@@ -1364,6 +1364,11 @@ A temporary emission permutation writes deterministic first-use package ids,
 then restores the live model, body numbering properties and identifier sets on
 both success and failure. Separate private abstract and instance maps translate
 both actual reopen paths back to live ids while retaining imported-id custody.
+Private native template staging and repeated-fragment packages keep consistent
+live IDs without a temporary permutation or another Field materialization.
+Their Sources describe the actual staged bytes. Scalar and repeated rendering
+retain the selected live counter and its start override. The final rendering
+publication uses the ordinary canonical emission and reopen translation.
 An unchanged save after signing preserves the signature. A process reopen
 starts a new Document whose handles use the published ids. `part_xml` exposes
 published package ids, while numbering queries use the live model.
@@ -2234,6 +2239,23 @@ Expected-count mismatch and zero-match behavior precede alternate-copy
 admission. Invalid replacement text and stale locations fail without
 publication. Foreign namespace lookalikes cannot establish alternate ownership.
 
+Native checked replacement uses the doc-hidden fallible paragraph and
+header/footer entrypoints `try_replace_in_paragraph`,
+`try_replace_regex_in_paragraph`, `try_replace_in_header_footer` and
+`try_replace_regex_in_header_footer`. Each takes the corresponding legacy
+arguments and returns `Result<usize>`. The legacy `usize` entrypoints retain
+their compatibility refusal policy. Result-returning document operations
+forward nested edit, writer and reparse errors before publishing their staged
+candidate. This includes ordinary regex operations and expected-count
+operations. Physical selected-source reuse does not renew an admission
+allowance or grant an aggregate reservation to a parsed or expanded source.
+Raw-block replacement in header/footer, text-box and note traversal performs
+original source admission before constructing its typed block. A source resource
+refusal propagates through the fallible native entrypoint and leaves earlier
+candidate edits unpublished. Ordinary unsupported-input preservation keeps its
+existing raw fallback. Read-time retention of a raw block does not authorize a
+later checked edit to construct an over-budget modeled owner.
+
 `Document::try_replace_all_expected` takes ordered `(placeholder, replacement,
 expected)` pairs and returns the count of each pair. Each pair runs over the
 whole staged document after the pairs before it, so a later pair sees what an
@@ -3049,7 +3071,18 @@ weaken held-revision preservation. Unknown attributes, foreign lookalikes and sc
 on surviving residual facts remain significant. Imported unsupported field programs
 retain their exact source while existing result setters and renderers keep stored
 display. Current nested edits and new-field constructors remain strictly checked,
-with existing XML, ownership and resource guards. The native-only
+with existing XML, ownership and resource guards. Changed checked raw owner XML
+also receives strict field-program validation after its exact same-owner no-op.
+This covers paragraph, run, table and cell replacements through their shared
+native attachment owner, without tightening retained lower fragment readers.
+An unchanged malformed field in a changed whole fragment does not become retained
+source merely by parsing. Exact no-ops and retained typed result edits preserve
+their existing source and lifetime contracts. Checked paragraph publication keeps
+the original validated qualified input through its existing staged owner
+transaction. Parsed guards do not authorize regenerating a root that loses
+retained field bindings. A changed run validates only that fresh run, while a
+changed whole paragraph validates every modeled field in its incoming owner.
+The native-only
 `CT_P::field_source_run_fragments_at(&self, run_idx: usize)` bridge returns
 `Result<Option<(usize, Vec<Option<Vec<u8>>>)>>` for one intact eligible shared
 field span. Positive coverage equals the ordered vector length. Outside entries
@@ -5133,3 +5166,156 @@ text edges remain barriers. An actual suffix after the right text edge stays wit
 that source owner. Restoration keeps the actual terminal run and its independent
 raw suffix in place, edits only proved member children and retires earlier runs
 only after complete child coverage proves they contain no independent event.
+
+Checked raw paragraph, table and cell replacement keeps valid imported field
+namespace identity and cache content through current snapshots and save/reopen.
+Fresh whole-owner field programs use the strict instruction constructor, while
+exact unchanged owner snapshots retain their no-op behavior. Replacing only a
+run validates that run without reauthoring a retained malformed field sibling.
+Cached display is observed through the existing paragraph accepted-text and
+qualified field snapshot contracts. Cell.text retains its existing plain-run
+projection. Supported public field evaluation installs source-associated main
+cache edits before rebuilding the model, preserving retained opaque namespace
+owners through save. The detached checked-field source-pair route remains the
+public mechanism for arbitrary cache authoring through paragraph replacement.
+
+The native doc-hidden CT_Document.body_item_xml_with_ancestor_declarations
+method coordinates exact current-source field-cache publication across actual
+table, cell and control namespace ancestors. It adds no Python or WASM method.
+Checked cache updates retain exact physical path and writer-byte correspondence
+under local and global namespace declarations, including duplicate paragraphs.
+
+The lower Rust doc-hidden `ScopedWordOperation` can freeze named borrowed OPC
+inputs and borrowed current paragraphs through `with_inputs`. Construction does
+not scan or fund catalog entries. `source_part` selects a known name and validates
+its range before capture. `source_model_paragraph` rejects a foreign model before
+cloning and carries the selected frozen model facts through its normalization and
+source writer. Its returned bytes are generated correspondence, not original OPC
+proof. `ScopedWordSource` has private bytes, correspondence and an operation anchor.
+It exposes `as_bytes` but no public constructor, Clone, numeric identity or map.
+`source_paragraph`, `source_document` and consuming `finish_source` reject a
+foreign operation anchor. `source_document` returns CT_Document through the
+existing whole-document factory and retains only private positive ownership
+facts. Its private root-event ordinary facts add no whole-source ordinary or
+fieldless certificate and no Python/WASM method.
+These are native Rust coordination APIs. They add no Python or WASM method.
+
+
+The hidden Rust Word grammar factory freezes Text, Field and complete retained
+XML membership in addition to its existing inputs. Borrowed current/frozen
+writer pairs have invocation lifetime and validate membership and duplicate
+current keys before output growth. Body-item, document and note source methods
+share their substantive existing writers. Carrier composition and namespace
+closure retain the operation anchor and copied/generated correspondence.
+The separate template_replaceable_texts method selects actual Word operands
+through the parser and substantive placeholder walk, reserving aggregation
+copies before growth. source_paragraph remains a Word-parse-only entry.
+These methods expose no provenance map or model field and add no Python or
+WASM binding. Additional nested producer and Native consumer connections remain
+required by the complete grammar carrier contract.
+
+Existing glossary, doc-part and revision models expose doc-hidden retained_xml
+borrowed accessors. The control retained_run_xml accessor uses its stored
+absolute content index and returns None when there is no capture. It does not
+override the writer's original-run or pending-edit guard. These add no binding
+or public provenance type. The doc-hidden Field::stored_ordered_result also
+borrows its stored paragraph without allocation, normalization or cache
+eligibility selection. Native input freezing can inspect that physical input
+before cloning. The actual writer still decides whether it is used.
+
+The scoped prepare_template_field method preserves the Native preflight
+decision. Its bypass branch clones with inert provenance and performs no new
+Field admission. Normal preparation uses inherited operation work in the
+existing child-before-owner order. A private Weak operation anchor and
+occurrence identity can move with the returned Field. Facts stay in the
+operation and equality ignores the receipt. Only the actual selected writer
+and guarded producer correspondence can publish Word operand intervals.
+Generated summaries, untracked cache changes and foreign or expired receipts
+do not themselves supply input.
+
+The internal Native bridge also exposes scoped raw textbox literal discovery
+and replacement through the existing opaque Word operation and source types.
+Its borrowed replacement tuples include actual selected JSON dependencies for
+affected Fields. The core doc-hidden capture companion returns bytes and an
+optional numeric copy transcript from the same capture loop. These interfaces
+add no Python authoring API, public model fields or independent allowance.
+Native keeps its existing grammar, validation and publication policy.
+
+The hidden Rust repeat_source method creates one generated publication occurrence
+from an anchored ScopedWordSource. It reserves known Field-copy demand without
+renewing Original, frozen-model or Word input. It preserves bytes and private
+correspondence, retaining unknown coverage explicitly. It does not parse or
+certify the entire source, and its final Native consumers remain required.
+
+The hidden Rust with_template_word_inputs constructor takes seven parameters:
+original parts, current paragraphs, current bodies, current Text owners, current
+Fields, current raw sources and JSON data. Borrowed bodies reach physical
+control members omitted by paragraph-only read projections. Overlapping seeds
+are deduplicated by live owner identity. Catalog membership grants no work or
+correspondence to a later clone, and does not override stored-cache eligibility.
+
+The hidden source_document call may record private ordinary intervals for its
+actual qualified document/body root events only after full factory success.
+This changes no public signature or binding. It does not certify the body
+contents, infer ordinary coverage from an empty Field list or grant input work.
+
+The hidden Rust source_imported_field_xml and rewrite_imported_source methods
+use the existing opaque operation and source types. Scalar production preserves
+raw versus escaped policy and binds its exact prepaid Field buffer to one
+parent occurrence. Rewrite accepts moved scalar payloads, validates all bounds
+and anchors before growth, and pays for remaining Field copies. Empty insertion
+requires a nonempty proved enclosing event and a strictly interior coordinate.
+No Python API, public receipt type or input allowance is added. Native interior
+owner qualification and complete import forwarding remain required.
+
+Initial Native template preparation can forward captured physical paragraph
+Fields, including nested-control runs, through prepare_template_field. It
+preserves preflight and raw-preservation policy and checks the shared refusal
+state before copying. The doc-hidden install_template_prepared_fields operation
+takes a mutable paragraph, accepted run path, owned Field-slot vector and an
+optional borrowed frozen paragraph. It validates exact slots and operation
+prepared facts, owns the run clone and uses the existing shared-work installer.
+Its Revision refresh carries the successful private reader companion through
+actual cloned slots and mapped reparse. Initial lookup retains prepared-state
+and exact replaced-slot exclusions. This private bounded wiring changes no
+public constructor or Python method and
+does not complete template lineage or later package-writer forwarding.
+
+Private property observations extend no Rust, Python or WASM authoring signature.
+The existing opaque source_document/source_paragraph readers and actual mapped
+wrapper read can retain qualified selected style-event facts. None-mode property
+parsing allocates no added transcript. Whole-factory failures, overwritten
+properties and discarded projection rows do not publish those facts. Positive
+Field coverage supersedes ordinary intervals. This does not complete Native
+import ownership, writer forwarding or the remaining scoped consumer closure.
+
+
+The hidden Rust source-composition and namespace-closure methods use the
+established Field publication-copy ledger for actual known copied output.
+They grant no Original, model-current, Word or ordinary input by materializing
+a buffer. Actual retained-part, clone, prepared-root and frozen-current-record
+consumers select their existing roles explicitly. The Native main source now
+reaches the prepared grammar paragraph and row readers, including actual
+namespace-changing replay. Structural import/current-source refresh and
+returned-model companions remain separate obligations. This wiring adds no
+Python, WASM or public Rust type or method.
+
+The additive doc-hidden ScopedWordOperation::declare_source_w14_on_root method
+consumes one ScopedWordSource and returns Result<ScopedWordSource>. It is the
+36th carrier operation in the approved inventory. Its actual consumers are
+source_model_document, source_model_notes and actual Native main assembly. No binding method or
+public type is added. Its owned call, visibility and exact signature belong
+in the external client and final strict SemVer inventory. Local source tests
+are not a substitute for that final compiled caller check.
+
+The doc-hidden scoped Rust operation exposes46carrier operations and7borrowed
+accessors. The comments methods are source_model_comments, source_comments and
+source_model_comments_from_read. Initial model emission accepts the existing
+current/frozen Text, Field and raw-record pair slices. The reader accepts the
+existing opaque Source and returns CT_Comments. Returned-model emission accepts
+that comments model and its actual same-operation successful-read Source. These
+methods share the real comments headers, paragraph-ID writer and opaque child
+order. They expose no budget, Work object or provenance type, and add no Python,
+WASM or CLI operation. Foreign or unread returned-model Sources refuse. The
+external Rust compile client includes all46operations and the retained borrowed
+accessor lifetimes at the final reviewed source.

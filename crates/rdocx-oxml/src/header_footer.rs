@@ -10,9 +10,7 @@ use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{namespace_bindings, word_prefixes_at};
 use crate::properties::is_word_element;
 use crate::raw_xml::{capture_element, capture_empty_element};
-use crate::text::{
-    CT_P, ROOT_R_BINDING, ROOT_WP_BINDING, declare_w14_on_part_root, root_binding_scope,
-};
+use crate::text::{CT_P, ROOT_R_BINDING, ROOT_WP_BINDING, declare_w14_on_part_root};
 
 const VML_NS: &str = "urn:schemas-microsoft-com:vml";
 const OFFICE_NS: &str = "urn:schemas-microsoft-com:office:office";
@@ -240,7 +238,11 @@ impl CT_HdrFtr {
 
     /// Parse from XML bytes (the content of header*.xml or footer*.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
+        let admitted = crate::document::admit_reader_source(
+            xml,
+            crate::document::WordSourceReader::Part(crate::document::PartReaderKind::HeaderFooter),
+        )?;
+        let mut controls = admitted.controls_for(xml);
         let watermarks = parse_vml_watermarks(xml);
         let mut reader = Reader::from_reader(xml);
         // A raw child is captured with the text events of this reader, so
@@ -265,10 +267,14 @@ impl CT_HdrFtr {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
                     if is_word_element(name.as_ref(), b"p", &prefixes) {
-                        paragraphs.push(CT_P::from_xml_with_prefixes_and_root(
+                        paragraphs.push(CT_P::from_xml_with_revision_facts(
                             &mut reader,
                             &prefixes,
                             Some(e),
+                            None,
+                            Some(&mut controls),
+                            None,
+                            None,
                         )?);
                     } else if is_word_element(name.as_ref(), b"hdr", &prefixes)
                         || is_word_element(name.as_ref(), b"ftr", &prefixes)
@@ -350,19 +356,6 @@ impl CT_HdrFtr {
             crate::document::admit_word_model(crate::document::WordOwner::Paragraph(paragraph))?;
         }
         let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
-        let wp_root_is_canonical = self
-            .extra_namespaces
-            .iter()
-            .find(|(name, _)| name == "xmlns:wp")
-            .is_none_or(|(_, namespace)| namespace == wp_ns);
-        let _binding_scope = root_binding_scope(
-            ROOT_R_BINDING
-                | if wp_root_is_canonical {
-                    ROOT_WP_BINDING
-                } else {
-                    0
-                },
-        );
         let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
@@ -396,6 +389,11 @@ impl CT_HdrFtr {
             start.push_attribute((key.as_str(), val.as_str()));
         }
 
+        let _binding_scope = crate::text::emitted_root_binding_scope(
+            &start,
+            ROOT_R_BINDING | ROOT_WP_BINDING,
+            true,
+        )?;
         writer.write_event(Event::Start(start))?;
 
         // Write each captured unknown element before the paragraph it

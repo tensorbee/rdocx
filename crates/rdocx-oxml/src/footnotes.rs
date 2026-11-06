@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::word_prefixes_at;
 use crate::properties::{is_word_attribute, is_word_element};
-use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root, root_binding_scope};
+use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root};
 
 /// `ST_FtnEdn` — what a note in the stream is for.
 ///
@@ -96,7 +96,20 @@ impl CT_Footnotes {
 
     /// Parse from XML bytes (the content of footnotes.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
+        let admitted = crate::document::admit_reader_source(
+            xml,
+            crate::document::WordSourceReader::Part(crate::document::PartReaderKind::Notes),
+        )?;
+        let mut controls = admitted.controls_for(xml);
+        Self::from_xml_with_read_output(xml, &mut controls, None)
+    }
+
+    pub(crate) fn from_xml_with_read_output(
+        xml: &[u8],
+        controls: &mut crate::document::ControlSourceCursor<'_>,
+        read_output: Option<&mut Vec<Vec<(usize, crate::text::WordBlockSourceMaps)>>>,
+    ) -> Result<Self> {
+        let mut retained_reads = Vec::new();
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
 
@@ -144,7 +157,14 @@ impl CT_Footnotes {
 
                         // Separators are kept rather than dropped, so a round
                         // trip preserves them.
-                        let paragraphs = parse_footnote_content(&mut reader, &prefixes)?;
+                        let mut reads = Vec::new();
+                        let paragraphs = parse_footnote_content(
+                            &mut reader,
+                            &prefixes,
+                            controls,
+                            read_output.as_ref().map(|_| &mut reads),
+                        )?;
+                        retained_reads.push(reads);
                         footnotes.push(CT_Footnote {
                             id,
                             note_type,
@@ -166,6 +186,9 @@ impl CT_Footnotes {
             buf.clear();
         }
 
+        if let Some(output) = read_output {
+            *output = retained_reads;
+        }
         Ok(CT_Footnotes { footnotes })
     }
 
@@ -180,13 +203,41 @@ impl CT_Footnotes {
     }
 
     fn to_xml_root(&self, root_tag: &str, item_tag: &str) -> Result<Vec<u8>> {
-        for note in &self.footnotes {
+        let mut writer = Writer::new(Vec::new());
+        self.write_xml_root_in(&mut writer, root_tag, item_tag, None)?;
+        let mut xml = writer.into_inner();
+        declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    pub(crate) fn write_xml_root_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        root_tag: &str,
+        item_tag: &str,
+        work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<()> {
+        Self::write_notes_root_in(
+            &self.footnotes.iter().collect::<Vec<_>>(),
+            writer,
+            root_tag,
+            item_tag,
+            work,
+        )
+    }
+
+    pub(crate) fn write_notes_root_in<W: std::io::Write>(
+        notes: &[&CT_Footnote],
+        writer: &mut Writer<W>,
+        root_tag: &str,
+        item_tag: &str,
+        mut work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<()> {
+        for note in notes {
             for paragraph in &note.paragraphs {
                 paragraph.validate_resource_limits()?;
             }
         }
-        let _binding_scope = root_binding_scope(ROOT_R_BINDING);
-        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",
@@ -200,10 +251,11 @@ impl CT_Footnotes {
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         ));
+        let _binding_scope = crate::text::emitted_root_binding_scope(&start, ROOT_R_BINDING, true)?;
         writer.write_event(Event::Start(start))?;
 
         let mut buf = itoa::Buffer::new();
-        for footnote in &self.footnotes {
+        for footnote in notes {
             let mut fn_start = BytesStart::new(item_tag);
             // `w:type` precedes `w:id` in the schema's attribute listing, and
             // is omitted entirely for a normal note, which is what Word writes.
@@ -214,7 +266,18 @@ impl CT_Footnotes {
             writer.write_event(Event::Start(fn_start))?;
 
             for p in &footnote.paragraphs {
-                p.to_xml(&mut writer)?;
+                if let Some(work) = work.as_deref_mut() {
+                    p.write_xml_core_in(
+                        writer,
+                        None,
+                        crate::text::XmlWriteRole::Publication,
+                        None,
+                        work,
+                        None,
+                    )?;
+                } else {
+                    p.to_xml(writer)?;
+                }
             }
 
             writer.write_event(Event::End(BytesEnd::new(item_tag)))?;
@@ -222,9 +285,7 @@ impl CT_Footnotes {
 
         writer.write_event(Event::End(BytesEnd::new(root_tag)))?;
 
-        let mut xml = writer.into_inner();
-        declare_w14_on_part_root(&mut xml)?;
-        Ok(xml)
+        Ok(())
     }
 }
 
@@ -238,6 +299,8 @@ impl Default for CT_Footnotes {
 fn parse_footnote_content(
     reader: &mut Reader<&[u8]>,
     word_prefixes: &[String],
+    controls: &mut crate::document::ControlSourceCursor<'_>,
+    mut read_output: Option<&mut Vec<(usize, crate::text::WordBlockSourceMaps)>>,
 ) -> Result<Vec<CT_P>> {
     let mut paragraphs = Vec::new();
     let mut buf = Vec::new();
@@ -248,11 +311,28 @@ fn parse_footnote_content(
                 let name = e.name();
                 let prefixes = word_prefixes_at(e, word_prefixes)?;
                 if is_word_element(name.as_ref(), b"p", &prefixes) {
-                    paragraphs.push(CT_P::from_xml_with_prefixes_and_root(
+                    let mut extras = Vec::new();
+                    let mut texts = Vec::new();
+                    let mut maps = crate::text::WordBlockSourceMaps::default();
+                    let paragraph = CT_P::from_xml_with_read_output(
                         reader,
                         &prefixes,
                         Some(e),
-                    )?);
+                        Some(controls),
+                        crate::text::WordParagraphReadOutput {
+                            extra_maps: read_output.as_ref().map(|_| &mut extras),
+                            text_facts: read_output.as_ref().map(|_| &mut texts),
+                            nested_maps: read_output.as_ref().map(|_| &mut maps),
+                            ..Default::default()
+                        },
+                    )?;
+                    if let Some(output) = read_output.as_deref_mut() {
+                        maps.paragraph(extras);
+                        maps.word_texts
+                            .push((Vec::new(), controls.paragraph_word_facts(reader, texts)));
+                        output.push((paragraphs.len(), maps));
+                    }
+                    paragraphs.push(paragraph);
                 } else {
                     reader.read_to_end_into(name, &mut Vec::new())?;
                 }

@@ -1,14 +1,12 @@
 //! The main Document type — entry point for the rdocx API.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-
-#[cfg(test)]
-use std::cell::Cell;
 
 use oxml_chart::{CT_ChartSpace, ChartData, ChartKind};
 use oxml_core::app_properties::AppProperties;
@@ -1385,6 +1383,23 @@ pub struct DocumentFragment {
     include_final_section_properties: bool,
 }
 
+pub(crate) struct ScopedDocumentRead<'operation, 'source, 'frozen> {
+    pub(crate) operation: &'operation mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+    pub(crate) source: &'source rdocx_oxml::document::ScopedWordSource,
+    pub(crate) related:
+        Option<&'source BTreeMap<String, Arc<rdocx_oxml::document::ScopedWordSource>>>,
+}
+
+pub(crate) struct TemplateFragmentSources {
+    pub(crate) main: Arc<rdocx_oxml::document::ScopedWordSource>,
+    pub(crate) related: BTreeMap<String, Arc<rdocx_oxml::document::ScopedWordSource>>,
+}
+
+pub(crate) enum TemplateFragmentSelection {
+    Source(Box<rdocx_oxml::document::ScopedWordSource>),
+    Bytes(Vec<u8>),
+}
+
 /// Conflict choices for one cross-document fragment import.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1468,6 +1483,61 @@ impl DocumentFragment {
         })
     }
 
+    pub(crate) fn from_part_source(
+        document: &mut Document,
+        source_part: &str,
+        selected: rdocx_oxml::document::ScopedWordSource,
+        evaluation: &mut crate::template::TemplateEvaluation<'_, '_>,
+    ) -> Result<(Self, TemplateFragmentSources)> {
+        validate_fragment_block_content(selected.as_bytes())?;
+        document.prepare_staged_template_package(
+            &mut evaluation.operation,
+            &mut evaluation.lineage,
+            &mut evaluation.sources,
+        )?;
+        let mut context = TemplateMainWriter {
+            operation: &mut evaluation.operation,
+            lineage: &evaluation.lineage,
+            sources: &mut evaluation.sources,
+        };
+        let main = match &context.sources.source {
+            Some(source) => Arc::clone(source),
+            None => Arc::new(context.document_source(&document.document)?),
+        };
+        let mut candidate = document.clone_for_staging();
+        let main = candidate.project_fragment_part_source(
+            source_part,
+            selected,
+            &main,
+            context.operation,
+        )?;
+        let mut related = BTreeMap::new();
+        for part in document.related_story_parts() {
+            if part == document.doc_part_name {
+                continue;
+            }
+            let Some(bytes) = document.package.get_part_shared(&part) else {
+                continue;
+            };
+            if let Some(source) = context.take_related_source(&part, bytes)? {
+                related.insert(part.clone(), Arc::clone(&source));
+                context.sources.put_related_source(&part, bytes, source);
+            }
+        }
+        let mut output = std::io::Cursor::new(Vec::new());
+        candidate.package.write_to(&mut output)?;
+        Ok((
+            Self {
+                package: output.into_inner(),
+                include_final_section_properties: false,
+            },
+            TemplateFragmentSources {
+                main: Arc::new(main),
+                related,
+            },
+        ))
+    }
+
     pub(crate) fn import_content_staged(
         &self,
         candidate: &mut Document,
@@ -1476,7 +1546,7 @@ impl DocumentFragment {
         source_owned_numbering: bool,
         note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
     ) -> Result<Vec<u8>> {
-        let xml = crate::field::import_document_fragment_content(
+        let (xml, _) = crate::field::import_document_fragment_content(
             candidate,
             &self.package,
             self.include_final_section_properties,
@@ -1484,6 +1554,7 @@ impl DocumentFragment {
             destination_part,
             source_owned_numbering,
             note_copy_sources,
+            None,
         )?;
         package_authoritative_body_fragment(
             &xml,
@@ -4147,8 +4218,126 @@ fn replay_nested_namespace_declarations_with_spans(
     owners: &[NestedNamespaceOwner],
     spans: Option<&[ModeledOwnerSpan]>,
 ) -> Result<Vec<u8>> {
+    replay_nested_namespace_declarations_in(xml, owners, spans, None)
+}
+
+fn namespace_replay_copy(
+    xml: &[u8],
+    template: Option<&mut TemplateMainWriter<'_, '_>>,
+) -> Result<Vec<u8>> {
+    if let Some(template) = template
+        && let Some(source) = template.sources.source.take()
+    {
+        // Retain one real, reserved output copy. Move the actual prior source
+        // into the legacy output instead of cloning an unchecked payload.
+        let retained = template.operation.repeat_source(&source)?;
+        let bytes = template.operation.finish_source(retained)?;
+        template.sources.source = Some(source);
+        Ok(bytes)
+    } else {
+        Ok(xml.to_vec())
+    }
+}
+
+// The actual event Writer selects copied images while they are borrowed from
+// its live input or the just-produced replacement event. Only generated writer
+// punctuation owns scratch bytes. No whole replay buffer is materialized here.
+enum NamespaceReplayPiece {
+    Source(usize, Range<usize>),
+    Generated(Vec<u8>),
+}
+
+enum NamespaceReplayOutput {
+    Bytes(Vec<u8>),
+    Recipe {
+        input: (usize, usize),
+        active: Option<(usize, usize, usize)>,
+        reference: Option<Range<usize>>,
+        pieces: Vec<NamespaceReplayPiece>,
+    },
+}
+
+impl NamespaceReplayOutput {
+    fn input_range(input: &[u8], bytes: &[u8]) -> Option<Range<usize>> {
+        let start = (bytes.as_ptr() as usize).checked_sub(input.as_ptr() as usize)?;
+        let end = start.checked_add(bytes.len())?;
+        (end <= input.len()).then_some(start..end)
+    }
+
+    fn active_event(&mut self, source: Option<(usize, &[u8])>) {
+        if let Self::Recipe { active, .. } = self {
+            *active = source.map(|(index, bytes)| (index, bytes.as_ptr() as usize, bytes.len()));
+        }
+    }
+}
+
+impl std::io::Write for NamespaceReplayOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Self::Recipe {
+            input,
+            active,
+            reference,
+            pieces,
+        } = self
+        else {
+            let Self::Bytes(output) = self else {
+                unreachable!()
+            };
+            output.extend_from_slice(bytes);
+            return Ok(bytes.len());
+        };
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        // GeneralRef's three Writer writes belong to the actual Reader event,
+        // including its grammar-owned delimiters. Preserve that complete
+        // encoded payload rather than labelling static delimiters generated.
+        let reference_piece = reference.as_mut().map(|range| {
+            let start = range.start;
+            range.start += bytes.len();
+            (0, start..range.start)
+        });
+        let selected = reference_piece.or_else(|| {
+            active
+                .iter()
+                .copied()
+                .chain(std::iter::once((0, input.0, input.1)))
+                .find_map(|(index, base, length)| {
+                    let start = (bytes.as_ptr() as usize).checked_sub(base)?;
+                    let end = start.checked_add(bytes.len())?;
+                    (end <= length).then_some((index, start..end))
+                })
+        });
+        if let Some((index, range)) = selected {
+            if let Some(NamespaceReplayPiece::Source(previous, span)) = pieces.last_mut()
+                && *previous == index
+                && span.end == range.start
+            {
+                span.end = range.end;
+            } else {
+                pieces.push(NamespaceReplayPiece::Source(index, range));
+            }
+        } else if let Some(NamespaceReplayPiece::Generated(output)) = pieces.last_mut() {
+            output.extend_from_slice(bytes);
+        } else {
+            pieces.push(NamespaceReplayPiece::Generated(bytes.to_vec()));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn replay_nested_namespace_declarations_in(
+    xml: &[u8],
+    owners: &[NestedNamespaceOwner],
+    spans: Option<&[ModeledOwnerSpan]>,
+    mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+) -> Result<Vec<u8>> {
     if owners.is_empty() {
-        return Ok(xml.to_vec());
+        return namespace_replay_copy(xml, template);
     }
     let scanned;
     let spans = match spans {
@@ -4244,27 +4433,39 @@ fn replay_nested_namespace_declarations_with_spans(
         targets.push((target.start, owner));
     }
     if targets.is_empty() {
-        return Ok(xml.to_vec());
+        return namespace_replay_copy(xml, template);
     }
 
-    let mut reader = NsReader::from_reader(xml);
+    let source = template
+        .as_mut()
+        .and_then(|template| template.sources.source.take());
+    let input = source.as_ref().map_or(xml, |source| source.as_bytes());
+    let output = if source.is_some() {
+        NamespaceReplayOutput::Recipe {
+            input: (input.as_ptr() as usize, input.len()),
+            active: None,
+            reference: None,
+            pieces: Vec::new(),
+        }
+    } else {
+        NamespaceReplayOutput::Bytes(Vec::new())
+    };
+    let mut retained_events = Vec::new();
+    let mut reader = NsReader::from_reader(input);
     reader.config_mut().trim_text(false);
-    let mut writer = Writer::new(Vec::new());
-    let mut buffer = Vec::new();
+    let mut writer = Writer::new(output);
     let mut replayed = 0usize;
     loop {
         let start = reader.buffer_position() as usize;
-        let (_namespace, event) =
-            reader
-                .read_resolved_event_into(&mut buffer)
-                .map_err(|error| {
-                    Error::Other(format!("invalid serialized namespace scope: {error}"))
-                })?;
+        let (_namespace, event) = reader.read_resolved_event().map_err(|error| {
+            Error::Other(format!("invalid serialized namespace scope: {error}"))
+        })?;
         let starts_scope = matches!(&event, Event::Start(_));
         match event {
             Event::Start(mut element) | Event::Empty(mut element) => {
                 if let Some((_, owner)) = targets.iter().find(|(target, _)| *target == start) {
                     let existing = namespace_declarations(&element)?;
+                    let mut missing = Vec::new();
                     for (name, value) in &owner.declarations {
                         match existing.iter().find(|(candidate, _)| candidate == name) {
                             Some((_, existing_value)) if existing_value == value => {}
@@ -4274,10 +4475,54 @@ fn replay_nested_namespace_declarations_with_spans(
                                     namespace_prefix(name),
                                 )));
                             }
-                            None => element.push_attribute((name.as_str(), value.as_str())),
+                            None => missing.push((name, value)),
                         }
                     }
                     replayed += 1;
+                    if let Some(source) = &source {
+                        let range = NamespaceReplayOutput::input_range(input, element.as_ref())
+                            .ok_or_else(|| {
+                                Error::Other(
+                                    "namespace replay event has no live source image".into(),
+                                )
+                            })?;
+                        // Only the new attributes are generated. The actual
+                        // quick_xml attribute producer retains its escaping.
+                        let mut attributes = BytesStart::new("x");
+                        for (name, value) in missing {
+                            attributes.push_attribute((name.as_str(), value.as_str()));
+                        }
+                        let attribute_bytes: &[u8] = attributes.as_ref();
+                        let emitted = template
+                            .as_mut()
+                            .expect("scoped replay writer")
+                            .operation
+                            .compose_sources(&[
+                                (Some(source), range, &[]),
+                                (None, 0..0, &attribute_bytes[1..]),
+                            ])?;
+                        let name_length = element.name().as_ref().len();
+                        let record = BytesStart::from_content(
+                            std::str::from_utf8(emitted.as_bytes()).map_err(|error| {
+                                Error::Other(format!("invalid serialized namespace scope: {error}"))
+                            })?,
+                            name_length,
+                        );
+                        writer
+                            .get_mut()
+                            .active_event(Some((retained_events.len() + 1, emitted.as_bytes())));
+                        writer.write_event(if starts_scope {
+                            Event::Start(record)
+                        } else {
+                            Event::Empty(record)
+                        })?;
+                        writer.get_mut().active_event(None);
+                        retained_events.push(emitted);
+                        continue;
+                    }
+                    for (name, value) in missing {
+                        element.push_attribute((name.as_str(), value.as_str()));
+                    }
                 }
                 writer.write_event(if starts_scope {
                     Event::Start(element)
@@ -4286,6 +4531,20 @@ fn replay_nested_namespace_declarations_with_spans(
                 })?;
             }
             Event::End(element) => writer.write_event(Event::End(element))?,
+            Event::GeneralRef(reference) => {
+                if let NamespaceReplayOutput::Recipe {
+                    reference: range, ..
+                } = writer.get_mut()
+                {
+                    let payload = NamespaceReplayOutput::input_range(input, reference.as_ref())
+                        .expect("borrowed reference from actual replay Reader");
+                    *range = Some(payload.start - 1..payload.end + 1);
+                }
+                writer.write_event(Event::GeneralRef(reference))?;
+                if let NamespaceReplayOutput::Recipe { reference, .. } = writer.get_mut() {
+                    *reference = None;
+                }
+            }
             Event::Eof => {
                 if replayed < targets.len() {
                     return Err(Error::Other(
@@ -4293,11 +4552,35 @@ fn replay_nested_namespace_declarations_with_spans(
                             .to_owned(),
                     ));
                 }
-                return Ok(writer.into_inner());
+                return match writer.into_inner() {
+                    NamespaceReplayOutput::Bytes(bytes) => Ok(bytes),
+                    NamespaceReplayOutput::Recipe { pieces, .. } => {
+                        let source = source.as_ref().expect("actual scoped replay input");
+                        let chunks = pieces
+                            .iter()
+                            .map(|piece| match piece {
+                                NamespaceReplayPiece::Source(0, range) => {
+                                    (Some(source.as_ref()), range.clone(), &[][..])
+                                }
+                                NamespaceReplayPiece::Source(index, range) => {
+                                    (Some(&retained_events[index - 1]), range.clone(), &[][..])
+                                }
+                                NamespaceReplayPiece::Generated(bytes) => {
+                                    (None, 0..0, bytes.as_slice())
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let template = template.as_mut().expect("scoped replay writer");
+                        let emitted = template.operation.compose_sources(&chunks)?;
+                        let legacy = template.operation.repeat_source(&emitted)?;
+                        let bytes = template.operation.finish_source(legacy)?;
+                        template.sources.source = Some(Arc::new(emitted));
+                        Ok(bytes)
+                    }
+                };
             }
             event => writer.write_event(event)?,
         }
-        buffer.clear();
     }
 }
 
@@ -6471,6 +6754,18 @@ fn xml_relationship_ids_in_collection_range(
 }
 
 fn rewrite_authored_doc_pr_ids(xml: &[u8], occupied: &mut HashSet<u32>) -> Result<Vec<u8>> {
+    let edits = authored_doc_pr_edits(xml, occupied)?;
+    let mut updated = xml.to_vec();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        updated.splice(start..end, replacement);
+    }
+    Ok(updated)
+}
+
+fn authored_doc_pr_edits(
+    xml: &[u8],
+    occupied: &mut HashSet<u32>,
+) -> Result<Vec<(usize, usize, Vec<u8>)>> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut edits = Vec::new();
@@ -6518,12 +6813,52 @@ fn rewrite_authored_doc_pr_ids(xml: &[u8], occupied: &mut HashSet<u32>) -> Resul
         }
         buffer.clear();
     }
-    let mut updated = xml.to_vec();
     edits.sort_by_key(|(start, _, _)| *start);
-    for (start, end, replacement) in edits.into_iter().rev() {
-        updated.splice(start..end, replacement);
+    Ok(edits)
+}
+
+fn apply_shared_template_source_edits(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: Arc<rdocx_oxml::document::ScopedWordSource>,
+    edits: Vec<(usize, usize, Vec<u8>)>,
+) -> Result<Arc<rdocx_oxml::document::ScopedWordSource>> {
+    if edits.is_empty() {
+        return Ok(source);
     }
-    Ok(updated)
+    Ok(Arc::new(apply_borrowed_template_source_edits(
+        operation, &source, edits,
+    )?))
+}
+
+pub(crate) fn apply_template_source_edits(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: rdocx_oxml::document::ScopedWordSource,
+    edits: Vec<(usize, usize, Vec<u8>)>,
+) -> Result<rdocx_oxml::document::ScopedWordSource> {
+    if edits.is_empty() {
+        return Ok(source);
+    }
+    apply_borrowed_template_source_edits(operation, &source, edits)
+}
+
+fn apply_borrowed_template_source_edits(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: &rdocx_oxml::document::ScopedWordSource,
+    mut edits: Vec<(usize, usize, Vec<u8>)>,
+) -> Result<rdocx_oxml::document::ScopedWordSource> {
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut pieces = Vec::new();
+    let mut at = 0;
+    for (start, end, replacement) in &edits {
+        if *start < at || start > end || *end > source.as_bytes().len() {
+            return Err(Error::Other("invalid template source edit ranges".into()));
+        }
+        pieces.push((Some(source), at..*start, &[][..]));
+        pieces.push((None, 0..0, replacement.as_slice()));
+        at = *end;
+    }
+    pieces.push((Some(source), at..source.as_bytes().len(), &[][..]));
+    Ok(operation.compose_sources(&pieces)?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6826,7 +7161,7 @@ fn note_transaction_clone() {
 
 // Counts outputs where they are actually produced. Copies and rewritten buffers
 // stay distinct from current-model writer calls and from each other.
-fn note_transaction_buffer(kind: &str, bytes: usize) {
+pub(crate) fn note_transaction_buffer(kind: &str, bytes: usize) {
     #[cfg(debug_assertions)]
     TRANSACTION_READ_PHASE.with(|phase| {
         let prefix = match phase.get() {
@@ -6845,7 +7180,7 @@ fn note_transaction_buffer(kind: &str, bytes: usize) {
     let _ = (kind, bytes);
 }
 
-fn note_transaction_output(kind: &str, bytes: usize) {
+pub(crate) fn note_transaction_output(kind: &str, bytes: usize) {
     note_transaction_buffer(kind, bytes);
     #[cfg(debug_assertions)]
     TRANSACTION_READ_PHASE.with(|phase| {
@@ -7007,6 +7342,15 @@ pub(crate) fn remap_xml_relationship_ids(
 }
 
 pub(crate) fn uniquify_drawing_ids_in_xml(xml: &[u8]) -> Result<Vec<u8>> {
+    let edits = unique_drawing_id_edits(xml)?;
+    let mut updated = xml.to_vec();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        updated.splice(start..end, replacement);
+    }
+    Ok(updated)
+}
+
+pub(crate) fn unique_drawing_id_edits(xml: &[u8]) -> Result<Vec<(usize, usize, Vec<u8>)>> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut occurrences = Vec::new();
@@ -7082,11 +7426,7 @@ pub(crate) fn uniquify_drawing_ids_in_xml(xml: &[u8]) -> Result<Vec<u8>> {
             .checked_add(1)
             .ok_or_else(|| Error::Other("drawing id range is exhausted".to_owned()))?;
     }
-    let mut updated = xml.to_vec();
-    for (start, end, replacement) in edits.into_iter().rev() {
-        updated.splice(start..end, replacement);
-    }
-    Ok(updated)
+    Ok(edits)
 }
 
 fn remap_xml_relationship_ids_with_bindings(
@@ -7613,6 +7953,7 @@ thread_local! {
     static FX282_CELL_EDITS: Cell<[usize; 2]> = const { Cell::new([0, 0]) };
     static FAIL_NEXT_HEADER_FOOTER_SERIALIZATION: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_SCOPED_REOPEN: Cell<bool> = const { Cell::new(false) };
+    static SCOPED_LITERAL_DELIVERIES: std::cell::RefCell<Option<Vec<(usize, bool, bool)>>> = const { std::cell::RefCell::new(None) };
     static FAIL_NEXT_STAGED_REOPEN: Cell<bool> = const { Cell::new(false) };
     pub(crate) static STORY_SOURCE_BUILDS: Cell<usize> = const { Cell::new(0) };
     static STORY_TEXT_PREFIX_BYTES: Cell<usize> = const { Cell::new(0) };
@@ -8789,8 +9130,12 @@ impl BodyBlockScan {
     /// Copying the bytes is not a child serialization. The new locks are empty,
     /// including after a failed `None`, so this piece can record the new frame.
     fn fresh_context_piece(self: &Arc<Self>) -> Arc<Self> {
+        self.fresh_context_piece_from(self.bytes.clone())
+    }
+
+    fn fresh_context_piece_from(self: &Arc<Self>, bytes: Vec<u8>) -> Arc<Self> {
         Arc::new(Self {
-            bytes: self.bytes.clone(),
+            bytes,
             owners: self.owners.clone(),
             items: self.items.clone(),
             staged: self.staged.clone(),
@@ -9252,6 +9597,247 @@ fn apply_readback_replacements(
     valid
 }
 
+// Operation-local output handles. They retain the actual emitted sources
+// while the legacy block record owns its separately accounted byte copy.
+// Immutable output records which already exist at this operation's ingress.
+// Sharing their handles copies metadata only. Selection still uses the exact
+// record chosen by the existing writer and pays every actual later byte copy.
+#[derive(Default)]
+pub(crate) struct TemplateWordRecordInputs {
+    blocks: BTreeMap<usize, Arc<BodyBlockScan>>,
+    openings: BTreeMap<(usize, usize), Arc<Parsed>>,
+}
+
+impl TemplateWordRecordInputs {
+    pub(crate) fn records(&self) -> Vec<&[u8]> {
+        self.blocks
+            .values()
+            .map(|block| block.bytes.as_slice())
+            .chain(
+                self.openings
+                    .values()
+                    .filter_map(|opening| opening.serialization_proof.as_deref()),
+            )
+            .collect()
+    }
+
+    fn source_for_block<'a>(
+        &'a self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'a>,
+        block: &Arc<BodyBlockScan>,
+    ) -> Result<Option<rdocx_oxml::document::ScopedWordSource>> {
+        self.blocks
+            .get(&(Arc::as_ptr(block) as usize))
+            .filter(|frozen| Arc::ptr_eq(frozen, block))
+            .map(|frozen| {
+                operation
+                    .source_current_word_record(&frozen.bytes, 0..frozen.bytes.len())
+                    .map_err(Error::from)
+            })
+            .transpose()
+    }
+
+    fn source_for_part<'a>(
+        &'a self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'a>,
+        part: &[u8],
+    ) -> Result<Option<rdocx_oxml::document::ScopedWordSource>> {
+        let Some(frozen) = self
+            .openings
+            .get(&(part.as_ptr() as usize, part.len()))
+            .and_then(|opening| opening.serialization_proof.as_deref())
+        else {
+            return Ok(None);
+        };
+        operation
+            .source_current_word_record(frozen, 0..frozen.len())
+            .map(Some)
+            .map_err(Error::from)
+    }
+}
+
+pub(crate) struct TemplateMainSources {
+    pub(crate) source: Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    reader_source: Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    comments_reader_source: Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    published_main: Option<(Arc<Vec<u8>>, Arc<rdocx_oxml::document::ScopedWordSource>)>,
+    read_note_count: usize,
+    notes_model_read: bool,
+    related: BTreeMap<String, (Arc<Vec<u8>>, Arc<rdocx_oxml::document::ScopedWordSource>)>,
+    items: Vec<Option<rdocx_oxml::document::ScopedWordSource>>,
+    blocks: Vec<std::sync::Weak<BodyBlockScan>>,
+    model_lineage_valid: bool,
+    first_visit: bool,
+    original_part: Option<(String, usize)>,
+}
+
+impl Default for TemplateMainSources {
+    fn default() -> Self {
+        Self {
+            source: None,
+            reader_source: None,
+            comments_reader_source: None,
+            published_main: None,
+            read_note_count: 0,
+            notes_model_read: false,
+            related: BTreeMap::new(),
+            items: Vec::new(),
+            blocks: Vec::new(),
+            model_lineage_valid: true,
+            first_visit: true,
+            original_part: None,
+        }
+    }
+}
+
+impl TemplateMainSources {
+    pub(crate) fn put_related_source(
+        &mut self,
+        part: &str,
+        bytes: &Arc<Vec<u8>>,
+        source: impl Into<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    ) {
+        self.related
+            .insert(part.to_owned(), (Arc::clone(bytes), source.into()));
+    }
+
+    pub(crate) fn read_document(
+        &mut self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+        source: Arc<rdocx_oxml::document::ScopedWordSource>,
+    ) -> Result<CT_Document> {
+        let document = operation.source_document(&source)?;
+        self.model_lineage_valid = false;
+        self.source = Some(Arc::clone(&source));
+        self.reader_source = Some(source);
+        Ok(document)
+    }
+
+    pub(crate) fn from_fragment_read(
+        package: &OpcPackage,
+        main_part: &str,
+        footnotes: &rdocx_oxml::footnotes::CT_Footnotes,
+        input: TemplateFragmentSources,
+    ) -> Self {
+        let mut sources = Self {
+            source: Some(Arc::clone(&input.main)),
+            published_main: package
+                .get_part_shared(main_part)
+                .map(|bytes| (Arc::clone(bytes), Arc::clone(&input.main))),
+            reader_source: Some(input.main),
+            model_lineage_valid: false,
+            first_visit: false,
+            ..Default::default()
+        };
+        // This is the actual opened model. With a paired resolved part, a
+        // nonempty model can only come from the loader's successful scoped
+        // reader: its malformed fallback returns an empty model instead.
+        let paired_notes = package
+            .get_part_rels(main_part)
+            .and_then(|rels| {
+                rels.items.iter().find(|rel| {
+                    rel.rel_type == rel_types::FOOTNOTES && relationship_is_internal(rel)
+                })
+            })
+            .is_some_and(|rel| {
+                input
+                    .related
+                    .contains_key(&OpcPackage::resolve_rel_target(main_part, &rel.target))
+            });
+        if paired_notes && !footnotes.footnotes.is_empty() {
+            sources.notes_model_read = true;
+            sources.read_note_count = footnotes.footnotes.len();
+        }
+        sources.comments_reader_source = package
+            .get_part_rels(main_part)
+            .and_then(|rels| {
+                rels.items.iter().find(|rel| {
+                    rel.rel_type == rel_types::COMMENTS && relationship_is_internal(rel)
+                })
+            })
+            .and_then(|rel| {
+                input
+                    .related
+                    .get(&OpcPackage::resolve_rel_target(main_part, &rel.target))
+            })
+            .cloned();
+        for (part, source) in input.related {
+            if let Some(bytes) = package.get_part_shared(&part) {
+                sources.related.insert(part, (Arc::clone(bytes), source));
+            }
+        }
+        sources
+    }
+
+    pub(crate) fn related_source(
+        &self,
+        part: &str,
+        bytes: &Arc<Vec<u8>>,
+    ) -> Option<&Arc<rdocx_oxml::document::ScopedWordSource>> {
+        let (stored, source) = self.related.get(part)?;
+        Arc::ptr_eq(stored, bytes).then_some(source)
+    }
+
+    pub(crate) fn invalidate_model(&mut self) {
+        self.source = None;
+        self.reader_source = None;
+        self.items.clear();
+        self.blocks.clear();
+        self.model_lineage_valid = false;
+    }
+}
+
+pub(crate) struct TemplateMainWriter<'frozen, 'operation> {
+    pub(crate) operation: &'operation mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+    pub(crate) lineage: &'operation crate::template::TemplateWordLineage<'frozen>,
+    pub(crate) sources: &'operation mut TemplateMainSources,
+}
+
+impl TemplateMainWriter<'_, '_> {
+    pub(crate) fn take_related_source(
+        &mut self,
+        part: &str,
+        bytes: &Arc<Vec<u8>>,
+    ) -> Result<Option<Arc<rdocx_oxml::document::ScopedWordSource>>> {
+        if let Some((stored, source)) = self.sources.related.remove(part)
+            && Arc::ptr_eq(&stored, bytes)
+        {
+            return Ok(Some(source));
+        }
+        self.lineage
+            .original_part_source(self.operation, part, bytes)
+            .map(|source| source.map(Arc::new))
+    }
+
+    // Both actual producers are current: an owned new emission and a retained
+    // shared source. Into keeps their publication path concrete and identical.
+    pub(crate) fn document_source(
+        &mut self,
+        document: &CT_Document,
+    ) -> Result<rdocx_oxml::document::ScopedWordSource> {
+        if let Some(source) = &self.sources.reader_source {
+            return Ok(self
+                .operation
+                .source_model_document_from_read(document, source)?);
+        }
+        let mut texts = Vec::new();
+        let mut fields = Vec::new();
+        let mut raw = Vec::new();
+        if self.sources.model_lineage_valid {
+            for (index, item) in document.body.content.iter().enumerate() {
+                if let Some(inputs) = self.lineage.model_writer_inputs(index, item) {
+                    texts.extend(inputs.texts);
+                    fields.extend(inputs.fields);
+                    raw.extend(inputs.raw);
+                }
+            }
+        }
+        Ok(self
+            .operation
+            .source_model_document(document, &texts, &fields, &raw)?)
+    }
+}
+
 impl MainPartBlocks {
     fn body_spans(&self) -> Result<(Range<usize>, Vec<Range<usize>>)> {
         let start = self.head.len();
@@ -9646,6 +10232,25 @@ impl MainPartBlocks {
         content: &[BodyContent],
         kept: Option<&MainPartBlocks>,
     ) -> Result<(Vec<u8>, Self)> {
+        Self::serialize_in(frame, content, kept, None)
+    }
+
+    fn serialize_in(
+        frame: &CT_Document,
+        content: &[BodyContent],
+        kept: Option<&MainPartBlocks>,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<(Vec<u8>, Self)> {
+        let mut previous = template.as_mut().map(|template| {
+            (
+                std::mem::take(&mut template.sources.items),
+                std::mem::take(&mut template.sources.blocks),
+            )
+        });
+        if let Some(template) = &mut template {
+            template.sources.items.resize_with(content.len(), || None);
+            template.sources.source = None;
+        }
         let kept_root = kept
             .map(|kept| kept.head[kept.root.clone()].to_vec())
             .unwrap_or_default();
@@ -9673,13 +10278,75 @@ impl MainPartBlocks {
             .chain(kept_blocks[kept_blocks.len() - suffix..].iter().map(Some));
         let mut blocks = Vec::with_capacity(content.len());
         let mut reused = false;
-        for (item, block) in content.iter().zip(reusable_blocks) {
-            if let Some(block) = block.filter(|block| reusable(item, block)) {
+        for (index, (item, block)) in content.iter().zip(reusable_blocks).enumerate() {
+            let block = block.filter(|block| reusable(item, block));
+            let mut block_source = None;
+            if let (Some(block), Some(writer)) = (block, template.as_deref_mut())
+                && writer.sources.reader_source.is_none()
+            {
+                if let Some((items, previous_blocks)) = &mut previous
+                    && previous_blocks
+                        .get(index)
+                        .and_then(std::sync::Weak::upgrade)
+                        .is_some_and(|prior| Arc::ptr_eq(&prior, block))
+                    && let Some(source) = items.get_mut(index)
+                {
+                    block_source = source.take();
+                }
+                if block_source.is_none()
+                    && let Some(records) = writer.lineage.records
+                {
+                    block_source = records.source_for_block(writer.operation, block)?;
+                }
+            }
+            // An ordinary cache proof does not carry this operation's producer
+            // facts. Decline it unless the actual cached Source is available.
+            if let Some(block) = block.filter(|_| template.is_none() || block_source.is_some()) {
                 reused = true;
+                if let Some(writer) = template.as_deref_mut() {
+                    writer.sources.items[index] = block_source;
+                }
                 blocks.push(Arc::clone(block));
             } else {
                 note_staging_work(|work| work.serialized_children += 1);
-                let xml = frame.body_item_xml(item)?;
+                let xml = if let Some(template) = &mut template
+                    && let Some(source) = &template.sources.reader_source
+                {
+                    let source = template.operation.source_model_body_item_from_read(
+                        frame,
+                        item,
+                        source,
+                        index,
+                        &[],
+                    )?;
+                    let copied = template.operation.repeat_source(&source)?;
+                    let bytes = template.operation.finish_source(copied)?;
+                    template.sources.items[index] = Some(source);
+                    bytes
+                } else if let Some(template) = &mut template
+                    && let Some(inputs) = template
+                        .sources
+                        .model_lineage_valid
+                        .then(|| template.lineage.model_writer_inputs(index, item))
+                        .flatten()
+                {
+                    let source = template.operation.source_model_body_item(
+                        frame,
+                        item,
+                        &[],
+                        &inputs.texts,
+                        &inputs.fields,
+                        &inputs.raw,
+                    )?;
+                    // The block cache owns a real second byte copy. Reserve
+                    // that copy through the existing producer before moving it.
+                    let copied = template.operation.repeat_source(&source)?;
+                    let xml = template.operation.finish_source(copied)?;
+                    template.sources.items[index] = Some(source);
+                    xml
+                } else {
+                    frame.body_item_xml(item)?
+                };
                 let declares_namespace = bytes_declare_namespace(&xml);
                 let holds_field_words = holds_field_words(&xml);
                 blocks.push(Arc::new(BodyBlockScan {
@@ -9700,17 +10367,33 @@ impl MainPartBlocks {
             }
         }
         let kept_frame = kept.map(|kept| (kept.head.as_slice(), kept.tail.as_slice()));
-        match Self::assemble(
+        match Self::assemble_in(
             frame,
             blocks,
             reused.then_some(kept_root.as_slice()),
             kept_frame,
+            template.as_deref_mut(),
         )? {
-            Some(assembled) => Ok(assembled),
-            None if reused => Self::serialize(frame, content, None),
+            Some(assembled) => {
+                if let Some(template) = &mut template {
+                    template.sources.blocks =
+                        assembled.1.blocks.iter().map(Arc::downgrade).collect();
+                }
+                Ok(assembled)
+            }
+            None if reused => Self::serialize_in(frame, content, None, template),
             None => {
                 note_staging_work(|work| work.serialized_children += content.len());
-                let xml = frame.to_xml()?;
+                let xml = if let Some(template) = &mut template {
+                    let source = template.document_source(frame)?;
+                    let copied = template.operation.repeat_source(&source)?;
+                    let bytes = template.operation.finish_source(copied)?;
+                    template.sources.source = Some(Arc::new(source));
+                    template.sources.blocks.clear();
+                    bytes
+                } else {
+                    frame.to_xml()?
+                };
                 Ok((
                     xml,
                     Self {
@@ -9737,20 +10420,55 @@ impl MainPartBlocks {
         kept_root: Option<&[u8]>,
         kept_frame: Option<(&[u8], &[u8])>,
     ) -> Result<Option<(Vec<u8>, Self)>> {
+        Self::assemble_in(frame, blocks, kept_root, kept_frame, None)
+    }
+
+    fn assemble_in(
+        frame: &CT_Document,
+        blocks: Vec<Arc<BodyBlockScan>>,
+        kept_root: Option<&[u8]>,
+        kept_frame: Option<(&[u8], &[u8])>,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<Option<(Vec<u8>, Self)>> {
         let (head, tail) = frame.body_frame_xml()?;
         let Some(root) = root_start_tag(&head) else {
             return Ok(None);
         };
-        let mut xml = Vec::with_capacity(
-            head.len() + blocks.iter().map(|block| block.bytes.len()).sum::<usize>() + tail.len(),
-        );
-        xml.extend_from_slice(&head);
-        for block in &blocks {
-            xml.extend_from_slice(&block.bytes);
+        let mut xml = if let Some(template) = &mut template {
+            let mut pieces = vec![(None, 0..0, head.as_slice())];
+            for (index, block) in blocks.iter().enumerate() {
+                pieces.push(match template.sources.items[index].as_ref() {
+                    Some(source) => (Some(source), 0..source.as_bytes().len(), &[][..]),
+                    None => (None, 0..0, block.bytes.as_slice()),
+                });
+            }
+            pieces.push((None, 0..0, tail.as_slice()));
+            // Scoped composition is this actual concatenation producer. Its
+            // second owned result is the separately reserved legacy record.
+            let source = template.operation.compose_sources(&pieces)?;
+            let source = template.operation.declare_source_w14_on_root(source)?;
+            let copied = template.operation.repeat_source(&source)?;
+            let xml = template.operation.finish_source(copied)?;
+            template.sources.source = Some(Arc::new(source));
+            xml
+        } else {
+            let mut xml = Vec::with_capacity(
+                head.len()
+                    + blocks.iter().map(|block| block.bytes.len()).sum::<usize>()
+                    + tail.len(),
+            );
+            xml.extend_from_slice(&head);
+            for block in &blocks {
+                xml.extend_from_slice(&block.bytes);
+            }
+            xml.extend_from_slice(&tail);
+            xml
+        };
+        let written =
+            head.len() + blocks.iter().map(|block| block.bytes.len()).sum::<usize>() + tail.len();
+        if template.is_none() {
+            rdocx_oxml::text::declare_w14_on_part_root(&mut xml)?;
         }
-        xml.extend_from_slice(&tail);
-        let written = xml.len();
-        rdocx_oxml::text::declare_w14_on_part_root(&mut xml)?;
         let declared = xml.len() - written;
         #[cfg(test)]
         a9_lookup_read("writer.assembled_output", 0, xml.len());
@@ -9769,8 +10487,19 @@ impl MainPartBlocks {
             {
                 blocks
                     .iter()
-                    .map(BodyBlockScan::fresh_context_piece)
-                    .collect()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        if let Some(template) = &mut template
+                            && let Some(source) = template.sources.items[index].as_ref()
+                        {
+                            let copied = template.operation.repeat_source(source)?;
+                            let bytes = template.operation.finish_source(copied)?;
+                            Ok(block.fresh_context_piece_from(bytes))
+                        } else {
+                            Ok(block.fresh_context_piece())
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?
             }
             _ => blocks,
         };
@@ -10565,6 +11294,33 @@ fn bytes_declare_namespace(bytes: &[u8]) -> bool {
     bytes
         .windows(b"xmlns".len())
         .any(|window| window == b"xmlns")
+}
+
+/// The root start tag of emitted item bytes binds `w` to a namespace other
+/// than Word. Only the root start tag is scanned, so a matching byte sequence
+/// inside a text run or opaque payload cannot disable the span check.
+fn root_declares_foreign_word(bytes: &[u8]) -> bool {
+    let Some(end) = bytes.iter().position(|byte| *byte == b'>') else {
+        return false;
+    };
+    let root = &bytes[..end];
+    const NEEDLE: &[u8] = b"xmlns:w=\"";
+    let mut cursor = 0usize;
+    while let Some(offset) = root[cursor..]
+        .windows(NEEDLE.len())
+        .position(|window| window == NEEDLE)
+    {
+        let value_start = cursor + offset + NEEDLE.len();
+        let Some(length) = root[value_start..].iter().position(|byte| *byte == b'"') else {
+            return true;
+        };
+        let value = &root[value_start..value_start + length];
+        if value != WORD_NAMESPACE.as_bytes() {
+            return true;
+        }
+        cursor = value_start + length + 1;
+    }
+    false
 }
 
 fn scoped_normalization_context(
@@ -11620,7 +12376,7 @@ fn assert_main_story_layout(xml: &[u8], layout: &MainStoryLayout, items: bool) {
 // Paired source events prove physical correspondence while permitting only
 // namespace declarations to differ. Non-namespace source remains exact.
 #[allow(clippy::type_complexity)] // Concrete physical map and changed namespace offsets form one proof.
-fn comment_namespace_source_boundaries(
+pub(crate) fn comment_namespace_source_boundaries(
     canonical: &[u8],
     restored: &[u8],
 ) -> Result<Option<(BTreeMap<usize, usize>, Vec<usize>)>> {
@@ -12077,7 +12833,10 @@ fn modeled_sdt_content_child(context: Option<StorySdtContext>, child: &[u8]) -> 
             Some(StorySdtContext::Table) => child == b"tr",
             Some(StorySdtContext::Row) => child == b"tc",
             Some(StorySdtContext::Inline) => {
-                matches!(child, b"r" | b"ins" | b"del" | b"moveFrom" | b"moveTo")
+                matches!(
+                    child,
+                    b"r" | b"fldSimple" | b"ins" | b"del" | b"moveFrom" | b"moveTo"
+                )
             }
             None => false,
         }
@@ -13293,6 +14052,90 @@ pub(crate) fn story_namespace_scope_at(
     }
 }
 
+// Pooled local declaration frames and exact target offsets form one lexical proof.
+#[allow(clippy::type_complexity)]
+pub(crate) fn story_namespace_ancestors_at(
+    xml: &[u8],
+    offsets: &[usize],
+) -> Result<(Vec<Vec<(String, String)>>, HashMap<usize, Vec<usize>>)> {
+    let requested = offsets.iter().copied().collect::<HashSet<_>>();
+    if requested.len() != offsets.len() {
+        return Err(Error::Other(
+            "field-cache paragraphs share a canonical start".into(),
+        ));
+    }
+    let mut frames = Vec::new();
+    let mut found = HashMap::with_capacity(requested.len());
+    let mut active = Vec::<Option<usize>>::new();
+    let mut decoded_bytes = 0usize;
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("field-cache ancestor scan failed: {error}")))?;
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                // Snapshot BEFORE the target's own declarations. The root is
+                // never pooled: the original model rebuilds its writer-time root.
+                if requested.contains(&before) {
+                    found.insert(before, active.iter().flatten().copied().collect());
+                }
+                let empty = xml.get(
+                    (reader.buffer_position() as usize).saturating_sub(2)
+                        ..reader.buffer_position() as usize,
+                ) == Some(b"/>");
+                if !empty {
+                    let mut local = Vec::new();
+                    if !active.is_empty() {
+                        for attribute in element.attributes() {
+                            let attribute = attribute.map_err(|error| {
+                                Error::Other(format!(
+                                    "story namespace scope attribute failed: {error}"
+                                ))
+                            })?;
+                            if let Some((prefix, namespace)) =
+                                decoded_story_namespace_declaration(&element, &attribute)?
+                            {
+                                decoded_bytes = decoded_bytes
+                                    .checked_add(prefix.len())
+                                    .and_then(|bytes| bytes.checked_add(namespace.len()))
+                                    .filter(|bytes| *bytes <= xml.len())
+                                    .ok_or_else(|| {
+                                        Error::Other(
+                                            "field-cache declaration source work overflow".into(),
+                                        )
+                                    })?;
+                                local.push((prefix, namespace));
+                            }
+                        }
+                    }
+                    if local.is_empty() {
+                        active.push(None);
+                    } else {
+                        let index = frames.len();
+                        frames.push(local);
+                        active.push(Some(index));
+                    }
+                }
+            }
+            Event::End(_) => {
+                active.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if found.len() != requested.len() || !active.is_empty() {
+        return Err(Error::Other(
+            "field-cache ancestor inventory is incomplete".into(),
+        ));
+    }
+    Ok((frames, found))
+}
+
 fn story_namespace_scopes_at(
     xml: &[u8],
     offsets: impl IntoIterator<Item = usize>,
@@ -13911,6 +14754,76 @@ pub(crate) fn package_authoritative_body_fragment(
     Ok(output)
 }
 
+pub(crate) fn package_authoritative_body_source(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: &rdocx_oxml::document::ScopedWordSource,
+    include_final_section_properties: bool,
+    destination_scope: &BTreeMap<String, String>,
+) -> Result<rdocx_oxml::document::ScopedWordSource> {
+    // The same package-authoritative selectors and namespace policy as the
+    // ordinary byte producer above, retaining their actual selected ranges.
+    let xml = source.as_bytes();
+    let owner = scan_story_owners(xml, StoryKind::Body)?
+        .into_iter()
+        .find(|owner| owner.kind == StoryKind::Body)
+        .ok_or_else(|| Error::Other("document fragment has no main body".into()))?;
+    let items = direct_story_content_items(xml, &owner)?;
+    let mut cursor = items
+        .first()
+        .map(|item| item.full.start)
+        .ok_or_else(|| Error::Other("document fragment main body is empty".into()))?;
+    let mut output = Vec::new();
+    for item in items {
+        output.push(operation.compose_sources(&[(Some(source), cursor..item.full.start, &[])])?);
+        let scope = story_namespace_scope_at(xml, item.full.start)?;
+        let required = scope
+            .into_iter()
+            .filter(|(prefix, namespace)| destination_scope.get(prefix) != Some(namespace))
+            .collect();
+        let selected = operation.compose_sources(&[(Some(source), item.full.clone(), &[])])?;
+        output.push(operation.close_source_namespaces(selected, &required)?);
+        cursor = item.full.end;
+    }
+    output.push(operation.compose_sources(&[(
+        Some(source),
+        cursor..story_owner_content_end(xml, &owner)?,
+        &[],
+    )])?);
+    if include_final_section_properties {
+        let mut section = None;
+        for item in scan_story_items(xml, &owner, None)? {
+            if item.direct_owner_child
+                && item.kind == StoryItemKind::PreservedNode
+                && content_fragment_root_is_section_properties(xml, &item)?
+            {
+                section = Some(item);
+                break;
+            }
+        }
+        let section = section.ok_or_else(|| {
+            Error::Other("section-inclusive document fragment has no final section".into())
+        })?;
+        let scope = story_namespace_scope_at(xml, section.full.start)?;
+        let required = scope
+            .into_iter()
+            .filter(|(prefix, namespace)| destination_scope.get(prefix) != Some(namespace))
+            .collect();
+        let selected = operation.compose_sources(&[(Some(source), section.full, &[])])?;
+        let selected = operation.close_source_namespaces(selected, &required)?;
+        let open = format!(r#"<w:p xmlns:w="{WORD_NAMESPACE}"><w:pPr>"#);
+        output.push(operation.compose_sources(&[
+            (None, 0..0, open.as_bytes()),
+            (Some(&selected), 0..selected.as_bytes().len(), &[]),
+            (None, 0..0, b"</w:pPr></w:p>"),
+        ])?);
+    }
+    let pieces = output
+        .iter()
+        .map(|part| (Some(part), 0..part.as_bytes().len(), &[][..]))
+        .collect::<Vec<_>>();
+    Ok(operation.compose_sources(&pieces)?)
+}
+
 /// Whether a fragment uses the `w14` prefix: in a qualified name, as the
 /// part root declaration finds it, or in a markup compatibility attribute
 /// that lists prefixes or qualified names.
@@ -14026,96 +14939,33 @@ pub(crate) fn close_content_fragment_namespaces(
     xml: &[u8],
     scope: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>> {
-    let mut reader = quick_xml::Reader::from_reader(xml);
-    reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
-    let (opening_end, empty, existing) = loop {
-        let event = reader
-            .read_event_into(&mut buffer)
-            .map_err(|error| Error::Other(format!("content fragment scan failed: {error}")))?;
-        match event {
-            Event::Start(element) => {
-                let mut existing = HashSet::new();
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|error| {
-                        Error::Other(format!("content fragment attribute scan failed: {error}"))
-                    })?;
-                    let name = attribute.key.as_ref();
-                    if name == b"xmlns" {
-                        existing.insert(String::new());
-                    } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
-                        existing.insert(
-                            std::str::from_utf8(prefix)
-                                .map_err(|error| {
-                                    Error::Other(format!(
-                                        "content fragment namespace prefix is invalid: {error}"
-                                    ))
-                                })?
-                                .to_owned(),
-                        );
-                    }
+    let closed =
+        rdocx_oxml::document::close_content_fragment_namespaces(xml, scope).map_err(|error| {
+            match error {
+                rdocx_oxml::OxmlError::InvalidValue(message) => Error::Other(message),
+                other => Error::from(other),
+            }
+        })?;
+    #[cfg(test)]
+    let mc_added = if closed.len() != xml.len() && scope.contains_key("mc") {
+        let mut reader = quick_xml::Reader::from_reader(xml);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(element) | Event::Empty(element)) => {
+                    break !element.attributes().any(|attribute| {
+                        attribute.is_ok_and(|attribute| attribute.key.as_ref() == b"xmlns:mc")
+                    });
                 }
-                break (reader.buffer_position() as usize, false, existing);
+                Ok(Event::Eof) | Err(_) => break false,
+                _ => {}
             }
-            Event::Empty(element) => {
-                let mut existing = HashSet::new();
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|error| {
-                        Error::Other(format!("content fragment attribute scan failed: {error}"))
-                    })?;
-                    let name = attribute.key.as_ref();
-                    if name == b"xmlns" {
-                        existing.insert(String::new());
-                    } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
-                        existing.insert(
-                            std::str::from_utf8(prefix)
-                                .map_err(|error| {
-                                    Error::Other(format!(
-                                        "content fragment namespace prefix is invalid: {error}"
-                                    ))
-                                })?
-                                .to_owned(),
-                        );
-                    }
-                }
-                break (reader.buffer_position() as usize, true, existing);
-            }
-            Event::Eof => {
-                return Err(Error::Other(
-                    "content fragment has no root element".to_owned(),
-                ));
-            }
-            _ => buffer.clear(),
         }
+    } else {
+        false
     };
-    let mut declarations = Vec::new();
-    for (prefix, namespace) in scope {
-        if prefix == "xml" || existing.contains(prefix) {
-            continue;
-        }
-        declarations.extend_from_slice(b" xmlns");
-        if !prefix.is_empty() {
-            declarations.push(b':');
-            declarations.extend_from_slice(prefix.as_bytes());
-        }
-        declarations.extend_from_slice(b"=\"");
-        declarations.extend_from_slice(quick_xml::escape::escape(namespace).as_bytes());
-        declarations.push(b'"');
-    }
-    if declarations.is_empty() {
-        return Ok(xml.to_vec());
-    }
-    let insertion = opening_end
-        .checked_sub(if empty { 2 } else { 1 })
-        .ok_or_else(|| Error::Other("content fragment opening tag is incomplete".to_owned()))?;
-    let mut closed = Vec::with_capacity(xml.len() + declarations.len());
-    closed.extend_from_slice(&xml[..insertion]);
-    closed.extend_from_slice(&declarations);
-    closed.extend_from_slice(&xml[insertion..]);
     #[cfg(test)]
     if std::env::var_os("RDOCX_DESTINATION_REPAIR_DIAGNOSTICS").is_some()
-        && !existing.contains("mc")
-        && scope.contains_key("mc")
+        && mc_added
         && [
             b"NewCell".as_slice(),
             b"OldCell".as_slice(),
@@ -14867,6 +15717,18 @@ fn validate_element_owner_relationships(
                     match content {
                         RunContent::Field(field) => {
                             field.validate_for_attachment()?;
+                            // A new whole raw owner has no retained-program authority.
+                            rdocx_oxml::text::Field::from_raw(
+                                &field.effective_instruction_text(),
+                                field.form(),
+                                Vec::new(),
+                            )?;
+                            let instruction = field.effective_instruction();
+                            rdocx_oxml::text::FieldInstruction::new(
+                                &instruction.name,
+                                instruction.arguments,
+                                instruction.switches,
+                            )?;
                             if let Some(owner) = field.cached_result_owner_projection()? {
                                 validate_element_owner_relationships(
                                     document,
@@ -15257,6 +16119,18 @@ pub(crate) fn set_story_source_xml(
     part_name: &str,
     xml: Vec<u8>,
 ) -> Result<()> {
+    set_story_source_xml_in(document, part_name, xml, None)
+}
+
+fn set_story_source_xml_in(
+    document: &mut Document,
+    part_name: &str,
+    xml: Vec<u8>,
+    mut scoped: Option<(
+        &mut TemplateMainWriter<'_, '_>,
+        rdocx_oxml::document::ScopedWordSource,
+    )>,
+) -> Result<()> {
     if part_name == document.doc_part_name {
         // The main-part story source is canonical XML. It drops a root
         // default namespace and every body declaration, and binds the root
@@ -15282,16 +16156,49 @@ pub(crate) fn set_story_source_xml(
                 "cannot serialize a modified document with a shadowed `{prefix}` namespace"
             )));
         }
-        let mut xml = xml;
-        declare_w14_on_part_root(&mut xml)?;
+        let (xml, mut main_scoped) = if let Some((template, source)) = scoped.take() {
+            let source = template.operation.declare_source_w14_on_root(source)?;
+            let retained = template.operation.repeat_source(&source)?;
+            (
+                template.operation.finish_source(retained)?,
+                Some((template, source)),
+            )
+        } else {
+            let mut xml = xml;
+            declare_w14_on_part_root(&mut xml)?;
+            (xml, None)
+        };
         let namespace_scopes = document_namespace_scopes(&xml)?;
         let xml = Arc::new(xml);
-        let rebuilt = document.source_blocks(&xml);
+        let rebuilt = if main_scoped.is_none() {
+            document.source_blocks(&xml)
+        } else {
+            None
+        };
         let (parsed, blocks) = match rebuilt {
             Some((parsed, blocks)) => (parsed, Some(blocks)),
             None => {
                 note_staging_work(|work| work.parsed += xml.len());
-                (CT_Document::from_xml(&xml)?, None)
+                let parsed = if let Some((template, source)) = main_scoped.take() {
+                    template.sources.invalidate_model();
+                    let parsed = template
+                        .sources
+                        .read_document(template.operation, Arc::new(source))?;
+                    template.sources.published_main = Some((
+                        Arc::clone(&xml),
+                        Arc::clone(
+                            template
+                                .sources
+                                .reader_source
+                                .as_ref()
+                                .expect("actual main reader input"),
+                        ),
+                    ));
+                    parsed
+                } else {
+                    CT_Document::from_xml(&xml)?
+                };
+                (parsed, None)
             }
         };
         #[cfg(debug_assertions)]
@@ -15335,11 +16242,24 @@ pub(crate) fn set_story_source_xml(
             !blocked,
         );
     } else if document.comments_part_name.as_deref() == Some(part_name) {
-        document.comments = Some(rdocx_oxml::comments::CT_Comments::from_xml(&xml)?);
+        document.comments = Some(if let Some((writer, source)) = scoped.as_mut() {
+            let comments = writer.operation.source_comments(source)?;
+            // The operation reader and package publication below are the same producer handback.
+            comments
+        } else {
+            rdocx_oxml::comments::CT_Comments::from_xml(&xml)?
+        });
         document.package.set_part(part_name, xml);
         document.comments_dirty = false;
     } else if document.footnotes_part_name.as_deref() == Some(part_name) {
-        document.footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(&xml)?;
+        document.footnotes = if let Some((template, source)) = scoped.as_mut() {
+            let notes = template.operation.source_notes(source)?;
+            template.sources.notes_model_read = true;
+            template.sources.read_note_count = notes.footnotes.len();
+            notes
+        } else {
+            rdocx_oxml::footnotes::CT_Footnotes::from_xml(&xml)?
+        };
         document.package.set_part(part_name, xml);
         document.footnotes_dirty = false;
     } else if document.glossary_part_name.as_deref() == Some(part_name) {
@@ -15348,6 +16268,19 @@ pub(crate) fn set_story_source_xml(
         document.glossary_dirty = false;
     } else {
         document.package.set_part(part_name, xml);
+    }
+    if let Some((template, source)) = scoped {
+        let bytes = document
+            .package
+            .get_part_shared(part_name)
+            .ok_or_else(|| Error::Other("published template part disappeared".into()))?;
+        let source = Arc::new(source);
+        if document.comments_part_name.as_deref() == Some(part_name) {
+            template.sources.comments_reader_source = Some(Arc::clone(&source));
+        }
+        template
+            .sources
+            .put_related_source(part_name, bytes, source);
     }
     Ok(())
 }
@@ -15540,6 +16473,64 @@ fn serialized_note_fragment(
     close_content_fragment_namespaces(&serialized[owner.full], &scope)
 }
 
+fn serialized_note_fragment_in(
+    note: &rdocx_oxml::footnotes::CT_Footnote,
+    kind: StoryKind,
+    note_index: usize,
+    read_source: Option<&rdocx_oxml::document::ScopedWordSource>,
+    template: &mut TemplateMainWriter<'_, '_>,
+) -> Result<Option<rdocx_oxml::document::ScopedWordSource>> {
+    let endnotes = match kind {
+        StoryKind::Footnote => false,
+        StoryKind::Endnote => true,
+        _ => return Err(Error::Other("invalid note story kind".into())),
+    };
+    let emitted = if let Some(source) = read_source {
+        template
+            .operation
+            .source_model_note_from_read(note, endnotes, source, note_index)?
+    } else {
+        if template.sources.notes_model_read {
+            return Ok(None);
+        }
+        // Preserve the existing one-note clone producer. Only actual initial
+        // clone slots can be paired, never a note ID or matching text value.
+        for paragraph in &note.paragraphs {
+            paragraph.validate_resource_limits()?;
+        }
+        let notes = rdocx_oxml::footnotes::CT_Footnotes {
+            footnotes: vec![note.clone()],
+        };
+        let Some(inputs) = template
+            .lineage
+            .note_writer_inputs(note_index, &notes.footnotes[0])
+        else {
+            return Ok(None);
+        };
+        template.operation.source_model_notes(
+            &notes,
+            endnotes,
+            &inputs.texts,
+            &inputs.fields,
+            &inputs.raw,
+            false,
+        )?
+    };
+    let owner = scan_story_owners_with_special(emitted.as_bytes(), kind, true)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Other("serialized note has no story owner".into()))?;
+    let scope = story_namespace_scope_at(emitted.as_bytes(), owner.full.start)?;
+    let selected = template
+        .operation
+        .compose_sources(&[(Some(&emitted), owner.full, &[])])?;
+    Ok(Some(
+        template
+            .operation
+            .close_source_namespaces(selected, &scope)?,
+    ))
+}
+
 fn serialized_footnote_fragment(footnote: &rdocx_oxml::footnotes::CT_Footnote) -> Result<Vec<u8>> {
     serialized_note_fragment(footnote, StoryKind::Footnote)
 }
@@ -15603,15 +16594,20 @@ fn remove_note_references(xml: &[u8], id: i32, kind: StoryKind) -> Result<Vec<u8
     Ok(updated)
 }
 
-fn append_story_fragments_to_root(
+enum StoryAppendPosition {
+    At(usize),
+    Empty {
+        insertion: usize,
+        after: usize,
+        name: Vec<u8>,
+    },
+}
+
+fn story_append_position(
     xml: &[u8],
     root_local_name: &[u8],
     item_local_name: &[u8],
-    fragments: &[Vec<u8>],
-) -> Result<Vec<u8>> {
-    if fragments.is_empty() {
-        return Ok(xml.to_vec());
-    }
+) -> Result<StoryAppendPosition> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut depth = 0usize;
@@ -15645,19 +16641,11 @@ fn append_story_fragments_to_root(
                     let insertion = after.checked_sub(2).ok_or_else(|| {
                         Error::Other("empty story root opening tag is incomplete".to_owned())
                     })?;
-                    let mut updated = Vec::new();
-                    updated.extend_from_slice(&xml[..insertion]);
-                    updated.push(b'>');
-                    updated.extend(
-                        fragments
-                            .iter()
-                            .flat_map(|fragment| fragment.iter().copied()),
-                    );
-                    updated.extend_from_slice(b"</");
-                    updated.extend_from_slice(&name);
-                    updated.push(b'>');
-                    updated.extend_from_slice(&xml[after..]);
-                    return Ok(updated);
+                    return Ok(StoryAppendPosition::Empty {
+                        insertion,
+                        after,
+                        name,
+                    });
                 }
                 if saw_root
                     && depth == 1
@@ -15687,14 +16675,105 @@ fn append_story_fragments_to_root(
         }
         buffer.clear();
     };
-    let mut updated = xml.to_vec();
-    updated.splice(
-        boundary..boundary,
-        fragments
-            .iter()
-            .flat_map(|fragment| fragment.iter().copied()),
-    );
-    Ok(updated)
+    Ok(StoryAppendPosition::At(boundary))
+}
+
+fn append_story_fragments_to_root(
+    xml: &[u8],
+    root_local_name: &[u8],
+    item_local_name: &[u8],
+    fragments: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    if fragments.is_empty() {
+        return Ok(xml.to_vec());
+    }
+    match story_append_position(xml, root_local_name, item_local_name)? {
+        StoryAppendPosition::At(boundary) => {
+            let mut updated = xml.to_vec();
+            updated.splice(
+                boundary..boundary,
+                fragments
+                    .iter()
+                    .flat_map(|fragment| fragment.iter().copied()),
+            );
+            Ok(updated)
+        }
+        StoryAppendPosition::Empty {
+            insertion,
+            after,
+            name,
+        } => {
+            let mut updated = Vec::new();
+            updated.extend_from_slice(&xml[..insertion]);
+            updated.push(b'>');
+            updated.extend(
+                fragments
+                    .iter()
+                    .flat_map(|fragment| fragment.iter().copied()),
+            );
+            updated.extend_from_slice(b"</");
+            updated.extend_from_slice(&name);
+            updated.push(b'>');
+            updated.extend_from_slice(&xml[after..]);
+            Ok(updated)
+        }
+    }
+}
+
+fn append_story_sources_to_root(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: impl Into<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    fragments: &[Arc<rdocx_oxml::document::ScopedWordSource>],
+    root_local_name: &[u8],
+    item_local_name: &[u8],
+) -> Result<Arc<rdocx_oxml::document::ScopedWordSource>> {
+    let source = source.into();
+    if fragments.is_empty() {
+        return Ok(source);
+    }
+    let position = story_append_position(source.as_bytes(), root_local_name, item_local_name)?;
+    let mut chunks = Vec::new();
+    let close;
+    match position {
+        StoryAppendPosition::At(boundary) => {
+            chunks.push((Some(source.as_ref()), 0..boundary, &[][..]));
+            for fragment in fragments {
+                chunks.push((
+                    Some(fragment.as_ref()),
+                    0..fragment.as_bytes().len(),
+                    &[][..],
+                ));
+            }
+            chunks.push((
+                Some(source.as_ref()),
+                boundary..source.as_bytes().len(),
+                &[][..],
+            ));
+        }
+        StoryAppendPosition::Empty {
+            insertion,
+            after,
+            name,
+        } => {
+            close = [b"</".as_slice(), name.as_slice(), b">".as_slice()].concat();
+            chunks.push((Some(source.as_ref()), 0..insertion, &[][..]));
+            chunks.push((None, 0..0, b">".as_slice()));
+            for fragment in fragments {
+                chunks.push((
+                    Some(fragment.as_ref()),
+                    0..fragment.as_bytes().len(),
+                    &[][..],
+                ));
+            }
+            chunks.push((None, 0..0, close.as_slice()));
+            chunks.push((
+                Some(source.as_ref()),
+                after..source.as_bytes().len(),
+                &[][..],
+            ));
+        }
+    }
+    Ok(Arc::new(operation.compose_sources(&chunks)?))
 }
 
 fn update_story_namespace_scope(
@@ -15705,29 +16784,38 @@ fn update_story_namespace_scope(
         let attribute = attribute.map_err(|error| {
             Error::Other(format!("story namespace scope attribute failed: {error}"))
         })?;
-        let name = attribute.key.as_ref();
-        let prefix = if name == b"xmlns" {
-            ""
-        } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
-            std::str::from_utf8(prefix).map_err(|error| {
-                Error::Other(format!("story namespace scope prefix is invalid: {error}"))
-            })?
-        } else {
+        let Some((prefix, value)) = decoded_story_namespace_declaration(element, &attribute)?
+        else {
             continue;
         };
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
-            .map_err(|error| {
-                Error::Other(format!("story namespace scope value is invalid: {error}"))
-            })?
-            .into_owned();
         if value.is_empty() {
-            scope.remove(prefix);
+            scope.remove(&prefix);
         } else {
-            scope.insert(prefix.to_owned(), value);
+            scope.insert(prefix, value);
         }
     }
     Ok(())
+}
+
+fn decoded_story_namespace_declaration(
+    element: &BytesStart<'_>,
+    attribute: &quick_xml::events::attributes::Attribute<'_>,
+) -> Result<Option<(String, String)>> {
+    let name = attribute.key.as_ref();
+    let prefix = if name == b"xmlns" {
+        ""
+    } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
+        std::str::from_utf8(prefix).map_err(|error| {
+            Error::Other(format!("story namespace scope prefix is invalid: {error}"))
+        })?
+    } else {
+        return Ok(None);
+    };
+    let value = attribute
+        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+        .map_err(|error| Error::Other(format!("story namespace scope value is invalid: {error}")))?
+        .into_owned();
+    Ok(Some((prefix.to_owned(), value)))
 }
 
 fn story_word_prefix_for_scope(scope: &BTreeMap<String, String>) -> String {
@@ -16148,7 +17236,11 @@ struct PairedTextBoxProjection {
     slots: Vec<(Vec<usize>, Range<usize>)>,
 }
 
-fn paired_text_box_projection(xml: &[u8], range: Range<usize>) -> Result<PairedTextBoxProjection> {
+fn paired_text_box_projection(
+    xml: &[u8],
+    range: Range<usize>,
+    mut operation: Option<&mut rdocx_oxml::document::ScopedWordOperation<'_>>,
+) -> Result<PairedTextBoxProjection> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut stack = Vec::<XmlElementFrame>::new();
@@ -16230,13 +17322,18 @@ fn paired_text_box_projection(xml: &[u8], range: Range<usize>) -> Result<PairedT
                     signature.push(format!("+{}", String::from_utf8_lossy(local)));
                     if local == b"tbl" {
                         let scope = story_namespace_scope_at(xml, before)?;
-                        let closed = close_content_fragment_namespaces(&xml[before..end], &scope)?;
-                        let mut wrapped =
-                            format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#)
-                                .into_bytes();
-                        wrapped.extend_from_slice(&closed);
-                        wrapped.extend_from_slice(b"</w:body></w:document>");
-                        let parsed = CT_Document::from_xml(&wrapped)?;
+                        let parsed = if let Some(operation) = operation.as_deref_mut() {
+                            operation.document_block(before..end, &scope)?
+                        } else {
+                            let closed =
+                                close_content_fragment_namespaces(&xml[before..end], &scope)?;
+                            let mut wrapped =
+                                format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#)
+                                    .into_bytes();
+                            wrapped.extend_from_slice(&closed);
+                            wrapped.extend_from_slice(b"</w:body></w:document>");
+                            CT_Document::from_xml(&wrapped)?
+                        };
                         let Some(BodyContent::Table(table)) = parsed.body.content.first() else {
                             return Err(Error::Other(
                                 "paired table is not a qualified table".into(),
@@ -16264,8 +17361,14 @@ fn paired_text_box_projection(xml: &[u8], range: Range<usize>) -> Result<PairedT
                     }
                     if local == b"p" {
                         let scope = story_namespace_scope_at(xml, before)?;
-                        let closed = close_content_fragment_namespaces(&xml[before..end], &scope)?;
-                        signature.push(CT_P::from_xml_fragment(&closed)?.accepted_text());
+                        let paragraph = if let Some(operation) = operation.as_deref_mut() {
+                            operation.paragraph(before..end, &scope)?
+                        } else {
+                            let closed =
+                                close_content_fragment_namespaces(&xml[before..end], &scope)?;
+                            CT_P::from_xml_fragment(&closed)?
+                        };
+                        signature.push(paragraph.accepted_text());
                     }
                     Some(path)
                 } else {
@@ -16350,6 +17453,7 @@ struct PairedReplacement<'a> {
     paragraph: Option<usize>,
     placeholder: &'a str,
     replacement: &'a str,
+    literal_input: &'a Cell<bool>,
     count: usize,
 }
 
@@ -16436,6 +17540,50 @@ fn template_direct_table_children(
 fn prepare_template_source_programs(
     source: &StorySource<'_>,
 ) -> Result<Vec<crate::template::TemplateProgram>> {
+    prepare_template_source_programs_in(source, None)
+}
+
+fn copy_template_source_range(
+    source: &StorySource<'_>,
+    range: Range<usize>,
+    scoped: &mut Option<(
+        &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+        &rdocx_oxml::document::ScopedWordSource,
+    )>,
+) -> Result<Vec<u8>> {
+    if let Some((operation, parent)) = scoped {
+        let copied = operation.compose_sources(&[(Some(*parent), range, &[])])?;
+        Ok(operation.finish_source(copied)?)
+    } else {
+        Ok(source.xml[range].to_vec())
+    }
+}
+
+fn retain_template_source_range(
+    range: Range<usize>,
+    scoped: &mut Option<(
+        &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+        &rdocx_oxml::document::ScopedWordSource,
+    )>,
+) -> Result<Option<Arc<rdocx_oxml::document::ScopedWordSource>>> {
+    if let Some((operation, parent)) = scoped {
+        Ok(Some(Arc::new(operation.compose_sources(&[(
+            Some(*parent),
+            range,
+            &[],
+        )])?)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn prepare_template_source_programs_in(
+    source: &StorySource<'_>,
+    mut scoped: Option<(
+        &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+        &rdocx_oxml::document::ScopedWordSource,
+    )>,
+) -> Result<Vec<crate::template::TemplateProgram>> {
     use crate::template::{TemplateItemKind, TemplateProgram, TemplateProgramItem};
     let mut roots = Vec::new();
     let owners = scan_story_owners(&source.xml, source.root_kind)?;
@@ -16501,7 +17649,7 @@ fn prepare_template_source_programs(
             continue;
         }
         let paired = if owner.kind == StoryKind::TextBox {
-            paired_scoped_ranges(&source.xml, owner, &owner.full)?
+            paired_scoped_ranges(&source.xml, owner, &owner.full, None)?
         } else {
             None
         };
@@ -16519,7 +17667,8 @@ fn prepare_template_source_programs(
             story: qualified[index].0.clone(),
             part: source.part_name.clone(),
             ranges,
-            raw: source.xml[owner.full.clone()].to_vec(),
+            raw: copy_template_source_range(source, owner.full.clone(), &mut scoped)?,
+            source: retain_template_source_range(owner.full.clone(), &mut scoped)?,
             scope: scopes[&owner.full.start].clone(),
             required_paragraph: owner.kind == StoryKind::TableCell,
             table_rows: false,
@@ -16551,7 +17700,8 @@ fn prepare_template_source_programs(
                     story: qualified[index].0.clone(),
                     part: source.part_name.clone(),
                     ranges: vec![item.full.clone()],
-                    raw: source.xml[item.full.clone()].to_vec(),
+                    raw: copy_template_source_range(source, item.full.clone(), &mut scoped)?,
+                    source: retain_template_source_range(item.full.clone(), &mut scoped)?,
                     scope: item_scopes[&item.full.start].clone(),
                     required_paragraph: false,
                     table_rows: false,
@@ -16633,10 +17783,18 @@ fn prepare_template_source_programs(
                 let rows = table_children.get(&item.full.start).ok_or_else(|| {
                     Error::Other("template table lacks its admitted physical projection".into())
                 })?;
-                let closed = close_content_fragment_namespaces(
-                    &source.xml[item.full.clone()],
-                    &item_scopes[&item.full.start].clone(),
-                )?;
+                let closed = if let Some((operation, parent)) = &mut scoped {
+                    let selected =
+                        operation.compose_sources(&[(Some(*parent), item.full.clone(), &[])])?;
+                    let closed = operation
+                        .close_source_namespaces(selected, &item_scopes[&item.full.start])?;
+                    operation.finish_source(closed)?
+                } else {
+                    close_content_fragment_namespaces(
+                        &source.xml[item.full.clone()],
+                        &item_scopes[&item.full.start].clone(),
+                    )?
+                };
                 let table = CT_Tbl::from_xml_fragment_checked(&closed)?;
                 if rows.iter().filter(|(_, row)| *row).count() != table.rows.len() {
                     return Err(Error::Other(
@@ -16662,7 +17820,7 @@ fn prepare_template_source_programs(
                         },
                         field_owned,
                         marker_unsafe,
-                        raw: source.xml[range.clone()].to_vec(),
+                        raw: copy_template_source_range(source, range.clone(), &mut scoped)?,
                         scope: item_scopes[&range.start].clone(),
                         children: Vec::new(),
                     });
@@ -16672,7 +17830,8 @@ fn prepare_template_source_programs(
                     story: story.clone(),
                     part: source.part_name.clone(),
                     ranges: vec![item.full.clone()],
-                    raw: source.xml[item.full.clone()].to_vec(),
+                    raw: copy_template_source_range(source, item.full.clone(), &mut scoped)?,
+                    source: retain_template_source_range(item.full.clone(), &mut scoped)?,
                     scope: item_scopes[&item.full.start].clone(),
                     required_paragraph: false,
                     table_rows: true,
@@ -16686,7 +17845,7 @@ fn prepare_template_source_programs(
                 kind: TemplateItemKind::Source(item.kind),
                 field_owned,
                 marker_unsafe: false,
-                raw: source.xml[item.full.clone()].to_vec(),
+                raw: copy_template_source_range(source, item.full.clone(), &mut scoped)?,
                 scope: item_scopes[&item.full.start].clone(),
                 children: Vec::new(),
             });
@@ -16798,6 +17957,7 @@ fn paired_scoped_ranges(
     xml: &[u8],
     owner: &StoryOwnerSpan,
     span: &Range<usize>,
+    mut operation: Option<&mut rdocx_oxml::document::ScopedWordOperation<'_>>,
 ) -> Result<Option<Vec<Range<usize>>>> {
     let copies = scoped_alternate_text_box_copies(xml)?;
     let selected = copies
@@ -16823,7 +17983,7 @@ fn paired_scoped_ranges(
         .ok_or_else(|| Error::Other("paired selected box disappeared".into()))?;
     let baseline = selected_branch
         .iter()
-        .map(|copy| paired_text_box_projection(xml, copy.range.clone()))
+        .map(|copy| paired_text_box_projection(xml, copy.range.clone(), operation.as_deref_mut()))
         .collect::<Result<Vec<_>>>()?;
     let selected_signature = &baseline[selected_slot].signature;
     if selected_branch.len() > 1
@@ -16852,7 +18012,9 @@ fn paired_scoped_ranges(
         }
         let projections = branch
             .iter()
-            .map(|copy| paired_text_box_projection(xml, copy.range.clone()))
+            .map(|copy| {
+                paired_text_box_projection(xml, copy.range.clone(), operation.as_deref_mut())
+            })
             .collect::<Result<Vec<_>>>()?;
         if projections
             .iter()
@@ -16888,27 +18050,54 @@ fn paired_scoped_edits(
     xml: &[u8],
     owner: &StoryOwnerSpan,
     replacement: &PairedReplacement<'_>,
+    selected_raw: &mut Vec<u8>,
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
 ) -> Result<Option<Vec<PairedTextEdit>>> {
     let PairedReplacement {
         span,
         paragraph,
         placeholder,
         replacement,
+        literal_input,
         count,
     } = *replacement;
-    let Some(ranges) = paired_scoped_ranges(xml, owner, span)? else {
+    let Some(ranges) = paired_scoped_ranges(xml, owner, span, Some(operation))? else {
         return Ok(None);
     };
     let mut edits = Vec::new();
     for range in ranges {
+        if range == *span {
+            edits.push(PairedTextEdit {
+                range,
+                raw: std::mem::take(selected_raw),
+            });
+            continue;
+        }
         let scope = story_namespace_scope_at(xml, range.start)?;
-        let mut raw = close_content_fragment_namespaces(&xml[range.clone()], &scope)?;
-        let actual_count = rdocx_oxml::placeholder::try_replace_in_block(
-            &mut raw,
+        #[cfg(test)]
+        let was_delivered = SCOPED_LITERAL_DELIVERIES
+            .with(|events| events.borrow().as_ref().map(|_| literal_input.get()));
+        let counterpart = operation.replace_block_with_literal_input(
+            range.clone(),
+            &scope,
             paragraph,
             placeholder,
             replacement,
-        )?;
+            literal_input,
+        );
+        #[cfg(test)]
+        if let Some(was_delivered) = was_delivered {
+            SCOPED_LITERAL_DELIVERIES.with(|events| {
+                if let Some(events) = events.borrow_mut().as_mut() {
+                    events.push((
+                        std::ptr::from_ref(literal_input) as usize,
+                        was_delivered,
+                        literal_input.get(),
+                    ));
+                }
+            });
+        }
+        let (raw, actual_count) = counterpart?;
         if actual_count != count {
             return Err(Error::Other(
                 "paired replacement physical counts are unequal".into(),
@@ -21498,10 +22687,10 @@ fn insert_html_content_into_cell(
     Ok(())
 }
 
-pub(crate) fn visit_body_paragraphs(
-    content: &[BodyContent],
+pub(crate) fn visit_body_paragraphs<'a>(
+    content: &'a [BodyContent],
     accepted: bool,
-    visitor: &mut impl FnMut(&CT_P),
+    visitor: &mut impl FnMut(&'a CT_P),
 ) {
     for item in content {
         match item {
@@ -21516,14 +22705,18 @@ pub(crate) fn visit_body_paragraphs(
 // With `accepted`, the visitors leave out the rows that accepting every
 // tracked change removes, as `CT_Row::accepted_view_removes` reports them.
 // `visit_row` itself visits the row it is given.
-fn visit_paragraph(paragraph: &CT_P, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
+pub(crate) fn visit_paragraph<'a>(
+    paragraph: &'a CT_P,
+    accepted: bool,
+    visitor: &mut impl FnMut(&'a CT_P),
+) {
     visitor(paragraph);
     for (_, _, _, control) in &paragraph.content_controls {
         visit_sdt(control, accepted, visitor);
     }
 }
 
-fn visit_table(table: &CT_Tbl, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
+fn visit_table<'a>(table: &'a CT_Tbl, accepted: bool, visitor: &mut impl FnMut(&'a CT_P)) {
     for index in 0..=table.rows.len() {
         for (_, _, control) in table
             .content_controls
@@ -21540,7 +22733,7 @@ fn visit_table(table: &CT_Tbl, accepted: bool, visitor: &mut impl FnMut(&CT_P)) 
     }
 }
 
-fn visit_row(row: &CT_Row, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
+fn visit_row<'a>(row: &'a CT_Row, accepted: bool, visitor: &mut impl FnMut(&'a CT_P)) {
     for index in 0..=row.cells.len() {
         for (_, _, control) in row
             .content_controls
@@ -21555,7 +22748,7 @@ fn visit_row(row: &CT_Row, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
     }
 }
 
-fn visit_cell(cell: &CT_Tc, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
+fn visit_cell<'a>(cell: &'a CT_Tc, accepted: bool, visitor: &mut impl FnMut(&'a CT_P)) {
     for item in &cell.content {
         match item {
             CellContent::Paragraph(paragraph) => visit_paragraph(paragraph, accepted, visitor),
@@ -21565,7 +22758,7 @@ fn visit_cell(cell: &CT_Tc, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
     }
 }
 
-fn visit_sdt(control: &CT_Sdt, accepted: bool, visitor: &mut impl FnMut(&CT_P)) {
+fn visit_sdt<'a>(control: &'a CT_Sdt, accepted: bool, visitor: &mut impl FnMut(&'a CT_P)) {
     for item in &control.content {
         match item {
             SdtContent::Paragraph(paragraph) => visit_paragraph(paragraph, accepted, visitor),
@@ -22908,7 +24101,7 @@ impl Document {
     }
 
     /// Admit each loaded recursive owner before staging clones it.
-    fn validate_model_resource_limits(&self) -> Result<()> {
+    pub(crate) fn validate_model_resource_limits(&self) -> Result<()> {
         self.document.validate_resource_limits()?;
         for note in &self.footnotes.footnotes {
             for paragraph in &note.paragraphs {
@@ -23072,12 +24265,18 @@ impl Document {
         copy
     }
 
-    fn canonicalize_typed_identifiers(&mut self) -> Result<()> {
-        self.canonicalize_bookmark_ids()?;
+    fn canonicalize_typed_identifiers(
+        &mut self,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
+        self.canonicalize_bookmark_ids(template)?;
         Ok(())
     }
 
-    fn canonicalize_bookmark_ids(&mut self) -> Result<()> {
+    fn canonicalize_bookmark_ids(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         let mut semantic = Vec::new();
         visit_body_paragraphs(&self.document.body.content, false, &mut |paragraph| {
             for marker in &paragraph.bookmark_markers {
@@ -23118,8 +24317,18 @@ impl Document {
                     .iter()
                     .map(|(old, new)| (old.to_string(), new.to_string()))
                     .collect();
-                let updated = crate::field::patch_bookmark_ids(&self.document.to_xml()?, &remap)?;
-                self.document = CT_Document::from_xml(&updated)?;
+                if let Some(template) = template.as_deref_mut() {
+                    let source = template.document_source(&self.document)?;
+                    let source =
+                        crate::field::patch_bookmark_source(template.operation, source, &remap)?;
+                    self.document = template
+                        .sources
+                        .read_document(template.operation, Arc::new(source))?;
+                } else {
+                    let updated =
+                        crate::field::patch_bookmark_ids(&self.document.to_xml()?, &remap)?;
+                    self.document = CT_Document::from_xml(&updated)?;
+                }
             } else {
                 visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
                     let _ = paragraph.remap_authored_bookmark_ids(&remap);
@@ -23132,11 +24341,14 @@ impl Document {
                 .authored_bookmark_ids
                 .extend(remap.values());
         }
-        self.canonicalize_toc_bookmark_ids()?;
+        self.canonicalize_toc_bookmark_ids(template)?;
         Ok(())
     }
 
-    fn canonicalize_toc_bookmark_ids(&mut self) -> Result<()> {
+    fn canonicalize_toc_bookmark_ids(
+        &mut self,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         let mut semantic = Vec::new();
         visit_body_paragraphs(&self.document.body.content, false, &mut |paragraph| {
             for marker in &paragraph.bookmark_markers {
@@ -23171,9 +24383,17 @@ impl Document {
         if remap.is_empty() {
             return Ok(());
         }
-        let xml = self.document.to_xml()?;
-        let updated = crate::field::patch_bookmark_ids(&xml, &remap)?;
-        self.document = CT_Document::from_xml(&updated)?;
+        if let Some(template) = template {
+            let source = template.document_source(&self.document)?;
+            let source = crate::field::patch_bookmark_source(template.operation, source, &remap)?;
+            self.document = template
+                .sources
+                .read_document(template.operation, Arc::new(source))?;
+        } else {
+            let xml = self.document.to_xml()?;
+            let updated = crate::field::patch_bookmark_ids(&xml, &remap)?;
+            self.document = CT_Document::from_xml(&updated)?;
+        }
         for (old, new) in remap {
             let old = old.parse::<i32>().expect("bookmark remap key is numeric");
             let new = new.parse::<i32>().expect("bookmark remap value is numeric");
@@ -23576,9 +24796,12 @@ impl Document {
         }
     }
 
-    fn canonicalize_drawing_ids(&mut self) -> Result<()> {
+    fn canonicalize_drawing_ids(
+        &mut self,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         let Some(kept) = self.unchanged_main_part() else {
-            return self.canonicalize_all_drawing_ids();
+            return self.canonicalize_all_drawing_ids(template);
         };
         let unchanged = kept
             .unchanged_main_part
@@ -23587,11 +24810,11 @@ impl Document {
             .expect("checked unchanged main part");
         #[cfg(debug_assertions)]
         let mut full = self.clone_for_debug_reference();
-        let result = self.canonicalize_beside_unchanged_main_part(unchanged);
+        let result = self.canonicalize_beside_unchanged_main_part(unchanged, template);
         #[cfg(debug_assertions)]
         {
             let _proof_off = CanonicalBlockProofOff::enter();
-            let full_result = without_staging_work(|| full.canonicalize_all_drawing_ids());
+            let full_result = without_staging_work(|| full.canonicalize_all_drawing_ids(None));
             assert_same_canonicalization(self, &result, &full, &full_result);
         }
         result
@@ -23734,6 +24957,7 @@ impl Document {
     fn canonicalize_beside_unchanged_main_part(
         &mut self,
         unchanged: &UnchangedMainPart,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
     ) -> Result<()> {
         let owner_identity = relationship_owner_identity(&self.doc_part_name);
         self.identifiers
@@ -23755,19 +24979,26 @@ impl Document {
         self.identifiers
             .authored_nested_story_drawing_ids
             .remove(&owner_identity);
-        self.canonicalize_related_story_relationships(&related_parts, &mut occupied_drawings)?;
+        self.canonicalize_related_story_relationships(
+            &related_parts,
+            &mut occupied_drawings,
+            template,
+        )?;
         self.identifiers.drawing_ids = occupied_drawings;
         self.canonicalize_image_parts(true)
     }
 
-    fn canonicalize_all_drawing_ids(&mut self) -> Result<()> {
+    fn canonicalize_all_drawing_ids(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         let owner = self.doc_part_name.clone();
         let owner_identity = relationship_owner_identity(&owner);
         // Story picture insertion keeps current producer XML. Patch its
         // canonical relationship and drawing IDs into that retained source.
         let retained_main_xml = self
             .package
-            .get_part(&owner)
+            .get_part_shared(&owner)
             .filter(|xml| {
                 let authored = self
                     .identifiers
@@ -23796,9 +25027,24 @@ impl Document {
                         .ok()
                         .as_ref()
                         .map(|(xml, _)| xml.as_slice())
-                        != Some(*xml)
+                        != Some(xml.as_slice())
             })
-            .map(|xml| xml.to_vec());
+            .map(Arc::clone);
+        let retained_main_source =
+            if let (Some(bytes), Some(writer)) = (&retained_main_xml, template.as_deref_mut()) {
+                if let Some((stored, source)) = &writer.sources.published_main
+                    && Arc::ptr_eq(stored, bytes)
+                {
+                    Some(Arc::clone(source))
+                } else {
+                    writer
+                        .lineage
+                        .original_part_source(writer.operation, &owner, bytes)?
+                        .map(Arc::new)
+                }
+            } else {
+                None
+            };
         if let Some(section) = &mut self.document.body.sect_pr {
             section
                 .header_refs
@@ -24071,7 +25317,11 @@ impl Document {
             &owner_identity,
             &nested_relationships,
             &relationship_remap,
+            template.as_deref_mut(),
         )?;
+        if has_live_nested_relationships && let Some(writer) = template.as_deref_mut() {
+            writer.sources.model_lineage_valid = false;
+        }
         if !has_live_nested_relationships {
             visit_authored_drawings_mut(&mut self.document.body.content, &mut |drawing| {
                 if let Some(mut drawing) = drawing
@@ -24137,7 +25387,12 @@ impl Document {
             })
             .map(|relationship| relationship.id.clone())
             .collect::<HashSet<_>>();
-        let (current_document_xml, blocks) = self.canonical_source()?;
+        let (current_document_xml, blocks) =
+            if modeled_drawing_ids.is_empty() && nested_image_relationship_ids.is_empty() {
+                self.canonical_source()?
+            } else {
+                self.canonical_source_in(template.as_deref_mut())?
+            };
         let authored_drawing_slots = authored_drawing_slots_by_blocks(
             &current_document_xml,
             blocks.as_ref(),
@@ -24183,56 +25438,131 @@ impl Document {
             a9_lookup_candidate("readback.drawing_noop");
         }
         if !drawing_edits.is_empty() && !drawing_noop {
-            let mut updated = current_document_xml;
-            drawing_edits.sort_by_key(|(start, _, _)| *start);
-            for (start, end, replacement) in drawing_edits.into_iter().rev() {
-                updated.splice(start..end, replacement);
-            }
-            let updated = Arc::new(updated);
-            if let Some((parsed, mut record)) =
-                offered_canonical_blocks(blocks.as_ref()).and_then(|blocks| {
-                    self.source_blocks_in(blocks.part.as_deref()?, blocks.clone(), &updated)
-                })
-            {
-                self.document = parsed;
-                // This is a current writer memo, not a published package part.
-                record.part = None;
+            if let Some(writer) = template.as_deref_mut() {
+                let source = writer.sources.source.take().ok_or_else(|| {
+                    Error::Other("main drawing canonicalization lost its produced source".into())
+                })?;
+                let source =
+                    apply_borrowed_template_source_edits(writer.operation, &source, drawing_edits)?;
+                self.document = writer
+                    .sources
+                    .read_document(writer.operation, Arc::new(source))?;
+                self.main_part_blocks = None;
                 self.main_body_scans
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .serialized = Some(record);
+                    .serialized = None;
             } else {
-                note_staging_work(|work| work.parsed += updated.len());
-                self.document = CT_Document::from_xml(&updated)?;
+                let mut updated = current_document_xml;
+                drawing_edits.sort_by_key(|(start, _, _)| *start);
+                for (start, end, replacement) in drawing_edits.into_iter().rev() {
+                    updated.splice(start..end, replacement);
+                }
+                let updated = Arc::new(updated);
+                if let Some((parsed, mut record)) = offered_canonical_blocks(blocks.as_ref())
+                    .and_then(|blocks| {
+                        self.source_blocks_in(blocks.part.as_deref()?, blocks.clone(), &updated)
+                    })
+                {
+                    self.document = parsed;
+                    if let Some(writer) = template.as_deref_mut() {
+                        writer.sources.model_lineage_valid = false;
+                    }
+                    // This is a current writer memo, not a published package part.
+                    record.part = None;
+                    self.main_body_scans
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .serialized = Some(record);
+                } else {
+                    note_staging_work(|work| work.parsed += updated.len());
+                    self.document = CT_Document::from_xml(&updated)?;
+                    if let Some(writer) = template.as_deref_mut() {
+                        writer.sources.model_lineage_valid = false;
+                    }
+                }
             }
         }
         if let Some(retained) = retained_main_xml {
-            let fast = self.package_main_part_blocks().and_then(|record| {
-                record.canonical_retained(
-                    &relationship_remap,
+            if let Some(writer) = template.as_deref_mut() {
+                let source = retained_main_source.ok_or_else(|| {
+                    Error::Other("retained main publication has no actual source handoff".into())
+                })?;
+                let edits = relationship_remap_edits(source.as_bytes(), &relationship_remap, &[])?;
+                let source =
+                    apply_borrowed_template_source_edits(writer.operation, &source, edits)?;
+                let slots = authored_drawing_slots_in_source_order(
+                    source.as_bytes(),
                     &modeled_drawing_ids,
                     &nested_image_relationship_ids,
-                    &canonical_drawing_ids,
-                    &mut self.document,
-                )
-            });
-            match fast {
-                Some(Some((xml, record))) => {
-                    self.package.set_part(&owner, xml);
-                    self.main_part_blocks = Some(record);
+                )?;
+                if slots.len() == canonical_drawing_ids.len()
+                    && slots
+                        .iter()
+                        .zip(&canonical_drawing_ids)
+                        .all(|((_, _, old), (expected, _))| old == expected)
+                {
+                    let edits = slots
+                        .into_iter()
+                        .zip(&canonical_drawing_ids)
+                        .map(|((_, span, _), (_, id))| {
+                            (span.start, span.end, id.to_string().into_bytes())
+                        })
+                        .collect();
+                    let source = apply_template_source_edits(writer.operation, source, edits)?;
+                    let retained = writer.operation.repeat_source(&source)?;
+                    let bytes = writer.operation.finish_source(retained)?;
+                    self.document = writer
+                        .sources
+                        .read_document(writer.operation, Arc::new(source))?;
+                    self.package.set_part(&owner, bytes);
+                    let bytes = self
+                        .package
+                        .get_part_shared(&owner)
+                        .expect("actual retained main publication");
+                    writer.sources.published_main = Some((
+                        Arc::clone(bytes),
+                        Arc::clone(
+                            writer
+                                .sources
+                                .reader_source
+                                .as_ref()
+                                .expect("actual retained main reader"),
+                        ),
+                    ));
+                    self.main_part_blocks = None;
                 }
-                Some(None) => {}
-                None => {
-                    if let Some((xml, document)) = canonical_retained_main_part(
-                        &retained,
+            } else {
+                if let Some(writer) = template.as_deref_mut() {
+                    writer.sources.model_lineage_valid = false;
+                }
+                let fast = self.package_main_part_blocks().and_then(|record| {
+                    record.canonical_retained(
                         &relationship_remap,
                         &modeled_drawing_ids,
                         &nested_image_relationship_ids,
                         &canonical_drawing_ids,
-                    )? {
-                        self.document = document;
+                        &mut self.document,
+                    )
+                });
+                match fast {
+                    Some(Some((xml, record))) => {
                         self.package.set_part(&owner, xml);
-                        self.main_part_blocks = None;
+                        self.main_part_blocks = Some(record);
+                    }
+                    Some(None) => {}
+                    None => {
+                        if let Some((xml, document)) = canonical_retained_main_part(
+                            &retained,
+                            &relationship_remap,
+                            &modeled_drawing_ids,
+                            &nested_image_relationship_ids,
+                            &canonical_drawing_ids,
+                        )? {
+                            self.document = document;
+                            self.package.set_part(&owner, xml);
+                            self.main_part_blocks = None;
+                        }
                     }
                 }
             }
@@ -24246,7 +25576,11 @@ impl Document {
                 .authored_nested_story_drawing_ids
                 .insert(owner_identity.clone(), canonical_nested_drawing_ids);
         }
-        self.canonicalize_related_story_relationships(&related_parts, &mut occupied_drawings)?;
+        self.canonicalize_related_story_relationships(
+            &related_parts,
+            &mut occupied_drawings,
+            template,
+        )?;
         self.identifiers.drawing_ids = occupied_drawings;
         self.canonicalize_image_parts(false)?;
         Ok(())
@@ -24269,6 +25603,7 @@ impl Document {
         physical_owner: &str,
         registered: &HashSet<String>,
         relationship_remap: &HashMap<String, String>,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
     ) -> Result<bool> {
         let (xml, blocks) = self.canonical_source()?;
         let occurrences =
@@ -24279,38 +25614,58 @@ impl Document {
             .cloned()
             .collect::<HashSet<_>>();
         if !relationship_remap.is_empty() && !live.is_empty() {
-            let fast = offered_canonical_blocks(blocks.as_ref()).and_then(|record| {
-                let edits = record
-                    .relationship_remap_edits(relationship_remap, &self.body_namespace_bindings)?;
-                let mut edited = record.edited(&edits)?;
-                let qualified_xml = edited.qualify_document_children()?;
-                let reconciled = edits.is_empty()
-                    && edited.reconcile_readback(&qualified_xml, &mut self.document);
-                if reconciled {
-                    return Some((None, edited));
-                }
-                // Original phase2, exactly once after original mandatory phase1.
-                let document = edited.proved_document(&qualified_xml)?;
-                document.validate_resource_limits().ok()?;
-                Some((Some(document), edited))
-            });
-            if let Some((document, mut record)) = fast {
-                if let Some(document) = document {
-                    self.document = document;
-                }
-                record.part = None;
-                self.main_body_scans
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .serialized = Some(record);
-            } else {
-                let updated = remap_xml_relationship_ids_with_bindings(
-                    &xml,
+            if let Some(writer) = template {
+                let source = writer.document_source(&self.document)?;
+                let edits = relationship_remap_edits(
+                    source.as_bytes(),
                     relationship_remap,
                     &self.body_namespace_bindings,
                 )?;
-                note_staging_work(|work| work.parsed += updated.len());
-                self.document = CT_Document::from_xml(&updated)?;
+                let source = apply_template_source_edits(writer.operation, source, edits)?;
+                self.document = writer
+                    .sources
+                    .read_document(writer.operation, Arc::new(source))?;
+                self.main_part_blocks = None;
+                self.main_body_scans
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .serialized = None;
+            } else {
+                let fast = offered_canonical_blocks(blocks.as_ref()).and_then(|record| {
+                    let edits = record.relationship_remap_edits(
+                        relationship_remap,
+                        &self.body_namespace_bindings,
+                    )?;
+                    let mut edited = record.edited(&edits)?;
+                    let qualified_xml = edited.qualify_document_children()?;
+                    let reconciled = edits.is_empty()
+                        && edited.reconcile_readback(&qualified_xml, &mut self.document);
+                    if reconciled {
+                        return Some((None, edited));
+                    }
+                    // Original phase2, exactly once after original mandatory phase1.
+                    let document = edited.proved_document(&qualified_xml)?;
+                    document.validate_resource_limits().ok()?;
+                    Some((Some(document), edited))
+                });
+                if let Some((document, mut record)) = fast {
+                    if let Some(document) = document {
+                        self.document = document;
+                    }
+                    record.part = None;
+                    self.main_body_scans
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .serialized = Some(record);
+                } else {
+                    let updated = remap_xml_relationship_ids_with_bindings(
+                        &xml,
+                        relationship_remap,
+                        &self.body_namespace_bindings,
+                    )?;
+                    note_staging_work(|work| work.parsed += updated.len());
+                    self.document = CT_Document::from_xml(&updated)?;
+                }
             }
         }
         if live.is_empty() {
@@ -24404,6 +25759,7 @@ impl Document {
         &mut self,
         parts: &[String],
         occupied_drawings: &mut HashSet<u32>,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
     ) -> Result<()> {
         let mut partially_authored_drawing_slots = HashMap::new();
         for owner in parts {
@@ -24460,9 +25816,9 @@ impl Document {
             }
             let xml = self
                 .package
-                .get_part(owner)
-                .ok_or_else(|| Error::Other(format!("story part {owner} is missing")))?
-                .to_vec();
+                .get_part_shared(owner)
+                .cloned()
+                .ok_or_else(|| Error::Other(format!("story part {owner} is missing")))?;
             let referenced = xml_relationship_ids_in_order(&xml)?;
             let preserved = self
                 .identifiers
@@ -24563,12 +25919,54 @@ impl Document {
                     drawing_edits.push((span.start, span.end, id.to_string().into_bytes()));
                 }
             }
-            let mut xml = xml;
-            drawing_edits.sort_by_key(|(start, _, _)| *start);
-            for (start, end, replacement) in drawing_edits.into_iter().rev() {
-                xml.splice(start..end, replacement);
-            }
-            let xml = remap_xml_relationship_ids(&xml, &remap)?;
+            let original_storage = Arc::clone(&xml);
+            let mut part_changed = false;
+            let mut produced_source = None;
+            let xml = if let Some(template) = template.as_deref_mut() {
+                let source = template.take_related_source(owner, &xml)?.ok_or_else(|| {
+                    Error::Other(format!("related canonicalization lost its source: {owner}"))
+                })?;
+                part_changed |= drawing_edits.iter().any(|(start, end, value)| {
+                    source.as_bytes().get(*start..*end) != Some(value.as_slice())
+                });
+                let source =
+                    apply_shared_template_source_edits(template.operation, source, drawing_edits)?;
+                let edits = relationship_remap_edits(source.as_bytes(), &remap, &[])?;
+                part_changed |= edits.iter().any(|(start, end, value)| {
+                    source.as_bytes().get(*start..*end) != Some(value.as_slice())
+                });
+                let source = apply_shared_template_source_edits(template.operation, source, edits)?;
+                let source = if fully_authored {
+                    let edits = authored_doc_pr_edits(source.as_bytes(), occupied_drawings)?;
+                    part_changed |= edits.iter().any(|(start, end, value)| {
+                        source.as_bytes().get(*start..*end) != Some(value.as_slice())
+                    });
+                    apply_shared_template_source_edits(template.operation, source, edits)?
+                } else {
+                    source
+                };
+                let xml = if part_changed {
+                    let retained = template.operation.repeat_source(&source)?;
+                    template.operation.finish_source(retained)?
+                } else {
+                    Vec::new()
+                };
+                produced_source = Some(source);
+                xml
+            } else {
+                let mut xml = xml.as_ref().clone();
+                drawing_edits.sort_by_key(|(start, _, _)| *start);
+                for (start, end, replacement) in drawing_edits.into_iter().rev() {
+                    part_changed |= xml.get(start..end) != Some(replacement.as_slice());
+                    xml.splice(start..end, replacement);
+                }
+                let edits = relationship_remap_edits(&xml, &remap, &[])?;
+                for (start, end, replacement) in edits.into_iter().rev() {
+                    part_changed |= xml.get(start..end) != Some(replacement.as_slice());
+                    xml.splice(start..end, replacement);
+                }
+                xml
+            };
             if let Some(ids) = self
                 .identifiers
                 .authored_story_relationship_ids
@@ -24579,12 +25977,36 @@ impl Document {
                     .map(|id| remap.get(&id).cloned().unwrap_or(id))
                     .collect();
             }
-            let xml = if fully_authored {
-                rewrite_authored_doc_pr_ids(&xml, occupied_drawings)?
+            let xml = if fully_authored && produced_source.is_none() {
+                let edits = authored_doc_pr_edits(&xml, occupied_drawings)?;
+                let mut xml = xml;
+                for (start, end, replacement) in edits.into_iter().rev() {
+                    part_changed |= xml.get(start..end) != Some(replacement.as_slice());
+                    xml.splice(start..end, replacement);
+                }
+                xml
             } else {
                 xml
             };
-            self.package.set_part(owner, xml);
+            if part_changed {
+                self.package.set_part(owner, xml);
+            } else {
+                // The actual edit plans made no byte change. Keep the existing
+                // immutable producer storage, not a new buffer matched by value.
+                drop(xml);
+                debug_assert!(
+                    self.package
+                        .get_part_shared(owner)
+                        .is_some_and(|stored| Arc::ptr_eq(stored, &original_storage))
+                );
+            }
+            if let (Some(template), Some(source)) = (template.as_deref_mut(), produced_source) {
+                let bytes = self
+                    .package
+                    .get_part_shared(owner)
+                    .expect("actual published related part");
+                template.sources.put_related_source(owner, bytes, source);
+            }
         }
         Ok(())
     }
@@ -24759,7 +26181,7 @@ impl Document {
     /// Open a document from a file path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let package = OpcPackage::open(path)?;
-        Self::from_opened_package(package, true)
+        Self::from_opened_package(package, true, None)
     }
 
     /// Open a password-protected agile-encrypted document from a file path.
@@ -24790,14 +26212,14 @@ impl Document {
     ) -> Result<Self> {
         let cursor = std::io::Cursor::new(bytes);
         let package = OpcPackage::from_encrypted_reader_with_limits(cursor, password, limits)?;
-        Self::from_opened_package(package, true)
+        Self::from_opened_package(package, true, None)
     }
 
     /// Open a document from bytes while bounding OPC archive expansion.
     pub fn from_bytes_with_limits(bytes: &[u8], limits: PackageReadLimits) -> Result<Self> {
         let cursor = std::io::Cursor::new(bytes);
         let package = OpcPackage::from_reader_with_limits(cursor, limits)?;
-        Self::from_opened_package(package, true)
+        Self::from_opened_package(package, true, None)
     }
 
     /// Return the exact Word package class declared for the main document part.
@@ -24880,11 +26302,23 @@ impl Document {
     }
 
     pub(crate) fn from_package(package: OpcPackage) -> Result<Self> {
-        Self::from_opened_package(package, false)
+        Self::from_opened_package(package, false, None)
     }
 
-    fn from_opened_package(package: OpcPackage, read_from_bytes: bool) -> Result<Self> {
-        Self::from_package_reusing(package, read_from_bytes, None, None, None, None)
+    pub(crate) fn from_opened_package(
+        package: OpcPackage,
+        read_from_bytes: bool,
+        scoped_source: Option<ScopedDocumentRead<'_, '_, '_>>,
+    ) -> Result<Self> {
+        Self::from_package_reusing(
+            package,
+            read_from_bytes,
+            None,
+            None,
+            None,
+            None,
+            scoped_source,
+        )
     }
 
     fn from_package_reusing(
@@ -24894,6 +26328,7 @@ impl Document {
         blocks: Option<&MainPartBlocks>,
         writer_blocks: Option<&MainPartBlocks>,
         styles_read: Option<&StylesPartCache>,
+        mut scoped_source: Option<ScopedDocumentRead<'_, '_, '_>>,
     ) -> Result<Self> {
         let (doc_part_name, _) = validated_word_package_class(&package)?;
 
@@ -24908,7 +26343,13 @@ impl Document {
                 && parsed.body_namespace_declarations == namespace_scopes.body_declarations
                 && parsed.body_namespace_bindings == namespace_scopes.body_bindings
         });
-        let hinted = blocks.and_then(|blocks| blocks.proved_document(doc_xml));
+        // A pre-operation child cache has no operation-bound reader facts.
+        // Use the existing authoritative factory below rather than reparsing
+        // solely to certify the cached model. Qualified kept-model reuse stays.
+        let hinted = scoped_source
+            .is_none()
+            .then(|| blocks.and_then(|blocks| blocks.proved_document(doc_xml)))
+            .flatten();
         let nested_namespace_owners = OnceLock::new();
         if let Some(kept) = kept
             && let Some(owners) = kept.nested_namespace_owners.get()
@@ -24926,6 +26367,15 @@ impl Document {
             doc_xml,
             &nested_namespace_owners,
         );
+        if let Some(input) = scoped_source.as_ref()
+            && input.source.as_bytes() != doc_xml
+        {
+            // Check the known producer binding, never discover provenance or
+            // grant input roles merely because two buffers have equal bytes.
+            return Err(Error::Other(
+                "scoped document source does not match its produced main part".into(),
+            ));
+        }
         let document = if let Some(document) = hinted {
             document
         } else {
@@ -24934,7 +26384,10 @@ impl Document {
                 None => {
                     note_reopen_work(|work| work.main_parses += 1);
                     note_staging_work(|work| work.parsed += doc_xml.len());
-                    CT_Document::from_xml(doc_xml)?
+                    match scoped_source.as_mut() {
+                        Some(input) => input.operation.source_document(input.source)?,
+                        None => CT_Document::from_xml(doc_xml)?,
+                    }
                 }
             }
         };
@@ -25085,18 +26538,53 @@ impl Document {
             .map(root_namespace_declarations)
             .transpose()?
             .unwrap_or_default();
-        let footnotes = footnotes_part_name
+        let footnotes = match footnotes_part_name
             .as_deref()
             .and_then(|part| package.get_part(part))
-            .and_then(|xml| rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).ok())
-            .unwrap_or_default();
+        {
+            Some(xml) => {
+                let paired = footnotes_part_name.as_ref().and_then(|part| {
+                    scoped_source
+                        .as_ref()
+                        .and_then(|input| input.related.and_then(|related| related.get(part)))
+                });
+                if let (Some(input), Some(source)) = (scoped_source.as_mut(), paired.cloned()) {
+                    match input.operation.source_notes(&source) {
+                        Ok(notes) => notes,
+                        Err(_) => {
+                            input.operation.reserve_template_text_copy(0)?;
+                            Default::default()
+                        }
+                    }
+                } else {
+                    rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).unwrap_or_default()
+                }
+            }
+            None => Default::default(),
+        };
 
         let comments_part_name = resolve_part(rel_types::COMMENTS);
         let comments = match comments_part_name
             .as_deref()
             .and_then(|part| package.get_part(part))
         {
-            Some(xml) => Some(rdocx_oxml::comments::CT_Comments::from_xml(xml)?),
+            Some(xml) => {
+                let paired = comments_part_name
+                    .as_ref()
+                    .and_then(|part| {
+                        scoped_source
+                            .as_ref()
+                            .and_then(|input| input.related.and_then(|related| related.get(part)))
+                    })
+                    .cloned();
+                Some(
+                    if let (Some(input), Some(source)) = (scoped_source.as_mut(), paired) {
+                        input.operation.source_comments(&source)?
+                    } else {
+                        rdocx_oxml::comments::CT_Comments::from_xml(xml)?
+                    },
+                )
+            }
             None => None,
         };
         let comments_extended_part_name = resolve_part(crate::comments::COMMENTS_EXTENDED_REL_TYPE);
@@ -25485,10 +26973,21 @@ impl Document {
             .map(|parsed| &parsed.package)
     }
 
-    fn prepare_current_field_models(&mut self) -> Result<bool> {
+    fn prepare_current_field_models<'a>(
+        &mut self,
+        mut template: Option<(
+            &mut rdocx_oxml::document::ScopedWordOperation<'a>,
+            &mut crate::template::TemplateWordLineage<'a>,
+            Option<&rdocx_oxml::document::ScopedWordSource>,
+            Option<&rdocx_oxml::document::ScopedWordSource>,
+        )>,
+    ) -> Result<bool> {
+        let mut paragraph_index = 0usize;
         let mut changed = false;
         let mut error = None;
-        let mut normalize = |paragraph: &mut CT_P| {
+        let mut normalize = |paragraph: &mut CT_P, main_body: bool, comment_body: bool| {
+            let current_paragraph = paragraph_index;
+            paragraph_index += 1;
             if error.is_some() {
                 return;
             }
@@ -25500,7 +26999,31 @@ impl Document {
                     let mut fields = Vec::new();
                     for (slot, content) in run.content.iter().enumerate() {
                         if let rdocx_oxml::text::RunContent::Field(field) = content {
-                            let current = crate::field::prepared_current_field(field)?;
+                            let current =
+                                if let Some((operation, lineage, reader, comments_reader)) =
+                                    template.as_mut()
+                                {
+                                    let bypass = crate::field::preflight_current_field(field)?;
+                                    if let Some(source) = if main_body {
+                                        reader.as_ref()
+                                    } else if comment_body {
+                                        comments_reader.as_ref()
+                                    } else {
+                                        None
+                                    } {
+                                        operation.prepare_template_field_from_read(
+                                            field, source, !bypass,
+                                        )?
+                                    } else if let Some(frozen) =
+                                        lineage.initial_field(current_paragraph, &path, slot)
+                                    {
+                                        operation.prepare_template_field(field, frozen, !bypass)?
+                                    } else {
+                                        crate::field::prepared_current_field(field)?
+                                    }
+                                } else {
+                                    crate::field::prepared_current_field(field)?
+                                };
                             if field != &current {
                                 fields.push((slot, current));
                             }
@@ -25509,14 +27032,35 @@ impl Document {
                     if fields.is_empty() {
                         continue;
                     }
-                    let mut replacement = run.clone();
-                    for (slot, field) in fields {
-                        replacement.content[slot] = rdocx_oxml::text::RunContent::Field(field);
-                    }
-                    if !paragraph.replace_accepted_run(&path, replacement)? {
+                    let installed_slots: Vec<_> = fields.iter().map(|(slot, _)| *slot).collect();
+                    let installed = if let Some((operation, lineage, reader, comments_reader)) =
+                        template.as_mut()
+                    {
+                        let frozen = if (main_body && reader.is_some())
+                            || (comment_body && comments_reader.is_some())
+                        {
+                            None
+                        } else {
+                            lineage.initial_paragraph(current_paragraph)
+                        };
+                        operation
+                            .install_template_prepared_fields(paragraph, &path, fields, frozen)?
+                    } else {
+                        let mut replacement = run.clone();
+                        for (slot, field) in fields {
+                            replacement.content[slot] = rdocx_oxml::text::RunContent::Field(field);
+                        }
+                        paragraph.replace_accepted_run(&path, replacement)?
+                    };
+                    if !installed {
                         return Err(Error::Other(
                             "current Field publication owner disappeared".into(),
                         ));
+                    }
+                    if let Some((_, lineage, _, _)) = template.as_mut() {
+                        for slot in installed_slots {
+                            lineage.installed_field(current_paragraph, &path, slot);
+                        }
                     }
                     changed = true;
                 }
@@ -25526,22 +27070,26 @@ impl Document {
                 error = Some(failure);
             }
         };
-        visit_body_paragraphs_mut(&mut self.document.body.content, &mut normalize);
+        visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
+            normalize(paragraph, true, false)
+        });
         for note in &mut self.footnotes.footnotes {
             for paragraph in &mut note.paragraphs {
-                normalize(paragraph);
+                normalize(paragraph, false, false);
             }
         }
         if let Some(comments) = &mut self.comments {
             for comment in &mut comments.comments {
                 for paragraph in &mut comment.paragraphs {
-                    normalize(paragraph);
+                    normalize(paragraph, false, true);
                 }
             }
         }
         if let Some(glossary) = &mut self.glossary {
             for part in &mut glossary.doc_parts {
-                visit_body_paragraphs_mut(&mut part.body.content, &mut normalize);
+                visit_body_paragraphs_mut(&mut part.body.content, &mut |paragraph| {
+                    normalize(paragraph, false, false)
+                });
             }
         }
         if let Some(error) = error {
@@ -25716,7 +27264,41 @@ impl Document {
     }
 
     pub(crate) fn prepare_staged_package(&mut self) -> Result<bool> {
-        let normalized = self.prepare_current_field_models()?;
+        self.prepare_staged_package_in(None)
+    }
+
+    pub(crate) fn prepare_staged_template_package<'a>(
+        &mut self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'a>,
+        lineage: &mut crate::template::TemplateWordLineage<'a>,
+        sources: &mut TemplateMainSources,
+    ) -> Result<bool> {
+        let result = self.prepare_staged_package_in(Some((operation, lineage, sources)));
+        lineage.finish_preparation();
+        result
+    }
+
+    fn prepare_staged_package_in<'a>(
+        &mut self,
+        mut template: Option<(
+            &mut rdocx_oxml::document::ScopedWordOperation<'a>,
+            &mut crate::template::TemplateWordLineage<'a>,
+            &mut TemplateMainSources,
+        )>,
+    ) -> Result<bool> {
+        let normalized = self.prepare_current_field_models(template.as_mut().map(
+            |(operation, lineage, sources)| {
+                (
+                    &mut **operation,
+                    &mut **lineage,
+                    sources.reader_source.as_deref(),
+                    sources.comments_reader_source.as_deref(),
+                )
+            },
+        ))?;
+        if let Some((_, lineage, _)) = &mut template {
+            lineage.finish_preparation();
+        }
         self.ensure_referenced_hyperlink_style()?;
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE preflight-before");
@@ -25725,7 +27307,16 @@ impl Document {
         eprintln!("FX211_PREPARE_STAGE preflight-after");
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE typed-identifiers-before");
-        self.canonicalize_typed_identifiers()?;
+        if let Some((operation, lineage, sources)) = template.as_mut() {
+            let mut writer = TemplateMainWriter {
+                operation,
+                lineage,
+                sources,
+            };
+            self.canonicalize_typed_identifiers(Some(&mut writer))?;
+        } else {
+            self.canonicalize_typed_identifiers(None)?;
+        }
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE typed-identifiers-after");
         #[cfg(test)]
@@ -25736,23 +27327,59 @@ impl Document {
         eprintln!("FX211_PREPARE_STAGE signature-after");
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE related-flush-before");
-        self.flush_dirty_related_story_models()?;
+        if let Some((operation, lineage, sources)) = template.as_mut() {
+            let mut writer = TemplateMainWriter {
+                operation,
+                lineage,
+                sources,
+            };
+            self.flush_dirty_related_story_models_in(Some(&mut writer))?;
+        } else {
+            self.flush_dirty_related_story_models()?;
+        }
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE related-flush-after");
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE drawing-identifiers-before");
-        self.canonicalize_drawing_ids()?;
+        if let Some((operation, lineage, sources)) = template.as_mut() {
+            let mut writer = TemplateMainWriter {
+                operation,
+                lineage,
+                sources,
+            };
+            self.canonicalize_drawing_ids(Some(&mut writer))?;
+        } else {
+            self.canonicalize_drawing_ids(None)?;
+        }
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE drawing-identifiers-after");
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE refresh-before");
-        self.refresh_related_story_caches()?;
+        if let Some((operation, lineage, sources)) = template.as_mut() {
+            let mut writer = TemplateMainWriter {
+                operation,
+                lineage,
+                sources,
+            };
+            self.refresh_related_story_caches_in(Some(&mut writer))?;
+        } else {
+            self.refresh_related_story_caches()?;
+        }
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE refresh-after");
         self.package_signatures_invalidated |= retained_signature_invalidated;
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE flush-before");
-        let result = self.flush_to_package();
+        let result = if let Some((operation, lineage, sources)) = template {
+            let mut writer = TemplateMainWriter {
+                operation,
+                lineage,
+                sources,
+            };
+            self.flush_to_package_in(Some(&mut writer))
+        } else {
+            self.flush_to_package()
+        };
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE flush-after");
         result.map(|()| normalized)
@@ -25879,6 +27506,7 @@ impl Document {
                 carried_blocks.as_ref(),
                 carried_scans.serialized.as_ref(),
                 self.styles_part_cache.as_ref(),
+                None,
             )?,
             None => {
                 let mut output = std::io::Cursor::new(Vec::new());
@@ -26036,6 +27664,13 @@ impl Document {
 
     /// Current writer bytes and pieces, without claiming a flushed part.
     fn serialized_main_part(&self) -> Result<(Vec<u8>, Option<MainPartBlocks>)> {
+        self.serialized_main_part_in(None)
+    }
+
+    fn serialized_main_part_in(
+        &self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<(Vec<u8>, Option<MainPartBlocks>)> {
         self.document.validate_resource_limits()?;
         let mut scans = self
             .main_body_scans
@@ -26048,7 +27683,20 @@ impl Document {
         {
             // These are an opening's normalized writer bytes, not its raw
             // source. Requalify the complete current writer before copying.
-            let xml = expected.to_vec();
+            let xml = if let Some(template) = &mut template
+                && let Some(records) = template.lineage.records
+                && let Some(source) = records.source_for_part(template.operation, expected)?
+            {
+                let copied = template.operation.repeat_source(&source)?;
+                let bytes = template.operation.finish_source(copied)?;
+                template.sources.source = Some(Arc::new(source));
+                bytes
+            } else {
+                if let Some(template) = &mut template {
+                    template.sources.source = None;
+                }
+                expected.to_vec()
+            };
             #[cfg(test)]
             a9_lookup_read("writer.copied_normalized_output", 0, xml.len());
             let mut record = record.clone();
@@ -26057,10 +27705,11 @@ impl Document {
             note_transaction_output("normalized_opening_copy", xml.len());
             return Ok((xml, Some(record)));
         }
-        let (xml, record) = MainPartBlocks::serialize(
+        let (xml, record) = MainPartBlocks::serialize_in(
             &self.document,
             &self.document.body.content,
             offered_canonical_blocks(scans.serialized.as_ref().or(self.main_part_blocks.as_ref())),
+            template,
         )?;
         if offered_canonical_blocks(Some(&record)).is_some() {
             scans.serialized = (!record.head.is_empty()).then(|| record.clone());
@@ -26073,9 +27722,24 @@ impl Document {
     /// Temporary main-part bytes for canonicalization. The returned record
     /// proves these bytes, without replacing the package or flushed record.
     fn canonical_source(&self) -> Result<(Vec<u8>, Option<MainPartBlocks>)> {
-        let (xml, mut record) = self.serialized_main_part()?;
+        self.canonical_source_in(None)
+    }
+
+    fn canonical_source_in(
+        &self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<(Vec<u8>, Option<MainPartBlocks>)> {
+        let (xml, mut record) = self.serialized_main_part_in(template.as_deref_mut())?;
         if let Some(record) = &mut record {
-            record.part = Some(Arc::new(xml.clone()));
+            let part = if let Some(template) = &mut template
+                && let Some(source) = &template.sources.source
+            {
+                let copied = template.operation.repeat_source(source)?;
+                template.operation.finish_source(copied)?
+            } else {
+                xml.clone()
+            };
+            record.part = Some(Arc::new(part));
             note_transaction_buffer("canonical_record_copy", xml.len());
         }
         Ok((xml, record))
@@ -26107,7 +27771,9 @@ impl Document {
     }
 
     #[allow(clippy::type_complexity)]
-    fn main_part_with_body_spans(&self) -> Result<(Vec<u8>, Range<usize>, Vec<Range<usize>>)> {
+    pub(crate) fn main_part_with_body_spans(
+        &self,
+    ) -> Result<(Vec<u8>, Range<usize>, Vec<Range<usize>>)> {
         let (xml, record) = self.serialized_main_part()?;
         if let Some(record) = record {
             let (content, children) = record.body_spans()?;
@@ -26115,11 +27781,37 @@ impl Document {
             let end = content.end;
             #[cfg(debug_assertions)]
             without_staging_work(|| {
-                assert_eq!(
-                    self.document.to_xml_with_body_spans().ok(),
-                    Some((xml.clone(), start..end, children.clone())),
-                    "serialized pieces changed the body spans"
-                );
+                // The canonical spans must point at the exact canonical
+                // blocks. This holds for every child, including a direct
+                // paragraph whose root keeps a foreign `w` binding.
+                for (range, block) in children.iter().zip(&record.blocks) {
+                    assert_eq!(
+                        xml.get(range.clone()),
+                        Some(block.bytes.as_slice()),
+                        "serialized pieces changed the body spans"
+                    );
+                }
+                // `to_xml_with_body_spans` is a public call and stays
+                // Publication. The canonical Source writer emits a direct
+                // paragraph with a root-local foreign `w` binding
+                // differently, so compare the public bytes of every other
+                // child against its canonical block.
+                if let Ok((public, _, public_children)) = self.document.to_xml_with_body_spans() {
+                    assert_eq!(
+                        public_children.len(),
+                        children.len(),
+                        "serialized pieces changed the body spans"
+                    );
+                    for (public_range, block) in public_children.iter().zip(&record.blocks) {
+                        if !root_declares_foreign_word(&block.bytes) {
+                            assert_eq!(
+                                public.get(public_range.clone()),
+                                Some(block.bytes.as_slice()),
+                                "serialized pieces changed the body spans"
+                            );
+                        }
+                    }
+                }
             });
             return Ok((xml, start..end, children));
         }
@@ -26529,7 +28221,14 @@ impl Document {
     /// when the frame or a child cannot be proved. A writer error is returned.
     /// It is not an empty part.
     fn main_part_xml(&mut self) -> Result<Vec<u8>> {
-        let (xml, record) = self.canonical_source()?;
+        self.main_part_xml_in(None)
+    }
+
+    fn main_part_xml_in(
+        &mut self,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<Vec<u8>> {
+        let (xml, record) = self.canonical_source_in(template)?;
         if let Some(record) = &record {
             let _ = record.proved_document_matches(&xml, &self.document);
         }
@@ -26688,7 +28387,10 @@ impl Document {
     }
 
     /// Restore live numbering immediately after writing its package projection.
-    fn flush_numbering_emission(&mut self) -> Result<(HashMap<u32, u32>, HashMap<u32, u32>)> {
+    fn flush_numbering_emission(
+        &mut self,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<(HashMap<u32, u32>, HashMap<u32, u32>)> {
         let numbering = self.numbering.clone();
         let abstract_ids = self.identifiers.abstract_numbering_ids.clone();
         let instance_ids = self.identifiers.numbering_instance_ids.clone();
@@ -26701,9 +28403,16 @@ impl Document {
                     .and_then(|properties| properties.num_id),
             );
         });
-        let (abstract_map, instance_map) = self.canonicalize_numbering_ids()?;
+        // Scoped template packages are private live-model staging inputs.
+        // Their main Source and numbering definitions must share that space.
+        // Final public publication still takes the ordinary canonical path.
+        let (abstract_map, instance_map) = if template.is_some() {
+            (HashMap::new(), HashMap::new())
+        } else {
+            self.canonicalize_numbering_ids()?
+        };
         let result = (|| {
-            self.flush_document_to_package()?;
+            self.flush_document_to_package_in(template)?;
             // Serialize numbering definitions if we have any
             if let Some(numbering_xml) = self
                 .numbering
@@ -26753,7 +28462,16 @@ impl Document {
 
     /// Write the in-memory document/styles back into the OPC package parts.
     pub(crate) fn flush_to_package(&mut self) -> Result<()> {
-        let (abstract_map, instance_map) = self.flush_numbering_emission()?;
+        self.flush_to_package_in(None)
+    }
+
+    fn flush_to_package_in(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
+        let (abstract_map, instance_map) =
+            self.flush_numbering_emission(template.as_deref_mut())?;
+
         // Unchanged proved styles share their model and source bytes through staging.
         let styles_part_name = self.styles_part_name.clone();
         let styles_part = self
@@ -26850,7 +28568,7 @@ impl Document {
             self.package.set_part(part_name, table.to_xml()?);
         }
 
-        self.flush_dirty_related_story_models()?;
+        self.flush_dirty_related_story_models_in(template)?;
 
         if let (Some(comments), Some(part_name)) = (
             &self.comments_extended,
@@ -26948,6 +28666,13 @@ impl Document {
     }
 
     pub(crate) fn flush_dirty_related_story_models(&mut self) -> Result<()> {
+        self.flush_dirty_related_story_models_in(None)
+    }
+
+    fn flush_dirty_related_story_models_in(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         // Existing footnote XML remains the authority. Typed additions are
         // inserted into that root once so producer namespace declarations and
         // unmodelled root children never pass through the lossy typed model.
@@ -26964,25 +28689,103 @@ impl Document {
                     Error::Other(format!("footnotes relationship allocation failed: {error}"))
                 })?;
             self.footnotes_part_name = Some(footnotes_part.clone());
-            let xml = if let Some(existing_xml) = self.package.get_part(&footnotes_part) {
-                let existing = rdocx_oxml::footnotes::CT_Footnotes::from_xml(existing_xml)?;
-                let additions = self
-                    .footnotes
-                    .footnotes
-                    .iter()
-                    .filter(|footnote| {
-                        existing.footnotes.iter().all(|candidate| {
-                            candidate.id != footnote.id || candidate.note_type != footnote.note_type
-                        })
-                    })
-                    .map(serialized_footnote_fragment)
-                    .collect::<Result<Vec<_>>>()?;
+            let mut emitted_part = None;
+            let xml = if let Some(existing_xml) = self.package.get_part_shared(&footnotes_part) {
+                let mut parent = if let Some(template) = template.as_deref_mut() {
+                    template.take_related_source(&footnotes_part, existing_xml)?
+                } else {
+                    None
+                };
+                let existing = if let (Some(template), Some(source)) =
+                    (template.as_deref_mut(), parent.as_ref())
+                {
+                    template.operation.source_notes(source)?
+                } else {
+                    rdocx_oxml::footnotes::CT_Footnotes::from_xml(existing_xml)?
+                };
+                let mut additions = Vec::new();
+                let mut addition_sources = Vec::new();
+                let mut all_sources = parent.is_some();
+                for (index, note) in self.footnotes.footnotes.iter().enumerate() {
+                    if existing.footnotes.iter().any(|candidate| {
+                        candidate.id == note.id && candidate.note_type == note.note_type
+                    }) {
+                        continue;
+                    }
+                    let source = if let Some(template) = template.as_deref_mut() {
+                        let read = (index < template.sources.read_note_count)
+                            .then_some(parent.as_deref())
+                            .flatten();
+                        serialized_note_fragment_in(
+                            note,
+                            StoryKind::Footnote,
+                            index,
+                            read,
+                            template,
+                        )?
+                    } else {
+                        None
+                    };
+                    if let (Some(template), Some(source)) = (template.as_deref_mut(), source) {
+                        let copied = template.operation.repeat_source(&source)?;
+                        additions.push(template.operation.finish_source(copied)?);
+                        addition_sources.push(Arc::new(source));
+                    } else {
+                        all_sources = false;
+                        additions.push(serialized_footnote_fragment(note)?);
+                    }
+                }
                 if existing.footnotes.len() + additions.len() != self.footnotes.footnotes.len() {
                     return Err(Error::Other(
                         "typed footnote mutation is not an additive package update".to_owned(),
                     ));
                 }
-                append_story_fragments_to_root(existing_xml, b"footnotes", b"footnote", &additions)?
+                if all_sources {
+                    let template = template.as_deref_mut().expect("scoped additive notes");
+                    let source = append_story_sources_to_root(
+                        template.operation,
+                        parent.take().expect("actual existing note Source"),
+                        &addition_sources,
+                        b"footnotes",
+                        b"footnote",
+                    )?;
+                    let copied = template.operation.repeat_source(&source)?;
+                    let bytes = template.operation.finish_source(copied)?;
+                    emitted_part = Some(source);
+                    bytes
+                } else {
+                    append_story_fragments_to_root(
+                        existing_xml,
+                        b"footnotes",
+                        b"footnote",
+                        &additions,
+                    )?
+                }
+            } else if let Some(template) = template.as_deref_mut() {
+                let mut texts = Vec::new();
+                let mut fields = Vec::new();
+                let mut raw = Vec::new();
+                if !template.sources.notes_model_read {
+                    for (index, note) in self.footnotes.footnotes.iter().enumerate() {
+                        if let Some(inputs) = template.lineage.note_writer_inputs(index, note) {
+                            texts.extend(inputs.texts);
+                            fields.extend(inputs.fields);
+                            raw.extend(inputs.raw);
+                        }
+                    }
+                }
+                let source = template.operation.source_model_notes(
+                    &self.footnotes,
+                    false,
+                    &texts,
+                    &fields,
+                    &raw,
+                    true,
+                )?;
+                let copied = template.operation.repeat_source(&source)?;
+                let bytes = template.operation.finish_source(copied)?;
+                emitted_part = Some(Arc::from(source));
+                bytes
             } else {
                 let mut footnotes = self.footnotes.clone();
                 for footnote in &mut footnotes.footnotes {
@@ -26993,6 +28796,15 @@ impl Document {
                 footnotes.to_xml_footnotes()?
             };
             self.package.set_part(&footnotes_part, xml);
+            if let (Some(template), Some(source)) = (template.as_deref_mut(), emitted_part) {
+                template.sources.put_related_source(
+                    &footnotes_part,
+                    self.package
+                        .get_part_shared(&footnotes_part)
+                        .expect("installed note part"),
+                    source,
+                );
+            }
             self.footnotes_dirty = false;
         }
 
@@ -27003,14 +28815,50 @@ impl Document {
             && let (Some(comments), Some(part_name)) =
                 (&self.comments, self.comments_part_name.clone())
         {
-            let mut comments = comments.clone();
-            for comment in &mut comments.comments {
-                for paragraph in &mut comment.paragraphs {
-                    close_typed_story_drawing_namespaces(paragraph)?;
+            let emitted = if let Some(writer) = template.as_deref_mut() {
+                let source = if let Some(source) = writer.sources.comments_reader_source.as_ref() {
+                    writer
+                        .operation
+                        .source_model_comments_from_read(comments, source)?
+                } else {
+                    let inputs = writer
+                        .lineage
+                        .comments_writer_inputs(comments)
+                        .unwrap_or_default();
+                    writer.operation.source_model_comments(
+                        comments,
+                        &inputs.texts,
+                        &inputs.fields,
+                        &inputs.raw,
+                    )?
+                };
+                let retained = writer.operation.repeat_source(&source)?;
+                Some((writer.operation.finish_source(retained)?, source))
+            } else {
+                None
+            };
+            let (xml, source) = if let Some((bytes, source)) = emitted {
+                (bytes, Some(source))
+            } else {
+                let mut comments = comments.clone();
+                for comment in &mut comments.comments {
+                    for paragraph in &mut comment.paragraphs {
+                        close_typed_story_drawing_namespaces(paragraph)?;
+                    }
                 }
-            }
-            let xml = comments.to_xml()?;
+                (comments.to_xml()?, None)
+            };
             self.package.set_part(&part_name, xml);
+            if let (Some(writer), Some(source)) = (template, source) {
+                writer.sources.comments_reader_source = None;
+                writer.sources.put_related_source(
+                    &part_name,
+                    self.package
+                        .get_part_shared(&part_name)
+                        .expect("actual comments publication"),
+                    source,
+                );
+            }
             self.comments_dirty = false;
             self.ensure_part_relationship_checked(
                 &part_name,
@@ -27025,6 +28873,13 @@ impl Document {
     }
 
     fn flush_document_to_package(&mut self) -> Result<()> {
+        self.flush_document_to_package_in(None)
+    }
+
+    fn flush_document_to_package_in(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         // A read-only save with unsafe retained namespace shadows keeps the
         // producer's complete scopes and every retained raw subtree byte for
         // byte. A modified document fails closed when canonical serialization
@@ -27090,6 +28945,19 @@ impl Document {
             eprintln!("FX211_FLUSH_STAGE temporary-drop-after");
             unchanged
         };
+        if typed_document_is_unchanged
+            && let Some(template) = &mut template
+            && template.sources.source.is_none()
+            && let Some((part, length)) = template.sources.original_part.take()
+        {
+            // This branch actually keeps the first staging clone's ingress
+            // part. Later generated or refreshed parts cannot enter it.
+            template.sources.source = Some(Arc::new(template.operation.source_part(
+                &part,
+                0..length,
+                &BTreeMap::new(),
+            )?));
+        }
         #[cfg(test)]
         eprintln!("FX211_FLUSH_STAGE nested-scopes-before");
         let scanned;
@@ -27166,17 +29034,21 @@ impl Document {
             }
             #[cfg(test)]
             eprintln!("FX211_FLUSH_STAGE serialize-before");
-            let serialized = self.main_part_xml()?;
+            let serialized = match template.as_deref_mut() {
+                Some(template) => self.main_part_xml_in(Some(template))?,
+                None => self.main_part_xml()?,
+            };
             #[cfg(test)]
             eprintln!("FX211_FLUSH_STAGE serialize-after");
             let spans = self
                 .main_part_blocks
                 .as_ref()
                 .and_then(|blocks| blocks.proved_namespace_spans(&serialized));
-            Some(replay_nested_namespace_declarations_with_spans(
+            Some(replay_nested_namespace_declarations_in(
                 &serialized,
                 nested_namespace_owners,
                 spans.as_deref(),
+                template.as_deref_mut(),
             )?)
         };
         let namespace_scopes = document_namespace_scopes(
@@ -27209,6 +29081,17 @@ impl Document {
         };
         if let Some(doc_xml) = doc_xml {
             self.package.set_part(&self.doc_part_name, doc_xml);
+            if let Some(template) = template {
+                let source =
+                    template.sources.source.as_ref().ok_or_else(|| {
+                        Error::Other("published main writer lost its source".into())
+                    })?;
+                let bytes = self
+                    .package
+                    .get_part_shared(&self.doc_part_name)
+                    .expect("actual main publication");
+                template.sources.published_main = Some((Arc::clone(bytes), Arc::clone(source)));
+            }
         }
         self.root_namespace_declarations = namespace_scopes.root_declarations;
         self.body_namespace_declarations = namespace_scopes.body_declarations;
@@ -27237,16 +29120,44 @@ impl Document {
     }
 
     fn refresh_related_story_caches(&mut self) -> Result<()> {
+        self.refresh_related_story_caches_in(None)
+    }
+
+    fn refresh_related_story_caches_in(
+        &mut self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<()> {
         if let Some(part_name) = self.footnotes_part_name.as_deref()
-            && let Some(xml) = self.package.get_part(part_name)
+            && let Some(xml) = self.package.get_part_shared(part_name)
         {
-            self.footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml)?;
+            if let Some(template) = template.as_deref_mut() {
+                template.sources.notes_model_read = true;
+                if let Some(source) = template.take_related_source(part_name, xml)? {
+                    self.footnotes = template.operation.source_notes(&source)?;
+                    template.sources.read_note_count = self.footnotes.footnotes.len();
+                    template.sources.put_related_source(part_name, xml, source);
+                } else {
+                    self.footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml)?;
+                }
+            } else {
+                self.footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml)?;
+            }
             self.footnotes_dirty = false;
         }
         if let Some(part_name) = self.comments_part_name.as_deref()
-            && let Some(xml) = self.package.get_part(part_name)
+            && let Some(xml) = self.package.get_part_shared(part_name)
         {
-            self.comments = Some(rdocx_oxml::comments::CT_Comments::from_xml(xml)?);
+            self.comments = Some(if let Some(writer) = template {
+                let source = writer.take_related_source(part_name, xml)?.ok_or_else(|| {
+                    Error::Other("comments refresh lost its actual source".into())
+                })?;
+                let comments = writer.operation.source_comments(&source)?;
+                writer.sources.comments_reader_source = Some(Arc::clone(&source));
+                writer.sources.put_related_source(part_name, xml, source);
+                comments
+            } else {
+                rdocx_oxml::comments::CT_Comments::from_xml(xml)?
+            });
             self.comments_dirty = false;
         }
         Ok(())
@@ -28202,43 +30113,54 @@ impl Document {
         Ok(())
     }
 
+    fn fragment_projection_relationships(
+        &mut self,
+        source_part: &str,
+        selected: &[u8],
+    ) -> Result<BTreeMap<String, String>> {
+        if source_part == self.doc_part_name {
+            return Ok(BTreeMap::new());
+        }
+        let source_rels = self
+            .package
+            .get_part_rels(source_part)
+            .cloned()
+            .unwrap_or_default();
+        let mut relationship_map = BTreeMap::new();
+        for relationship_id in crate::field::relationship_ids_in_xml(selected)? {
+            let relationship = source_rels.get_by_id(&relationship_id).ok_or_else(|| {
+                Error::Other(format!(
+                    "fragment source relationship {relationship_id} is missing from {source_part}"
+                ))
+            })?;
+            let destination_part = self.doc_part_name.clone();
+            let new_id = if relationship_is_internal(relationship) {
+                let target_part = OpcPackage::resolve_rel_target(source_part, &relationship.target);
+                self.add_internal_relationship_checked(
+                    &destination_part,
+                    &relationship.rel_type,
+                    &relative_target(&destination_part, &target_part),
+                )?
+            } else {
+                self.add_external_relationship_checked(
+                    &destination_part,
+                    &relationship.rel_type,
+                    &relationship.target,
+                )?
+            };
+            relationship_map.insert(relationship_id, new_id);
+        }
+        Ok(relationship_map)
+    }
+
     pub(crate) fn project_fragment_part_content(
         &mut self,
         source_part: &str,
         mut selected: Vec<u8>,
     ) -> Result<()> {
         if source_part != self.doc_part_name {
-            let source_rels = self
-                .package
-                .get_part_rels(source_part)
-                .cloned()
-                .unwrap_or_default();
-            let mut relationship_map = BTreeMap::new();
-            for relationship_id in crate::field::relationship_ids_in_xml(&selected)? {
-                let relationship = source_rels.get_by_id(&relationship_id).ok_or_else(|| {
-                        Error::Other(format!(
-                            "fragment source relationship {relationship_id} is missing from {source_part}"
-                        ))
-                    })?;
-                let destination_part = self.doc_part_name.clone();
-                let new_id = if relationship_is_internal(relationship) {
-                    let target_part =
-                        OpcPackage::resolve_rel_target(source_part, &relationship.target);
-                    self.add_internal_relationship_checked(
-                        &destination_part,
-                        &relationship.rel_type,
-                        &relative_target(&destination_part, &target_part),
-                    )?
-                } else {
-                    self.add_external_relationship_checked(
-                        &destination_part,
-                        &relationship.rel_type,
-                        &relationship.target,
-                    )?
-                };
-                relationship_map.insert(relationship_id, new_id);
-            }
-            selected = crate::field::patch_relationship_ids(&selected, &relationship_map)?;
+            let relationships = self.fragment_projection_relationships(source_part, &selected)?;
+            selected = crate::field::patch_relationship_ids(&selected, &relationships)?;
         }
         let main_xml = self
             .package
@@ -28256,6 +30178,39 @@ impl Document {
         updated.splice(main_start..main_end, selected);
         self.package.set_part(&self.doc_part_name, updated);
         Ok(())
+    }
+
+    pub(crate) fn project_fragment_part_source(
+        &mut self,
+        source_part: &str,
+        selected: rdocx_oxml::document::ScopedWordSource,
+        main_source: &rdocx_oxml::document::ScopedWordSource,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    ) -> Result<rdocx_oxml::document::ScopedWordSource> {
+        let relationships =
+            self.fragment_projection_relationships(source_part, selected.as_bytes())?;
+        let selected =
+            crate::field::patch_relationship_source(operation, selected, &relationships)?;
+        let main_owner = scan_story_owners(main_source.as_bytes(), StoryKind::Body)?
+            .into_iter()
+            .find(|owner| owner.kind == StoryKind::Body)
+            .ok_or_else(|| Error::Other("document fragment main body is missing".into()))?;
+        let main_items = direct_story_content_items(main_source.as_bytes(), &main_owner)?;
+        let main_end = story_owner_content_end(main_source.as_bytes(), &main_owner)?;
+        let main_start = main_items.first().map_or(main_end, |item| item.full.start);
+        let source = operation.compose_sources(&[
+            (Some(main_source), 0..main_start, &[]),
+            (Some(&selected), 0..selected.as_bytes().len(), &[]),
+            (
+                Some(main_source),
+                main_end..main_source.as_bytes().len(),
+                &[],
+            ),
+        ])?;
+        let retained = operation.repeat_source(&source)?;
+        self.package
+            .set_part(&self.doc_part_name, operation.finish_source(retained)?);
+        Ok(source)
     }
 
     fn fragment_story_source_owner_and_owners<'a>(
@@ -29578,8 +31533,8 @@ impl Document {
     // Keep canonical locations and fingerprints while restoring only the proved
     // namespace context used by rich comment projection. Physical event offsets
     // qualify every owner before a restored declaration can reinterpret a name.
-    fn namespace_restored_main_source(&self) -> Result<Vec<u8>> {
-        let canonical = self.document.to_xml()?;
+    pub(crate) fn namespace_restored_main_source(&self) -> Result<Vec<u8>> {
+        let canonical = self.main_part_with_body_spans()?.0;
         note_transaction_output("namespace_current_writer", canonical.len());
         let original = self
             .package
@@ -31854,7 +33809,7 @@ impl Document {
                     .windows(b"AlternateContent".len())
                     .any(|window| window == b"AlternateContent") =>
             {
-                paired_scoped_ranges(&source_xml, owner, &item_range)?
+                paired_scoped_ranges(&source_xml, owner, &item_range, None)?
             }
             _ => None,
         };
@@ -32316,11 +34271,9 @@ impl Document {
             selected.xml(),
             xml.as_bytes(),
         )?;
-        let mut replacement = Vec::new();
-        paragraph.to_xml(&mut Writer::new(&mut replacement))?;
         let fragment = ContentFragment {
             kind: StoryItemKind::Paragraph,
-            xml: replacement,
+            xml: xml.as_bytes().to_vec(),
             namespace_scope: BTreeMap::new(),
             source_part_name: Some(location.story.part_name.clone()),
             source_story_kind: Some(location.story.kind),
@@ -34832,42 +36785,155 @@ impl Document {
         &mut self,
         include_final_section_properties: bool,
     ) -> Result<Vec<u8>> {
+        self.omit_glossary_selected_body_comments_in(include_final_section_properties, None)
+            .map(|(bytes, _)| bytes)
+    }
+
+    pub(crate) fn omit_glossary_selected_body_comments_in(
+        &mut self,
+        include_final_section_properties: bool,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<(Vec<u8>, Option<Arc<rdocx_oxml::document::ScopedWordSource>>)> {
         let part = self.doc_part_name.clone();
-        let mut xml = self
+        let storage = self
             .package
-            .get_part(&part)
-            .ok_or_else(|| Error::Other("fragment main source disappeared".into()))?
-            .to_vec();
-        let owner = scan_story_owners(&xml, StoryKind::Body)?
+            .get_part_shared(&part)
+            .ok_or_else(|| Error::Other("fragment main source disappeared".into()))?;
+        let storage = Arc::clone(storage);
+        let xml = storage.as_slice();
+        let parent = if let Some(writer) = template.as_deref_mut() {
+            let source = if let Some((stored, source)) = &writer.sources.published_main
+                && Arc::ptr_eq(stored, &storage)
+            {
+                Some(Arc::clone(source))
+            } else {
+                writer
+                    .lineage
+                    .original_part_source(writer.operation, &part, &storage)?
+                    .map(Arc::new)
+            };
+            Some(source.ok_or_else(|| {
+                Error::Other("glossary omission lost its actual main source".into())
+            })?)
+        } else {
+            None
+        };
+        let owner = scan_story_owners(xml, StoryKind::Body)?
             .into_iter()
             .find(|owner| owner.kind == StoryKind::Body)
             .ok_or_else(|| Error::Other("document fragment has no main body".into()))?;
-        let start = direct_story_content_items(&xml, &owner)?
+        let start = direct_story_content_items(xml, &owner)?
             .first()
             .map(|item| item.full.start)
             .ok_or_else(|| Error::Other("document fragment main body is empty".into()))?;
-        let end = story_owner_content_end(&xml, &owner)?;
-        let selected = package_authoritative_body_fragment(&xml, false, &BTreeMap::new())?;
-        self.omit_glossary_fragment_note_comments(&part, &selected)?;
-        let omitted = Self::omit_comment_markers(&selected)?;
+        let end = story_owner_content_end(xml, &owner)?;
+        let selected_source =
+            if let (Some(writer), Some(parent)) = (template.as_deref_mut(), parent.as_ref()) {
+                Some(package_authoritative_body_source(
+                    writer.operation,
+                    parent.as_ref(),
+                    false,
+                    &BTreeMap::new(),
+                )?)
+            } else {
+                None
+            };
+        let selected_bytes = if selected_source.is_none() {
+            package_authoritative_body_fragment(xml, false, &BTreeMap::new())?
+        } else {
+            Vec::new()
+        };
+        let selected = selected_source
+            .as_ref()
+            .map_or(selected_bytes.as_slice(), |source| source.as_bytes());
+        self.omit_glossary_fragment_note_comments_in(&part, selected, template.as_deref_mut())?;
+        let mut omitted_source = None;
+        let omitted = if let (Some(writer), Some(selected_source)) =
+            (template.as_deref_mut(), selected_source)
+        {
+            let edits = Self::omit_comment_marker_edits(selected_source.as_bytes())?;
+            omitted_source = Some(apply_template_source_edits(
+                writer.operation,
+                selected_source,
+                edits,
+            )?);
+            Vec::new()
+        } else {
+            Self::omit_comment_markers(&selected_bytes)?
+        };
+        let mut section_replacement = None;
         if include_final_section_properties {
-            for item in scan_story_items(&xml, &owner, None)? {
+            for item in scan_story_items(xml, &owner, None)? {
                 if item.direct_owner_child
                     && item.kind == StoryItemKind::PreservedNode
-                    && content_fragment_root_is_section_properties(&xml, &item)?
+                    && content_fragment_root_is_section_properties(xml, &item)?
                 {
-                    let scope = story_namespace_scope_at(&xml, item.full.start)?;
-                    let section =
-                        close_content_fragment_namespaces(&xml[item.full.clone()], &scope)?;
-                    self.omit_glossary_fragment_note_comments(&part, &section)?;
-                    xml.splice(item.full, Self::omit_comment_markers(&section)?);
+                    let scope = story_namespace_scope_at(xml, item.full.start)?;
+                    if let (Some(writer), Some(parent)) = (template.as_deref_mut(), parent.as_ref())
+                    {
+                        let section = writer.operation.compose_sources(&[(
+                            Some(parent.as_ref()),
+                            item.full.clone(),
+                            &[],
+                        )])?;
+                        let section = writer.operation.close_source_namespaces(section, &scope)?;
+                        self.omit_glossary_fragment_note_comments_in(
+                            &part,
+                            section.as_bytes(),
+                            Some(writer),
+                        )?;
+                        let edits = Self::omit_comment_marker_edits(section.as_bytes())?;
+                        let section =
+                            apply_template_source_edits(writer.operation, section, edits)?;
+                        section_replacement = Some((item.full, Vec::new(), Some(section)));
+                    } else {
+                        let section =
+                            close_content_fragment_namespaces(&xml[item.full.clone()], &scope)?;
+                        self.omit_glossary_fragment_note_comments(&part, &section)?;
+                        section_replacement =
+                            Some((item.full, Self::omit_comment_markers(&section)?, None));
+                    }
                     break;
                 }
             }
         }
-        xml.splice(start..end, omitted);
-        set_story_source_xml(self, &part, xml.clone())?;
-        Ok(xml)
+        if let (Some(writer), Some(parent), Some(omitted)) =
+            (template, parent.as_ref(), omitted_source)
+        {
+            let mut pieces = vec![
+                (Some(parent.as_ref()), 0..start, &[][..]),
+                (Some(&omitted), 0..omitted.as_bytes().len(), &[][..]),
+            ];
+            if let Some((range, _, Some(section))) = &section_replacement {
+                pieces.push((Some(parent.as_ref()), end..range.start, &[]));
+                pieces.push((Some(section), 0..section.as_bytes().len(), &[]));
+                pieces.push((
+                    Some(parent.as_ref()),
+                    range.end..parent.as_bytes().len(),
+                    &[],
+                ));
+            } else {
+                pieces.push((Some(parent.as_ref()), end..parent.as_bytes().len(), &[]));
+            }
+            let updated = writer.operation.compose_sources(&pieces)?;
+            set_story_source_xml_in(self, &part, Vec::new(), Some((writer, updated)))?;
+            let source = writer
+                .sources
+                .published_main
+                .as_ref()
+                .ok_or_else(|| Error::Other("glossary omission lost its published source".into()))?
+                .1
+                .clone();
+            let retained = writer.operation.repeat_source(&source)?;
+            return Ok((writer.operation.finish_source(retained)?, Some(source)));
+        }
+        let mut updated = xml.to_vec();
+        if let Some((range, section, _)) = section_replacement {
+            updated.splice(range, section);
+        }
+        updated.splice(start..end, omitted);
+        set_story_source_xml(self, &part, updated.clone())?;
+        Ok((updated, None))
     }
 
     /// Omit only selected note review markers before glossary dependency capture.
@@ -34875,6 +36941,15 @@ impl Document {
         &mut self,
         source_part: &str,
         selected: &[u8],
+    ) -> Result<()> {
+        self.omit_glossary_fragment_note_comments_in(source_part, selected, None)
+    }
+
+    fn omit_glossary_fragment_note_comments_in(
+        &mut self,
+        source_part: &str,
+        selected: &[u8],
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
     ) -> Result<()> {
         let mut pending = crate::field::fragment_note_references(selected)?;
         let mut seen = HashSet::new();
@@ -34906,13 +36981,44 @@ impl Document {
             })?;
             let (source, owner) = self.story_source_and_owner(&story)?;
             let part = source.part_name;
-            let mut xml = source.xml.into_owned();
-            let scope = story_namespace_scope_at(&xml, owner.full.start)?;
-            let note = close_content_fragment_namespaces(&xml[owner.full.clone()], &scope)?;
-            pending.extend(crate::field::fragment_note_references(&note)?);
-            let omitted = Self::omit_comment_markers(&note)?;
-            xml.splice(owner.full, omitted);
-            set_story_source_xml(self, &part, xml)?;
+            let scope = story_namespace_scope_at(source.xml.as_ref(), owner.full.start)?;
+            if let Some(writer) = template.as_deref_mut() {
+                let storage = self
+                    .package
+                    .get_part_shared(&part)
+                    .ok_or_else(|| Error::Other("glossary note source disappeared".into()))?;
+                let parent = writer
+                    .take_related_source(&part, storage)?
+                    .ok_or_else(|| Error::Other("glossary note omission lost its source".into()))?;
+                let note = writer.operation.compose_sources(&[(
+                    Some(parent.as_ref()),
+                    owner.full.clone(),
+                    &[],
+                )])?;
+                let note = writer.operation.close_source_namespaces(note, &scope)?;
+                pending.extend(crate::field::fragment_note_references(note.as_bytes())?);
+                let edits = Self::omit_comment_marker_edits(note.as_bytes())?;
+                let note = apply_template_source_edits(writer.operation, note, edits)?;
+                let updated = writer.operation.compose_sources(&[
+                    (Some(parent.as_ref()), 0..owner.full.start, &[]),
+                    (Some(&note), 0..note.as_bytes().len(), &[]),
+                    (
+                        Some(parent.as_ref()),
+                        owner.full.end..parent.as_bytes().len(),
+                        &[],
+                    ),
+                ])?;
+                let retained = writer.operation.repeat_source(&updated)?;
+                let bytes = writer.operation.finish_source(retained)?;
+                set_story_source_xml_in(self, &part, bytes, Some((writer, updated)))?;
+            } else {
+                let mut xml = source.xml.into_owned();
+                let note = close_content_fragment_namespaces(&xml[owner.full.clone()], &scope)?;
+                pending.extend(crate::field::fragment_note_references(&note)?);
+                let omitted = Self::omit_comment_markers(&note)?;
+                xml.splice(owner.full, omitted);
+                set_story_source_xml(self, &part, xml)?;
+            }
         }
         Ok(())
     }
@@ -34922,6 +37028,23 @@ impl Document {
         kind: StoryKind,
         id: i32,
     ) -> Result<(String, Vec<u8>)> {
+        self.fragment_note_dependency_in(kind, id, None)
+            .map(|(part, xml, _)| (part, xml))
+    }
+
+    pub(crate) fn fragment_note_dependency_in(
+        &self,
+        kind: StoryKind,
+        id: i32,
+        scoped: Option<(
+            &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+            &TemplateMainSources,
+        )>,
+    ) -> Result<(
+        String,
+        Vec<u8>,
+        Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    )> {
         let story = self.note_story(kind, id)?.ok_or_else(|| {
             Error::Other(format!(
                 "document fragment {kind:?} reference {id} has no note owner"
@@ -34930,10 +37053,27 @@ impl Document {
         let (source, owner) = self.story_source_and_owner(&story)?;
         let xml = source.xml.as_ref();
         let scope = story_namespace_scope_at(xml, owner.full.start)?;
-        Ok((
-            source.part_name,
-            close_content_fragment_namespaces(&xml[owner.full], &scope)?,
-        ))
+        let produced = if let Some((operation, sources)) = scoped
+            && let Some(bytes) = self.package.get_part_shared(&source.part_name)
+            && let Some(parent) = sources.related_source(&source.part_name, bytes)
+        {
+            let selected = operation.compose_sources(&[(Some(parent), owner.full.clone(), &[])])?;
+            let selected = Arc::new(operation.close_source_namespaces(selected, &scope)?);
+            let retained = operation.repeat_source(&selected)?;
+            let bytes = operation.finish_source(retained)?;
+            Some((bytes, selected))
+        } else {
+            None
+        };
+        if let Some((bytes, selected)) = produced {
+            Ok((source.part_name, bytes, Some(selected)))
+        } else {
+            Ok((
+                source.part_name,
+                close_content_fragment_namespaces(&xml[owner.full], &scope)?,
+                None,
+            ))
+        }
     }
 
     pub(crate) fn fragment_comment_dependency(&self, id: i32) -> Result<(String, Vec<u8>)> {
@@ -35035,6 +37175,14 @@ impl Document {
     }
 
     pub(crate) fn ensure_fragment_note_part_staged(&mut self, kind: StoryKind) -> Result<String> {
+        self.ensure_fragment_note_part_staged_in(kind, None)
+    }
+
+    pub(crate) fn ensure_fragment_note_part_staged_in(
+        &mut self,
+        kind: StoryKind,
+        template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<String> {
         let (preferred, relationship_type, content_type) = match kind {
             StoryKind::Footnote => (
                 "/word/footnotes.xml",
@@ -35060,12 +37208,40 @@ impl Document {
         }
         if self.package.get_part(&part).is_none() {
             let notes = rdocx_oxml::footnotes::CT_Footnotes::new();
-            let xml = if kind == StoryKind::Footnote {
-                notes.to_xml_footnotes()?
+            let (xml, produced) = if let Some(template) = template {
+                let source = template.operation.source_model_notes(
+                    &notes,
+                    kind == StoryKind::Endnote,
+                    &[],
+                    &[],
+                    &[],
+                    false,
+                )?;
+                let retained = template.operation.repeat_source(&source)?;
+                (
+                    template.operation.finish_source(retained)?,
+                    Some((template, source)),
+                )
             } else {
-                notes.to_xml_endnotes()?
+                (
+                    if kind == StoryKind::Footnote {
+                        notes.to_xml_footnotes()?
+                    } else {
+                        notes.to_xml_endnotes()?
+                    },
+                    None,
+                )
             };
             self.package.set_part(&part, xml);
+            if let Some((template, source)) = produced {
+                template.sources.put_related_source(
+                    &part,
+                    self.package
+                        .get_part_shared(&part)
+                        .expect("actual new note part"),
+                    source,
+                );
+            }
         }
         Ok(part)
     }
@@ -35077,6 +37253,20 @@ impl Document {
         note_xml: Vec<u8>,
         replace_id: Option<i32>,
     ) -> Result<()> {
+        self.publish_fragment_note_staged_in(kind, part_name, note_xml, replace_id, None)
+    }
+
+    pub(crate) fn publish_fragment_note_staged_in(
+        &mut self,
+        kind: StoryKind,
+        part_name: &str,
+        note_xml: Vec<u8>,
+        replace_id: Option<i32>,
+        template: Option<(
+            &mut TemplateMainWriter<'_, '_>,
+            Arc<rdocx_oxml::document::ScopedWordSource>,
+        )>,
+    ) -> Result<()> {
         let source = self.package.get_part(part_name).ok_or_else(|| {
             Error::Other(format!(
                 "document fragment destination note part {part_name} is missing"
@@ -35087,6 +37277,50 @@ impl Document {
             StoryKind::Endnote => (b"endnotes".as_slice(), b"endnote".as_slice()),
             _ => return Err(Error::Other("invalid fragment note story kind".to_owned())),
         };
+        if let Some((template, note)) = template {
+            let storage = self
+                .package
+                .get_part_shared(part_name)
+                .expect("actual destination note part");
+            let parent = template
+                .take_related_source(part_name, storage)?
+                .ok_or_else(|| Error::Other("destination note part lost its source".into()))?;
+            let updated = if let Some(id) = replace_id {
+                let story = self.note_story(kind, id)?.ok_or_else(|| {
+                    Error::Other("REF f cached note replacement owner is absent".into())
+                })?;
+                let (owner_source, owner) = self.story_source_and_owner(&story)?;
+                if owner_source.part_name != part_name {
+                    return Err(Error::Other(
+                        "REF f cached note replacement has a different relationship owner".into(),
+                    ));
+                }
+                let updated = Arc::new(template.operation.compose_sources(&[
+                    (Some(parent.as_ref()), 0..owner.full.start, &[]),
+                    (Some(note.as_ref()), 0..note.as_bytes().len(), &[]),
+                    (
+                        Some(parent.as_ref()),
+                        owner.full.end..parent.as_bytes().len(),
+                        &[],
+                    ),
+                ])?);
+                template.operation.source_notes(&updated)?;
+                updated
+            } else {
+                append_story_sources_to_root(template.operation, parent, &[note], root, item)?
+            };
+            let retained = template.operation.repeat_source(&updated)?;
+            let bytes = template.operation.finish_source(retained)?;
+            self.package.set_part(part_name, bytes);
+            template.sources.put_related_source(
+                part_name,
+                self.package
+                    .get_part_shared(part_name)
+                    .expect("actual appended note publication"),
+                updated,
+            );
+            return Ok(());
+        }
         let updated = if let Some(id) = replace_id {
             let story = self.note_story(kind, id)?.ok_or_else(|| {
                 Error::Other("REF f cached note replacement owner is absent".into())
@@ -45182,10 +47416,17 @@ impl Document {
         expected: Option<usize>,
     ) -> Result<std::result::Result<usize, ReplacementCountMismatch>> {
         oxml_core::xml::reject_non_xml_characters("replacement text", replacement)?;
+        let literal_input = Cell::new(false);
         let candidate = self.clone_for_staging();
         note_transaction_clone();
-        match Self::replace_scoped_candidate(candidate, target, placeholder, replacement, expected)?
-        {
+        match Self::replace_scoped_candidate(
+            candidate,
+            target,
+            placeholder,
+            replacement,
+            expected,
+            &literal_input,
+        )? {
             Err(mismatch) => Ok(Err(mismatch)),
             Ok(None) => Ok(Ok(0)),
             Ok(Some((updated, count))) => {
@@ -45258,8 +47499,16 @@ impl Document {
         expected: Option<usize>,
     ) -> Result<std::result::Result<Option<(Self, usize)>, ReplacementCountMismatch>> {
         oxml_core::xml::reject_non_xml_characters("replacement text", replacement)?;
+        let literal_input = Cell::new(false);
         let mut origin = self.take_staged_commit_origin();
-        match Self::replace_scoped_candidate(self, target, placeholder, replacement, expected)? {
+        match Self::replace_scoped_candidate(
+            self,
+            target,
+            placeholder,
+            replacement,
+            expected,
+            &literal_input,
+        )? {
             Err(mismatch) => Ok(Err(mismatch)),
             Ok(None) => Ok(Ok(None)),
             Ok(Some((updated, count))) => Ok(Ok(Some((
@@ -45281,6 +47530,7 @@ impl Document {
         placeholder: &str,
         replacement: &str,
         expected: Option<usize>,
+        literal_input: &Cell<bool>,
     ) -> Result<std::result::Result<Option<(Self, usize)>, ReplacementCountMismatch>> {
         let (story, path, paragraph) = match target {
             ScopedReplacementTarget::Item(location) => {
@@ -45471,13 +47721,31 @@ impl Document {
         let part = source.part_name.clone();
         let mut xml = source.xml.into_owned();
         let scope = story_namespace_scope_at(&xml, span.start)?;
-        let mut raw = close_content_fragment_namespaces(&xml[span.clone()], &scope)?;
-        let count = rdocx_oxml::placeholder::try_replace_in_block(
-            &mut raw,
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::new(&xml);
+        #[cfg(test)]
+        let was_delivered = SCOPED_LITERAL_DELIVERIES
+            .with(|events| events.borrow().as_ref().map(|_| literal_input.get()));
+        let selected = operation.replace_block_with_literal_input(
+            span.clone(),
+            &scope,
             paragraph,
             placeholder,
             replacement,
-        )?;
+            literal_input,
+        );
+        #[cfg(test)]
+        if let Some(was_delivered) = was_delivered {
+            SCOPED_LITERAL_DELIVERIES.with(|events| {
+                if let Some(events) = events.borrow_mut().as_mut() {
+                    events.push((
+                        std::ptr::from_ref(literal_input) as usize,
+                        was_delivered,
+                        literal_input.get(),
+                    ));
+                }
+            });
+        }
+        let (mut raw, count) = selected?;
         if let Some(expected) = expected
             && count != expected
         {
@@ -45499,8 +47767,11 @@ impl Document {
                 paragraph,
                 placeholder,
                 replacement,
+                literal_input,
                 count,
             },
+            &mut raw,
+            &mut operation,
         )? {
             for edit in edits.into_iter().rev() {
                 xml.splice(edit.range, edit.raw);
@@ -45785,6 +48056,32 @@ impl Document {
             })
     }
 
+    pub(crate) fn template_word_record_inputs(&self) -> TemplateWordRecordInputs {
+        let scans = self
+            .main_body_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut input = TemplateWordRecordInputs::default();
+        for record in scans.serialized.iter().chain(self.main_part_blocks.iter()) {
+            for block in &record.blocks {
+                input
+                    .blocks
+                    .entry(Arc::as_ptr(block) as usize)
+                    .or_insert_with(|| Arc::clone(block));
+            }
+        }
+        if let Some(kept) = self.kept_main_part()
+            && let Some(part) = kept.serialization_proof.as_ref()
+        {
+            input
+                .openings
+                .entry((part.as_ptr() as usize, part.len()))
+                .or_insert_with(|| Arc::clone(&kept));
+        }
+        input
+    }
+
+    #[cfg(test)]
     pub(crate) fn template_programs(&mut self) -> Result<Vec<crate::template::TemplateProgram>> {
         self.flush_to_package()?;
         let mut roots = Vec::new();
@@ -45796,18 +48093,117 @@ impl Document {
         Ok(roots)
     }
 
-    pub(crate) fn template_note_identities(&self) -> Result<Vec<(StoryKind, String, i32, usize)>> {
-        let stories = self.stories()?;
+    pub(crate) fn template_programs_scoped<'frozen>(
+        &mut self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+        lineage: &crate::template::TemplateWordLineage<'frozen>,
+        sources: &mut TemplateMainSources,
+    ) -> Result<Vec<crate::template::TemplateProgram>> {
+        if sources.first_visit {
+            sources.first_visit = false;
+            sources.original_part = lineage
+                .initial_main_part()
+                .map(|(part, length)| (part.to_owned(), length));
+        }
+        let mut writer = TemplateMainWriter {
+            operation,
+            lineage,
+            sources,
+        };
+        self.flush_to_package_in(Some(&mut writer))?;
+        writer.sources.original_part = None;
+        let main = &writer.sources.source;
+        let mut roots = Vec::new();
+        if let Some(source) = main {
+            let story = StorySource {
+                root_kind: StoryKind::Body,
+                part_name: self.doc_part_name.clone(),
+                xml: Cow::Borrowed(source.as_bytes()),
+            };
+            roots.extend(prepare_template_source_programs_in(
+                &story,
+                Some((writer.operation, source)),
+            )?);
+        } else {
+            for source in self.story_sources()? {
+                if source.root_kind == StoryKind::Body {
+                    roots.extend(prepare_template_source_programs(&source)?);
+                }
+            }
+        }
+        for story in self.related_story_sources()? {
+            if story.root_kind != StoryKind::Comment {
+                let bytes = self
+                    .package
+                    .get_part_shared(&story.part_name)
+                    .expect("actual related package part");
+                if let Some(source) = writer.take_related_source(&story.part_name, bytes)? {
+                    let actual = StorySource {
+                        root_kind: story.root_kind,
+                        part_name: story.part_name.clone(),
+                        xml: Cow::Borrowed(source.as_bytes()),
+                    };
+                    roots.extend(prepare_template_source_programs_in(
+                        &actual,
+                        Some((writer.operation, &source)),
+                    )?);
+                    writer
+                        .sources
+                        .put_related_source(&story.part_name, bytes, source);
+                } else {
+                    roots.extend(prepare_template_source_programs(&story)?);
+                }
+            }
+        }
+        Ok(roots)
+    }
+
+    pub(crate) fn template_note_identities(
+        &self,
+        mut template: Option<&mut TemplateMainWriter<'_, '_>>,
+    ) -> Result<Vec<(StoryKind, String, i32, usize)>> {
+        let stories = if let Some(writer) = template.as_deref_mut() {
+            let (main, record) = self.serialized_main_part_in(Some(writer))?;
+            let (layout, child_count) = if let Some(record) = record {
+                let (content, children) = record.body_spans()?;
+                (
+                    self.main_story_layout(&main, &content, &children, false)
+                        .ok(),
+                    children.len(),
+                )
+            } else {
+                (None, self.document.body.content.len())
+            };
+            let mut sources = vec![StorySource {
+                root_kind: StoryKind::Body,
+                part_name: self.doc_part_name.clone(),
+                xml: Cow::Owned(main),
+            }];
+            sources.extend(self.related_story_sources()?);
+            Self::stories_in_sources(sources, layout, child_count)?
+        } else {
+            self.stories()?
+        };
         let mut result = Vec::new();
         for kind in [StoryKind::Footnote, StoryKind::Endnote] {
             let Some(part) = self.note_part_name(kind)? else {
                 continue;
             };
-            let notes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(
-                self.package
-                    .get_part(&part)
-                    .ok_or_else(|| Error::Other(format!("template note part {part} is missing")))?,
-            )?;
+            let bytes = self
+                .package
+                .get_part_shared(&part)
+                .ok_or_else(|| Error::Other(format!("template note part {part} is missing")))?;
+            let notes = if let Some(writer) = template.as_deref_mut() {
+                if let Some(source) = writer.take_related_source(&part, bytes)? {
+                    let notes = writer.operation.source_notes(&source)?;
+                    writer.sources.put_related_source(&part, bytes, source);
+                    notes
+                } else {
+                    rdocx_oxml::footnotes::CT_Footnotes::from_xml(bytes)?
+                }
+            } else {
+                rdocx_oxml::footnotes::CT_Footnotes::from_xml(bytes)?
+            };
             let normal = notes
                 .footnotes
                 .iter()
@@ -45866,6 +48262,147 @@ impl Document {
         Ok(programs.remove(0))
     }
 
+    pub(crate) fn template_fragment_program_from_source(
+        part: &str,
+        source: rdocx_oxml::document::ScopedWordSource,
+        scope: &BTreeMap<String, String>,
+        kind: StoryKind,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    ) -> Result<crate::template::TemplateProgram> {
+        let closed = operation.close_source_namespaces(source, scope)?;
+        let source = if kind == StoryKind::Body {
+            let open = format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#);
+            operation.compose_sources(&[
+                (None, 0..0, open.as_bytes()),
+                (Some(&closed), 0..closed.as_bytes().len(), &[]),
+                (None, 0..0, b"</w:body></w:document>"),
+            ])?
+        } else {
+            closed
+        };
+        let actual = StorySource {
+            root_kind: kind,
+            part_name: part.to_owned(),
+            xml: Cow::Borrowed(source.as_bytes()),
+        };
+        let mut programs =
+            prepare_template_source_programs_in(&actual, Some((operation, &source)))?;
+        if programs.len() != 1 {
+            return Err(Error::Other(
+                "template imported source has ambiguous root ownership".into(),
+            ));
+        }
+        Ok(programs.remove(0))
+    }
+
+    pub(crate) fn template_require_cell_source(
+        &mut self,
+        source: rdocx_oxml::document::ScopedWordSource,
+        scope: &BTreeMap<String, String>,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    ) -> Result<rdocx_oxml::document::ScopedWordSource> {
+        let selected = operation.repeat_source(&source)?;
+        let program = Self::template_fragment_program_from_source(
+            &self.doc_part_name,
+            selected,
+            scope,
+            StoryKind::TableCell,
+            operation,
+        )?;
+        if program.items.iter().any(|item| {
+            matches!(
+                item.kind,
+                crate::template::TemplateItemKind::Source(
+                    StoryItemKind::Paragraph | StoryItemKind::Table | StoryItemKind::ContentControl
+                )
+            )
+        }) {
+            return Ok(source);
+        }
+        let source = operation.close_source_namespaces(source, scope)?;
+        let owner = scan_story_owners(source.as_bytes(), StoryKind::TableCell)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Other("template cell owner disappeared".into()))?;
+        let destination = ContentLocation::end(program.story);
+        let (boundary, _, _) = validated_content_boundary(source.as_bytes(), &owner, &destination)?;
+        Ok(operation.compose_sources(&[
+            (Some(&source), 0..boundary, &[]),
+            (None, 0..0, b"<w:p/>"),
+            (Some(&source), boundary..source.as_bytes().len(), &[]),
+        ])?)
+    }
+
+    pub(crate) fn template_publish_program_source<'frozen>(
+        &mut self,
+        program: &crate::template::TemplateProgram,
+        replacement: rdocx_oxml::document::ScopedWordSource,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+        lineage: &crate::template::TemplateWordLineage<'frozen>,
+        sources: &mut TemplateMainSources,
+    ) -> Result<()> {
+        if program.raw == replacement.as_bytes() {
+            return Ok(());
+        }
+        let mut context = TemplateMainWriter {
+            operation,
+            lineage,
+            sources,
+        };
+        self.flush_to_package_in(Some(&mut context))?;
+        let part = &program.part;
+        let source = if part == &self.doc_part_name {
+            match context.sources.source.take() {
+                Some(source) => source,
+                None => Arc::new(context.document_source(&self.document)?),
+            }
+        } else {
+            let bytes = self.package.get_part_shared(part).ok_or_else(|| {
+                Error::Other("template owning part disappeared during staging".into())
+            })?;
+            context.take_related_source(part, bytes)?.ok_or_else(|| {
+                Error::Other("template owning part lost its produced source".into())
+            })?
+        };
+        let root_kind = if part == &self.doc_part_name {
+            StoryKind::Body
+        } else {
+            self.related_story_sources()?
+                .into_iter()
+                .find(|story| &story.part_name == part)
+                .map(|story| story.root_kind)
+                .ok_or_else(|| {
+                    Error::Other("template owning part disappeared during staging".into())
+                })?
+        };
+        let owner = scan_story_owners(source.as_bytes(), root_kind)?
+            .into_iter()
+            .find(|owner| {
+                owner.kind == program.story.kind && owner.owner_index == program.story.owner_index
+            })
+            .ok_or_else(|| {
+                Error::Other("template physical owner disappeared during staging".into())
+            })?;
+        if source.as_bytes().get(owner.full.clone()) != Some(program.raw.as_slice()) {
+            return Err(Error::Other(
+                "template original owner changed during staged dependency allocation".into(),
+            ));
+        }
+        if program.ranges.len() != 1 {
+            return Err(Error::Other(
+                "root paired template owner requires its qualified containing item".into(),
+            ));
+        }
+        let updated = context.operation.compose_sources(&[
+            (Some(&source), 0..owner.full.start, &[]),
+            (Some(&replacement), 0..replacement.as_bytes().len(), &[]),
+            (Some(&source), owner.full.end..source.as_bytes().len(), &[]),
+        ])?;
+        let retained = context.operation.repeat_source(&updated)?;
+        let bytes = context.operation.finish_source(retained)?;
+        set_story_source_xml_in(self, part, bytes, Some((&mut context, updated)))
+    }
+
     pub(crate) fn claim_pending_drawing_ids(
         &mut self,
         pending: &mut HashSet<u32>,
@@ -45883,42 +48420,135 @@ impl Document {
     pub(crate) fn template_import_repeated_blocks(
         &mut self,
         source: &crate::template::TemplateProgram,
-        selected: Vec<u8>,
+        selected: TemplateFragmentSelection,
         note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
         pending_drawings: &mut HashSet<u32>,
+        evaluation: &mut crate::template::TemplateEvaluation<'_, '_>,
     ) -> Result<crate::template::TemplateProgram> {
         let part = &source.part;
-        let selected = if source.table_rows {
-            let mut raw = source.raw.clone();
-            let start = source
-                .items
-                .first()
-                .ok_or_else(|| Error::Other("template table has no row source".into()))?
-                .range
-                .start
-                - source.ranges[0].start;
-            let end = source.items.last().unwrap().range.end - source.ranges[0].start;
-            raw.splice(start..end, selected);
-            close_content_fragment_namespaces(&raw, &source.scope)?
-        } else {
-            selected
+        let scoped = matches!(&selected, TemplateFragmentSelection::Source(_));
+        let (fragment, input) = match selected {
+            TemplateFragmentSelection::Source(selected) => {
+                let selected = *selected;
+                let selected = if source.table_rows {
+                    let parent = source.source.as_ref().ok_or_else(|| {
+                        Error::Other("selected table has no source companion".into())
+                    })?;
+                    let start = source
+                        .items
+                        .first()
+                        .ok_or_else(|| Error::Other("template table has no row source".into()))?
+                        .range
+                        .start
+                        - source.ranges[0].start;
+                    let end = source.items.last().unwrap().range.end - source.ranges[0].start;
+                    let joined = evaluation.operation.compose_sources(&[
+                        (Some(parent.as_ref()), 0..start, &[]),
+                        (Some(&selected), 0..selected.as_bytes().len(), &[]),
+                        (Some(parent.as_ref()), end..parent.as_bytes().len(), &[]),
+                    ])?;
+                    evaluation
+                        .operation
+                        .close_source_namespaces(joined, &source.scope)?
+                } else {
+                    selected
+                };
+                let (fragment, input) =
+                    DocumentFragment::from_part_source(self, part, selected, evaluation)?;
+                (fragment, Some(input))
+            }
+            TemplateFragmentSelection::Bytes(selected) => {
+                let selected = if source.table_rows {
+                    let mut raw = source.raw.clone();
+                    let start = source
+                        .items
+                        .first()
+                        .ok_or_else(|| Error::Other("template table has no row source".into()))?
+                        .range
+                        .start
+                        - source.ranges[0].start;
+                    let end = source.items.last().unwrap().range.end - source.ranges[0].start;
+                    raw.splice(start..end, selected);
+                    close_content_fragment_namespaces(&raw, &source.scope)?
+                } else {
+                    selected
+                };
+                (
+                    DocumentFragment::from_part_content(self, part, selected)?,
+                    None,
+                )
+            }
         };
-        let fragment = DocumentFragment::from_part_content(self, part, selected)?;
-        let imported = fragment.import_content_staged(
-            self,
-            part,
-            FragmentConflictPolicy::reuse_equivalent(),
-            true,
-            note_copy_sources,
-        )?;
+        // Preparation inspects only published owners. Earlier repeated copies
+        // still awaiting publication keep their actual reserved drawing ids.
+        self.retain_pending_drawing_ids(pending_drawings);
+        let (imported, imported_source) = if let Some(input) = input {
+            let (xml, source) = crate::field::import_document_fragment_content(
+                self,
+                &fragment.package,
+                fragment.include_final_section_properties,
+                FragmentConflictPolicy::reuse_equivalent(),
+                part,
+                true,
+                note_copy_sources,
+                Some((evaluation, input)),
+            )?;
+            if let Some(source) = source {
+                let source = package_authoritative_body_source(
+                    &mut evaluation.operation,
+                    source.as_ref(),
+                    fragment.include_final_section_properties,
+                    &BTreeMap::new(),
+                )?;
+                let retained = evaluation.operation.repeat_source(&source)?;
+                (evaluation.operation.finish_source(retained)?, Some(source))
+            } else {
+                (
+                    package_authoritative_body_fragment(
+                        &xml,
+                        fragment.include_final_section_properties,
+                        &BTreeMap::new(),
+                    )?,
+                    None,
+                )
+            }
+        } else {
+            (
+                fragment.import_content_staged(
+                    self,
+                    part,
+                    FragmentConflictPolicy::reuse_equivalent(),
+                    true,
+                    note_copy_sources,
+                )?,
+                None,
+            )
+        };
         // Preserve newly allocated note/comment companions before any owner
         // replacement reacquires the actual physical source. Staging then
         // rebuilds drawing occupancy from the live package. The repeated copy
         // is not in that package yet, so keep the ids this import reserved.
-        self.prepare_staged_package()?;
+        if scoped {
+            self.prepare_staged_template_package(
+                &mut evaluation.operation,
+                &mut evaluation.lineage,
+                &mut evaluation.sources,
+            )?;
+        } else {
+            self.prepare_staged_package()?;
+        }
         self.claim_pending_drawing_ids(pending_drawings, &imported)?;
-        let mut program =
-            Self::template_fragment_program(part, &imported, &BTreeMap::new(), StoryKind::Body)?;
+        let mut program = if let Some(source) = imported_source {
+            Self::template_fragment_program_from_source(
+                part,
+                source,
+                &BTreeMap::new(),
+                StoryKind::Body,
+                &mut evaluation.operation,
+            )?
+        } else {
+            Self::template_fragment_program(part, &imported, &BTreeMap::new(), StoryKind::Body)?
+        };
         if source.table_rows {
             if program.items.len() != 1
                 || program.items[0].children.len() != 1
@@ -46007,24 +48637,88 @@ impl Document {
         set_story_source_xml(self, &part, xml)
     }
 
-    pub(crate) fn template_raw_parts(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    pub(crate) fn template_raw_sources_scoped<'frozen>(
+        &self,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+        lineage: &crate::template::TemplateWordLineage<'frozen>,
+        sources: &mut TemplateMainSources,
+    ) -> Result<Vec<(String, Arc<rdocx_oxml::document::ScopedWordSource>)>> {
+        let mut context = TemplateMainWriter {
+            operation,
+            lineage,
+            sources,
+        };
         let mut parts = Vec::new();
         for (part, _) in self.raw_text_bearing_part_names() {
-            // Body program ranges are offsets into `document.to_xml()`. A
-            // flush keeps the stored part when the typed model still compares
-            // equal, and that part is shorter than the canonical serialization
-            // for a document opened from bytes.
-            let xml = if part == self.doc_part_name {
-                self.document.to_xml()?
+            let source = if part == self.doc_part_name {
+                Arc::new(context.document_source(&self.document)?)
             } else {
-                let Some(xml) = self.package.get_part(&part) else {
+                let Some(bytes) = self.package.get_part_shared(&part) else {
                     continue;
                 };
-                xml.to_vec()
+                context.take_related_source(&part, bytes)?.ok_or_else(|| {
+                    Error::Other(format!(
+                        "template part has no retained producer source: {part}"
+                    ))
+                })?
             };
-            parts.push((part, xml));
+            parts.push((part, source));
         }
         Ok(parts)
+    }
+
+    pub(crate) fn template_retain_raw_source(
+        &self,
+        part: &str,
+        source: rdocx_oxml::document::ScopedWordSource,
+        sources: &mut TemplateMainSources,
+    ) -> Result<()> {
+        if part != self.doc_part_name {
+            let bytes = self
+                .package
+                .get_part_shared(part)
+                .ok_or_else(|| Error::Other("template source part disappeared".into()))?;
+            if bytes.as_slice() != source.as_bytes() {
+                return Err(Error::Other(
+                    "template source part changed before retention".into(),
+                ));
+            }
+            sources
+                .related
+                .insert(part.to_owned(), (Arc::clone(bytes), Arc::new(source)));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn template_publish_scalar_source<'frozen>(
+        &mut self,
+        part: &str,
+        original: &[u8],
+        source: rdocx_oxml::document::ScopedWordSource,
+        operation: &mut rdocx_oxml::document::ScopedWordOperation<'frozen>,
+        lineage: &crate::template::TemplateWordLineage<'frozen>,
+        sources: &mut TemplateMainSources,
+    ) -> Result<()> {
+        // The caller supplies the actual output of the selected part producer.
+        // Equality here checks its publication precondition, not input origin.
+        let mut context = TemplateMainWriter {
+            operation,
+            lineage,
+            sources,
+        };
+        let matches = if part == self.doc_part_name {
+            context.document_source(&self.document)?.as_bytes() == original
+        } else {
+            self.package.get_part(part) == Some(original)
+        };
+        if !matches {
+            return Err(Error::Other(format!(
+                "template chart source changed during staging: {part}"
+            )));
+        }
+        let retained = context.operation.repeat_source(&source)?;
+        let xml = context.operation.finish_source(retained)?;
+        set_story_source_xml_in(self, part, xml, Some((&mut context, source)))
     }
 
     pub(crate) fn template_chart_parts(&self) -> Vec<(String, Vec<u8>)> {
@@ -46084,27 +48778,39 @@ impl Document {
 
         // Typed model: body content, then headers and footers.
         for (placeholder, replacement) in pairs {
-            count += self.replace_in_body(placeholder, replacement);
+            count += self.replace_in_body(placeholder, replacement)?;
         }
         count += self.replace_in_headers_footers(pairs)?;
 
-        // Raw XML: text boxes, shapes and charts live in markup the typed model
+        // Raw XML: text boxes and shapes live in markup the typed model
         // does not cover, so flush first and work on the serialised parts.
         self.flush_to_package()?;
-        count += self.replace_in_xml_parts(pairs);
+        count += self.replace_in_xml_parts(pairs)?;
 
         Ok(count)
     }
 
     /// Run the typed replacement over every body paragraph, those of tables
     /// and content controls at every level included.
-    fn replace_in_body(&mut self, placeholder: &str, replacement: &str) -> usize {
+    fn replace_in_body(&mut self, placeholder: &str, replacement: &str) -> Result<usize> {
+        let mut failure = None;
         let mut count = 0;
         visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
-            count +=
-                rdocx_oxml::placeholder::replace_in_paragraph(paragraph, placeholder, replacement);
+            if failure.is_none() {
+                match rdocx_oxml::placeholder::try_replace_in_paragraph(
+                    paragraph,
+                    placeholder,
+                    replacement,
+                ) {
+                    Ok(found) => count += found,
+                    Err(error) => failure = Some(error),
+                }
+            }
         });
-        count
+        match failure {
+            Some(error) => Err(error.into()),
+            None => Ok(count),
+        }
     }
 
     /// Run the typed replacement over every referenced header and footer part.
@@ -46113,13 +48819,13 @@ impl Document {
 
         let mut count = 0;
         for (rel_id, is_header) in self.header_footer_rel_ids() {
-            let Some(mut hf) = self.load_header_footer(&rel_id, is_header) else {
-                continue;
-            };
+            let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
+                Error::Other(format!("required header/footer {rel_id} cannot be read"))
+            })?;
             let mut part_count = 0;
             for (placeholder, replacement) in pairs {
                 part_count +=
-                    placeholder::replace_in_header_footer(&mut hf, placeholder, replacement);
+                    placeholder::try_replace_in_header_footer(&mut hf, placeholder, replacement)?;
             }
             if part_count > 0 {
                 self.save_header_footer(&rel_id, &hf, is_header)?;
@@ -46270,14 +48976,23 @@ impl Document {
         use rdocx_oxml::placeholder;
         self.flush_to_package()?;
         let mut count = 0;
+        let mut failure = None;
         visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
-            count += placeholder::replace_regex_in_paragraph(paragraph, re, replacement);
+            if failure.is_none() {
+                match placeholder::try_replace_regex_in_paragraph(paragraph, re, replacement) {
+                    Ok(found) => count += found,
+                    Err(error) => failure = Some(error),
+                }
+            }
         });
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
         for (rel_id, is_header) in self.header_footer_rel_ids() {
             let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
                 Error::Other(format!("required header/footer {rel_id} cannot be read"))
             })?;
-            let n = placeholder::replace_regex_in_header_footer(&mut hf, re, replacement);
+            let n = placeholder::try_replace_regex_in_header_footer(&mut hf, re, replacement)?;
             if n > 0 {
                 self.save_header_footer(&rel_id, &hf, is_header)?;
                 count += n;
@@ -46324,16 +49039,25 @@ impl Document {
         let mut count = 0;
 
         // Replace in body paragraphs, tables and content controls
+        let mut failure = None;
         visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
-            count += placeholder::replace_regex_in_paragraph(paragraph, re, replacement);
+            if failure.is_none() {
+                match placeholder::try_replace_regex_in_paragraph(paragraph, re, replacement) {
+                    Ok(found) => count += found,
+                    Err(error) => failure = Some(error),
+                }
+            }
         });
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
 
         // Replace in headers and footers
         for (rel_id, is_header) in self.header_footer_rel_ids() {
-            let Some(mut hf) = self.load_header_footer(&rel_id, is_header) else {
-                continue;
-            };
-            let n = placeholder::replace_regex_in_header_footer(&mut hf, re, replacement);
+            let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
+                Error::Other(format!("required header/footer {rel_id} cannot be read"))
+            })?;
+            let n = placeholder::try_replace_regex_in_header_footer(&mut hf, re, replacement)?;
             if n > 0 {
                 self.save_header_footer(&rel_id, &hf, is_header)?;
                 count += n;
@@ -46344,14 +49068,18 @@ impl Document {
         // reach. `replace_text` has always covered them; do the same here so
         // the two entry points search the same places.
         self.flush_to_package()?;
-        count += self.replace_regex_in_xml_parts(re, replacement);
+        count += self.replace_regex_in_xml_parts(re, replacement)?;
 
         Ok(count)
     }
 
     /// Apply a regex replacement to the text-box content of the raw XML parts,
     /// then to the notes of the footnotes and endnotes parts.
-    fn replace_regex_in_xml_parts(&mut self, re: &regex::Regex, replacement: &str) -> usize {
+    fn replace_regex_in_xml_parts(
+        &mut self,
+        re: &regex::Regex,
+        replacement: &str,
+    ) -> Result<usize> {
         let mut count = 0;
         let mut changed = false;
 
@@ -46361,10 +49089,9 @@ impl Document {
             };
             // A part can change without a count, when a replacement reaches
             // only the uncounted copy of a text box that Word writes twice.
-            if let Ok((new_xml, n)) =
-                rdocx_oxml::placeholder::replace_regex_in_xml_part(&xml, re, replacement)
-                && (n > 0 || new_xml != xml)
-            {
+            let (new_xml, n) =
+                rdocx_oxml::placeholder::replace_regex_in_xml_part(&xml, re, replacement)?;
+            if n > 0 || new_xml != xml {
                 self.package.set_part(&part_name, new_xml);
                 count += n;
                 changed = true;
@@ -46373,17 +49100,14 @@ impl Document {
 
         // Re-parse so the in-memory model reflects the edited markup; otherwise
         // the next flush would write the pre-replacement document back out.
-        if changed
-            && let Some(doc_xml) = self.package.get_part(&self.doc_part_name)
-            && let Ok(doc) = CT_Document::from_xml(doc_xml)
-        {
-            self.document = doc;
+        if changed && let Some(doc_xml) = self.package.get_part(&self.doc_part_name) {
+            self.document = CT_Document::from_xml(doc_xml)?;
         }
 
-        count
+        Ok(count
             + self.rewrite_note_parts(|xml| {
                 rdocx_oxml::placeholder::replace_regex_in_notes_part(xml, re, replacement)
-            })
+            })?)
     }
 
     /// The main document part plus every header and footer part: everywhere
@@ -46438,23 +49162,23 @@ impl Document {
     fn rewrite_note_parts(
         &mut self,
         mut rewrite: impl FnMut(&[u8]) -> rdocx_oxml::error::Result<(Vec<u8>, usize)>,
-    ) -> usize {
+    ) -> Result<usize> {
         let mut count = 0;
         for part_name in self.note_part_names() {
-            let Some(Ok((xml, n))) = self.package.get_part(&part_name).map(&mut rewrite) else {
+            let Some(original) = self.package.get_part(&part_name) else {
                 continue;
             };
+            let (xml, n) = rewrite(original)?;
             if n == 0 {
                 continue;
             }
             if self.footnotes_part_name.as_deref() == Some(part_name.as_str()) {
-                self.footnotes =
-                    rdocx_oxml::footnotes::CT_Footnotes::from_xml(&xml).unwrap_or_default();
+                self.footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(&xml)?;
             }
             self.package.set_part(&part_name, xml);
             count += n;
         }
-        count
+        Ok(count)
     }
 
     fn chart_part_names(&self) -> Vec<String> {
@@ -46518,11 +49242,10 @@ impl Document {
     }
 
     /// Run raw XML replacement on the text boxes of the body, header and footer
-    /// parts, on the chart parts, and on the notes of the footnotes and
-    /// endnotes parts.
+    /// parts, and on the notes of the footnotes and endnotes parts.
     ///
     /// This is called after the typed-model replacement and flush_to_package.
-    fn replace_in_xml_parts(&mut self, pairs: &[(&str, &str)]) -> usize {
+    fn replace_in_xml_parts(&mut self, pairs: &[(&str, &str)]) -> Result<usize> {
         use rdocx_oxml::placeholder::replace_many_in_xml_part;
 
         let mut count = 0;
@@ -46535,9 +49258,8 @@ impl Document {
                 // A part can change without a count, when a replacement
                 // reaches only the uncounted copy of a text box that Word
                 // writes twice.
-                if let Ok((new_xml, n)) = replace_many_in_xml_part(&xml, pairs)
-                    && (n > 0 || new_xml != xml)
-                {
+                let (new_xml, n) = replace_many_in_xml_part(&xml, pairs)?;
+                if n > 0 || new_xml != xml {
                     self.package.set_part(&part_name, new_xml);
                     count += n;
                     changed = true;
@@ -46546,17 +49268,14 @@ impl Document {
         }
 
         // Re-parse document from the (possibly modified) package XML
-        if changed
-            && let Some(doc_xml) = self.package.get_part(&self.doc_part_name)
-            && let Ok(doc) = CT_Document::from_xml(doc_xml)
-        {
-            self.document = doc;
+        if changed && let Some(doc_xml) = self.package.get_part(&self.doc_part_name) {
+            self.document = CT_Document::from_xml(doc_xml)?;
         }
 
-        count
+        Ok(count
             + self.rewrite_note_parts(|xml| {
                 rdocx_oxml::placeholder::replace_many_in_notes_part(xml, pairs)
-            })
+            })?)
     }
 
     // ---- Layout and PDF conversion ----
@@ -50400,6 +53119,312 @@ fn annotate_undrawable_images(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn scoped_document_factory_footnotes_keep_actual_read_and_malformed_fallback() {
+        for mode in 0..4 {
+            let mut original = Document::new();
+            let id = original.add_footnote("A&B");
+            original.add_paragraph("body").add_footnote_ref(id);
+            original.to_bytes().unwrap();
+            let part = original.footnotes_part_name.as_ref().unwrap().clone();
+            if mode > 0 {
+                let xml = match mode {
+                    1 => format!(
+                        r#"<w:footnotes xmlns:w="{WORD_NAMESPACE}"><w:footnote w:id="1"><w:p>"#
+                    ),
+                    2 => format!(r#"<w:footnotes xmlns:w="{WORD_NAMESPACE}"/>"#),
+                    _ => format!(
+                        r#"<w:footnotes xmlns:w="{WORD_NAMESPACE}"><w:footnote w:id="oops"><w:p/></w:footnote></w:footnotes>"#
+                    ),
+                };
+                original.package.set_part(&part, xml.into_bytes());
+            }
+            if mode == 1 {
+                assert!(
+                    Document::from_package(original.package.clone())
+                        .unwrap()
+                        .footnotes
+                        .footnotes
+                        .is_empty()
+                );
+                continue;
+            }
+            let data = serde_json::Value::Null;
+            let mut operation =
+                rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+                    original
+                        .package
+                        .parts
+                        .iter()
+                        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                        .collect(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    &data,
+                )
+                .unwrap();
+            let main_bytes = original.package.get_part(&original.doc_part_name).unwrap();
+            let main = operation
+                .source_part(
+                    &original.doc_part_name,
+                    0..main_bytes.len(),
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+            let note_bytes = original.package.get_part(&part).unwrap();
+            let notes = Arc::new(
+                operation
+                    .source_part(&part, 0..note_bytes.len(), &BTreeMap::new())
+                    .unwrap(),
+            );
+            let related = BTreeMap::from([(part, Arc::clone(&notes))]);
+            let opened = Document::from_opened_package(
+                original.package.clone(),
+                true,
+                Some(ScopedDocumentRead {
+                    operation: &mut operation,
+                    source: &main,
+                    related: Some(&related),
+                }),
+            )
+            .unwrap();
+            let inputs = TemplateFragmentSources {
+                main: Arc::new(main),
+                related,
+            };
+            let mut sources = TemplateMainSources::from_fragment_read(
+                &opened.package,
+                &opened.doc_part_name,
+                &opened.footnotes,
+                inputs,
+            );
+            if mode == 2 {
+                assert!(opened.footnotes.footnotes.is_empty());
+                assert!(!sources.notes_model_read);
+                assert_eq!(sources.read_note_count, 0);
+                assert!(
+                    Document::from_package(original.package.clone())
+                        .unwrap()
+                        .footnotes
+                        .footnotes
+                        .is_empty()
+                );
+                continue;
+            }
+            assert!(sources.notes_model_read);
+            assert_eq!(sources.read_note_count, opened.footnotes.footnotes.len());
+            if mode == 3 {
+                let ordinary = Document::from_package(original.package.clone()).unwrap();
+                assert_eq!(opened.footnotes.footnotes, ordinary.footnotes.footnotes);
+                continue;
+            }
+            let (_, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+            let mut writer = TemplateMainWriter {
+                operation: &mut operation,
+                lineage: &lineage,
+                sources: &mut sources,
+            };
+            let note_index = opened
+                .footnotes
+                .footnotes
+                .iter()
+                .position(|note| note.id == id)
+                .unwrap();
+            let prepared = serialized_note_fragment_in(
+                &opened.footnotes.footnotes[note_index],
+                StoryKind::Footnote,
+                note_index,
+                Some(&notes),
+                &mut writer,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                prepared
+                    .as_bytes()
+                    .windows(7)
+                    .any(|bytes| bytes == b"A&amp;B")
+            );
+            let index = opened
+                .footnotes
+                .footnotes
+                .iter()
+                .position(|note| note.id == id)
+                .unwrap();
+            let emitted = operation
+                .source_model_note_from_read(
+                    &opened.footnotes.footnotes[index],
+                    false,
+                    &notes,
+                    index,
+                )
+                .unwrap();
+            let xml = std::str::from_utf8(emitted.as_bytes()).unwrap();
+            let start = xml.find("<w:p").unwrap();
+            let end = start + xml[start..].find("</w:p>").unwrap() + 6;
+            let paragraph = operation
+                .compose_sources(&[(Some(&emitted), start..end, &[])])
+                .unwrap();
+            let paragraph = operation
+                .close_source_namespaces(
+                    paragraph,
+                    &BTreeMap::from([("w".into(), WORD_NAMESPACE.into())]),
+                )
+                .unwrap();
+            assert_eq!(
+                operation
+                    .template_replaceable_texts(&paragraph)
+                    .unwrap()
+                    .concat(),
+                " A&B"
+            );
+            operation.reserve_template_text_copy(4).unwrap();
+        }
+    }
+
+    #[test]
+    fn scoped_document_factory_consumes_the_known_source_in_the_fresh_main_branch() {
+        let mut original = Document::new();
+        let part = original.doc_part_name.clone();
+        let xml = format!(
+            r#"<q:document xmlns:q="{}" xmlns:x="urn:retained" x:flag="keep"><q:background q:color="ABCDEF"/><q:body><q:p><q:fldSimple q:instr="CUSTOM"><q:r><q:t>cache</q:t></q:r></q:fldSimple></q:p></q:body></q:document>"#,
+            rdocx_oxml::namespace::W_NS
+        );
+        original.package.set_part(&part, xml.as_bytes().to_vec());
+        let ordinary = Document::from_package(original.package.clone()).unwrap();
+        let raw = original.package.get_part(&part).unwrap();
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::with_inputs(
+            vec![(part.as_str(), raw)],
+            Vec::new(),
+        )
+        .unwrap();
+        let source = operation
+            .source_part(&part, 0..raw.len(), &BTreeMap::new())
+            .unwrap();
+        #[cfg(debug_assertions)]
+        let _ = take_reopen_work();
+        let opened = Document::from_opened_package(
+            original.package.clone(),
+            true,
+            Some(ScopedDocumentRead {
+                operation: &mut operation,
+                source: &source,
+                related: None,
+            }),
+        )
+        .unwrap();
+        #[cfg(debug_assertions)]
+        assert_eq!(&take_reopen_work()[..2], &[0, 1]);
+        assert_eq!(
+            opened.document.to_xml().unwrap(),
+            ordinary.document.to_xml().unwrap()
+        );
+        assert_eq!(
+            opened.document.root_attributes,
+            ordinary.document.root_attributes
+        );
+        assert_eq!(
+            opened.document.background_xml,
+            ordinary.document.background_xml
+        );
+        assert_eq!(opened.package.get_part(&part).unwrap(), raw);
+        assert_eq!(source.as_bytes(), raw);
+    }
+
+    #[test]
+    fn scoped_document_factory_rejects_a_foreign_operation_for_a_fresh_model() {
+        let original = Document::new();
+        let raw = original.package.get_part(&original.doc_part_name).unwrap();
+        let mut first = rdocx_oxml::document::ScopedWordOperation::new(raw);
+        let source = first.source(0..raw.len(), &BTreeMap::new()).unwrap();
+        let mut other = rdocx_oxml::document::ScopedWordOperation::new(raw);
+        let error = match Document::from_opened_package(
+            original.package.clone(),
+            true,
+            Some(ScopedDocumentRead {
+                operation: &mut other,
+                source: &source,
+                related: None,
+            }),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign operation must refuse"),
+        };
+        assert!(error.to_string().contains("another scoped operation"));
+        assert_eq!(
+            original.package.get_part(&original.doc_part_name).unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn scoped_document_factory_rejects_a_different_known_main_source() {
+        let original = Document::new();
+        let different = format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:p><w:r><w:t>different</w:t></w:r></w:p></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS
+        );
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::new(different.as_bytes());
+        let source = operation
+            .source(0..different.len(), &BTreeMap::new())
+            .unwrap();
+        #[cfg(debug_assertions)]
+        let _ = take_reopen_work();
+        let error = match Document::from_opened_package(
+            original.package.clone(),
+            true,
+            Some(ScopedDocumentRead {
+                operation: &mut operation,
+                source: &source,
+                related: None,
+            }),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("different main source must refuse"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its produced main part")
+        );
+        #[cfg(debug_assertions)]
+        assert_eq!(&take_reopen_work()[..2], &[0, 0]);
+    }
+
+    #[test]
+    fn scoped_document_factory_preserves_qualified_kept_model_reuse() {
+        let original = Document::new();
+        let opened = Document::from_package(original.package.clone()).unwrap();
+        let kept = opened.parsed.as_deref().unwrap();
+        assert!(kept.main_document.get().is_some());
+        let raw = opened.package.get_part(&opened.doc_part_name).unwrap();
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::new(raw);
+        let source = operation.source(0..raw.len(), &BTreeMap::new()).unwrap();
+        #[cfg(debug_assertions)]
+        let _ = take_reopen_work();
+        let reused = Document::from_package_reusing(
+            opened.package.clone(),
+            true,
+            Some((&opened.identifiers, kept)),
+            None,
+            None,
+            None,
+            Some(ScopedDocumentRead {
+                operation: &mut operation,
+                source: &source,
+                related: None,
+            }),
+        )
+        .unwrap();
+        #[cfg(debug_assertions)]
+        assert_eq!(&take_reopen_work()[..2], &[0, 0]);
+        assert_eq!(reused.document, opened.document);
+        assert_eq!(source.as_bytes(), raw);
+    }
+
+    #[test]
     fn fx281_number_format_diagnostics_follow_successful_paint() {
         for (code, refused) in [
             ("General", false),
@@ -53787,6 +56812,273 @@ mod tests {
             .unwrap()
             .set_text("alpha cell");
         Document::from_bytes(&seed.to_bytes().unwrap()).unwrap()
+    }
+
+    struct NativeLiteralTraceGuard(Option<Vec<(usize, bool, bool)>>);
+
+    impl NativeLiteralTraceGuard {
+        fn begin() -> Self {
+            Self(SCOPED_LITERAL_DELIVERIES.with(|events| events.replace(Some(Vec::new()))))
+        }
+    }
+
+    impl Drop for NativeLiteralTraceGuard {
+        fn drop(&mut self) {
+            SCOPED_LITERAL_DELIVERIES.with(|events| events.replace(self.0.take()));
+        }
+    }
+
+    fn native_literal_paired_seed(cache: &str, fallback_cache: &str) -> Document {
+        let textbox = |text: &str| {
+            format!(
+                "<w:txbxContent><w:p><w:fldSimple w:instr='PAGE'><w:r><w:t>{text}</w:t></w:r></w:fldSimple></w:p></w:txbxContent>"
+            )
+        };
+        let body = format!(
+            "<w:p><w:r><mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' xmlns:wp='http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:wps='http://schemas.microsoft.com/office/word/2010/wordprocessingShape' xmlns:v='urn:schemas-microsoft-com:vml'><mc:Choice Requires='wps'><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx>{}</wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape><v:textbox>{}</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>",
+            textbox(cache),
+            textbox(fallback_cache)
+        );
+        issue407_document(&body, false)
+    }
+
+    #[test]
+    fn native_scoped_literal_shared_event_bounds_paired_cache_expansion() {
+        assert!(SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()));
+        // Public lower-call probes authenticated this exact band: first alias
+        // fits, shared second refuses, per-alias fresh events both fit.
+        let cache = "T ".repeat(14);
+        let seed = native_literal_paired_seed(&cache, &cache);
+        let story = seed
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind == StoryKind::TextBox)
+            .unwrap();
+        let location = seed.story_items(&story).unwrap()[0].location().clone();
+        let literal = "&".repeat(2048);
+        let held_parts = seed.package.parts.clone();
+        let model = seed.document.to_xml().unwrap();
+        let mut borrowed = seed.clone_for_staging();
+        let before = borrowed.package.parts.clone();
+        let result = borrowed.try_replace_text_at(&location, "T", &literal, Some(14));
+        assert!(
+            matches!(
+                result,
+                Err(Error::Oxml(rdocx_oxml::OxmlError::InvalidValue(_)))
+            ),
+            "one real incoming literal cannot be renewed by its paired alias, actual result {result:?}"
+        );
+        assert_eq!(borrowed.package.parts, before);
+        assert_eq!(borrowed.document.to_xml().unwrap(), model);
+        let result =
+            seed.clone_for_staging()
+                .try_replace_text_at_owned(&location, "T", &literal, Some(14));
+        assert!(
+            matches!(
+                result,
+                Err(Error::Oxml(rdocx_oxml::OxmlError::InvalidValue(_)))
+            ),
+            "owned ingress forwards the same event across aliases"
+        );
+        assert_eq!(seed.package.parts, held_parts);
+        assert_eq!(seed.document.to_xml().unwrap(), model);
+        assert!(
+            SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()),
+            "ordinary cfgtest calls must not retain a delivery history"
+        );
+    }
+
+    #[test]
+    fn native_scoped_literal_events_selected_paired_and_distinct_calls() {
+        let trace = NativeLiteralTraceGuard::begin();
+        let seed = native_literal_paired_seed("TOKEN", "TOKEN");
+        let story = seed
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind == StoryKind::TextBox)
+            .unwrap();
+        let location = seed.story_items(&story).unwrap()[0].location().clone();
+        let literal = "x".repeat(65_536);
+        let original = seed.package.parts.clone();
+        SCOPED_LITERAL_DELIVERIES.with(|events| {
+            events
+                .borrow_mut()
+                .as_mut()
+                .expect("focused trace enabled")
+                .clear()
+        });
+        let mut borrowed = seed.clone_for_staging();
+        assert_eq!(
+            borrowed
+                .try_replace_text_at(&location, "TOKEN", &literal, Some(1))
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        let events = SCOPED_LITERAL_DELIVERIES.with(|events| {
+            std::mem::take(events.borrow_mut().as_mut().expect("focused trace enabled"))
+        });
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].1, events[0].2), (false, true));
+        assert_eq!((events[1].1, events[1].2), (true, true));
+        assert_eq!(
+            events[0].0, events[1].0,
+            "one live borrowed Cell reaches both actual calls"
+        );
+        let xml = String::from_utf8(borrowed.serialized_main_part().unwrap().0).unwrap();
+        assert_eq!(xml.matches(&literal).count(), 2);
+        SCOPED_LITERAL_DELIVERIES.with(|events| {
+            events
+                .borrow_mut()
+                .as_mut()
+                .expect("focused trace enabled")
+                .clear()
+        });
+        let (owned, count) = seed
+            .clone_for_staging()
+            .try_replace_text_at_owned(&location, "TOKEN", &literal, Some(1))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(owned.package.parts, borrowed.package.parts);
+        let events = SCOPED_LITERAL_DELIVERIES.with(|events| {
+            std::mem::take(events.borrow_mut().as_mut().expect("focused trace enabled"))
+        });
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            (events[0].1, events[0].2),
+            (false, true),
+            "equal value at a distinct invocation has a fresh real event"
+        );
+        assert_eq!((events[1].1, events[1].2), (true, true));
+        assert_eq!(events[0].0, events[1].0);
+        assert_eq!(seed.package.parts, original);
+        drop(trace);
+        assert!(SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()));
+    }
+
+    #[test]
+    fn native_scoped_literal_native_validation_and_selected_first_order() {
+        let trace = NativeLiteralTraceGuard::begin();
+        let mut seed = owned_transaction_seed();
+        let location = seed.paragraph_story_location(0).unwrap().unwrap();
+        let original = seed.package.parts.clone();
+        for needle in ["alpha", "absent", ""] {
+            #[cfg(debug_assertions)]
+            let _ = Document::take_transaction_work();
+            SCOPED_LITERAL_DELIVERIES.with(|events| {
+                events
+                    .borrow_mut()
+                    .as_mut()
+                    .expect("focused trace enabled")
+                    .clear()
+            });
+            assert!(
+                seed.try_replace_text_at(&location, needle, "\0", Some(0))
+                    .is_err()
+            );
+            assert!(SCOPED_LITERAL_DELIVERIES.with(|events| {
+                events
+                    .borrow()
+                    .as_ref()
+                    .expect("focused trace enabled")
+                    .is_empty()
+            }));
+            #[cfg(debug_assertions)]
+            assert_eq!(
+                Document::take_transaction_work()[0],
+                0,
+                "Native rejects before transaction cloning, including unused input"
+            );
+            let candidate = seed.clone_for_staging();
+            #[cfg(debug_assertions)]
+            let _ = Document::take_transaction_work();
+            assert!(
+                candidate
+                    .try_replace_text_at_owned(&location, needle, "\0", Some(0))
+                    .is_err()
+            );
+            #[cfg(debug_assertions)]
+            assert_eq!(
+                Document::take_transaction_work(),
+                [0; 6],
+                "owned Native rejects before taking package origin"
+            );
+            assert_eq!(seed.package.parts, original);
+        }
+        let mut asymmetric = native_literal_paired_seed("TOKEN", "different");
+        let story = asymmetric
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind == StoryKind::TextBox)
+            .unwrap();
+        let location = asymmetric.story_items(&story).unwrap()[0]
+            .location()
+            .clone();
+        let before = asymmetric.package.parts.clone();
+        SCOPED_LITERAL_DELIVERIES.with(|events| {
+            events
+                .borrow_mut()
+                .as_mut()
+                .expect("focused trace enabled")
+                .clear()
+        });
+        assert!(matches!(
+            asymmetric
+                .try_replace_text_at(&location, "TOKEN", "new", Some(2))
+                .unwrap(),
+            Err(ReplacementCountMismatch {
+                found: 1,
+                expected: 2,
+                ..
+            })
+        ));
+        assert_eq!(
+            SCOPED_LITERAL_DELIVERIES.with(|events| events
+                .borrow()
+                .as_ref()
+                .expect("focused trace enabled")
+                .len()),
+            1,
+            "mismatch precedes asymmetric counterpart work"
+        );
+        SCOPED_LITERAL_DELIVERIES.with(|events| {
+            events
+                .borrow_mut()
+                .as_mut()
+                .expect("focused trace enabled")
+                .clear()
+        });
+        assert_eq!(
+            asymmetric
+                .try_replace_text_at(&location, "absent", "new", Some(0))
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let events = SCOPED_LITERAL_DELIVERIES.with(|events| {
+            std::mem::take(events.borrow_mut().as_mut().expect("focused trace enabled"))
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].1, events[0].2), (false, false));
+        assert_eq!(asymmetric.package.parts, before);
+        drop(trace);
+        assert!(SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()));
+    }
+
+    #[test]
+    fn native_scoped_literal_trace_restores_disabled_state_on_unwind() {
+        assert!(SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()));
+        let outcome = std::panic::catch_unwind(|| {
+            let _trace = NativeLiteralTraceGuard::begin();
+            panic!("controlled literal observation unwind");
+        });
+        assert!(outcome.is_err());
+        assert!(SCOPED_LITERAL_DELIVERIES.with(|events| events.borrow().is_none()));
     }
 
     #[test]
@@ -57469,7 +60761,12 @@ mod tests {
                 let _ = take_staging_work();
                 assert!(
                     document
-                        .remap_authored_nested_story_relationships(&owner, &registered, &remap)
+                        .remap_authored_nested_story_relationships(
+                            &owner,
+                            &registered,
+                            &remap,
+                            None
+                        )
                         .unwrap()
                 );
                 #[cfg(debug_assertions)]
@@ -57477,7 +60774,12 @@ mod tests {
                 let off = CanonicalBlockProofOff::enter();
                 assert!(
                     reference
-                        .remap_authored_nested_story_relationships(&owner, &registered, &remap)
+                        .remap_authored_nested_story_relationships(
+                            &owner,
+                            &registered,
+                            &remap,
+                            None
+                        )
                         .unwrap()
                 );
                 drop(off);
@@ -57592,11 +60894,11 @@ mod tests {
                 let mut reference = document.clone_for_staging();
                 #[cfg(debug_assertions)]
                 let _ = take_staging_work();
-                document.canonicalize_all_drawing_ids().unwrap();
+                document.canonicalize_all_drawing_ids(None).unwrap();
                 #[cfg(debug_assertions)]
                 let work = take_staging_work();
                 let off = CanonicalBlockProofOff::enter();
-                reference.canonicalize_all_drawing_ids().unwrap();
+                reference.canonicalize_all_drawing_ids(None).unwrap();
                 drop(off);
                 assert_eq!(document.package.parts, reference.package.parts);
                 assert_eq!(
@@ -61323,7 +64625,8 @@ mod tests {
         let textbox = format!(
             r#"<w:txbxContent xmlns:w="{WORD_NAMESPACE}"><w:sdt>{first}{phantom}</w:sdt></w:txbxContent>"#
         );
-        let projection = paired_text_box_projection(textbox.as_bytes(), 0..textbox.len()).unwrap();
+        let projection =
+            paired_text_box_projection(textbox.as_bytes(), 0..textbox.len(), None).unwrap();
         assert!(projection.signature.iter().any(|fact| fact == "visible"));
         assert!(
             !projection
@@ -62238,7 +65541,367 @@ mod tests {
     }
 
     #[test]
+    fn fx272_public_page_cache_update_preserves_ancestor_namespace_context() {
+        fn run_case(
+            label: &str,
+            owner: &str,
+            global: Option<&str>,
+            duplicate: bool,
+        ) -> std::result::Result<(), String> {
+            let root = std::path::Path::new(
+                "/private/tmp/rdocx-s96-run-refresh/fx272-writer-context-successor-v1/ancestor-cases",
+            )
+            .join(label);
+            std::fs::create_dir_all(&root).unwrap();
+            let record = |name: &str, bytes: &[u8]| std::fs::write(root.join(name), bytes).unwrap();
+            let mut document = Document::new();
+            document.add_table(1, 1);
+            // Fixture construction only. The measured public subject is reopened
+            // from the completed package before any cache operation.
+            if let Some(namespace) = global {
+                document
+                    .document
+                    .extra_namespaces
+                    .push(("xmlns:x".into(), namespace.into()));
+            }
+            let local = owner != "none";
+            let extra = if local {
+                r#" xmlns:x="urn:producer" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x" x:opaque="table""#
+            } else {
+                ""
+            };
+            let instruction_extra = if local { r#" x:opaque="field""# } else { "" };
+            let field = format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r{instruction_extra}><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            );
+            let paragraph_extra = if owner == "paragraph" { extra } else { "" };
+            let paragraph = format!("<w:p{paragraph_extra}>{field}</w:p>");
+            let paragraphs = if duplicate {
+                paragraph.repeat(2)
+            } else {
+                paragraph
+            };
+            let content = if owner == "control" {
+                format!("<w:sdt{extra}><w:sdtPr/><w:sdtContent>{paragraphs}</w:sdtContent></w:sdt>")
+            } else {
+                paragraphs
+            };
+            let table_extra = if owner == "table" { extra } else { "" };
+            let xml = format!(
+                r#"<w:tbl xmlns:w="{WORD_NAMESPACE}"{table_extra}><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc>{content}</w:tc></w:tr></w:tbl>"#
+            );
+            record("input-table.xml", xml.as_bytes());
+            let table = document
+                .story_item_snapshots()
+                .map_err(|error| format!("setup.snapshot: {error}"))?[0]
+                .location()
+                .clone();
+            document
+                .replace_table_xml(&table, &xml)
+                .map_err(|error| format!("setup.replace: {error}"))?;
+            println!("{label}: setup.replace=OK");
+            let saved = document
+                .to_bytes()
+                .map_err(|error| format!("setup.save: {error}"))?;
+            record("input.docx", &saved);
+            let mut subject =
+                Document::from_bytes(&saved).map_err(|error| format!("setup.reopen: {error}"))?;
+            let text = subject
+                .table(0)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                .paragraph(0)
+                .unwrap()
+                .text();
+            if text != "7" {
+                return Err(format!("setup.cache expected7 actual={text:?}"));
+            }
+            let physical = subject.package.get_part(&subject.doc_part_name).unwrap();
+            record("before-physical-main.xml", physical);
+            record(
+                "before-original-owners.txt",
+                format!("{:#?}", nested_modeled_namespace_owners(physical)).as_bytes(),
+            );
+            let raw_current = subject
+                .document
+                .to_xml()
+                .map_err(|error| format!("setup.raw-current: {error}"))?;
+            record("before-raw-current-main.xml", &raw_current);
+            let (canonical, _, _) = subject
+                .main_part_with_body_spans()
+                .map_err(|error| format!("setup.current: {error}"))?;
+            record("before-current-main.xml", &canonical);
+            let restored = subject
+                .namespace_restored_main_source()
+                .map_err(|error| format!("setup.restored: {error}"))?;
+            record("before-restored-main.xml", &restored);
+            let canonical_text = std::str::from_utf8(&canonical).unwrap();
+            if canonical_text.matches("</w:p>").count() != if duplicate { 2 } else { 1 } {
+                return Err("diagnostic canonical paragraph count changed".into());
+            }
+            let start = canonical_text.find("<w:p").unwrap();
+            let end = canonical_text.find("</w:p>").unwrap() + "</w:p>".len();
+            record("before-canonical-paragraph.xml", &canonical[start..end]);
+            let BodyContent::Table(table) = &subject.document.body.content[0] else {
+                return Err("setup.expected-table".into());
+            };
+            let paragraphs = table.rows[0].cells[0].paragraphs();
+            let paragraph = paragraphs[0];
+            let detached = subject
+                .document
+                .body_item_xml(&BodyContent::Paragraph(Box::new(paragraph.clone())))
+                .map_err(|error| format!("setup.paragraph-clone: {error}"))?;
+            record("before-root-context-paragraph-clone.xml", &detached);
+            println!(
+                "{label}: paragraph-clone-equal={}",
+                canonical.get(start..end) == Some(detached.as_slice())
+            );
+            let (frames, paths) = story_namespace_ancestors_at(&canonical, &[start])
+                .map_err(|error| format!("setup.ancestor-scan: {error}"))?;
+            let ancestors = paths[&start]
+                .iter()
+                .map(|index| frames[*index].as_slice())
+                .collect::<Vec<_>>();
+            if owner == "paragraph"
+                && ancestors
+                    .iter()
+                    .flat_map(|frame| frame.iter())
+                    .any(|(prefix, _)| prefix == "x")
+            {
+                return Err("target P's own x declaration leaked into ancestor arguments".into());
+            }
+            let coordinated = subject
+                .document
+                .body_item_xml_with_ancestor_declarations(
+                    &BodyContent::Paragraph(Box::new(paragraph.clone())),
+                    &ancestors,
+                )
+                .map_err(|error| format!("setup.coordinated-clone: {error}"))?;
+            record("before-coordinated-paragraph-clone.xml", &coordinated);
+            if canonical.get(start..end) != Some(coordinated.as_slice()) {
+                return Err("setup.coordinated-emitter differs".into());
+            }
+            let before = subject
+                .to_bytes()
+                .map_err(|error| format!("setup.baseline-save: {error}"))?;
+            let outcome = subject.update_page_fields();
+            record("update-result.txt", format!("{outcome:?}").as_bytes());
+            println!("{label}: update_page_fields={outcome:?}");
+            match outcome {
+                Err(error) => {
+                    let after = subject
+                        .to_bytes()
+                        .map_err(|error| format!("refusal.save: {error}"))?;
+                    record("refusal-after.docx", &after);
+                    record(
+                        "refusal-unchanged.txt",
+                        format!("{}", before == after).as_bytes(),
+                    );
+                    return Err(format!("update: {error}"));
+                }
+                Ok(count) if count != if duplicate { 2 } else { 1 } => {
+                    return Err(format!("update count actual={count} duplicate={duplicate}"));
+                }
+                Ok(_) => {}
+            }
+            record(
+                "after-raw-current-main.xml",
+                &subject
+                    .document
+                    .to_xml()
+                    .map_err(|error| format!("updated.raw-current: {error}"))?,
+            );
+            let after = subject
+                .to_bytes()
+                .map_err(|error| format!("updated.save: {error}"))?;
+            record("after.docx", &after);
+            let reopened =
+                Document::from_bytes(&after).map_err(|error| format!("updated.reopen: {error}"))?;
+            let text = reopened
+                .table(0)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                .paragraph(0)
+                .unwrap()
+                .text();
+            if text != "1" {
+                return Err(format!("updated.cache expected1 actual={text:?}"));
+            }
+            record(
+                "after-reopened-physical-main.xml",
+                reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+            );
+            if duplicate
+                && reopened
+                    .table(0)
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap()
+                    .paragraph(1)
+                    .unwrap()
+                    .text()
+                    != "1"
+            {
+                return Err("updated second duplicate paragraph cache differs".into());
+            }
+            println!("{label}: save/reopen/cache1=OK");
+            Ok(())
+        }
+        let mut failed = Vec::new();
+        for (label, owner, global, duplicate) in [
+            ("canonical", "none", None, false),
+            ("table-local", "table", None, false),
+            ("document-global", "table", Some("urn:producer"), false),
+            ("conflicting-global", "table", Some("urn:conflict"), false),
+            ("control-local", "control", None, false),
+            ("paragraph-own", "paragraph", None, false),
+            ("duplicate-paragraphs", "table", None, true),
+        ] {
+            let result = run_case(label, owner, global, duplicate);
+            std::fs::write(format!("/private/tmp/rdocx-s96-run-refresh/fx272-writer-context-successor-v1/ancestor-cases/{label}-result.txt"), format!("{result:?}")).unwrap();
+            if let Err(error) = result {
+                failed.push(format!("{label}: {error}"));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "public ancestor diagnostic failures: {failed:#?}"
+        );
+    }
+
+    #[test]
     fn fx211_note_and_field_profiles_reuse_existing_qualified_providers() {
+        fx211_public_page_rows();
+        fx211_note_dependency_profile();
+        fx211_typed_field_payload_profiles();
+        fx211_rendered_field_profile();
+        fx211_related_story_profiles();
+        fx211_opaque_shadow_profile();
+        fx211_retained_import_profile();
+    }
+
+    fn fx211_public_page_rows() {
+        let describe = |document: &Document| {
+            let physical = document.package.get_part(&document.doc_part_name).unwrap();
+            let virtual_main = document.main_part_with_body_spans().map(|(xml, _, _)| xml);
+            let mut diagnostic = format!(
+                "physical_main={}\nvirtual_main={:?}\noriginal_owners={:?}\n",
+                std::str::from_utf8(physical).unwrap(),
+                virtual_main
+                    .as_ref()
+                    .map(|xml| std::str::from_utf8(xml).unwrap()),
+                nested_modeled_namespace_owners(physical)
+            );
+            if let Ok(xml) = &virtual_main {
+                diagnostic.push_str(&format!("candidate_spans={:?}\n", modeled_owner_spans(xml)));
+                if let (Ok(owners), Ok(spans)) = (
+                    nested_modeled_namespace_owners(physical),
+                    modeled_owner_spans(xml),
+                ) {
+                    for owner in &owners {
+                        for span in spans
+                            .iter()
+                            .filter(|span| span.local_name == owner.local_name)
+                        {
+                            let candidate = &xml[span.start..span.end];
+                            let snapshot = logical_owner_snapshot(
+                                candidate,
+                                &span.bindings,
+                                &owner.declarations,
+                            );
+                            let markers = candidate_namespace_owner_markers(
+                                candidate,
+                                &owner.declarations,
+                                &span.bindings,
+                                &owner.markers,
+                            );
+                            let all_markers = namespace_owner_markers(
+                                candidate,
+                                &owner.declarations,
+                                &span.bindings,
+                                true,
+                            );
+                            diagnostic.push_str(&format!("owner={} candidate_xml={}\nlogical_snapshot={snapshot:?}\nall_markers={all_markers:?}\nmatched_markers={markers:?}\nmarker_raw_match={:?} marker_namespace_match={:?}\n", owner.local_name, std::str::from_utf8(candidate).unwrap(), markers.as_ref().map(|markers| marker_multiset_matches(&owner.markers,markers,false)), markers.as_ref().map(|markers| marker_multiset_matches(&owner.markers,markers,true))));
+                        }
+                    }
+                }
+            }
+            diagnostic.push_str(&format!(
+                "snapshot={:?}\n",
+                document
+                    .story_item_snapshots()
+                    .and_then(|items| document.story_range_paragraph_snapshot(items[0].location()))
+                    .map(|item| std::str::from_utf8(item.xml()).unwrap().to_owned())
+            ));
+            diagnostic
+        };
+        // Independent public-route diagnostic: every prefix gets its own fresh
+        // saved input, and no earlier private cache failure hides a later case.
+        let mut public_failures = Vec::new();
+        for opaque in [false, true] {
+            for prefix in ["w", "q", "default"] {
+                let retained_opaque = if opaque {
+                    r#"<x:payload x:key='keep'><x:child/></x:payload>"#
+                } else {
+                    ""
+                };
+                let mut document = Document::new();
+                document.add_paragraph("before");
+                let location = document.story_item_snapshots().unwrap()[0]
+                    .location()
+                    .clone();
+                let xml = format!(
+                    r#"<w:p xmlns:w="{WORD_NAMESPACE}" xmlns:x="urn:producer" xmlns:mc="{MC_NS}" mc:Ignorable="x"><w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>{retained_opaque}</w:p>"#
+                );
+                let xml = match prefix {
+                    "q" => xml.replace("w:", "q:").replace("xmlns:w", "xmlns:q"),
+                    "default" => xml.replace("<w:", "<").replace("</w:", "</").replacen(
+                        "<p ",
+                        &format!(r#"<p xmlns="{WORD_NAMESPACE}" "#),
+                        1,
+                    ),
+                    _ => xml,
+                };
+                document
+                    .replace_paragraph_xml(&location, &xml)
+                    .unwrap_or_else(|error| panic!("public PAGE prefix={prefix} setup: {error}"));
+                let mut current = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+                assert_eq!(current.paragraph(0).unwrap().text(), "7");
+                eprintln!(
+                    "PUBLIC_PAGE opaque={opaque} prefix={prefix} BEFORE\n{}",
+                    describe(&current)
+                );
+                let update = current.update_page_fields();
+                eprintln!(
+                    "PUBLIC_PAGE opaque={opaque} prefix={prefix} UPDATE={update:?} AFTER_UPDATE\n{}",
+                    describe(&current)
+                );
+                let saved = current.to_bytes();
+                eprintln!(
+                    "PUBLIC_PAGE opaque={opaque} prefix={prefix} SAVE={:?} AFTER_SAVE\n{}",
+                    saved.as_ref().map(|bytes| bytes.len()),
+                    describe(&current)
+                );
+                let observed = saved
+                    .and_then(|bytes| Document::from_bytes(&bytes))
+                    .map(|document| document.paragraph(0).unwrap().text());
+                eprintln!("PUBLIC_PAGE opaque={opaque} prefix={prefix} REOPENED={observed:?}");
+                if !matches!(&update, Ok(1)) || !matches!(observed.as_deref(), Ok("1")) {
+                    public_failures.push(format!(
+                        "opaque={opaque} prefix={prefix} update={update:?} reopened={observed:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            public_failures.is_empty(),
+            "public PAGE diagnostic failures: {public_failures:?}"
+        );
+    }
+
+    fn fx211_note_dependency_profile() {
         let mut document = Document::new();
         document.add_paragraph("before");
         let id = document.add_footnote("note owner");
@@ -62264,6 +65927,543 @@ mod tests {
         assert_eq!(twice.paragraph(0).unwrap().text(), "7");
     }
 
+    fn fx211_typed_field_payload_profiles() {
+        let inner = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>MERGEFIELD name</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Ada</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        for (label, payload) in [
+            ("simple", r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>"#.to_owned()),
+            ("foreign-lookalike", r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple><x:fldSimple x:instr="PAGE &quot;unclosed"><x:payload/></x:fldSimple>"#.to_owned()),
+            ("nested-result", r#"<w:fldSimple w:instr="PRODUCER"><w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple></w:fldSimple>"#.to_owned()),
+            ("nested-operand", format!(r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF </w:instrText></w:r>{inner}<w:r><w:instrText> = &quot;Ada&quot; &quot;yes&quot; &quot;no&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#)),
+            ("nested-switch", format!(r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PRODUCER \q </w:instrText></w:r>{inner}<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#)),
+        ] {
+            for prefix in ["w", "q", "default"] {
+                let mut document = Document::new();
+                document.add_paragraph("before");
+                let location = document.story_item_snapshots().unwrap()[0].location().clone();
+                let xml = format!(r#"<w:p xmlns:w="{WORD_NAMESPACE}" xmlns:x="urn:producer" xmlns:mc="{MC_NS}" mc:Ignorable="x">{payload}</w:p>"#);
+                let xml = match prefix {
+                    "q" => xml.replace("w:", "q:").replace("xmlns:w", "xmlns:q"),
+                    "default" => xml.replace("<w:", "<").replace("</w:", "</").replacen("<p ", &format!(r#"<p xmlns="{WORD_NAMESPACE}" "#), 1),
+                    _ => xml,
+                };
+                document.replace_paragraph_xml(&location, &xml).unwrap_or_else(|error| panic!("{label} prefix={prefix}: {error}"));
+                assert_eq!(document.paragraph(0).unwrap().text(), "7", "{label} prefix={prefix} immediate");
+                let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+                assert_eq!(reopened.paragraph(0).unwrap().text(), "7", "{label} prefix={prefix}");
+                let source_location = reopened.story_item_snapshots().unwrap()[0].location().clone();
+                let current = reopened.story_range_paragraph_snapshot(&source_location).unwrap().xml().to_vec();
+                let mut source_owner = CT_P::from_xml_fragment_checked(&current).unwrap_or_else(|error| {
+                    let (virtual_main, _, _) = reopened.main_part_with_body_spans().unwrap();
+                    let physical_main = reopened.package.get_part(&reopened.doc_part_name).unwrap();
+                    panic!("qualified-source diagnostic label={label} prefix={prefix} error={error}\ninput={}\nsnapshot={}\nvirtual_main={}\nphysical_main={}\nimmediate_cache={:?} reopened_cache={:?}", xml, std::str::from_utf8(&current).unwrap(), std::str::from_utf8(&virtual_main).unwrap(), std::str::from_utf8(physical_main).unwrap(), document.paragraph(0).unwrap().text(), reopened.paragraph(0).unwrap().text());
+                });
+                let source_fields = source_owner.runs.iter().flat_map(|run| &run.content).filter_map(|content| match content { RunContent::Field(field) => Some(field), _ => None }).collect::<Vec<_>>();
+                assert_eq!(source_fields.len(), 1, "qualified source {label} prefix={prefix}");
+                assert_eq!(source_fields[0].cached_result, "7", "qualified source {label} prefix={prefix}");
+                // Arbitrary checked cache publication is detached. Patch its
+                // OUTER source pair into this same captured qualified owner,
+                // then use the real public fresh-owner transaction.
+                let fields = source_owner.runs.iter_mut().flat_map(|run| &mut run.content).filter_map(|content| match content { RunContent::Field(field) => Some(field), _ => None }).collect::<Vec<_>>();
+                assert_eq!(fields.len(), 1, "{label} prefix={prefix} field count");
+                let field = fields.into_iter().next().unwrap();
+                assert_eq!(field.cached_result, "7");
+                let instruction = field.effective_instruction_text();
+                assert_eq!(instruction, if label == "nested-operand" { "IF  = \"Ada\" \"yes\" \"no\"" } else if label == "nested-switch" { "PRODUCER \\q" } else if label == "nested-result" { "PRODUCER" } else { "PAGE" });
+                if label == "nested-result" {
+                    field.cached_field_mut(0).unwrap().set_cached_runs(vec![CT_R::new("8")]).unwrap();
+                } else {
+                    field.set_cached_runs(vec![CT_R::new("8")]).unwrap();
+                }
+                let owner_id = field.source_owner_id();
+                let (original, replacement) = field.source_replacement().unwrap().unwrap();
+                let offset = crate::field::find_typed_field_source(&current, 0, current.len(), original, 0).unwrap().unwrap();
+                let mut edited = current.clone();
+                edited.splice(offset..offset + original.len(), replacement);
+                assert_eq!(owner_id, field.source_owner_id());
+                assert_eq!(reopened.paragraph(0).unwrap().text(), "7", "detached edit must not mutate attached model");
+                reopened.replace_paragraph_xml(&source_location, std::str::from_utf8(&edited).unwrap()).unwrap_or_else(|error|panic!("public cache8 label={label} prefix={prefix}: {error}"));
+                let updated = reopened.to_bytes().unwrap();
+                let updated = Document::from_bytes(&updated).unwrap();
+                assert_eq!(updated.paragraph(0).unwrap().text(), "8", "typed cache {label} prefix={prefix}");
+                if label == "foreign-lookalike" {
+                    assert!(String::from_utf8_lossy(&current).contains(r#"<x:fldSimple x:instr="PAGE &quot;unclosed"><x:payload/></x:fldSimple>"#));
+                }
+            }
+        }
+    }
+
+    fn fx211_rendered_field_profile() {
+        let mut rendered = Document::new();
+        rendered.add_paragraph("before");
+        let location = rendered.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        rendered.replace_paragraph_xml(&location, &format!(r#"<q:p xmlns:q="{WORD_NAMESPACE}"><q:fldSimple q:instr="PRODUCER"><q:r><q:t>7</q:t></q:r></q:fldSimple></q:p>"#)).unwrap();
+        let BodyContent::Paragraph(paragraph) = &rendered.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("field")
+        };
+        let owner = field.source_owner_id();
+        let pair = field.source_replacement().unwrap().unwrap();
+        let original = pair.0.to_vec();
+        assert_eq!(pair.0, pair.1);
+        let svg = rendered
+            .render_page_to_svg_deterministic(0)
+            .unwrap()
+            .unwrap();
+        assert!(
+            svg.svg.contains(">7</text>"),
+            "retained custom field must render stored7"
+        );
+        let BodyContent::Paragraph(paragraph) = &rendered.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("field")
+        };
+        assert_eq!(owner, field.source_owner_id());
+        let pair = field.source_replacement().unwrap().unwrap();
+        assert_eq!(pair.0, original);
+        assert_eq!(pair.0, pair.1);
+    }
+
+    fn fx211_related_story_profiles() {
+        // Table/cell and related/control publishers retain the ancestor scope.
+        for prefix in ["q", "default"] {
+            let qualify = |xml: String| {
+                if prefix == "q" {
+                    xml.replace("w:", "q:").replace("xmlns:w", "xmlns:q")
+                } else {
+                    xml.replace("<w:", "<").replace("</w:", "</").replacen(
+                        " ",
+                        &format!(r#" xmlns="{WORD_NAMESPACE}" "#),
+                        1,
+                    )
+                }
+            };
+            let field = r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+            for cell_only in [false, true] {
+                let mut document = Document::new();
+                document.add_table(1, 1);
+                let table = document.story_item_snapshots().unwrap()[0]
+                    .location()
+                    .clone();
+                if cell_only {
+                    let xml = qualify(format!(
+                        r#"<w:tc xmlns:w="{WORD_NAMESPACE}"><w:p>{field}</w:p></w:tc>"#
+                    ));
+                    document.replace_cell_xml(&table, 0, 0, &xml).unwrap();
+                } else {
+                    let xml = qualify(format!(
+                        r#"<w:tbl xmlns:w="{WORD_NAMESPACE}"><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p>{field}</w:p></w:tc></w:tr></w:tbl>"#
+                    ));
+                    document.replace_table_xml(&table, &xml).unwrap();
+                }
+                let saved = document.to_bytes().unwrap();
+                let mut reopened = Document::from_bytes(&saved).unwrap();
+                assert_eq!(
+                    reopened
+                        .table(0)
+                        .unwrap()
+                        .cell(0, 0)
+                        .unwrap()
+                        .paragraph(0)
+                        .unwrap()
+                        .text(),
+                    "7",
+                    "{prefix} cell_only={cell_only}"
+                );
+                let paragraph = reopened.cell_paragraph_story_location(0, 0, 0, 0).unwrap();
+                let xml = qualify(format!(r#"<w:p xmlns:w="{WORD_NAMESPACE}">{field}</w:p>"#));
+                reopened.replace_paragraph_xml(&paragraph, &xml).unwrap();
+                assert_eq!(
+                    reopened
+                        .story_range_paragraph_snapshot(
+                            &reopened.cell_paragraph_story_location(0, 0, 0, 0).unwrap()
+                        )
+                        .unwrap()
+                        .text(),
+                    Some("7")
+                );
+            }
+            // Footer discriminator: the related-story reader must resolve a
+            // qualified inline SDT field in a footer exactly as it does in a
+            // header, with the same saved and reopened text.
+            let mut document = Document::new();
+            document.add_paragraph("body");
+            document.set_footer("footer");
+            let location = document
+                .story_item_snapshots()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.location().story().kind() == StoryKind::Footer)
+                .unwrap()
+                .location()
+                .clone();
+            let xml = qualify(format!(
+                r#"<w:p xmlns:w="{WORD_NAMESPACE}"><w:sdt><w:sdtPr/><w:sdtContent>{field}</w:sdtContent></w:sdt></w:p>"#
+            ));
+            document.replace_paragraph_xml(&location, &xml).unwrap();
+            assert_eq!(
+                document
+                    .story_range_paragraph_snapshot(
+                        &document
+                            .story_item_snapshots()
+                            .unwrap()
+                            .into_iter()
+                            .find(|item| item.location().story().kind() == StoryKind::Footer)
+                            .unwrap()
+                            .location()
+                            .clone()
+                    )
+                    .unwrap()
+                    .text(),
+                Some("7"),
+                "{prefix} footer snapshot"
+            );
+            let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened
+                    .story_item_snapshots()
+                    .unwrap()
+                    .into_iter()
+                    .find(|item| item.location().story().kind() == StoryKind::Footer)
+                    .unwrap()
+                    .text(),
+                Some("7"),
+                "{prefix} footer reopened"
+            );
+            let mut document = Document::new();
+            document.add_paragraph("body");
+            document.set_header("header");
+            let location = document
+                .story_item_snapshots()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.location().story().kind() == StoryKind::Header)
+                .unwrap()
+                .location()
+                .clone();
+            let xml = qualify(format!(
+                r#"<w:p xmlns:w="{WORD_NAMESPACE}"><w:sdt><w:sdtPr/><w:sdtContent>{field}</w:sdtContent></w:sdt></w:p>"#
+            ));
+            document.replace_paragraph_xml(&location, &xml).unwrap();
+            assert_eq!(
+                document
+                    .story_range_paragraph_snapshot(
+                        &document
+                            .story_item_snapshots()
+                            .unwrap()
+                            .into_iter()
+                            .find(|item| item.location().story().kind() == StoryKind::Header)
+                            .unwrap()
+                            .location()
+                            .clone()
+                    )
+                    .unwrap()
+                    .text(),
+                Some("7")
+            );
+            let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened
+                    .story_item_snapshots()
+                    .unwrap()
+                    .into_iter()
+                    .find(|item| item.location().story().kind() == StoryKind::Header)
+                    .unwrap()
+                    .text(),
+                Some("7")
+            );
+        }
+    }
+
+    fn fx211_opaque_shadow_profile() {
+        // A qualified Word owner can bind w to foreign XML locally. Unknown
+        // elements, attribute values and sibling shadowing remain source bytes.
+        let opaque = r#"<x:payload xmlns:x="urn:outer" xmlns="urn:default" x:key='q:name'><x:item xmlns:x="urn:inner"/></x:payload>"#;
+        let xml = format!(
+            r#"<q:p xmlns:q="{WORD_NAMESPACE}" xmlns:w="urn:foreign" xmlns:x="urn:outer" xmlns:mc="{MC_NS}" mc:Ignorable="w x"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple><w:fldSimple w:instr="PAGE &quot;unclosed"/>{opaque}</q:p>"#
+        );
+        let mut shadowed = Document::new();
+        shadowed.add_paragraph("before");
+        let location = shadowed.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        shadowed.replace_paragraph_xml(&location, &xml).unwrap();
+        assert_eq!(shadowed.paragraph(0).unwrap().text(), "7");
+        let source = shadowed.story_item_snapshots().unwrap()[0].xml().to_vec();
+        assert!(String::from_utf8_lossy(&source).contains(opaque));
+        let reopened = Document::from_bytes(&shadowed.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.paragraph(0).unwrap().text(), "7");
+        let unqualified = format!(
+            r#"<p xmlns="{WORD_NAMESPACE}"><fldSimple instr="PAGE"><r><t>not a field</t></r></fldSimple></p>"#
+        );
+        let parsed = CT_P::from_xml_fragment_checked(unqualified.as_bytes()).unwrap();
+        assert!(
+            !parsed
+                .runs
+                .iter()
+                .flat_map(|run| &run.content)
+                .any(|content| matches!(content, RunContent::Field(_)))
+        );
+    }
+
+    fn fx211_retained_import_profile() {
+        // The retained imported program remains readable and an exact owner
+        // replacement is a no-op. A changed whole fragment has no such authority.
+        let raw = format!(
+            r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:fldSimple w:instr="PAGE &quot;unclosed"><w:r><w:t>stored</w:t></w:r></w:fldSimple><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>old</w:t></w:r></w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        let mut seed = Document::new();
+        seed.package.set_part(&seed.doc_part_name, raw.into_bytes());
+        let mut bytes = Cursor::new(Vec::new());
+        seed.package.write_to(&mut bytes).unwrap();
+        let mut imported = Document::from_bytes(bytes.get_ref()).unwrap();
+        let location = imported.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let snapshot = imported.story_range_paragraph_snapshot(&location).unwrap();
+        let original = std::str::from_utf8(snapshot.xml()).unwrap().to_owned();
+        let before = imported.to_bytes().unwrap();
+        imported
+            .replace_paragraph_xml(&location, &original)
+            .unwrap();
+        assert_eq!(imported.to_bytes().unwrap(), before);
+        assert!(
+            imported
+                .replace_paragraph_xml(&location, &original.replace(">old<", ">new<"))
+                .is_err()
+        );
+        assert_eq!(imported.to_bytes().unwrap(), before);
+        assert_eq!(
+            imported
+                .story_range_paragraph_snapshot(&location)
+                .unwrap()
+                .xml(),
+            snapshot.xml()
+        );
+        assert!(
+            imported
+                .story_range_paragraph_snapshot(&location)
+                .unwrap()
+                .text()
+                .unwrap()
+                .contains("stored")
+        );
+    }
+
+    #[test]
+    fn fx211_default_word_foreign_w_alias_declaration_is_valid() {
+        let mut failures = Vec::new();
+        for (label, xml, alias, has_field) in [
+            (
+                "default-before-q",
+                format!(
+                    r#"<p xmlns="{WORD_NAMESPACE}" xmlns:q="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep" xmlns:mc="{MC_NS}" mc:Ignorable="w"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></p>"#
+                ),
+                "q",
+                true,
+            ),
+            (
+                "q-before-default",
+                format!(
+                    r#"<p xmlns:q="{WORD_NAMESPACE}" xmlns="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep" xmlns:mc="{MC_NS}" mc:Ignorable="w"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></p>"#
+                ),
+                "q",
+                true,
+            ),
+            (
+                "nonempty-alias",
+                format!(
+                    r#"<q:p xmlns:q="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep" xmlns:mc="{MC_NS}" mc:Ignorable="w"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></q:p>"#
+                ),
+                "q",
+                true,
+            ),
+            (
+                "default-and-nonempty",
+                format!(
+                    r#"<p xmlns="{WORD_NAMESPACE}" xmlns:q="{WORD_NAMESPACE}" xmlns:z="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep" xmlns:mc="{MC_NS}" mc:Ignorable="w"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></p>"#
+                ),
+                "q",
+                true,
+            ),
+            (
+                "default-only-fallback",
+                format!(
+                    r#"<p xmlns="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep"><r><t>7</t></r></p>"#
+                ),
+                "rdocxW",
+                false,
+            ),
+        ] {
+            let mut document = Document::new();
+            document.add_paragraph("before");
+            let location = document.story_item_snapshots().unwrap()[0]
+                .location()
+                .clone();
+            document
+                .replace_paragraph_xml(&location, &xml)
+                .unwrap_or_else(|error| panic!("{label} replace: {error}"));
+            assert_eq!(
+                document.paragraph(0).unwrap().text(),
+                "7",
+                "{label} immediate"
+            );
+            let saved = document.to_bytes().unwrap();
+            let reopened = Document::from_bytes(&saved)
+                .unwrap_or_else(|error| panic!("{label} reopen: {error}"));
+            assert_eq!(
+                reopened.paragraph(0).unwrap().text(),
+                "7",
+                "{label} reopened"
+            );
+            let source = reopened.story_item_snapshots().unwrap()[0].xml().to_vec();
+            let source_text = String::from_utf8_lossy(&source);
+            assert!(
+                source_text.contains(&format!(r#"xmlns:{alias}="{WORD_NAMESPACE}""#)),
+                "{label} selected Word alias {alias}: {source_text}"
+            );
+            assert!(
+                source_text.contains(&format!("<{alias}:p")),
+                "{label} expanded paragraph name: {source_text}"
+            );
+            if has_field {
+                assert!(
+                    source_text.contains(&format!("<{alias}:fldSimple")),
+                    "{label} expanded field name: {source_text}"
+                );
+            }
+            if alias == "rdocxW" {
+                assert!(
+                    source_text.contains("<rdocxW:p"),
+                    "{label} fallback paragraph name: {source_text}"
+                );
+                assert!(
+                    source_text.contains("<w:t>7</w:t>"),
+                    "{label} run establishes canonical Word at its own leaf: {source_text}"
+                );
+                assert!(
+                    source_text.contains(&format!(r#"xmlns:w="{WORD_NAMESPACE}""#)),
+                    "{label} run local Word declaration: {source_text}"
+                );
+            } else {
+                assert!(
+                    source_text.contains(&format!("<{alias}:t>7</{alias}:t>")),
+                    "{label} expanded result text: {source_text}"
+                );
+            }
+            assert!(
+                source_text.contains(r#"w:flag="keep""#),
+                "{label} producer attribute: {source_text}"
+            );
+            if alias != "rdocxW" {
+                assert!(
+                    !source_text.contains("rdocxW:"),
+                    "{label} must not use the fallback alias: {source_text}"
+                );
+            }
+            if source_text.contains("xmlns:=") {
+                failures.push(format!("{label} source invalid xmlns:"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "invalid namespace declarations: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn fx211_public_foreign_w_serialization_stays_publication() {
+        // A simple opaque producer attribute, not MC prefix-valued metadata,
+        // so the old public-success path is exercised rather than the refusal.
+        let xml = format!(
+            r#"<q:p xmlns:q="{WORD_NAMESPACE}" xmlns:w="urn:producer" w:flag="keep"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></q:p>"#
+        );
+        let mut document = Document::new();
+        document.add_paragraph("before");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        document
+            .replace_paragraph_xml(&location, &xml)
+            .unwrap_or_else(|error| panic!("replace: {error}"));
+        assert_eq!(document.paragraph(0).unwrap().text(), "7");
+
+        // The facade canonical source keeps the fresh authored root-local
+        // foreign `w` binding and its opaque producer attribute in Source role.
+        let canonical = document.main_part_with_body_spans().unwrap().0;
+        let canonical_text = String::from_utf8_lossy(&canonical).into_owned();
+        assert!(
+            canonical_text.contains(r#"xmlns:w="urn:producer""#),
+            "canonical source must keep the foreign w binding: {canonical_text}"
+        );
+        assert!(
+            canonical_text.contains(r#"w:flag="keep""#),
+            "canonical source must keep the opaque producer attribute: {canonical_text}"
+        );
+
+        // The ordinary public writer remains Publication: the generated owner
+        // uses canonical `w`, the foreign binding becomes a bounded producer
+        // prefix and the opaque attribute follows it. Reentrant calls are
+        // stable and install no Source intent in the model.
+        let publication = document.document.to_xml().unwrap();
+        let publication_text = String::from_utf8_lossy(&publication).into_owned();
+        assert!(
+            !publication_text.contains(r#"xmlns:w="urn:producer""#),
+            "publication must not keep a foreign w binding: {publication_text}"
+        );
+        assert!(
+            publication_text.contains(r#"xmlns:rdocxProducer="urn:producer""#),
+            "publication must retain the producer namespace: {publication_text}"
+        );
+        assert!(
+            publication_text.contains(r#"rdocxProducer:flag="keep""#),
+            "publication must retain the opaque producer attribute: {publication_text}"
+        );
+        assert!(
+            publication_text.contains("PAGE"),
+            "publication must retain the field instruction: {publication_text}"
+        );
+        assert!(
+            CT_Document::from_xml(&publication).is_ok(),
+            "publication must remain valid XML: {publication_text}"
+        );
+        let again = document.document.to_xml().unwrap();
+        assert_eq!(again, publication, "public serialization must be stable");
+        assert_eq!(
+            document.main_part_with_body_spans().unwrap().0,
+            canonical,
+            "canonical source must be stable across public serialization"
+        );
+
+        // Save and reopen keeps both contracts distinct.
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let reopened_publication = reopened.document.to_xml().unwrap();
+        let reopened_publication_text = String::from_utf8_lossy(&reopened_publication).into_owned();
+        assert!(
+            reopened_publication_text.contains(r#"rdocxProducer:flag="keep""#),
+            "reopened publication producer attribute: {reopened_publication_text}"
+        );
+        assert!(
+            !reopened_publication_text.contains(r#"xmlns:w="urn:producer""#),
+            "reopened publication must not keep a foreign w binding: {reopened_publication_text}"
+        );
+        let reopened_canonical = reopened.main_part_with_body_spans().unwrap().0;
+        let reopened_canonical_text = String::from_utf8_lossy(&reopened_canonical).into_owned();
+        assert!(
+            reopened_canonical_text.contains(r#"xmlns:w="urn:producer""#),
+            "reopened canonical source binding: {reopened_canonical_text}"
+        );
+        assert!(
+            reopened_canonical_text.contains(r#"w:flag="keep""#),
+            "reopened canonical source producer attribute: {reopened_canonical_text}"
+        );
+    }
+
     #[test]
     fn fx211_note_field_and_section_profiles_refuse_atomically() {
         let mut failures = Vec::new();
@@ -62271,6 +66471,11 @@ mod tests {
             r#"<w:r><w:footnoteReference w:id="99"/></w:r>"#,
             r#"<w:r><w:endnoteReference w:id="99"/></w:r>"#,
             r#"<w:fldSimple w:instr="REF &quot;unclosed"><w:r><w:t>cache</w:t></w:r></w:fldSimple>"#,
+            r#"<w:fldSimple w:instr="PAGE &quot;unclosed"><w:r><w:t>cache</w:t></w:r></w:fldSimple>"#,
+            r#"<w:fldSimple w:instr="&quot;PAGE&quot;"><w:r><w:t>cache</w:t></w:r></w:fldSimple>"#,
+            r#"<w:fldSimple w:instr="PAGE \bad-token"><w:r><w:t>cache</w:t></w:r></w:fldSimple>"#,
+            r#"<w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr="PAGE &quot;unclosed"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt>"#,
+            r#"<w:fldSimple w:instr="PRODUCER"><w:fldSimple w:instr="REF &quot;unclosed"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:fldSimple>"#,
         ] {
             let mut document = Document::new();
             document.add_paragraph("retained");
@@ -62301,6 +66506,68 @@ mod tests {
             assert_eq!(document.to_bytes().unwrap(), before);
         }
         assert!(failures.is_empty(), "{failures:?}");
+
+        let bad = r#"<w:fldSimple w:instr="PAGE &quot;unclosed"><w:r><w:t>cache</w:t></w:r></w:fldSimple>"#;
+        for cell_only in [false, true] {
+            let mut document = Document::new();
+            document.add_table(1, 1);
+            let table = document
+                .story_item_snapshots()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.location().item_kind() == StoryItemKind::Table)
+                .unwrap()
+                .location()
+                .clone();
+            let before = document.to_bytes().unwrap();
+            let result = if cell_only {
+                document.replace_cell_xml(
+                    &table,
+                    0,
+                    0,
+                    &format!(r#"<w:tc xmlns:w="{WORD_NAMESPACE}"><w:p>{bad}</w:p></w:tc>"#),
+                )
+            } else {
+                document.replace_table_xml(&table, &format!(r#"<w:tbl xmlns:w="{WORD_NAMESPACE}"><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p>{bad}</w:p></w:tc></w:tr></w:tbl>"#))
+            };
+            assert!(
+                result.is_err(),
+                "fresh malformed field cell_only={cell_only}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+            assert_eq!(
+                document.story_item_snapshots().unwrap()[0].location(),
+                &table
+            );
+        }
+        let mut related = Document::new();
+        related.add_paragraph("body");
+        related.set_header("header");
+        let header = related
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.location().story().kind() == StoryKind::Header)
+            .unwrap()
+            .location()
+            .clone();
+        let before = related.to_bytes().unwrap();
+        assert!(
+            related
+                .replace_paragraph_xml(
+                    &header,
+                    &format!(r#"<w:p xmlns:w="{WORD_NAMESPACE}">{bad}</w:p>"#)
+                )
+                .is_err()
+        );
+        assert_eq!(related.to_bytes().unwrap(), before);
+        assert_eq!(
+            related
+                .story_range_paragraph_snapshot(&header)
+                .unwrap()
+                .text(),
+            Some("header")
+        );
     }
 
     #[test]
@@ -63212,6 +67479,79 @@ mod tests {
         document.replace_run_xml(&position, &xml).unwrap();
         let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
         assert_eq!(reopened.paragraph(0).unwrap().text(), "firstchanged");
+
+        // A fresh RUN does not reauthor its retained malformed field sibling.
+        for default in [false, true] {
+            let field = r#"<q:fldSimple q:instr="PAGE &quot;unclosed" xmlns:x="urn:field" x:key="keep"><q:r><q:t>stored</q:t></q:r></q:fldSimple>"#;
+            let paragraph = format!(
+                r#"<q:p xmlns:q="{WORD_NAMESPACE}">{field}<q:r><q:t>old</q:t></q:r></q:p>"#
+            );
+            let paragraph = if default {
+                paragraph
+                    .replace("<q:", "<")
+                    .replace("</q:", "</")
+                    .replacen("<p ", &format!(r#"<p xmlns="{WORD_NAMESPACE}" "#), 1)
+            } else {
+                paragraph
+            };
+            let raw = format!(
+                r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>{paragraph}<w:sectPr/></w:body></w:document>"#
+            );
+            let mut seed = Document::new();
+            seed.package.set_part(&seed.doc_part_name, raw.into_bytes());
+            let mut bytes = Cursor::new(Vec::new());
+            seed.package.write_to(&mut bytes).unwrap();
+            let mut imported = Document::from_bytes(bytes.get_ref()).unwrap();
+            let position = StoryRunPosition {
+                location: imported.story_item_snapshots().unwrap()[0]
+                    .location()
+                    .clone(),
+                run_index: 1,
+            };
+            let before = imported.to_bytes().unwrap();
+            let malformed = format!(
+                r#"<w:r xmlns:w="{WORD_NAMESPACE}"><w:footnoteReference w:id="99"/></w:r>"#
+            );
+            assert!(imported.replace_run_xml(&position, &malformed).is_err());
+            assert_eq!(imported.to_bytes().unwrap(), before);
+            let opaque = r#"<x:payload x:key="x:local"/>"#;
+            let replacement = format!(
+                r#"<w:r xmlns:w="{WORD_NAMESPACE}" xmlns:x="urn:run" xmlns:mc="{MC_NS}" mc:Ignorable="x"><w:t>new</w:t>{opaque}</w:r>"#
+            );
+            imported.replace_run_xml(&position, &replacement).unwrap();
+            assert_eq!(
+                imported.paragraph(0).unwrap().text(),
+                "storednew",
+                "default={default}"
+            );
+            let source = imported.story_item_snapshots().unwrap()[0].xml().to_vec();
+            let source = String::from_utf8_lossy(&source);
+            assert!(
+                source.contains("fldSimple"),
+                "retained physical field root default={default}: {source}"
+            );
+            assert!(
+                source.contains("PAGE &quot;unclosed"),
+                "retained field instruction default={default}: {source}"
+            );
+            assert!(
+                source.contains(">stored<"),
+                "retained field result default={default}: {source}"
+            );
+            assert!(
+                source.contains(r#"xmlns:x="urn:field""#),
+                "retained field producer namespace default={default}: {source}"
+            );
+            assert!(
+                source.contains(r#"x:key="keep""#),
+                "retained field producer attribute default={default}: {source}"
+            );
+            assert!(source.contains(opaque));
+            assert!(source.contains(r#"xmlns:x="urn:run""#));
+            assert!(source.contains(r#"xmlns:x="urn:field""#));
+            let reopened = Document::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+            assert_eq!(reopened.paragraph(0).unwrap().text(), "storednew");
+        }
     }
 
     use super::*;
@@ -64665,7 +69005,7 @@ mod tests {
         assert!(
             document
                 .clone_for_staging()
-                .prepare_current_field_models()
+                .prepare_current_field_models(None)
                 .unwrap(),
             "fixture must actually take normalizing assign-back"
         );
@@ -64673,7 +69013,7 @@ mod tests {
         assert!(
             !document
                 .clone_for_staging()
-                .prepare_current_field_models()
+                .prepare_current_field_models(None)
                 .unwrap(),
             "actual normalized model assigned back"
         );
@@ -64707,7 +69047,7 @@ mod tests {
         assert!(
             document
                 .clone_for_staging()
-                .prepare_current_field_models()
+                .prepare_current_field_models(None)
                 .unwrap(),
             "save must also normalize an actual ordered owner"
         );
@@ -64720,7 +69060,7 @@ mod tests {
         assert!(
             !document
                 .clone_for_staging()
-                .prepare_current_field_models()
+                .prepare_current_field_models(None)
                 .unwrap()
         );
         assert_eq!(
@@ -64916,8 +69256,8 @@ mod tests {
         );
 
         let mut staged = document.clone_for_staging();
-        staged.canonicalize_typed_identifiers().unwrap();
-        staged.canonicalize_drawing_ids().unwrap();
+        staged.canonicalize_typed_identifiers(None).unwrap();
+        staged.canonicalize_drawing_ids(None).unwrap();
         let numeric = staged
             .package
             .get_part_rels("/word/document.xml")
@@ -64944,8 +69284,8 @@ mod tests {
             .unwrap();
         assert!(authored.contains(&numeric));
         assert!(!authored.contains(&provisional));
-        staged.canonicalize_typed_identifiers().unwrap();
-        staged.canonicalize_drawing_ids().unwrap();
+        staged.canonicalize_typed_identifiers(None).unwrap();
+        staged.canonicalize_drawing_ids(None).unwrap();
         assert_eq!(
             staged
                 .package
@@ -70655,6 +74995,84 @@ mod tests {
     }
 
     #[test]
+    fn versioned_template_unsaved_numbering_keeps_selected_start_semantics() {
+        for repeated in [false, true] {
+            let mut document = Document::new();
+            let definition = document
+                .add_numbering_definition(&[ListLevel::decimal()])
+                .unwrap();
+            let unused = document.add_numbering_instance(definition, &[]).unwrap();
+            let selected = document
+                .add_numbering_instance(definition, &[NumberingLevelOverride::new(0).start(7)])
+                .unwrap();
+            if repeated {
+                document.add_paragraph("{% for item in items %}");
+            }
+            document.add_paragraph(if repeated { "{{item}}" } else { "{{name}}" });
+            let index = usize::from(repeated);
+            document
+                .paragraph_mut(index)
+                .unwrap()
+                .set_numbering(selected, 0);
+            if repeated {
+                document.add_paragraph("{% endfor %}");
+            }
+            assert_eq!(
+                document
+                    .numbering_instance(selected)
+                    .unwrap()
+                    .level_overrides[0]
+                    .start,
+                Some(7)
+            );
+            assert_eq!(document.numbering_level(unused, 0).unwrap().start, 1);
+            let count = document
+                .render_template_with_formatter(
+                    &serde_json::json!({"name":"Ada", "items":["Ada","Bob"]}),
+                    &mut |_, _| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(count, if repeated { 2 } else { 1 });
+            for index in 0..count {
+                let (actual, level) = document.paragraph(index).unwrap().numbering().unwrap();
+                assert_eq!(
+                    actual, selected,
+                    "the same-document selected counter handle survives"
+                );
+                assert_eq!(
+                    document
+                        .numbering_instance(actual)
+                        .unwrap()
+                        .level_overrides
+                        .iter()
+                        .find(|item| item.level == level)
+                        .and_then(|item| item.start),
+                    Some(7)
+                );
+            }
+            let bytes = document.to_bytes().unwrap();
+            let reopened = Document::from_bytes(&bytes).unwrap();
+            for index in 0..count {
+                assert_eq!(
+                    document.paragraph(index).unwrap().numbering(),
+                    Some((selected, 0))
+                );
+                let (actual, level) = reopened.paragraph(index).unwrap().numbering().unwrap();
+                assert_eq!(
+                    reopened
+                        .numbering_instance(actual)
+                        .unwrap()
+                        .level_overrides
+                        .iter()
+                        .find(|item| item.level == level)
+                        .and_then(|item| item.start),
+                    Some(7)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn versioned_template_unsaved_numbering_retains_original_callback_location() {
         let mut document = Document::new();
         let definition = document
@@ -71304,7 +75722,7 @@ mod tests {
                     .join("")
             })
             .collect::<Vec<_>>();
-        assert_eq!(texts, ["NOTE ROOT-2", "NOTE ROOT-3", "NOTE ROOT-4"]);
+        assert_eq!(texts, [" NOTE ROOT-2", " NOTE ROOT-3", " NOTE ROOT-4"]);
     }
 
     #[test]
@@ -71335,7 +75753,7 @@ mod tests {
                     .into_iter()
                     .filter_map(|item| item.text().unwrap())
                     .collect::<String>(),
-                "NOTE ROOT"
+                " NOTE ROOT"
             );
         }
         let (mut literal, note) = source("LITERAL {{{{root}}}}");
@@ -71364,7 +75782,7 @@ mod tests {
                     .into_iter()
                     .filter_map(|item| item.text().unwrap())
                     .collect::<String>(),
-                "LITERAL {{root}}"
+                " LITERAL {{root}}"
             );
         }
         let (mut late, _) = source("NOTE {{root}}");
@@ -77800,7 +82218,7 @@ mod tests {
             assert!(!admitted, "{label} admitted a nonempty pending hold");
             let mut full = document.clone_for_staging();
             full.parsed = None;
-            let full_result = full.canonicalize_all_drawing_ids();
+            let full_result = full.canonicalize_all_drawing_ids(None);
             let cache_result = match document.unchanged_main_part() {
                 Some(kept_part) => {
                     let unchanged = kept_part
@@ -77808,9 +82226,9 @@ mod tests {
                         .get()
                         .and_then(Option::as_ref)
                         .expect("checked unchanged main part");
-                    document.canonicalize_beside_unchanged_main_part(unchanged)
+                    document.canonicalize_beside_unchanged_main_part(unchanged, None)
                 }
-                None => document.canonicalize_all_drawing_ids(),
+                None => document.canonicalize_all_drawing_ids(None),
             };
             assert_eq!(
                 cache_result
@@ -84048,4 +88466,1490 @@ fn fx283_flush_certificate_classifies_newly_serialized_namespace_owners() {
             .is_none(),
         "the pre-flush source had no nested owners, but the published source does"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_initial_writer_namespace_replay_keeps_exact_no_target_copies() {
+    let xml = b"\xef\xbb\xbf \nnot parsed when there are no owners";
+    let actual = replay_nested_namespace_declarations_in(xml, &[], None, None).unwrap();
+    assert_eq!(actual, xml);
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_namespace_target_replay_uses_actual_writer_source_and_copy_ledger() {
+    for known_field in [false, true] {
+        let word = rdocx_oxml::namespace::W_NS;
+        let namespace = "http://schemas.microsoft.com/office/word/2012/wordml";
+        let field = if known_field {
+            r#"<w:p><w:fldSimple w:instr="CUSTOM"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p>"#
+        } else {
+            ""
+        };
+        let original = format!(
+            r#"<w:document xmlns:w="{word}"><w:body><w:sdt xmlns:w15="{namespace}"><w:sdtPr><w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w15:repeatingSectionItem/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>A&amp;B</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>{field}</w:body></w:document>"#
+        );
+        let owners = nested_modeled_namespace_owners(original.as_bytes()).unwrap();
+        assert!(!owners.is_empty());
+        let canonical = original
+            .replacen(&format!(r#" xmlns:w15="{namespace}""#), "", 1)
+            .replacen(
+                "<w:document ",
+                &format!(r#"<w:document xmlns:w15="{namespace}" "#),
+                1,
+            );
+        let expected = replay_nested_namespace_declarations(canonical.as_bytes(), &owners).unwrap();
+        assert_ne!(
+            expected,
+            canonical.as_bytes(),
+            "actual target must change namespace output"
+        );
+        let document = Document::new();
+        let (_, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&document);
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::new(canonical.as_bytes());
+        let source = operation
+            .compose_sources(&[(None, 0..0, canonical.as_bytes())])
+            .unwrap();
+        if known_field {
+            operation.source_document(&source).unwrap();
+        }
+        let mut sources = TemplateMainSources {
+            source: Some(Arc::new(source)),
+            ..Default::default()
+        };
+        let mut context = TemplateMainWriter {
+            operation: &mut operation,
+            lineage: &lineage,
+            sources: &mut sources,
+        };
+        let actual = replay_nested_namespace_declarations_in(
+            canonical.as_bytes(),
+            &owners,
+            None,
+            Some(&mut context),
+        );
+        if known_field {
+            assert!(
+                actual.is_err(),
+                "generated known Field has no original copy allowance"
+            );
+            assert!(
+                context.operation.compose_sources(&[]).is_err(),
+                "copy refusal stays sticky"
+            );
+        } else {
+            let actual = actual.unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(context.sources.source.as_ref().unwrap().as_bytes(), actual);
+            let repeated = context
+                .operation
+                .repeat_source(context.sources.source.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(repeated.as_bytes(), actual);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_namespace_replay_preserves_real_text_events_across_entities() {
+    for value in ["A&amp;B", "plain"] {
+        let word = rdocx_oxml::namespace::W_NS;
+        let namespace = "http://schemas.microsoft.com/office/word/2012/wordml";
+        let original = format!(
+            r#"<w:document xmlns:w="{word}"><w:body><w:sdt xmlns:w15="{namespace}"><w:sdtPr><w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w15:repeatingSectionItem/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:sdtContent></w:sdt><w:p><w:r><w:t>{value}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let owners = nested_modeled_namespace_owners(original.as_bytes()).unwrap();
+        let canonical = original
+            .replacen(&format!(r#" xmlns:w15="{namespace}""#), "", 1)
+            .replacen(
+                "<w:document ",
+                &format!(r#"<w:document xmlns:w15="{namespace}" "#),
+                1,
+            );
+        let frozen = CT_Document::from_xml(canonical.as_bytes()).unwrap();
+        let current = frozen.clone();
+        fn text(document: &CT_Document) -> &rdocx_oxml::text::CT_Text {
+            match document.body.content.last().unwrap() {
+                BodyContent::Paragraph(paragraph) => match &paragraph.runs[0].content[0] {
+                    RunContent::Text(text) => text,
+                    _ => panic!("actual Text slot"),
+                },
+                _ => panic!("actual paragraph slot"),
+            }
+        }
+        let data = serde_json::Value::Null;
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+            Vec::new(),
+            Vec::new(),
+            vec![&frozen.body],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &data,
+        )
+        .unwrap();
+        let source = operation
+            .source_model_document(&current, &[(text(&current), text(&frozen))], &[], &[])
+            .unwrap();
+        let expected = replay_nested_namespace_declarations(source.as_bytes(), &owners).unwrap();
+        assert_ne!(source.as_bytes(), expected);
+        let input = source.as_bytes().to_vec();
+        let document = Document::new();
+        let (_, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&document);
+        let mut sources = TemplateMainSources {
+            source: Some(Arc::new(source)),
+            ..Default::default()
+        };
+        let mut context = TemplateMainWriter {
+            operation: &mut operation,
+            lineage: &lineage,
+            sources: &mut sources,
+        };
+        let actual =
+            replay_nested_namespace_declarations_in(&input, &owners, None, Some(&mut context))
+                .unwrap();
+        assert_eq!(actual, expected);
+        let source = context.sources.source.as_ref().unwrap();
+        let xml = std::str::from_utf8(source.as_bytes()).unwrap();
+        let begin = xml.rfind("<w:p>").unwrap();
+        let end = begin + xml[begin..].find("</w:p>").unwrap() + "</w:p>".len();
+        let selected = context
+            .operation
+            .compose_sources(&[(Some(source), begin..end, &[])])
+            .unwrap();
+        let selected = context
+            .operation
+            .close_source_namespaces(
+                selected,
+                &std::collections::BTreeMap::from([("w".into(), word.into())]),
+            )
+            .unwrap();
+        let buffers = context
+            .operation
+            .template_replaceable_texts(&selected)
+            .unwrap();
+        assert_eq!(
+            buffers,
+            vec![if value == "plain" { "plain" } else { "A&B" }]
+        );
+        context
+            .operation
+            .reserve_template_text_copy(buffers[0].len())
+            .unwrap();
+        let copied = buffers[0].clone();
+        assert_eq!(copied, buffers[0]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_actual_toc_reparse_forwards_reader_facts_into_next_main_writer() {
+    let mut original = Document::new();
+    let xml = format!(
+        r#"<w:document xmlns:w="{}"><w:body><w:p><w:bookmarkStart w:id="5" w:name="_TocNative"/><w:r><w:t>A&amp;B</w:t></w:r><w:bookmarkEnd w:id="5"/></w:p></w:body></w:document>"#,
+        rdocx_oxml::namespace::W_NS
+    );
+    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    let (mut current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+    current.identifiers.bookmark_ids.extend([5, 50]);
+    current.identifiers.authored_toc_bookmark_ids.insert(5);
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        Vec::new(),
+        Vec::new(),
+        vec![&original.document.body],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &data,
+    )
+    .unwrap();
+    let mut sources = TemplateMainSources::default();
+    let mut context = TemplateMainWriter {
+        operation: &mut operation,
+        lineage: &lineage,
+        sources: &mut sources,
+    };
+    current
+        .canonicalize_typed_identifiers(Some(&mut context))
+        .unwrap();
+    assert!(context.sources.reader_source.is_some());
+    assert!(!context.sources.model_lineage_valid);
+    let xml = String::from_utf8(current.document.to_xml().unwrap()).unwrap();
+    assert!(xml.contains("w:id=\"51\""));
+    let (bytes, _) = current.serialized_main_part_in(Some(&mut context)).unwrap();
+    let source = context.sources.source.as_ref().unwrap();
+    assert_eq!(bytes, source.as_bytes());
+    let xml = std::str::from_utf8(source.as_bytes()).unwrap();
+    let start = xml.find("<w:p>").unwrap();
+    let end = start + xml[start..].find("</w:p>").unwrap() + 6;
+    let paragraph = context
+        .operation
+        .compose_sources(&[(Some(source), start..end, &[])])
+        .unwrap();
+    let paragraph = context
+        .operation
+        .close_source_namespaces(
+            paragraph,
+            &std::collections::BTreeMap::from([("w".into(), rdocx_oxml::namespace::W_NS.into())]),
+        )
+        .unwrap();
+    let text = context
+        .operation
+        .template_replaceable_texts(&paragraph)
+        .unwrap();
+    context
+        .operation
+        .reserve_template_text_copy(text[0].len())
+        .unwrap();
+    assert_eq!(text, ["A&B"]);
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_note_drawing_emission_matches_actual_namespace_preparation() {
+    for anchored in [false, true] {
+        let drawing = if anchored {
+            rdocx_oxml::drawing::CT_Drawing {
+                inline: None,
+                anchor: Some(rdocx_oxml::drawing::CT_Anchor::background(
+                    "rIdImage", 100, 200,
+                )),
+            }
+        } else {
+            rdocx_oxml::drawing::CT_Drawing {
+                inline: Some(rdocx_oxml::drawing::CT_Inline::new("rIdImage", 100, 200)),
+                anchor: None,
+            }
+        };
+        let mut paragraph = CT_P::new();
+        paragraph.runs.push(CT_R {
+            properties: None,
+            content: vec![
+                RunContent::Text(rdocx_oxml::text::CT_Text {
+                    text: "A&B".into(),
+                    preserve_space: false,
+                }),
+                RunContent::Drawing(drawing),
+            ],
+            extra_xml: Vec::new(),
+            extra_xml_positions: Vec::new(),
+            alt_drawings: Vec::new(),
+        });
+        let frozen = rdocx_oxml::footnotes::CT_Footnotes {
+            footnotes: vec![rdocx_oxml::footnotes::CT_Footnote {
+                id: 2,
+                note_type: rdocx_oxml::footnotes::NoteType::Normal,
+                paragraphs: vec![paragraph],
+            }],
+        };
+        let current = frozen.clone();
+        let RunContent::Text(frozen_text) = &frozen.footnotes[0].paragraphs[0].runs[0].content[0]
+        else {
+            unreachable!()
+        };
+        let RunContent::Text(current_text) = &current.footnotes[0].paragraphs[0].runs[0].content[0]
+        else {
+            unreachable!()
+        };
+        for endnotes in [false, true] {
+            let data = serde_json::Value::Null;
+            let mut operation =
+                rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+                    Vec::new(),
+                    vec![&frozen.footnotes[0].paragraphs[0]],
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    &data,
+                )
+                .unwrap();
+            let mut expected = current.clone();
+            for note in &mut expected.footnotes {
+                for paragraph in &mut note.paragraphs {
+                    close_typed_story_drawing_namespaces(paragraph).unwrap();
+                }
+            }
+            let expected = if endnotes {
+                expected.to_xml_endnotes()
+            } else {
+                expected.to_xml_footnotes()
+            }
+            .unwrap();
+            let source = operation
+                .source_model_notes(
+                    &current,
+                    endnotes,
+                    &[(current_text, frozen_text)],
+                    &[],
+                    &[],
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                source.as_bytes(),
+                expected,
+                "same actual namespace preparation bytes"
+            );
+            let notes = operation.source_notes(&source).unwrap();
+            let output = operation
+                .source_model_notes_from_read(&notes, endnotes, &source)
+                .unwrap();
+            assert_eq!(output.as_bytes(), expected);
+            let xml = std::str::from_utf8(output.as_bytes()).unwrap();
+            let start = xml.find("<w:p>").unwrap();
+            let end = start + xml[start..].find("</w:p>").unwrap() + 6;
+            let paragraph = operation
+                .compose_sources(&[(Some(&output), start..end, &[])])
+                .unwrap();
+            let paragraph = operation
+                .close_source_namespaces(
+                    paragraph,
+                    &BTreeMap::from([("w".into(), WORD_NAMESPACE.into())]),
+                )
+                .unwrap();
+            let text = operation.template_replaceable_texts(&paragraph).unwrap();
+            operation.reserve_template_text_copy(3).unwrap();
+            assert_eq!(text, ["A&B"]);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_selected_note_append_preserves_actual_legacy_drawing_policy() {
+    for anchored in [false, true] {
+        for (kind, root, item) in [
+            (StoryKind::Footnote, "footnotes", "footnote"),
+            (StoryKind::Endnote, "endnotes", "endnote"),
+        ] {
+            let drawing = if anchored {
+                rdocx_oxml::drawing::CT_Drawing {
+                    inline: None,
+                    anchor: Some(rdocx_oxml::drawing::CT_Anchor::background(
+                        "rIdImage", 100, 200,
+                    )),
+                }
+            } else {
+                rdocx_oxml::drawing::CT_Drawing {
+                    inline: Some(rdocx_oxml::drawing::CT_Inline::new("rIdImage", 100, 200)),
+                    anchor: None,
+                }
+            };
+            let old = format!(
+                r#"<w:{root} xmlns:w="{}" xmlns:wp="{}"><w:{item} w:id="1"><w:p><w:r><w:t>preceding</w:t></w:r></w:p></w:{item}></w:{root}>"#,
+                WORD_NAMESPACE,
+                drawing_ns::WP
+            );
+            let part = format!("/word/{root}.xml");
+            let mut original = Document::new();
+            original.package.set_part(&part, old.as_bytes().to_vec());
+            original.footnotes =
+                rdocx_oxml::footnotes::CT_Footnotes::from_xml(old.as_bytes()).unwrap();
+            let mut paragraph = CT_P::new();
+            paragraph.runs.push(CT_R {
+                properties: None,
+                content: vec![
+                    RunContent::Text(rdocx_oxml::text::CT_Text {
+                        text: "A&B".into(),
+                        preserve_space: false,
+                    }),
+                    RunContent::Drawing(drawing),
+                ],
+                extra_xml: Vec::new(),
+                extra_xml_positions: Vec::new(),
+                alt_drawings: Vec::new(),
+            });
+            original
+                .footnotes
+                .footnotes
+                .push(rdocx_oxml::footnotes::CT_Footnote {
+                    id: 2,
+                    note_type: rdocx_oxml::footnotes::NoteType::Normal,
+                    paragraphs: vec![paragraph],
+                });
+            let data = serde_json::Value::Null;
+            let mut operation =
+                rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+                    original
+                        .package
+                        .parts
+                        .iter()
+                        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                        .collect(),
+                    original
+                        .footnotes
+                        .footnotes
+                        .iter()
+                        .flat_map(|note| note.paragraphs.iter())
+                        .collect(),
+                    vec![&original.document.body],
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    &data,
+                )
+                .unwrap();
+            let (current, lineage) =
+                crate::template::TemplateWordLineage::clone_for_staging(&original);
+            let mut sources = TemplateMainSources::default();
+            let mut context = TemplateMainWriter {
+                operation: &mut operation,
+                lineage: &lineage,
+                sources: &mut sources,
+            };
+            let note = &current.footnotes.footnotes[1];
+            let expected_fragment = serialized_note_fragment(note, kind).unwrap();
+            let fragment = serialized_note_fragment_in(note, kind, 1, None, &mut context)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                fragment.as_bytes(),
+                expected_fragment,
+                "selected producer does not pre-close fresh drawings"
+            );
+            let parent = context
+                .operation
+                .source_part(&part, 0..old.len(), &Default::default())
+                .unwrap();
+            let actual = append_story_sources_to_root(
+                context.operation,
+                parent,
+                &[Arc::new(fragment)],
+                root.as_bytes(),
+                item.as_bytes(),
+            )
+            .unwrap();
+            let expected = append_story_fragments_to_root(
+                old.as_bytes(),
+                root.as_bytes(),
+                item.as_bytes(),
+                &[expected_fragment],
+            )
+            .unwrap();
+            assert_eq!(actual.as_bytes(), expected);
+            let xml = std::str::from_utf8(actual.as_bytes()).unwrap();
+            assert_eq!(
+                xml.matches("xmlns:wp=").count(),
+                1,
+                "only the existing parent binding remains"
+            );
+            let notes = context.operation.source_notes(&actual).unwrap();
+            assert_eq!(notes.footnotes[1].paragraphs[0].accepted_text(), "A&B");
+            let single = context
+                .operation
+                .source_model_note_from_read(
+                    &notes.footnotes[1],
+                    kind == StoryKind::Endnote,
+                    &actual,
+                    1,
+                )
+                .unwrap();
+            let xml = std::str::from_utf8(single.as_bytes()).unwrap();
+            let begin = xml.find("<w:p>").unwrap();
+            let end = begin + xml[begin..].find("</w:p>").unwrap() + 6;
+            let paragraph = context
+                .operation
+                .compose_sources(&[(Some(&single), begin..end, &[])])
+                .unwrap();
+            let paragraph = context
+                .operation
+                .close_source_namespaces(
+                    paragraph,
+                    &BTreeMap::from([("w".into(), WORD_NAMESPACE.into())]),
+                )
+                .unwrap();
+            let text = context
+                .operation
+                .template_replaceable_texts(&paragraph)
+                .unwrap();
+            context.operation.reserve_template_text_copy(3).unwrap();
+            assert_eq!(text, ["A&B"]);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_cached_reader_uses_actual_factory_before_returned_model_write() {
+    let mut seed = Document::new();
+    seed.add_paragraph("A&B");
+    let (xml, mut blocks) =
+        MainPartBlocks::serialize(&seed.document, &seed.document.body.content, None).unwrap();
+    blocks.part = Some(Arc::new(xml.clone()));
+    assert!(
+        blocks.proved_document(&xml).is_some(),
+        "warm an actually qualified old child cache"
+    );
+    let part = seed.doc_part_name.clone();
+    seed.package.set_part(&part, xml);
+    let bytes = seed.package.get_part(&part).unwrap();
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_inputs(
+        vec![(part.as_str(), bytes)],
+        Vec::new(),
+    )
+    .unwrap();
+    let source = operation
+        .source_part(&part, 0..bytes.len(), &BTreeMap::new())
+        .unwrap();
+    let rebuilt = Document::from_package_reusing(
+        seed.package.clone(),
+        false,
+        None,
+        Some(&blocks),
+        None,
+        None,
+        Some(ScopedDocumentRead {
+            operation: &mut operation,
+            source: &source,
+            related: None,
+        }),
+    )
+    .unwrap();
+    let emitted = operation
+        .source_model_document_from_read(&rebuilt.document, &source)
+        .unwrap();
+    assert!(
+        std::str::from_utf8(emitted.as_bytes())
+            .unwrap()
+            .contains("A&amp;B")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_drawing_reparse_keeps_text_for_actual_next_writer() {
+    let mut original = Document::new();
+    original.add_paragraph("A&B");
+    let BodyContent::Paragraph(paragraph) = &mut original.document.body.content[0] else {
+        unreachable!()
+    };
+    let mut drawing = rdocx_oxml::drawing::CT_Inline::new("rIdImage", 100, 200);
+    drawing.doc_pr_id = 50;
+    paragraph.runs[0]
+        .content
+        .push(RunContent::Drawing(rdocx_oxml::drawing::CT_Drawing {
+            inline: Some(drawing),
+            anchor: None,
+        }));
+    let (mut current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        Vec::new(),
+        Vec::new(),
+        vec![&original.document.body],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &data,
+    )
+    .unwrap();
+    let mut sources = TemplateMainSources::default();
+    let mut context = TemplateMainWriter {
+        operation: &mut operation,
+        lineage: &lineage,
+        sources: &mut sources,
+    };
+    current
+        .canonicalize_all_drawing_ids(Some(&mut context))
+        .unwrap();
+    assert!(
+        context.sources.reader_source.is_some(),
+        "the real changed drawing factory returned a paired model"
+    );
+    let BodyContent::Paragraph(paragraph) = &current.document.body.content[0] else {
+        unreachable!()
+    };
+    assert!(paragraph.runs.iter().flat_map(|run| &run.content).any(|item| matches!(item, RunContent::Drawing(drawing) if drawing.inline.as_ref().is_some_and(|inline| inline.doc_pr_id != 50))));
+    let (bytes, _) = current.serialized_main_part_in(Some(&mut context)).unwrap();
+    let source = context.sources.source.as_ref().unwrap();
+    assert_eq!(source.as_bytes(), bytes);
+    let xml = std::str::from_utf8(source.as_bytes()).unwrap();
+    let start = xml.find("<w:p>").unwrap();
+    let end = start + xml[start..].find("</w:p>").unwrap() + 6;
+    let paragraph = context
+        .operation
+        .compose_sources(&[(Some(source), start..end, &[])])
+        .unwrap();
+    let scope = story_namespace_scope_at(source.as_bytes(), start).unwrap();
+    let paragraph = context
+        .operation
+        .close_source_namespaces(paragraph, &scope)
+        .unwrap();
+    let texts = context
+        .operation
+        .template_replaceable_texts(&paragraph)
+        .unwrap();
+    context
+        .operation
+        .reserve_template_text_copy(texts[0].len())
+        .unwrap();
+    assert_eq!(texts, ["A&B"]);
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_returned_field_preparation_uses_same_operation_before_next_writer() {
+    let xml = format!(
+        r#"<w:document xmlns:w="{}"><w:body><w:p><w:r><w:t>A&amp;B</w:t></w:r><w:fldSimple w:instr="CUSTOM"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p></w:body></w:document>"#,
+        WORD_NAMESPACE
+    );
+    let original = Document::new();
+    let (mut current, mut lineage) =
+        crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::new(xml.as_bytes());
+    let source = operation.source(0..xml.len(), &BTreeMap::new()).unwrap();
+    let mut sources = TemplateMainSources::default();
+    {
+        let context = TemplateMainWriter {
+            operation: &mut operation,
+            lineage: &lineage,
+            sources: &mut sources,
+        };
+        current.document = context
+            .sources
+            .read_document(context.operation, Arc::new(source))
+            .unwrap();
+    }
+    let mut ordinary = current.clone_for_staging();
+    ordinary.prepare_staged_package().unwrap();
+    current
+        .prepare_staged_template_package(&mut operation, &mut lineage, &mut sources)
+        .unwrap();
+    assert_eq!(current.document, ordinary.document);
+    let programs = current
+        .template_programs_scoped(&mut operation, &lineage, &mut sources)
+        .unwrap();
+    let source = programs[0].source.as_ref().unwrap();
+    assert!(
+        std::str::from_utf8(source.as_bytes())
+            .unwrap()
+            .contains("A&amp;B")
+    );
+    let source = sources.source.as_ref().unwrap();
+    let xml = std::str::from_utf8(source.as_bytes()).unwrap();
+    let begin = xml.find("<w:p>").unwrap();
+    let end = begin + xml[begin..].find("</w:p>").unwrap() + 6;
+    let paragraph = operation
+        .compose_sources(&[(Some(source), begin..end, &[])])
+        .unwrap();
+    let scope = story_namespace_scope_at(source.as_bytes(), begin).unwrap();
+    let paragraph = operation
+        .close_source_namespaces(paragraph, &scope)
+        .unwrap();
+    let texts = operation.template_replaceable_texts(&paragraph).unwrap();
+    assert_eq!(texts.concat(), "A&Bcache");
+    operation
+        .reserve_template_text_copy(texts.iter().map(String::len).sum())
+        .unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_retained_story_picture_keeps_actual_package_source_through_canonicalization() {
+    let mut seed = Document::new();
+    seed.add_paragraph("A&B");
+    let mut original = Document::from_bytes(&seed.to_bytes().unwrap()).unwrap();
+    let part = original.doc_part_name.clone();
+    let xml = String::from_utf8(original.package.get_part(&part).unwrap().to_vec())
+        .unwrap()
+        .replace("<w:body>", "<w:body>\n");
+    original.package.set_part(&part, xml.into_bytes());
+    let mut zip = std::io::Cursor::new(Vec::new());
+    original.package.write_to(&mut zip).unwrap();
+    let mut original = Document::from_bytes(zip.get_ref()).unwrap();
+    let story = original
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Body)
+        .unwrap();
+    original
+        .add_picture_to_story(
+            &story,
+            watermark_tests::PNG,
+            "pixel.png",
+            Length::pt(12.0),
+            Length::pt(12.0),
+        )
+        .unwrap();
+    let (mut current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let mut ordinary = original.clone_for_staging();
+    ordinary.canonicalize_all_drawing_ids(None).unwrap();
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        original
+            .package
+            .parts
+            .iter()
+            .map(|(part, bytes)| (part.as_str(), bytes.as_slice()))
+            .collect(),
+        Vec::new(),
+        vec![&original.document.body],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &data,
+    )
+    .unwrap();
+    let mut sources = TemplateMainSources::default();
+    let mut context = TemplateMainWriter {
+        operation: &mut operation,
+        lineage: &lineage,
+        sources: &mut sources,
+    };
+    current
+        .canonicalize_all_drawing_ids(Some(&mut context))
+        .unwrap();
+    assert_eq!(current.package.parts, ordinary.package.parts);
+    assert_eq!(current.document, ordinary.document);
+    let (storage, source) = context
+        .sources
+        .published_main
+        .as_ref()
+        .expect("actual retained main publication handback");
+    assert!(Arc::ptr_eq(
+        storage,
+        current.package.get_part_shared(&part).unwrap()
+    ));
+    let xml = std::str::from_utf8(source.as_bytes()).unwrap();
+    let begin = xml.find("<w:p>").unwrap();
+    let end = begin + xml[begin..].find("</w:p>").unwrap() + 6;
+    let paragraph = context
+        .operation
+        .compose_sources(&[(Some(source.as_ref()), begin..end, &[])])
+        .unwrap();
+    let scope = story_namespace_scope_at(source.as_bytes(), begin).unwrap();
+    let paragraph = context
+        .operation
+        .close_source_namespaces(paragraph, &scope)
+        .unwrap();
+    let text = context
+        .operation
+        .template_replaceable_texts(&paragraph)
+        .unwrap();
+    assert_eq!(text.concat(), "A&B");
+    context
+        .operation
+        .reserve_template_text_copy(text.iter().map(String::len).sum())
+        .unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_glossary_omission_keeps_body_and_recursive_selected_note_sources() {
+    for endnotes in [false, true] {
+        for include_section in [false, true] {
+            let (root, item, relationship, part, content_type) = if endnotes {
+                (
+                    "endnotes",
+                    "endnote",
+                    rel_types::ENDNOTES,
+                    "/word/endnotes.xml",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+                )
+            } else {
+                (
+                    "footnotes",
+                    "footnote",
+                    rel_types::FOOTNOTES,
+                    "/word/footnotes.xml",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+                )
+            };
+            let mut seed = Document::new();
+            seed.add_paragraph("seed");
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let main = seed.doc_part_name.clone();
+            let body = format!(
+                r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>A&amp;B</w:t><w:{item}Reference w:id="1"/></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>"#
+            );
+            package.set_part(&main, format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>{body}<w:sectPr><w:opaque xmlns:w="urn:foreign"/><w:{item}Reference w:id="4"/></w:sectPr></w:body></w:document>"#).into_bytes());
+            let notes = format!(
+                r#"<w:{root} xmlns:w="{WORD_NAMESPACE}"><w:{item} w:id="1"><w:p><w:r><w:t>C&amp;D</w:t><w:{item}Reference w:id="3"/><w:commentReference w:id="11"/></w:r></w:p></w:{item}><w:{item} w:id="2"><w:p><w:r><w:t>UNSELECTED</w:t><w:commentReference w:id="22"/></w:r></w:p></w:{item}><w:{item} w:id="3"><w:p><w:r><w:t>E&amp;F</w:t><w:commentReference w:id="33"/></w:r></w:p></w:{item}><w:{item} w:id="4"><w:p><w:r><w:t>SECTION</w:t><w:commentReference w:id="44"/></w:r></w:p></w:{item}></w:{root}>"#
+            );
+            package.set_part(part, notes.into_bytes());
+            package.content_types.add_override(part, content_type);
+            package
+                .get_or_create_part_rels(&main)
+                .add(relationship, part.trim_start_matches("/word/"));
+            let mut zip = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut zip).unwrap();
+            let original = Document::from_bytes(zip.get_ref()).unwrap();
+            let (mut current, lineage) =
+                crate::template::TemplateWordLineage::clone_for_staging(&original);
+            let mut ordinary = original.clone_for_staging();
+            let expected = ordinary
+                .omit_glossary_selected_body_comments(include_section)
+                .unwrap();
+            let mut operation = rdocx_oxml::document::ScopedWordOperation::with_inputs(
+                original
+                    .package
+                    .parts
+                    .iter()
+                    .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                    .collect(),
+                Vec::new(),
+            )
+            .unwrap();
+            let source = Arc::new(
+                operation
+                    .source_part(
+                        &main,
+                        0..original.package.get_part(&main).unwrap().len(),
+                        &BTreeMap::new(),
+                    )
+                    .unwrap(),
+            );
+            current.document = operation.source_document(&source).unwrap();
+            let mut sources = TemplateMainSources::from_fragment_read(
+                &current.package,
+                &main,
+                &current.footnotes,
+                TemplateFragmentSources {
+                    main: source,
+                    related: BTreeMap::new(),
+                },
+            );
+            let mut writer = TemplateMainWriter {
+                operation: &mut operation,
+                lineage: &lineage,
+                sources: &mut sources,
+            };
+            let (bytes, returned) = current
+                .omit_glossary_selected_body_comments_in(include_section, Some(&mut writer))
+                .unwrap_or_else(|e| {
+                    panic!("endnotes={endnotes} include_section={include_section}: {e}")
+                });
+            assert_eq!(bytes, expected);
+            assert_eq!(current.package.parts, ordinary.package.parts);
+            let returned = returned.expect("actual omission Source");
+            assert_eq!(returned.as_bytes(), expected);
+            assert!(Arc::ptr_eq(
+                &writer.sources.published_main.as_ref().unwrap().0,
+                current.package.get_part_shared(&main).unwrap()
+            ));
+            let text = std::str::from_utf8(returned.as_bytes()).unwrap();
+            assert!(!text.contains("commentRange"));
+            assert!(!text.contains("commentReference"));
+            let p_start = text.find("<w:p").unwrap();
+            let p_end = p_start + text[p_start..].find("</w:p>").unwrap() + 6;
+            let paragraph = writer
+                .operation
+                .compose_sources(&[(Some(returned.as_ref()), p_start..p_end, &[])])
+                .unwrap();
+            let scope = story_namespace_scope_at(returned.as_bytes(), p_start).unwrap();
+            let paragraph = writer
+                .operation
+                .close_source_namespaces(paragraph, &scope)
+                .unwrap();
+            assert_eq!(
+                writer
+                    .operation
+                    .template_replaceable_texts(&paragraph)
+                    .unwrap()
+                    .concat(),
+                "A&B"
+            );
+            writer.operation.reserve_template_text_copy(3).unwrap();
+            let storage = current.package.get_part_shared(part).unwrap();
+            let note_source = writer
+                .sources
+                .related_source(part, storage)
+                .expect("actual selected note publication");
+            let note_text = std::str::from_utf8(note_source.as_bytes()).unwrap();
+            assert!(!note_text.contains("w:id=\"11\""));
+            assert!(!note_text.contains("w:id=\"33\""));
+            assert!(note_text.contains("w:id=\"22\""));
+            assert!(note_text.contains("UNSELECTED"));
+            assert_eq!(note_text.contains("w:id=\"44\""), !include_section);
+            let start = note_text.find("<w:p").unwrap();
+            let end = start + note_text[start..].find("</w:p>").unwrap() + 6;
+            let paragraph = writer
+                .operation
+                .compose_sources(&[(Some(note_source.as_ref()), start..end, &[])])
+                .unwrap();
+            let scope = story_namespace_scope_at(note_source.as_bytes(), start).unwrap();
+            let paragraph = writer
+                .operation
+                .close_source_namespaces(paragraph, &scope)
+                .unwrap();
+            assert_eq!(
+                writer
+                    .operation
+                    .template_replaceable_texts(&paragraph)
+                    .unwrap()
+                    .concat(),
+                "C&D"
+            );
+            writer.operation.reserve_template_text_copy(3).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_glossary_omission_preserves_opaque_marker_refusal_and_held_state() {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    let main = seed.doc_part_name.clone();
+    package.set_part(&main, format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:commentRangeStart w:id="1"><w:opaque/></w:commentRangeStart><w:r><w:t>kept</w:t></w:r></w:p></w:body></w:document>"#).into_bytes());
+    let mut zip = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut zip).unwrap();
+    let original = Document::from_bytes(zip.get_ref()).unwrap();
+    let (mut current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let before = current.package.parts.clone();
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_inputs(
+        original
+            .package
+            .parts
+            .iter()
+            .map(|(part, bytes)| (part.as_str(), bytes.as_slice()))
+            .collect(),
+        Vec::new(),
+    )
+    .unwrap();
+    let source = Arc::new(
+        operation
+            .source_part(
+                &main,
+                0..original.package.get_part(&main).unwrap().len(),
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+    );
+    current.document = operation.source_document(&source).unwrap();
+    let mut sources = TemplateMainSources::from_fragment_read(
+        &current.package,
+        &main,
+        &current.footnotes,
+        TemplateFragmentSources {
+            main: Arc::clone(&source),
+            related: BTreeMap::new(),
+        },
+    );
+    let mut writer = TemplateMainWriter {
+        operation: &mut operation,
+        lineage: &lineage,
+        sources: &mut sources,
+    };
+    let error = current
+        .omit_glossary_selected_body_comments_in(false, Some(&mut writer))
+        .err()
+        .expect("opaque marker refuses");
+    assert!(error.to_string().contains("opaque marker content"));
+    assert_eq!(current.package.parts, before);
+    assert_eq!(source.as_bytes(), original.package.get_part(&main).unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_revision_installer_prepares_sibling_fields_without_losing_other_revision() {
+    fn complex(instruction: &str, result: &str) -> String {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    }
+    let first = complex(
+        "OUTER1",
+        &format!(
+            "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+            complex("INNER1", "<w:r><w:t>old1</w:t></w:r>")
+        ),
+    );
+    let second = complex(
+        "OUTER2",
+        &format!(
+            "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+            complex("INNER2", "<w:r><w:t>old2</w:t></w:r>")
+        ),
+    );
+    let xml = format!(
+        r#"<w:document xmlns:w="{}"><w:body><w:p><w:ins w:id="1" w:author="A"><w:r><w:t>A&amp;B</w:t></w:r>{first}{second}</w:ins><w:ins w:id="2" w:author="B"><w:r><w:t>untouched</w:t></w:r></w:ins></w:p></w:body></w:document>"#,
+        rdocx_oxml::namespace::W_NS
+    );
+    let mut original = Document::new();
+    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    let BodyContent::Paragraph(paragraph) = &mut original.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let inner = paragraph.revisions[0]
+        .2
+        .physical_content_paragraph_mut()
+        .unwrap()
+        .unwrap();
+    let mut count = 0;
+    for run in &mut inner.runs {
+        for content in &mut run.content {
+            if let RunContent::Field(field) = content {
+                count += 1;
+                field.cached_field_mut(0).unwrap().cached_result = format!("new{count}");
+            }
+        }
+    }
+    assert_eq!(count, 2);
+    let BodyContent::Paragraph(probe) = &original.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let mut observed = Vec::new();
+    for path in probe.accepted_run_paths() {
+        for content in &probe.accepted_run(&path).unwrap().content {
+            if let RunContent::Field(field) = content {
+                let prepared = crate::field::prepared_current_field(field).unwrap();
+                observed.push((
+                    field.cached_result.clone(),
+                    prepared.cached_result.clone(),
+                    field == &prepared,
+                    crate::field::preflight_current_field(field).unwrap(),
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        observed
+            .iter()
+            .map(|entry| entry.1.as_str())
+            .collect::<Vec<_>>(),
+        ["new1", "new2"],
+        "actual legacy preparation facts: {observed:?}"
+    );
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        vec![],
+        vec![],
+        vec![&original.document.body],
+        vec![],
+        vec![],
+        vec![],
+        &data,
+    )
+    .unwrap();
+    let (mut current, mut lineage) =
+        crate::template::TemplateWordLineage::clone_for_staging(&original);
+    assert!(
+        current
+            .prepare_current_field_models(Some((&mut operation, &mut lineage, None, None)))
+            .unwrap()
+    );
+    let BodyContent::Paragraph(paragraph) = &current.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let values = paragraph
+        .accepted_run_paths()
+        .into_iter()
+        .flat_map(|path| {
+            paragraph
+                .accepted_run(&path)
+                .unwrap()
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    RunContent::Field(field) => Some(field.cached_result.clone()),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["new1", "new2"]);
+    let mut sources = TemplateMainSources::default();
+    let programs = current
+        .template_programs_scoped(&mut operation, &lineage, &mut sources)
+        .unwrap();
+    let body = programs
+        .iter()
+        .find(|program| program.story.kind() == StoryKind::Body)
+        .unwrap();
+    let source = body.source.as_ref().unwrap();
+    let item = &body.items[0];
+    let paragraph = operation
+        .compose_sources(&[(
+            Some(source.as_ref()),
+            item.range.start - body.ranges[0].start..item.range.end - body.ranges[0].start,
+            &[],
+        )])
+        .unwrap();
+    let paragraph = operation
+        .close_source_namespaces(paragraph, &item.scope)
+        .unwrap();
+    let texts = operation.template_replaceable_texts(&paragraph).unwrap();
+    assert_eq!(texts.concat(), "A&Buntouched");
+    assert_eq!(current.document.revisions().len(), 2);
+    operation.reserve_template_text_copy(12).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_revision_installer_noop_keeps_model_and_exact_slot_guard() {
+    let xml = format!(
+        r#"<w:document xmlns:w="{}"><w:body><w:p><w:ins w:id="1" w:author="A"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TEST </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>kept</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins></w:p></w:body></w:document>"#,
+        rdocx_oxml::namespace::W_NS
+    );
+    let mut original = Document::new();
+    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        vec![],
+        vec![],
+        vec![&original.document.body],
+        vec![],
+        vec![],
+        vec![],
+        &data,
+    )
+    .unwrap();
+    let (current, mut lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let BodyContent::Paragraph(paragraph) = &current.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let path = paragraph
+        .accepted_run_paths()
+        .into_iter()
+        .find(|path| {
+            paragraph
+                .accepted_run(path)
+                .unwrap()
+                .content
+                .iter()
+                .any(|c| matches!(c, RunContent::Field(_)))
+        })
+        .unwrap();
+    assert!(lineage.initial_field(0, &path, 0).is_some());
+    lineage.installed_field(0, &path, 0);
+    assert!(lineage.initial_field(0, &path, 0).is_none());
+    // A fresh lineage retains the actual ordinary no-op model choice.
+    let (mut current, mut lineage) =
+        crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let BodyContent::Paragraph(paragraph) = &current.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let pointer = paragraph.revisions[0].2.retained_xml().as_ptr();
+    let before = current.document.clone();
+    assert!(
+        !current
+            .prepare_current_field_models(Some((&mut operation, &mut lineage, None, None)))
+            .unwrap()
+    );
+    assert_eq!(current.document, before);
+    let BodyContent::Paragraph(paragraph) = &current.document.body.content[0] else {
+        panic!("paragraph")
+    };
+    let held = paragraph.revisions[0].2.retained_xml().as_ptr();
+    assert_eq!(
+        held, pointer,
+        "semantic no-op does not replace the retained model/raw choice"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_comments_dirty_refresh_and_fragment_reader_keep_actual_fields_and_text() {
+    let mut original = Document::new();
+    original.add_paragraph("main");
+    original.to_bytes().unwrap();
+    let part = "/word/comments.xml";
+    fn complex(instruction: &str, result: &str) -> String {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    }
+    let field_xml = complex(
+        "OUTER",
+        &format!(
+            "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+            complex("INNER", "<w:r><w:t>CACHE</w:t></w:r>")
+        ),
+    );
+    let xml = format!(
+        r#"<w:comments xmlns:w="{WORD_NAMESPACE}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:v="urn:opaque" v:root="kept"><v:root/><w:comment w:id="9" w:author="Ada" w:initials="AD" v:owner="kept"><v:before/><w:p w14:paraId="00000009"><w:r><w:t>A&amp;B</w:t></w:r>{field_xml}<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>C&amp;D</w:t></w:r></w:sdtContent></w:sdt><w:ins w:id="4" w:author="B"><w:r><w:t>E&amp;F</w:t></w:r></w:ins></w:p><v:after/></w:comment></w:comments>"#
+    );
+    original.comments = Some(rdocx_oxml::comments::CT_Comments::from_xml(xml.as_bytes()).unwrap());
+    original.comments_part_name = Some(part.into());
+    original.package.set_part(part, xml.into_bytes());
+    original
+        .package
+        .content_types
+        .add_override(part, crate::comments::COMMENTS_CONTENT_TYPE);
+    original
+        .package
+        .get_or_create_part_rels(&original.doc_part_name)
+        .add(rel_types::COMMENTS, "comments.xml");
+    let (mut current, mut lineage) =
+        crate::template::TemplateWordLineage::clone_for_staging(&original);
+    let mut ordinary = original.clone_for_staging();
+    let frozen_comments = original.comments.as_ref().unwrap();
+    let paragraphs = frozen_comments
+        .comments
+        .iter()
+        .flat_map(|comment| &comment.paragraphs)
+        .collect();
+    let mut raws = frozen_comments
+        .extra_xml
+        .iter()
+        .map(|(_, raw)| raw.as_slice())
+        .collect::<Vec<_>>();
+    for comment in &frozen_comments.comments {
+        raws.extend(comment.extra_xml.iter().map(|(_, raw)| raw.as_slice()));
+    }
+    let data = serde_json::Value::Null;
+    let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+        original
+            .package
+            .parts
+            .iter()
+            .map(|(part, bytes)| (part.as_str(), bytes.as_slice()))
+            .collect(),
+        paragraphs,
+        vec![&original.document.body],
+        Vec::new(),
+        Vec::new(),
+        raws,
+        &data,
+    )
+    .unwrap();
+    let mut sources = TemplateMainSources::default();
+    current.comments_dirty = true;
+    ordinary.comments_dirty = true;
+    ordinary.flush_dirty_related_story_models().unwrap();
+    ordinary.refresh_related_story_caches().unwrap();
+    let emitted = {
+        let mut writer = TemplateMainWriter {
+            operation: &mut operation,
+            lineage: &lineage,
+            sources: &mut sources,
+        };
+        current
+            .flush_dirty_related_story_models_in(Some(&mut writer))
+            .unwrap();
+        assert_eq!(
+            current.package.get_part(part),
+            ordinary.package.get_part(part)
+        );
+        current
+            .refresh_related_story_caches_in(Some(&mut writer))
+            .unwrap();
+        assert_eq!(current.comments, ordinary.comments);
+        Arc::clone(
+            writer
+                .sources
+                .comments_reader_source
+                .as_ref()
+                .expect("actual comments refresh"),
+        )
+    };
+    let main = current.doc_part_name.clone();
+    let main_source = Arc::new(
+        operation
+            .source_part(
+                &main,
+                0..current.package.get_part(&main).unwrap().len(),
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+    );
+    let related = BTreeMap::from([(part.to_owned(), Arc::clone(&emitted))]);
+    let mut loaded = Document::from_opened_package(
+        current.package.clone(),
+        true,
+        Some(ScopedDocumentRead {
+            operation: &mut operation,
+            source: &main_source,
+            related: Some(&related),
+        }),
+    )
+    .unwrap();
+    let mut imported_sources = TemplateMainSources::from_fragment_read(
+        &loaded.package,
+        &main,
+        &loaded.footnotes,
+        TemplateFragmentSources {
+            main: main_source,
+            related,
+        },
+    );
+    assert!(imported_sources.comments_reader_source.is_some());
+    let paragraph = &mut loaded.comments.as_mut().unwrap().comments[0].paragraphs[0];
+    let field = paragraph
+        .runs
+        .iter_mut()
+        .flat_map(|run| &mut run.content)
+        .find_map(|value| {
+            if let RunContent::Field(field) = value {
+                Some(field)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    field.cached_field_mut(0).unwrap().cached_result = "EDITED".into();
+    lineage.finish_preparation();
+    assert!(
+        loaded
+            .prepare_current_field_models(Some((
+                &mut operation,
+                &mut lineage,
+                None,
+                imported_sources.comments_reader_source.as_deref()
+            )))
+            .unwrap()
+    );
+    loaded.comments_dirty = true;
+    let output = {
+        let mut writer = TemplateMainWriter {
+            operation: &mut operation,
+            lineage: &lineage,
+            sources: &mut imported_sources,
+        };
+        loaded
+            .flush_dirty_related_story_models_in(Some(&mut writer))
+            .unwrap();
+        loaded
+            .refresh_related_story_caches_in(Some(&mut writer))
+            .unwrap();
+        let source = Arc::clone(writer.sources.comments_reader_source.as_ref().unwrap());
+        assert!(String::from_utf8_lossy(source.as_bytes()).contains("EDITED"));
+        let ordinary_bytes = loaded.comments.as_ref().unwrap().to_xml().unwrap();
+        let output = writer
+            .operation
+            .source_model_comments_from_read(loaded.comments.as_ref().unwrap(), &source)
+            .unwrap();
+        assert_eq!(output.as_bytes(), ordinary_bytes);
+        let retained = writer.operation.repeat_source(&output).unwrap();
+        let bytes = writer.operation.finish_source(retained).unwrap();
+        set_story_source_xml_in(&mut loaded, part, bytes, Some((&mut writer, output))).unwrap();
+        Arc::clone(
+            writer
+                .sources
+                .comments_reader_source
+                .as_ref()
+                .expect("actual comments story setter reader"),
+        )
+    };
+    let text = std::str::from_utf8(output.as_bytes()).unwrap();
+    let start = text.find("<w:p ").unwrap();
+    let end = start + text[start..].find("</w:p>").unwrap() + 6;
+    let paragraph = operation
+        .compose_sources(&[(Some(&output), start..end, &[])])
+        .unwrap();
+    let scope = story_namespace_scope_at(output.as_bytes(), start).unwrap();
+    let paragraph = operation
+        .close_source_namespaces(paragraph, &scope)
+        .unwrap();
+    assert_eq!(
+        operation
+            .template_replaceable_texts(&paragraph)
+            .unwrap()
+            .concat(),
+        "A&BC&DE&F"
+    );
+    operation.reserve_template_text_copy(14).unwrap();
+    assert_eq!(
+        original.comments.as_ref().unwrap().comments[0].paragraph_ids,
+        [Some("00000009".into())]
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_template_comments_authored_drawing_preparation_matches_inline_and_anchor() {
+    for anchored in [false, true] {
+        let drawing = if anchored {
+            let anchor = rdocx_oxml::drawing::CT_Anchor::background("rIdImage", 100, 200);
+            rdocx_oxml::drawing::CT_Drawing {
+                inline: None,
+                anchor: Some(anchor),
+            }
+        } else {
+            rdocx_oxml::drawing::CT_Drawing {
+                inline: Some(rdocx_oxml::drawing::CT_Inline::new("rIdImage", 100, 200)),
+                anchor: None,
+            }
+        };
+        let mut paragraph = CT_P::new();
+        paragraph.runs.push(CT_R {
+            properties: None,
+            content: vec![
+                RunContent::Text(rdocx_oxml::text::CT_Text {
+                    text: "A&B".into(),
+                    preserve_space: false,
+                }),
+                RunContent::Drawing(drawing),
+            ],
+            extra_xml: Vec::new(),
+            extra_xml_positions: Vec::new(),
+            alt_drawings: Vec::new(),
+        });
+        let mut original = Document::new();
+        original.comments = Some(rdocx_oxml::comments::CT_Comments {
+            comments: vec![rdocx_oxml::comments::CT_Comment {
+                id: 1,
+                author: Some("Ada".into()),
+                date: None,
+                initials: None,
+                paragraphs: vec![paragraph],
+                paragraph_ids: vec![Some("00000001".into())],
+                extra_attributes: Vec::new(),
+                extra_xml: Vec::new(),
+            }],
+            root_attributes: Vec::new(),
+            extra_xml: Vec::new(),
+        });
+        let (current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
+        let inputs = lineage
+            .comments_writer_inputs(current.comments.as_ref().unwrap())
+            .unwrap();
+        let data = serde_json::Value::Null;
+        let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
+            Vec::new(),
+            vec![&original.comments.as_ref().unwrap().comments[0].paragraphs[0]],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &data,
+        )
+        .unwrap();
+        let mut ordinary = current.comments.clone().unwrap();
+        close_typed_story_drawing_namespaces(&mut ordinary.comments[0].paragraphs[0]).unwrap();
+        let expected = ordinary.to_xml().unwrap();
+        let source = operation
+            .source_model_comments(
+                current.comments.as_ref().unwrap(),
+                &inputs.texts,
+                &inputs.fields,
+                &inputs.raw,
+            )
+            .unwrap();
+        assert_eq!(
+            source.as_bytes(),
+            expected,
+            "actual authored drawing preparation policy"
+        );
+        let model = operation.source_comments(&source).unwrap();
+        let output = operation
+            .source_model_comments_from_read(&model, &source)
+            .unwrap();
+        assert_eq!(output.as_bytes(), expected);
+        let text = std::str::from_utf8(output.as_bytes()).unwrap();
+        let start = text.find("<w:p ").unwrap();
+        let end = start + text[start..].rfind("</w:p>").unwrap() + 6;
+        let paragraph = operation
+            .compose_sources(&[(Some(&output), start..end, &[])])
+            .unwrap();
+        let scope = story_namespace_scope_at(output.as_bytes(), start).unwrap();
+        let paragraph = operation
+            .close_source_namespaces(paragraph, &scope)
+            .unwrap();
+        let actual = operation
+            .template_replaceable_texts(&paragraph)
+            .unwrap()
+            .concat();
+        assert!(actual.contains("A&B"));
+
+        operation.reserve_template_text_copy(actual.len()).unwrap();
+    }
 }

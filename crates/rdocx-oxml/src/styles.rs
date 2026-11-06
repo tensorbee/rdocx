@@ -553,6 +553,7 @@ impl CT_Style {
             e.push_attribute(("w:default", "1"));
         }
         push_style_attributes(&mut e, &self.extra_attributes);
+        let _style_scope = crate::text::emitted_binding_scope(&e, false, false)?;
         writer.write_event(Event::Start(e))?;
 
         let mut extras = self.extra_xml.iter().collect::<Vec<_>>();
@@ -840,6 +841,7 @@ impl CT_DocDefaults {
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if let Some(raw) = &self.source_xml {
+            let _defaults_scope = crate::text::raw_root_binding_scope(raw, false)?;
             let original = Self::from_source_xml(raw, &[])?;
             if original.rpr == self.rpr && original.ppr == self.ppr {
                 writer.get_mut().write_all(raw)?;
@@ -1018,6 +1020,17 @@ pub(crate) fn merge_defaults_scalar_attributes(
     inherited: &[String],
     selected: bool,
 ) -> Result<Vec<u8>> {
+    merge_defaults_scalar_attributes_in(raw, before, after, inherited, selected, None)
+}
+
+pub(crate) fn merge_defaults_scalar_attributes_in(
+    raw: &[u8],
+    before: Option<&Vec<u8>>,
+    after: Option<&Vec<u8>>,
+    inherited: &[String],
+    selected: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<Vec<u8>> {
     let canonical = vec!["w".to_owned()];
     let old = defaults_owned_attributes(before.map_or(&[], Vec::as_slice), &canonical)?;
     let new = defaults_owned_attributes(after.map_or(&[], Vec::as_slice), &canonical)?;
@@ -1028,6 +1041,9 @@ pub(crate) fn merge_defaults_scalar_attributes(
         .cloned()
         .collect::<std::collections::HashSet<_>>();
     if changed.is_empty() {
+        if let Some(emission) = emission {
+            emission.reserve_inner_xml(raw.len())?;
+        }
         return Ok(raw.to_vec());
     }
     let (root, _) = defaults_source_children(raw)?;
@@ -1038,20 +1054,25 @@ pub(crate) fn merge_defaults_scalar_attributes(
     let existing_prefix = scope
         .iter()
         .find(|prefix| !prefix.is_empty() && !prefix.starts_with('\0'))
-        .cloned();
+        .map(String::as_str);
     let mut prefix = existing_prefix
-        .clone()
-        .unwrap_or_else(|| "defaultsWord".to_owned());
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| std::borrow::Cow::Owned("defaultsWord".to_owned()));
     while existing_prefix.is_none()
-        && (bindings.iter().any(|(name, _)| name == &prefix)
-            || inherited.contains(&prefix)
-            || raw
-                .windows(prefix.len() + 1)
-                .any(|bytes| bytes == format!("{prefix}:").as_bytes()))
+        && (bindings
+            .iter()
+            .any(|(name, _)| name.as_str() == prefix.as_ref())
+            || inherited.iter().any(|known| known == prefix.as_ref())
+            || raw.windows(prefix.len() + 1).any(|bytes| {
+                bytes[..prefix.len()] == *prefix.as_bytes() && bytes[prefix.len()] == b':'
+            }))
     {
-        prefix.push('_');
+        prefix.to_mut().push('_');
     }
-    let mut result = Vec::new();
+    // The actual lexical walk produces borrowed source spans. No replacement
+    // XML buffer or generated attribute name exists until the exact plan is
+    // validated and reserved below.
+    let mut retained = Vec::new();
     let mut cursor = 1;
     while cursor < raw.len()
         && !raw[cursor].is_ascii_whitespace()
@@ -1060,14 +1081,14 @@ pub(crate) fn merge_defaults_scalar_attributes(
     {
         cursor += 1;
     }
-    result.extend_from_slice(&raw[..cursor]);
+    retained.push(0..cursor);
     loop {
         let begin = cursor;
         while cursor < raw.len() && raw[cursor].is_ascii_whitespace() {
             cursor += 1;
         }
         if matches!(raw.get(cursor), Some(b'/') | Some(b'>')) {
-            result.extend_from_slice(&raw[begin..cursor]);
+            retained.push(begin..cursor);
             break;
         }
         let key_start = cursor;
@@ -1107,26 +1128,72 @@ pub(crate) fn merge_defaults_scalar_attributes(
         cursor += 1;
         let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
         if !changed.contains(local) || !is_word_attribute(key, local, &scope) {
-            result.extend_from_slice(&raw[begin..cursor]);
+            retained.push(begin..cursor);
         }
     }
-    if selected && changed.iter().any(|key| new.contains_key(key)) {
-        if existing_prefix.is_none() {
-            result.extend_from_slice(format!(" xmlns:{prefix}=\"{W_NS}\"").as_bytes());
-        }
-        let mut keys = changed.iter().collect::<Vec<_>>();
-        keys.sort();
-        for key in keys {
-            if let Some(value) = new.get(key) {
-                result.extend_from_slice(
-                    format!(" {prefix}:{}=\"", std::str::from_utf8(key)?).as_bytes(),
-                );
-                result.extend_from_slice(value);
-                result.push(b'"');
-            }
-        }
+    let append = selected && changed.iter().any(|key| new.contains_key(key));
+    let mut attributes = if append {
+        let mut keys = changed
+            .iter()
+            .filter_map(|key| new.get(key).map(|value| (key, value)))
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|(key, _)| *key);
+        keys.into_iter()
+            .map(|(key, value)| Ok((std::str::from_utf8(key)?, value.as_slice())))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    retained.push(cursor..raw.len());
+    let mut length = retained
+        .iter()
+        .try_fold(0usize, |sum, range| sum.checked_add(range.len()))
+        .ok_or_else(|| OxmlError::InvalidValue("default attribute output overflow".to_owned()))?;
+    if append && existing_prefix.is_none() {
+        length = length
+            .checked_add(10)
+            .and_then(|n| n.checked_add(prefix.len()))
+            .and_then(|n| n.checked_add(W_NS.len()))
+            .ok_or_else(|| {
+                OxmlError::InvalidValue("default namespace output overflow".to_owned())
+            })?;
     }
-    result.extend_from_slice(&raw[cursor..]);
+    for (key, value) in &attributes {
+        length = length
+            .checked_add(5)
+            .and_then(|n| n.checked_add(prefix.len()))
+            .and_then(|n| n.checked_add(key.len()))
+            .and_then(|n| n.checked_add(value.len()))
+            .ok_or_else(|| {
+                OxmlError::InvalidValue("default attribute output overflow".to_owned())
+            })?;
+    }
+    if let Some(emission) = emission {
+        emission.reserve_inner_xml(length)?;
+    }
+    let mut result = Vec::with_capacity(length);
+    let tail = retained.pop().expect("the actual source tail was recorded");
+    for range in retained {
+        result.extend_from_slice(&raw[range]);
+    }
+    if append && existing_prefix.is_none() {
+        result.extend_from_slice(b" xmlns:");
+        result.extend_from_slice(prefix.as_bytes());
+        result.extend_from_slice(b"=\"");
+        result.extend_from_slice(W_NS.as_bytes());
+        result.push(b'"');
+    }
+    for (key, value) in attributes.drain(..) {
+        result.push(b' ');
+        result.extend_from_slice(prefix.as_bytes());
+        result.push(b':');
+        result.extend_from_slice(key.as_bytes());
+        result.extend_from_slice(b"=\"");
+        result.extend_from_slice(value);
+        result.push(b'"');
+    }
+    result.extend_from_slice(&raw[tail]);
+    debug_assert_eq!(result.len(), length);
     Ok(result)
 }
 
@@ -1147,13 +1214,64 @@ pub(crate) fn merge_style_border_source(
     inherited: &[String],
     selected_owner: bool,
 ) -> Result<Vec<u8>> {
+    merge_style_border_source_in(raw, before, after, inherited, selected_owner, None)
+}
+
+pub(crate) fn merge_style_border_source_in(
+    raw: &[u8],
+    before: Option<&Vec<u8>>,
+    after: &[u8],
+    inherited: &[String],
+    selected_owner: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<Vec<u8>> {
+    if let Some(emission) = emission {
+        let (output, _outer) = emission.new_source_record_output();
+        let mut writer = Writer::new(output);
+        write_style_border_source(
+            &mut writer,
+            raw,
+            before,
+            after,
+            inherited,
+            selected_owner,
+            Some(emission),
+        )?;
+        Ok(writer.into_inner().into_mapped_parts().0)
+    } else {
+        let mut writer = Writer::new(Vec::new());
+        write_style_border_source(
+            &mut writer,
+            raw,
+            before,
+            after,
+            inherited,
+            selected_owner,
+            None,
+        )?;
+        Ok(writer.into_inner())
+    }
+}
+
+fn write_style_border_source<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    raw: &[u8],
+    before: Option<&Vec<u8>>,
+    after: &[u8],
+    inherited: &[String],
+    selected_owner: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
     let (root, source) = defaults_source_children(raw)?;
     let scope = word_prefixes_at(&root, inherited)?;
     let canonical = vec!["w".to_owned()];
     let mut previous = std::collections::HashMap::new();
     if let Some(before) = before {
-        let before =
-            crate::text::raw_with_external_bindings(before, &[("w".to_owned(), W_NS.to_owned())])?;
+        let before = crate::text::raw_with_external_bindings_in(
+            before,
+            &[("w".to_owned(), W_NS.to_owned())],
+            emission,
+        )?;
         let (before_root, children) = defaults_source_children(&before)?;
         let before_scope = word_prefixes_at(&before_root, &canonical)?;
         let bindings = namespace_bindings_at(&before_root, &[])?;
@@ -1161,13 +1279,13 @@ pub(crate) fn merge_style_border_source(
             if let Some(name) = defaults_owned_child_name(&child, &before_scope)? {
                 previous.insert(
                     style_border_semantic_key(name),
-                    crate::text::raw_with_external_bindings(&child, &bindings)?,
+                    crate::text::raw_with_external_bindings_in(&child, &bindings, emission)?,
                 );
             }
         }
     }
     let bindings = [("w".to_owned(), W_NS.to_owned())];
-    let after = crate::text::raw_with_external_bindings(after, &bindings)?;
+    let after = crate::text::raw_with_external_bindings_in(after, &bindings, emission)?;
     let (generated_root, generated) = defaults_source_children(&after)?;
     let generated_scope = word_prefixes_at(&generated_root, &[])?;
     let mut supplied = std::collections::HashMap::new();
@@ -1178,9 +1296,10 @@ pub(crate) fn merge_style_border_source(
             order.push(name.clone());
             supplied.insert(
                 name,
-                crate::text::raw_with_external_bindings(
+                crate::text::raw_with_external_bindings_in(
                     &child,
                     &namespace_bindings_at(&generated_root, &[])?,
+                    emission,
                 )?,
             );
         }
@@ -1193,9 +1312,9 @@ pub(crate) fn merge_style_border_source(
         }
     }
     let generated_bindings = namespace_bindings_at(&generated_root, &[])?;
-    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
-    let mut writer = Writer::new(Vec::new());
-    writer.write_event(Event::Start(root))?;
+    let root_name = root.name();
+    let end = std::str::from_utf8(root_name.as_ref())?;
+    writer.write_event(Event::Start(root.borrow()))?;
     let mut inserted = std::collections::HashSet::new();
     for child in &source {
         if let Some(name) = defaults_owned_child_name(child, &scope)? {
@@ -1207,12 +1326,13 @@ pub(crate) fn merge_style_border_source(
                     .filter(|value| !selected.contains_key(*value))
                 {
                     if selected_owner && inserted.insert(new_name.clone()) {
-                        writer.get_mut().extend_from_slice(
-                            &crate::text::raw_with_external_bindings(
+                        writer
+                            .get_mut()
+                            .write_all(&crate::text::raw_with_external_bindings_in(
                                 &supplied[new_name],
                                 &generated_bindings,
-                            )?,
-                        );
+                                emission,
+                            )?)?;
                     }
                 }
             }
@@ -1224,18 +1344,19 @@ pub(crate) fn merge_style_border_source(
             if previous.get(&name) != supplied.get(&name) && supplied.contains_key(&name) {
                 writer
                     .get_mut()
-                    .extend_from_slice(&merge_defaults_scalar_attributes(
+                    .write_all(&merge_defaults_scalar_attributes_in(
                         child,
                         previous.get(&name),
                         supplied.get(&name),
                         &scope,
                         true,
-                    )?);
+                        emission,
+                    )?)?;
                 inserted.insert(name);
                 continue;
             }
         }
-        writer.get_mut().extend_from_slice(child);
+        writer.get_mut().write_all(child)?;
     }
     for name in order
         .iter()
@@ -1243,13 +1364,14 @@ pub(crate) fn merge_style_border_source(
     {
         writer
             .get_mut()
-            .extend_from_slice(&crate::text::raw_with_external_bindings(
+            .write_all(&crate::text::raw_with_external_bindings_in(
                 &supplied[name],
                 &generated_bindings,
-            )?);
+                emission,
+            )?)?;
     }
     writer.write_event(Event::End(BytesEnd::new(end)))?;
-    Ok(writer.into_inner())
+    Ok(())
 }
 
 fn merge_defaults_property_root(
@@ -1671,6 +1793,7 @@ impl CT_Styles {
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         ));
+        let _binding_scope = crate::text::emitted_root_binding_scope(&styles_start, 0, false)?;
         writer.write_event(Event::Start(styles_start))?;
 
         if let Some(ref defaults) = self.doc_defaults {

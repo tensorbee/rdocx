@@ -8296,6 +8296,63 @@ def test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal(kind):
         assert reopened.section(0).page_width == 13000 * 635
     assert rdocx.Document.from_bytes(reopened.to_bytes()).to_bytes() == reopened.to_bytes()
 
+    # Fresh whole-owner field grammar is strict through the real binding.
+    # Each refusal leaves both the owner and previously held snapshot usable.
+    if kind in {"paragraph", "table", "cell"}:
+        for program in ('REF &quot;unclosed', 'PAGE &quot;unclosed', '&quot;PAGE&quot;', r'PAGE \bad-token'):
+            fresh = rdocx.Document.from_bytes(before)
+            target = {"paragraph": lambda: fresh.paragraphs[0],
+                      "table": lambda: fresh.tables[0],
+                      "cell": lambda: fresh.tables[0].cell(0, 0)}[kind]()
+            held = fresh.paragraphs[0]
+            source = target.xml
+            payload = '<w:fldSimple w:instr="' + program + '"><w:r><w:t>cache</w:t></w:r></w:fldSimple>'
+            changed, count = re.subn(r'<w:r(?:\s[^>]*)?>.*?</w:r>', lambda _: payload, source, count=1, flags=re.S)
+            assert count == 1
+            original_bytes = fresh.to_bytes()
+            with pytest.raises(rdocx.RdocxError):
+                target.replace_xml(changed)
+            assert fresh.to_bytes() == original_bytes
+            assert target.xml == source
+            assert fresh.find_content_index(held) == 0
+    if kind in {"paragraph", "table", "cell"}:
+        for prefix in ("w", "q", "default"):
+            fresh = rdocx.Document.from_bytes(before)
+            target = {"paragraph": lambda: fresh.paragraphs[0],
+                      "table": lambda: fresh.tables[0],
+                      "cell": lambda: fresh.tables[0].cell(0, 0)}[kind]()
+            source = target.xml
+            payload = '<w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple>'
+            changed, count = re.subn(r'<w:r(?:\s[^>]*)?>.*?</w:r>', lambda _: payload, source, count=1, flags=re.S)
+            assert count == 1
+            if prefix == "q":
+                changed = changed.replace('w:', 'q:').replace('xmlns:w', 'xmlns:q')
+            elif prefix == "default":
+                changed = changed.replace('<w:', '<').replace('</w:', '</')
+                changed = changed.replace(' ', ' xmlns="' + namespace + '" ', 1)
+            target.replace_xml(changed)
+            current = fresh.paragraphs[0] if kind == "paragraph" else fresh.tables[0].cell(0, 0).paragraphs[0]
+            assert current.text == "7", (kind, prefix)
+            assert len(ET.fromstring(target.xml).findall('.//{' + namespace + '}fldSimple')) == 1
+            reopened = rdocx.Document.from_bytes(fresh.to_bytes())
+            current = reopened.paragraphs[0] if kind == "paragraph" else reopened.tables[0].cell(0, 0).paragraphs[0]
+            assert current.text == "7", (kind, prefix, "reopened")
+    if kind == "paragraph":
+        imported = _replace_document_body(rdocx.Document(),
+            '<w:p xmlns:w="' + namespace + '"><w:fldSimple w:instr="PAGE &quot;unclosed"><w:r><w:t>stored</w:t></w:r></w:fldSimple>'
+            '<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>old</w:t></w:r></w:sdtContent></w:sdt></w:p>')
+        target = imported.paragraphs[0]
+        source = target.xml
+        original_bytes = imported.to_bytes()
+        held = imported.paragraphs[0]
+        target.replace_xml(source)
+        assert imported.to_bytes() == original_bytes
+        with pytest.raises(rdocx.RdocxError):
+            target.replace_xml(source.replace('>old<', '>new<'))
+        assert imported.to_bytes() == original_bytes
+        assert target.xml == source and 'stored' in target.text
+        assert imported.find_content_index(held) == 0
+
 
 def test_fx211a_xml_child_views_retire_without_retiring_true_ancestors():
     import rdocx

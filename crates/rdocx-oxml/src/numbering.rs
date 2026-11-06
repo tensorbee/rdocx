@@ -459,61 +459,102 @@ fn prefixed_name(name: &[u8], prefix: &str) -> Result<String> {
     })
 }
 
-fn prefixed_start(element: &BytesStart<'_>, prefix: &str) -> Result<BytesStart<'static>> {
-    let name = prefixed_name(element.name().as_ref(), prefix)?;
-    let mut rewritten = BytesStart::new(name);
+fn prefixed_start_in<'e, 'input>(
+    element: &'input BytesStart<'_>,
+    prefix: &str,
+    emission: Option<&'e crate::text::FieldXmlEmission>,
+) -> Result<crate::text::FieldXmlStart<'e, 'input>> {
+    let name = std::str::from_utf8(&element.as_ref()[..element.name().as_ref().len()])?;
+    let mut rewritten = if let Some(local) = name.strip_prefix("w:") {
+        crate::text::FieldXmlStart::word(prefix, local, emission)?
+    } else {
+        crate::text::FieldXmlStart::new(name, emission)?
+    };
     for attribute in element.attributes() {
         let attribute = attribute?;
-        let key = prefixed_name(attribute.key.as_ref(), prefix)?;
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?
-            .into_owned();
-        rewritten.push_attribute((key.as_str(), value.as_str()));
+        let key = std::str::from_utf8(attribute.key.as_ref())?;
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+        if let Some(local) = key.strip_prefix("w:") {
+            rewritten.push_word(prefix, local, &value)?;
+        } else {
+            rewritten.push(key, &value)?;
+        }
     }
-    Ok(rewritten.into_owned())
+    Ok(rewritten)
 }
 
 fn rewrite_generated_prefix(raw: &[u8], prefix: &str) -> Result<Vec<u8>> {
+    rewrite_generated_prefix_in(raw, prefix, None)
+}
+
+fn rewrite_generated_prefix_in(
+    raw: &[u8],
+    prefix: &str,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<Vec<u8>> {
     if prefix == "w" {
+        if let Some(emission) = emission {
+            emission.reserve_inner_xml(raw.len())?;
+        }
         return Ok(raw.to_vec());
     }
-
-    let mut reader = Reader::from_reader(raw);
-    let mut writer = Writer::new(Vec::new());
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) => {
-                writer.write_event(Event::Start(prefixed_start(&element, prefix)?))?;
-            }
-            Ok(Event::Empty(element)) => {
-                writer.write_event(Event::Empty(prefixed_start(&element, prefix)?))?;
-            }
-            Ok(Event::End(element)) => {
-                let name = prefixed_name(element.name().as_ref(), prefix)?;
-                writer.write_event(Event::End(BytesEnd::new(name)))?;
-            }
-            Ok(Event::Eof) => break,
-            Ok(event) => writer.write_event(event.into_owned())?,
-            Err(error) => return Err(error.into()),
-        }
-        buf.clear();
+    if let Some(emission) = emission {
+        let (output, _outer) = emission.new_source_record_output();
+        let mut writer = Writer::new(output);
+        write_rewritten_prefix(&mut writer, raw, prefix, Some(emission))?;
+        Ok(writer.into_inner().into_mapped_parts().0)
+    } else {
+        let mut writer = Writer::new(Vec::new());
+        write_rewritten_prefix(&mut writer, raw, prefix, None)?;
+        Ok(writer.into_inner())
     }
-    Ok(writer.into_inner())
+}
+
+fn write_rewritten_prefix<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    raw: &[u8],
+    prefix: &str,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    let mut reader = Reader::from_reader(raw);
+    loop {
+        match reader.read_event()? {
+            Event::Start(element) => {
+                prefixed_start_in(&element, prefix, emission)?.write(writer, false)?
+            }
+            Event::Empty(element) => {
+                prefixed_start_in(&element, prefix, emission)?.write(writer, true)?
+            }
+            Event::End(element) => {
+                let name = std::str::from_utf8(element.as_ref())?;
+                if let Some(emission) = emission {
+                    if let Some(local) = name.strip_prefix("w:") {
+                        emission.write_word_end(writer, prefix, local)?;
+                    } else {
+                        emission.write_end_name(writer, name)?;
+                    }
+                } else {
+                    writer.write_event(Event::End(BytesEnd::new(prefixed_name(
+                        element.name().as_ref(),
+                        prefix,
+                    )?)))?;
+                }
+            }
+            Event::Eof => return Ok(()),
+            event => writer.write_event(event)?,
+        }
+    }
 }
 
 fn write_xml_events<W: std::io::Write>(writer: &mut Writer<W>, raw: &[u8]) -> Result<()> {
     let mut reader = Reader::from_reader(raw);
-    let mut buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Eof) => break,
-            Ok(event) => writer.write_event(event.into_owned())?,
-            Err(error) => return Err(error.into()),
+        match reader.read_event()? {
+            Event::Eof => return Ok(()),
+            event => writer.write_event(event)?,
         }
-        buf.clear();
     }
-    Ok(())
 }
 
 fn write_extras_at<W: std::io::Write>(
@@ -730,17 +771,20 @@ fn typed_on_off_value(element: &BytesStart<'_>, word_prefixes: &[String]) -> Res
     }
 }
 
-fn typed_leaf_start(
-    element: &BytesStart<'_>,
+fn typed_leaf_start_in<'e, 'input>(
+    element: &'input BytesStart<'_>,
     word_prefixes: &[String],
     value: Option<&str>,
     output_word_prefix: &str,
-) -> Result<BytesStart<'static>> {
+    emission: Option<&'e crate::text::FieldXmlEmission>,
+) -> Result<crate::text::FieldXmlStart<'e, 'input>> {
     let prefixes = word_prefixes_at(element, word_prefixes)?;
-    let name = std::str::from_utf8(element.name().as_ref())?.to_string();
-    let mut rewritten = BytesStart::new(name);
+    let name = std::str::from_utf8(&element.as_ref()[..element.name().as_ref().len()])?;
     let mut wrote_value = false;
     let namespace_bindings = namespace_bindings(&prefixes);
+    // This is the actual attribute selection/decoder, completed in its original
+    // order before any new event reservation can preempt an input error.
+    let mut attributes = Vec::new();
     for attribute in element.attributes() {
         let attribute = attribute?;
         let key = std::str::from_utf8(attribute.key.as_ref())?.to_string();
@@ -748,41 +792,47 @@ fn typed_leaf_start(
             if let Some(value) = value
                 && !wrote_value
             {
-                rewritten.push_attribute((key.as_str(), value));
+                attributes.push((key, std::borrow::Cow::Borrowed(value)));
                 wrote_value = true;
             }
             continue;
         }
-        let attribute_value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?
-            .into_owned();
-        rewritten.push_attribute((key.as_str(), attribute_value.as_str()));
+        let attribute_value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+        attributes.push((key, attribute_value));
     }
-    if let Some(value) = value
-        && !wrote_value
-    {
-        let safe_prefix = prefixes
-            .iter()
-            .find(|candidate| candidate.as_str() == output_word_prefix)
-            .or_else(|| {
-                prefixes.iter().find(|candidate| {
-                    !candidate.is_empty() && split_namespace_binding(candidate).is_none()
+    let safe_prefix = if value.is_some() && !wrote_value {
+        Some(
+            prefixes
+                .iter()
+                .find(|candidate| candidate.as_str() == output_word_prefix)
+                .or_else(|| {
+                    prefixes.iter().find(|candidate| {
+                        !candidate.is_empty() && split_namespace_binding(candidate).is_none()
+                    })
                 })
-            })
-            .cloned();
-        let safe_prefix = match safe_prefix {
-            Some(prefix) => prefix,
-            None => {
-                let prefix = unused_prefix(&namespace_bindings, "rdocxWord");
-                let declaration = format!("xmlns:{prefix}");
-                rewritten.push_attribute((declaration.as_str(), W_NS));
-                prefix
-            }
-        };
-        let key = qualified(&safe_prefix, "val");
-        rewritten.push_attribute((key.as_str(), value));
+                .map(|prefix| (std::borrow::Cow::Borrowed(prefix.as_str()), false))
+                .unwrap_or_else(|| {
+                    (
+                        std::borrow::Cow::Owned(unused_prefix(&namespace_bindings, "rdocxWord")),
+                        true,
+                    )
+                }),
+        )
+    } else {
+        None
+    };
+    let mut rewritten = crate::text::FieldXmlStart::new(name, emission)?;
+    for (key, value) in attributes {
+        rewritten.push(&key, &value)?;
     }
-    Ok(rewritten.into_owned())
+    if let (Some(value), Some((prefix, declare))) = (value, safe_prefix) {
+        if declare {
+            rewritten.push_word("xmlns", &prefix, W_NS)?;
+        }
+        rewritten.push_word(&prefix, "val", value)?;
+    }
+    Ok(rewritten)
 }
 
 fn validate_typed_leaf_prefixes(raw: &[u8], inherited: &[String]) -> Result<()> {
@@ -846,35 +896,35 @@ pub(crate) fn write_typed_leaf_raw<W: std::io::Write>(
     value: Option<&str>,
     output_word_prefix: &str,
 ) -> Result<()> {
+    write_typed_leaf_raw_in(writer, raw, word_prefixes, value, output_word_prefix, None)
+}
+
+pub(crate) fn write_typed_leaf_raw_in<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    raw: &[u8],
+    word_prefixes: &[String],
+    value: Option<&str>,
+    output_word_prefix: &str,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
     validate_typed_leaf_prefixes(raw, word_prefixes)?;
     let mut reader = Reader::from_reader(raw);
-    let mut buf = Vec::new();
     let mut root_pending = true;
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(element)) if root_pending => {
+        match reader.read_event()? {
+            Event::Start(element) if root_pending => {
                 root_pending = false;
-                writer.write_event(Event::Start(typed_leaf_start(
-                    &element,
-                    word_prefixes,
-                    value,
-                    output_word_prefix,
-                )?))?;
+                typed_leaf_start_in(&element, word_prefixes, value, output_word_prefix, emission)?
+                    .write(writer, false)?;
             }
-            Ok(Event::Empty(element)) if root_pending => {
-                writer.write_event(Event::Empty(typed_leaf_start(
-                    &element,
-                    word_prefixes,
-                    value,
-                    output_word_prefix,
-                )?))?;
+            Event::Empty(element) if root_pending => {
+                typed_leaf_start_in(&element, word_prefixes, value, output_word_prefix, emission)?
+                    .write(writer, true)?;
                 break;
             }
-            Ok(Event::Eof) => break,
-            Ok(event) => writer.write_event(event.into_owned())?,
-            Err(error) => return Err(error.into()),
+            Event::Eof => break,
+            event => writer.write_event(event)?,
         }
-        buf.clear();
     }
     Ok(())
 }
@@ -1341,6 +1391,17 @@ pub(crate) fn parse_scoped_ppr(raw: &[u8], word_prefixes: &[String]) -> Result<C
 }
 
 fn parse_raw_ppr(raw: &[u8], word_prefixes: &[String]) -> Result<CT_PPr> {
+    parse_scoped_ppr_with_observation(raw, word_prefixes, None)
+}
+
+pub(crate) fn parse_scoped_ppr_with_observation(
+    raw: &[u8],
+    word_prefixes: &[String],
+    mut ordinary: Option<&mut Option<std::ops::Range<usize>>>,
+) -> Result<CT_PPr> {
+    if let Some(output) = &mut ordinary {
+        **output = None;
+    }
     let mut reader = Reader::from_reader(raw);
     let mut buf = Vec::new();
     loop {
@@ -1348,11 +1409,20 @@ fn parse_raw_ppr(raw: &[u8], word_prefixes: &[String]) -> Result<CT_PPr> {
             Ok(Event::Start(ref start)) => {
                 let owner_bindings = local_namespace_overrides(start, word_prefixes)?;
                 let prefixes = word_prefixes_at(start, word_prefixes)?;
-                return CT_PPr::from_xml_with_prefixes_and_owner_bindings(
+                let mut selected = None;
+                let model = CT_PPr::from_xml_with_property_observation(
                     &mut reader,
                     &prefixes,
                     &owner_bindings,
-                );
+                    ordinary.as_ref().map(|_| &mut selected),
+                )?;
+                if let Some(output) = ordinary {
+                    *output = selected.and_then(|range| {
+                        let origin = crate::document::reader_input_origin(raw, &reader)?;
+                        Some(range.start + origin..range.end + origin)
+                    });
+                }
+                return Ok(model);
             }
             Ok(Event::Empty(_)) | Ok(Event::Eof) => return Ok(CT_PPr::default()),
             Err(error) => return Err(error.into()),
@@ -1382,6 +1452,18 @@ fn parse_raw_rpr_with_owner_bindings(
     word_prefixes: &[String],
     inherited_owner_bindings: &[(String, String)],
 ) -> Result<CT_RPr> {
+    parse_scoped_rpr_with_observation(raw, word_prefixes, inherited_owner_bindings, None)
+}
+
+pub(crate) fn parse_scoped_rpr_with_observation(
+    raw: &[u8],
+    word_prefixes: &[String],
+    inherited_owner_bindings: &[(String, String)],
+    mut ordinary: Option<&mut Option<std::ops::Range<usize>>>,
+) -> Result<CT_RPr> {
+    if let Some(output) = &mut ordinary {
+        **output = None;
+    }
     let mut reader = Reader::from_reader(raw);
     let mut buf = Vec::new();
     loop {
@@ -1391,11 +1473,20 @@ fn parse_raw_rpr_with_owner_bindings(
                 let owner_bindings =
                     merged_owner_bindings(inherited_owner_bindings, &local_bindings);
                 let prefixes = word_prefixes_at(start, word_prefixes)?;
-                return CT_RPr::from_xml_with_prefixes_and_owner_bindings(
+                let mut selected = None;
+                let model = CT_RPr::from_xml_with_property_observation(
                     &mut reader,
                     &prefixes,
                     &owner_bindings,
-                );
+                    ordinary.as_ref().map(|_| &mut selected),
+                )?;
+                if let Some(output) = ordinary {
+                    *output = selected.and_then(|range| {
+                        let origin = crate::document::reader_input_origin(raw, &reader)?;
+                        Some(range.start + origin..range.end + origin)
+                    });
+                }
+                return Ok(model);
             }
             Ok(Event::Empty(_)) | Ok(Event::Eof) => return Ok(CT_RPr::default()),
             Err(error) => return Err(error.into()),
@@ -2105,23 +2196,86 @@ pub(crate) fn merge_tabs_source(
     current: Option<&crate::borders::CT_Tabs>,
     forced_occurrence: Option<usize>,
 ) -> Result<Vec<u8>> {
+    merge_tabs_source_in(original, current, forced_occurrence, None)
+}
+
+pub(crate) fn merge_tabs_source_in(
+    original: &[u8],
+    current: Option<&crate::borders::CT_Tabs>,
+    forced_occurrence: Option<usize>,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<Vec<u8>> {
     let original_typed = crate::borders::CT_Tabs::from_source_xml(original)?;
-    let current = current.cloned().unwrap_or_default();
+    let empty = crate::borders::CT_Tabs::default();
+    let current = current.unwrap_or(&empty);
     if forced_occurrence.is_none()
-        && original_typed == current
+        && original_typed == *current
         && original_typed
             .tabs
             .iter()
             .map(|tab| tab.source_occurrence)
             .eq(current.tabs.iter().map(|tab| tab.source_occurrence))
     {
+        if let Some(emission) = emission {
+            emission.reserve_inner_xml(original.len())?;
+        }
         return Ok(original.to_vec());
     }
     let overlay = occurrence_overlay(original, &[])?;
-    let mut generated = Writer::new(Vec::new());
-    generated.write_event(Event::Start(BytesStart::new("w:tabs")))?;
+    let generated = if let Some(emission) = emission {
+        let (output, _outer) = emission.new_source_record_output();
+        let mut generated = Writer::new(output);
+        write_tabs_snapshot(
+            &mut generated,
+            current,
+            &original_typed,
+            &overlay,
+            forced_occurrence,
+            Some(emission),
+        )?;
+        generated.into_inner().into_mapped_parts().0
+    } else {
+        let mut generated = Writer::new(Vec::new());
+        write_tabs_snapshot(
+            &mut generated,
+            current,
+            &original_typed,
+            &overlay,
+            forced_occurrence,
+            None,
+        )?;
+        generated.into_inner()
+    };
+    let (original_start, _) = first_element_start(original)?;
+    let prefix = element_prefix(&original_start)?;
+    let generated = rewrite_generated_prefix_in(&generated, &prefix, emission)?;
+    let sources = current
+        .tabs
+        .iter()
+        .map(|tab| tab.source_occurrence)
+        .collect::<Vec<_>>();
+    Ok(merge_repeated_property_with_work_in(
+        original,
+        &generated,
+        &overlay.word_prefixes,
+        PropertyKind::Paragraph,
+        0,
+        Some(&sources),
+        (&PreservationPrefixes::new(&[]), true, emission),
+    )?
+    .0)
+}
+
+fn write_tabs_snapshot<W: std::io::Write>(
+    generated: &mut Writer<W>,
+    current: &crate::borders::CT_Tabs,
+    original_typed: &crate::borders::CT_Tabs,
+    overlay: &OccurrenceOverlay,
+    forced_occurrence: Option<usize>,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    crate::text::FieldXmlStart::new("w:tabs", emission)?.write(generated, false)?;
     for tab in &current.tabs {
-        let mut start = BytesStart::new("w:tab");
         let mut alignment = tab.val.to_str().to_owned();
         let mut leader = tab.leader.map(|value| value.to_str().to_owned());
         if let Some(index) = tab
@@ -2149,42 +2303,32 @@ pub(crate) fn merge_tabs_source(
                 }
             }
         }
-        start.push_attribute(("w:val", alignment.as_str()));
-        let position = tab.pos.0.to_string();
-        start.push_attribute(("w:pos", position.as_str()));
+        let mut start = crate::text::FieldXmlStart::new("w:tab", emission)?;
+        start.push("w:val", alignment.as_str())?;
+        let mut decimal = itoa::Buffer::new();
+        start.push("w:pos", decimal.format(tab.pos.0))?;
         if let Some(leader) = leader.as_ref() {
-            start.push_attribute(("w:leader", leader.as_str()));
+            start.push("w:leader", leader.as_str())?;
         }
-        generated.write_event(Event::Empty(start))?;
+        start.write(generated, true)?;
     }
-    generated.write_event(Event::End(BytesEnd::new("w:tabs")))?;
-    let (original_start, _) = first_element_start(original)?;
-    let prefix = element_prefix(&original_start)?;
-    let generated = rewrite_generated_prefix(&generated.into_inner(), &prefix)?;
-    let sources = current
-        .tabs
-        .iter()
-        .map(|tab| tab.source_occurrence)
-        .collect::<Vec<_>>();
-    merge_repeated_property(
-        original,
-        &generated,
-        &overlay.word_prefixes,
-        PropertyKind::Paragraph,
-        0,
-        Some(&sources),
-        (&PreservationPrefixes::new(&[]), true),
-    )
+    if let Some(emission) = emission {
+        emission.write_end_name(generated, "w:tabs")?;
+    } else {
+        generated.write_event(Event::End(BytesEnd::new("w:tabs")))?;
+    }
+    Ok(())
 }
 
 /// Update only the three owned tab attributes. Retained producer attribute
 /// slices include their whitespace, quote style and entity spelling. The owned
 /// child's QName stays in its actual local namespace context.
-fn merge_direct_tab_attributes(
+fn merge_direct_tab_attributes<'e>(
     original: &BytesStart<'_>,
     generated: &[u8],
     inherited_prefixes: &[String],
-) -> Result<BytesStart<'static>> {
+    emission: Option<&'e crate::text::FieldXmlEmission>,
+) -> Result<crate::text::FieldXmlStart<'e, 'static>> {
     let prefixes = word_prefixes_at(original, inherited_prefixes)?;
     for attribute in original.attributes() {
         attribute?;
@@ -2203,7 +2347,7 @@ fn merge_direct_tab_attributes(
         })
         .ok_or_else(|| OxmlError::InvalidValue("owned tab attribute prefix missing".to_owned()))?;
     let raw = original.attributes_raw();
-    let mut content = name.as_bytes().to_vec();
+    let mut retained = Vec::new();
     let mut cursor = 0;
     while cursor < raw.len() {
         let begin = cursor;
@@ -2211,7 +2355,7 @@ fn merge_direct_tab_attributes(
             cursor += 1;
         }
         if cursor == raw.len() {
-            content.extend_from_slice(&raw[begin..]);
+            retained.push(begin..raw.len());
             break;
         }
         let key_begin = cursor;
@@ -2253,10 +2397,32 @@ fn merge_direct_tab_attributes(
         if !is_word_property_attribute(key, &prefixes)
             || ![b"val".as_slice(), b"pos".as_slice(), b"leader".as_slice()].contains(&local)
         {
-            content.extend_from_slice(&raw[begin..cursor]);
+            retained.push(begin..cursor);
         }
     }
-    let mut start = BytesStart::from_content(std::str::from_utf8(&content)?.to_owned(), name.len());
+    // Attribute values were already checked by the actual CT_Tabs reader.
+    // Retained name bytes are validated here at the existing lexical boundary,
+    // before any normalization reservation or owned event buffer.
+    let mut start = if let Some(emission) = emission {
+        let retained = retained
+            .iter()
+            .map(|range| std::str::from_utf8(&raw[range.clone()]))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        crate::text::FieldXmlStart::from_raw_spans(name, &retained, Some(emission))?
+    } else {
+        // Preserve the legacy concatenated UTF-8 error and its byte offset.
+        let mut content = name.as_bytes().to_vec();
+        for range in retained {
+            content.extend_from_slice(&raw[range]);
+        }
+        let start = BytesStart::from_content(std::str::from_utf8(&content)?.to_owned(), name.len());
+        #[cfg(test)]
+        if content.len() >= 4096 {
+            crate::text::WORD_LARGE_EVENT_ATTRIBUTE_MATERIALIZATIONS
+                .set(crate::text::WORD_LARGE_EVENT_ATTRIBUTE_MATERIALIZATIONS.get() + 1);
+        }
+        crate::text::FieldXmlStart::from_start(start, None)?
+    };
     let (generated, _) = first_element_start(generated)?;
     for attribute in generated.attributes() {
         let attribute = attribute?;
@@ -2264,10 +2430,13 @@ fn merge_direct_tab_attributes(
         let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
         let value =
             attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, generated.decoder())?;
-        let key = qualified(attribute_prefix, std::str::from_utf8(local)?);
-        start.push_attribute((key.as_str(), value.as_ref()));
+        start.push_word(
+            attribute_prefix,
+            std::str::from_utf8(local)?,
+            value.as_ref(),
+        )?;
     }
-    Ok(start.into_owned())
+    Ok(start)
 }
 
 fn merge_repeated_property(
@@ -2300,7 +2469,78 @@ fn merge_repeated_property_with_work(
     generated_sources: Option<&[Option<usize>]>,
     preservation: (&PreservationPrefixes, bool),
 ) -> Result<(Vec<u8>, usize)> {
-    let (preservation_prefixes, preserve_direct_source) = preservation;
+    merge_repeated_property_with_work_in(
+        original,
+        generated,
+        word_prefixes,
+        kind,
+        depth,
+        generated_sources,
+        (preservation.0, preservation.1, None),
+    )
+}
+
+fn merge_repeated_property_with_work_in(
+    original: &[u8],
+    generated: &[u8],
+    word_prefixes: &[String],
+    kind: PropertyKind,
+    depth: usize,
+    generated_sources: Option<&[Option<usize>]>,
+    preservation: (
+        &PreservationPrefixes,
+        bool,
+        Option<&crate::text::FieldXmlEmission>,
+    ),
+) -> Result<(Vec<u8>, usize)> {
+    if let Some(emission) = preservation.2 {
+        let (output, _outer) = emission.new_source_record_output();
+        let mut writer = Writer::new(output);
+        let work = write_repeated_property(
+            &mut writer,
+            original,
+            generated,
+            word_prefixes,
+            kind,
+            depth,
+            generated_sources,
+            preservation,
+        )?;
+        Ok((writer.into_inner().into_mapped_parts().0, work))
+    } else {
+        let mut writer = Writer::new(Vec::new());
+        let work = write_repeated_property(
+            &mut writer,
+            original,
+            generated,
+            word_prefixes,
+            kind,
+            depth,
+            generated_sources,
+            preservation,
+        )?;
+        Ok((writer.into_inner(), work))
+    }
+}
+
+// The existing Vec writer and actual inherited normalized-record writer share
+// this one occurrence/attribute merge implementation.
+#[allow(clippy::too_many_arguments)]
+fn write_repeated_property<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    original: &[u8],
+    generated: &[u8],
+    word_prefixes: &[String],
+    kind: PropertyKind,
+    depth: usize,
+    generated_sources: Option<&[Option<usize>]>,
+    preservation: (
+        &PreservationPrefixes,
+        bool,
+        Option<&crate::text::FieldXmlEmission>,
+    ),
+) -> Result<usize> {
+    let (preservation_prefixes, preserve_direct_source, emission) = preservation;
     let overlay = occurrence_overlay(original, word_prefixes)?;
     let merged_start = if preserve_direct_source {
         first_element_start(original)?.0
@@ -2318,16 +2558,16 @@ fn merge_repeated_property_with_work(
         extras_by_boundary[*boundary].push(raw.as_slice());
         work += 1;
     }
-    let mut writer = Writer::new(Vec::new());
-    let end_name = std::str::from_utf8(merged_start.name().as_ref())?.to_string();
-    writer.write_event(Event::Start(merged_start))?;
+    let root_name = merged_start.name();
+    let end_name = std::str::from_utf8(root_name.as_ref())?;
+    writer.write_event(Event::Start(merged_start.borrow()))?;
     let mut next_boundary = 0;
     for ((_, generated_tab), original_index) in generated_tabs.iter().zip(matches) {
         work += 1;
         if let Some(index) = original_index {
             while next_boundary <= index {
                 for raw in &extras_by_boundary[next_boundary] {
-                    writer.get_mut().extend_from_slice(raw);
+                    writer.get_mut().write_all(raw)?;
                     work += 1;
                 }
                 next_boundary += 1;
@@ -2335,11 +2575,22 @@ fn merge_repeated_property_with_work(
             }
             let merged = if preserve_direct_source {
                 let (start, _) = first_element_start(&overlay.modelled[index])?;
-                let start =
-                    merge_direct_tab_attributes(&start, generated_tab, &overlay.word_prefixes)?;
-                let mut writer = Writer::new(Vec::new());
-                writer.write_event(Event::Empty(start))?;
-                writer.into_inner()
+                let start = merge_direct_tab_attributes(
+                    &start,
+                    generated_tab,
+                    &overlay.word_prefixes,
+                    emission,
+                )?;
+                if let Some(emission) = emission {
+                    let (output, _outer) = emission.new_source_record_output();
+                    let mut child_writer = Writer::new(output);
+                    start.write(&mut child_writer, true)?;
+                    child_writer.into_inner().into_mapped_parts().0
+                } else {
+                    let mut child_writer = Writer::new(Vec::new());
+                    start.write(&mut child_writer, true)?;
+                    child_writer.into_inner()
+                }
             } else {
                 merge_property_child(
                     &overlay.modelled[index],
@@ -2374,20 +2625,21 @@ fn merge_repeated_property_with_work(
                         _ => {}
                     }
                 };
-                let end = std::str::from_utf8(merged_start.name().as_ref())?.to_owned();
-                writer.write_event(Event::Start(merged_start))?;
-                writer.get_mut().extend_from_slice(&raw[begin..finish]);
+                let source_name = merged_start.name();
+                let end = std::str::from_utf8(source_name.as_ref())?;
+                writer.write_event(Event::Start(merged_start.borrow()))?;
+                writer.get_mut().write_all(&raw[begin..finish])?;
                 writer.write_event(Event::End(BytesEnd::new(end)))?;
             } else {
-                write_xml_events(&mut writer, &merged)?;
+                write_xml_events(writer, &merged)?;
             }
         } else {
-            write_xml_events(&mut writer, generated_tab)?;
+            write_xml_events(writer, generated_tab)?;
         }
     }
     while next_boundary < extras_by_boundary.len() {
         for raw in &extras_by_boundary[next_boundary] {
-            writer.get_mut().extend_from_slice(raw);
+            writer.get_mut().write_all(raw)?;
             work += 1;
         }
         next_boundary += 1;
@@ -2397,7 +2649,7 @@ fn merge_repeated_property_with_work(
     debug_assert!(
         work <= 4 * (overlay.modelled.len() + generated_tabs.len() + overlay.extras.len() + 1)
     );
-    Ok((writer.into_inner(), work))
+    Ok(work)
 }
 
 fn merge_property_child(
@@ -3283,6 +3535,7 @@ impl CT_Lvl {
             start.push_attribute((name.as_str(), if tentative { "true" } else { "false" }));
         }
         push_extra_attributes(&mut start, &self.extra_attributes);
+        let _owner_scope = crate::text::emitted_binding_scope(&start, false, false)?;
         writer.write_event(Event::Start(start))?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
@@ -3701,6 +3954,7 @@ impl CT_AbstractNum {
         let mut start = BytesStart::new(abstract_name.as_str());
         start.push_attribute((id_name.as_str(), buf.format(self.abstract_num_id)));
         push_extra_attributes(&mut start, &self.extra_attributes);
+        let _owner_scope = crate::text::emitted_binding_scope(&start, false, false)?;
         writer.write_event(Event::Start(start))?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
@@ -3972,6 +4226,7 @@ impl CT_NumLvl {
         let mut start = BytesStart::new(name.as_str());
         start.push_attribute((ilvl_name.as_str(), buf.format(self.ilvl)));
         push_extra_attributes(&mut start, &self.extra_attributes);
+        let _owner_scope = crate::text::emitted_binding_scope(&start, false, false)?;
         writer.write_event(Event::Start(start))?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
@@ -4121,6 +4376,7 @@ impl CT_Num {
         let mut start = BytesStart::new(num_name.as_str());
         start.push_attribute((num_id_name.as_str(), buf.format(self.num_id)));
         push_extra_attributes(&mut start, &self.extra_attributes);
+        let _owner_scope = crate::text::emitted_binding_scope(&start, false, false)?;
         writer.write_event(Event::Start(start))?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
@@ -4402,6 +4658,7 @@ impl CT_Numbering {
         for (name, value) in &self.root_attributes {
             start.push_attribute((name.as_str(), value.as_str()));
         }
+        let _binding_scope = crate::text::emitted_root_binding_scope(&start, 0, false)?;
         writer.write_event(Event::Start(start))?;
 
         write_extras_at(&mut writer, &self.extra_xml, 0)?;
@@ -4715,10 +4972,150 @@ fn build_level(ilvl: u32, num_fmt: ST_NumberFormat, start: u32) -> CT_Lvl {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_property_reader_observations_keep_only_successful_selected_empty_styles() {
+        use super::{
+            parse_scoped_ppr, parse_scoped_ppr_with_observation, parse_scoped_rpr,
+            parse_scoped_rpr_with_observation,
+        };
+        let prefixes = vec!["w".to_owned()];
+        for run in [false, true] {
+            let (root, style) = if run {
+                ("rPr", "rStyle")
+            } else {
+                ("pPr", "pStyle")
+            };
+            let selected = format!("<w:{style} w:val=\"selected\"/>");
+            let old = format!("<w:{style} w:val=\"old\"/>");
+            for (contents, expected) in [
+                (selected.clone(), Some(selected.clone())),
+                (
+                    format!("<w:{style} w:val=\"&unrecognized;\"/>"),
+                    Some(format!("<w:{style} w:val=\"&unrecognized;\"/>")),
+                ),
+                (format!("{old}{selected}"), Some(selected.clone())),
+                (format!("<w:{style} w:val=\"start\"></w:{style}>"), None),
+                (
+                    format!("<w:{style} xmlns:w=\"urn:foreign\" w:val=\"foreign\"/>"),
+                    None,
+                ),
+                (
+                    format!(
+                        "<q:{style} xmlns:q=\"{}\" q:val=\"alias\"/>",
+                        crate::namespace::W_NS
+                    ),
+                    Some(format!(
+                        "<q:{style} xmlns:q=\"{}\" q:val=\"alias\"/>",
+                        crate::namespace::W_NS
+                    )),
+                ),
+                (format!("<w:{style}/>"), Some(format!("<w:{style}/>"))),
+            ] {
+                for bom in ["", "\u{feff}"] {
+                    let raw = format!(
+                        "{bom}<w:{root} xmlns:w=\"{}\">{contents}</w:{root}>",
+                        crate::namespace::W_NS
+                    );
+                    let mut observed = Some(usize::MAX..usize::MAX);
+                    let actual = if run {
+                        parse_scoped_rpr_with_observation(
+                            raw.as_bytes(),
+                            &prefixes,
+                            &[],
+                            Some(&mut observed),
+                        )
+                        .map(|model| model.style_id)
+                    } else {
+                        parse_scoped_ppr_with_observation(
+                            raw.as_bytes(),
+                            &prefixes,
+                            Some(&mut observed),
+                        )
+                        .map(|model| model.style_id)
+                    }
+                    .unwrap();
+                    let ordinary = if run {
+                        parse_scoped_rpr(raw.as_bytes(), &prefixes).map(|model| model.style_id)
+                    } else {
+                        parse_scoped_ppr(raw.as_bytes(), &prefixes).map(|model| model.style_id)
+                    }
+                    .unwrap();
+                    assert_eq!(actual, ordinary);
+                    let expected = expected.as_ref().map(|tag| {
+                        let start = raw.rfind(tag).unwrap();
+                        start..start + tag.len()
+                    });
+                    assert_eq!(observed, expected, "{raw}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_property_reader_observations_discard_decoder_and_late_parent_failures() {
+        use super::{parse_scoped_ppr_with_observation, parse_scoped_rpr_with_observation};
+        let prefixes = vec!["w".to_owned()];
+        for run in [false, true] {
+            let (root, style, bad) = if run {
+                ("rPr", "rStyle", "<w:sz w:val=\"invalid\"/>")
+            } else {
+                ("pPr", "pStyle", "<w:spacing w:before=\"invalid\"/>")
+            };
+            for content in [
+                format!("<w:{style} w:val=\"ok\"/>{bad}"),
+                format!("<w:{style} malformed w:val=\"ok\"/>"),
+            ] {
+                let raw = format!(
+                    "<w:{root} xmlns:w=\"{}\">{content}</w:{root}>",
+                    crate::namespace::W_NS
+                );
+                let mut observed = Some(0..1);
+                let result = if run {
+                    parse_scoped_rpr_with_observation(
+                        raw.as_bytes(),
+                        &prefixes,
+                        &[],
+                        Some(&mut observed),
+                    )
+                    .map(|_| ())
+                } else {
+                    parse_scoped_ppr_with_observation(
+                        raw.as_bytes(),
+                        &prefixes,
+                        Some(&mut observed),
+                    )
+                    .map(|_| ())
+                };
+                assert!(result.is_err(), "{raw}");
+                assert!(
+                    observed.is_none(),
+                    "failed parent must return no property observation"
+                );
+            }
+        }
+    }
+
     use super::*;
     use crate::borders::CT_TabStop;
     use crate::shared::ST_TabJc;
     use crate::units::Twips;
+
+    #[test]
+    fn direct_tab_legacy_invalid_utf8_keeps_its_concatenated_error_offset() {
+        let raw = b"<q:tab q:val='left' x:\xff='kept' q:pos='12'/>";
+        let mut reader = Reader::from_reader(raw.as_slice());
+        let Event::Empty(start) = reader.read_event().unwrap() else {
+            panic!("fixture root");
+        };
+        let generated = b"<w:tab w:val='left' w:pos='27'/>";
+        let actual = merge_direct_tab_attributes(&start, generated, &["q".to_owned()], None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            actual.to_string(),
+            "UTF-8 error: invalid utf-8 sequence of 1 bytes from index 8"
+        );
+    }
 
     #[test]
     fn every_standard_number_format_token_round_trips() {

@@ -223,6 +223,7 @@ impl RevisionSourceFacts {
             &prefixes,
             &mut self.runs,
             &mut self.revisions,
+            None,
         )
     }
 }
@@ -238,6 +239,88 @@ pub enum RevisionKind {
     ParagraphPropertyChange,
     TablePropertyChange,
     SectionPropertyChange,
+}
+
+/// Existing substantive body-reader modes. Deletions need the real source
+/// ownership probe, never a header-only guess.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RevisionBodyMode {
+    Ordered,
+    Legacy(RevisionKind),
+}
+
+impl RevisionBodyMode {
+    pub(crate) fn without_source_probe(kind: RevisionKind) -> Option<Self> {
+        match kind {
+            RevisionKind::Insertion | RevisionKind::MoveTo => Some(Self::Ordered),
+            RevisionKind::Deletion | RevisionKind::MoveFrom => None,
+            _ => Some(Self::Legacy(kind)),
+        }
+    }
+
+    fn selected(kind: RevisionKind, ordered_owner: bool) -> Self {
+        Self::without_source_probe(kind).unwrap_or(if ordered_owner {
+            Self::Ordered
+        } else {
+            Self::Legacy(kind)
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevisionContentAction {
+    Run,
+    NestedRevision,
+    Hyperlink,
+    PriorRunProperties,
+    PriorParagraphProperties,
+    PriorTableProperties,
+    PriorSectionProperties,
+    Skip,
+}
+
+impl RevisionContentAction {
+    pub(crate) fn for_names(
+        kind: Option<RevisionKind>,
+        local: &[u8],
+        word: bool,
+        empty: bool,
+    ) -> Self {
+        if !word {
+            return Self::Skip;
+        }
+        if revision_kind_for_local(local).is_some() {
+            return Self::NestedRevision;
+        }
+        if empty {
+            return Self::Skip;
+        }
+        match local {
+            b"r" => Self::Run,
+            b"hyperlink" => Self::Hyperlink,
+            b"rPr" if kind == Some(RevisionKind::RunPropertyChange) => Self::PriorRunProperties,
+            b"pPr" if kind == Some(RevisionKind::ParagraphPropertyChange) => {
+                Self::PriorParagraphProperties
+            }
+            b"tblPr" if kind == Some(RevisionKind::TablePropertyChange) => {
+                Self::PriorTableProperties
+            }
+            b"sectPr" if kind == Some(RevisionKind::SectionPropertyChange) => {
+                Self::PriorSectionProperties
+            }
+            _ => Self::Skip,
+        }
+    }
+}
+
+// Both the actual depth reader and source postorder fact use this exact old
+// inclusive constructor boundary. It is a raw-fallback outcome, not a quota.
+pub(crate) fn revision_depth_exceeds(depth: usize) -> bool {
+    depth > MAX_REVISION_NESTING_DEPTH
+}
+
+pub(crate) fn revision_depth_height(parent: bool, child: usize) -> usize {
+    (child + usize::from(parent)).min(MAX_REVISION_NESTING_DEPTH + 1)
 }
 
 /// The typed content projected from a preserved revision subtree.
@@ -267,6 +350,22 @@ pub struct CT_Revision {
     require_author: bool,
     accepted_fields_pending: bool,
     accepted_payload_pending: bool,
+    read_context: Option<Arc<RevisionReadContext>>,
+}
+
+// Numeric facts belong to this successful constructor and its real typed
+// clones. The weak operation anchor carries neither Work nor input ownership.
+struct RevisionReadContext {
+    registry: std::sync::Weak<std::sync::Mutex<crate::text::FieldOriginRegistry>>,
+    raw_map: crate::document::WordSourceMap,
+    maps: crate::text::WordBlockSourceMaps,
+}
+impl std::fmt::Debug for RevisionReadContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevisionReadContext")
+            .field("raw_len", &self.raw_map.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PartialEq for CT_Revision {
@@ -302,29 +401,128 @@ thread_local! {
     pub(crate) static ORDERED_DIAGNOSTIC_SECONDARY_VISIBLE_RAW_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The actual root decoder, shared by construction and contextual source actions.
+pub(crate) struct RevisionHeader {
+    pub(crate) kind: RevisionKind,
+    id: i32,
+    author: String,
+    timestamp: Option<String>,
+}
+
+impl RevisionHeader {
+    pub(crate) fn read(
+        start: &quick_xml::events::BytesStart<'_>,
+        prefixes: &[String],
+        require_author: bool,
+    ) -> crate::Result<Self> {
+        let kind = revision_kind(start.name().as_ref(), prefixes).ok_or_else(|| {
+            crate::OxmlError::InvalidValue("unsupported revision element".to_owned())
+        })?;
+        let id = required_word_attribute(start, b"id", prefixes)?.parse()?;
+        let author = optional_word_attribute(start, b"author", prefixes)?;
+        let author = match (author, require_author) {
+            (Some(author), _) => author,
+            (None, true) => required_word_attribute(start, b"author", prefixes)?,
+            (None, false) => String::new(),
+        };
+        let timestamp = optional_word_attribute(start, b"date", prefixes)?;
+        Ok(Self {
+            kind,
+            id,
+            author,
+            timestamp,
+        })
+    }
+}
+
 impl CT_Revision {
-    pub(crate) fn from_raw(raw_xml: Vec<u8>, word_prefixes: &[String]) -> Option<Self> {
-        Self::try_from_raw(raw_xml, word_prefixes, true).ok()
+    /// Borrow the stored revision record without rebuilding its typed projection.
+    #[doc(hidden)]
+    pub fn retained_xml(&self) -> &[u8] {
+        &self.raw_xml
     }
 
-    pub(crate) fn from_raw_content(raw_xml: Vec<u8>, word_prefixes: &[String]) -> Option<Self> {
-        Self::try_from_raw(raw_xml, word_prefixes, false).ok()
+    pub(crate) fn from_raw(raw_xml: Vec<u8>, word_prefixes: &[String]) -> Option<Self> {
+        Self::try_from_raw(raw_xml, word_prefixes, true, None).ok()
+    }
+
+    pub(crate) fn from_raw_with_input(
+        raw_xml: Vec<u8>,
+        word_prefixes: &[String],
+        require_author: bool,
+        input: Option<&crate::document::WordFieldInput>,
+    ) -> crate::Result<Option<Self>> {
+        Self::from_raw_with_read_output(raw_xml, word_prefixes, require_author, input, None)
+    }
+
+    pub(crate) fn from_raw_with_read_output(
+        raw_xml: Vec<u8>,
+        word_prefixes: &[String],
+        require_author: bool,
+        input: Option<&crate::document::WordFieldInput>,
+        output: Option<&mut crate::text::WordBlockSourceMaps>,
+    ) -> crate::Result<Option<Self>> {
+        if let Some(error) = input.and_then(crate::document::WordFieldInput::resource_failure) {
+            return Err(error);
+        }
+        let mut staged =
+            (output.is_some() || input.is_some()).then(crate::text::WordBlockSourceMaps::default);
+        let parsed = Self::try_from_raw_with_read_output(
+            raw_xml,
+            word_prefixes,
+            require_author,
+            input,
+            staged.as_mut(),
+        );
+        if let Some(error) = input.and_then(crate::document::WordFieldInput::resource_failure) {
+            return Err(error);
+        }
+        // Only the actual producer's classified receipt makes a checked error.
+        // All ordinary constructor failures retain the old None policy.
+        match parsed {
+            Ok(mut revision) => {
+                if let (Some(input), Some(staged)) = (input, staged.as_ref()) {
+                    revision.attach_read_context(input, staged.clone());
+                }
+                if let (Some(output), Some(staged)) = (output, staged) {
+                    *output = staged;
+                }
+                Ok(Some(revision))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// Whether a preserved wrapper is admitted by the complete typed parser.
     #[doc(hidden)]
     pub fn story_raw_is_typed(raw_xml: &[u8], word_prefixes: &[String]) -> bool {
-        Self::try_from_raw(raw_xml.to_vec(), word_prefixes, true).is_ok()
+        Self::try_from_raw(raw_xml.to_vec(), word_prefixes, true, None).is_ok()
     }
 
     pub(crate) fn into_raw_xml(self) -> Vec<u8> {
         self.raw_xml
     }
 
+    /// Original retained wrapper bytes still owned by this revision.
+    pub(crate) fn retained_source_len(&self) -> usize {
+        self.raw_xml.len()
+    }
+
     fn try_from_raw(
         raw_xml: Vec<u8>,
         word_prefixes: &[String],
         require_author: bool,
+        input: Option<&crate::document::WordFieldInput>,
+    ) -> crate::Result<Self> {
+        Self::try_from_raw_with_read_output(raw_xml, word_prefixes, require_author, input, None)
+    }
+
+    fn try_from_raw_with_read_output(
+        raw_xml: Vec<u8>,
+        word_prefixes: &[String],
+        require_author: bool,
+        input: Option<&crate::document::WordFieldInput>,
+        output: Option<&mut crate::text::WordBlockSourceMaps>,
     ) -> crate::Result<Self> {
         #[cfg(test)]
         {
@@ -346,41 +544,20 @@ impl CT_Revision {
         reader.config_mut().trim_text(false);
         let mut buffer = Vec::new();
         let (kind, prefixes) = loop {
-            match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) => {
+            let event = reader.read_event_into(&mut buffer)?;
+            let empty = matches!(event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start) => {
                     let prefixes = word_prefixes_at(&start, word_prefixes)?;
-                    let kind =
-                        revision_kind(start.name().as_ref(), &prefixes).ok_or_else(|| {
-                            crate::OxmlError::InvalidValue(
-                                "unsupported revision element".to_owned(),
-                            )
-                        })?;
-                    let id = required_word_attribute(&start, b"id", &prefixes)?.parse()?;
-                    let author = optional_word_attribute(&start, b"author", &prefixes)?;
-                    let author = match (author, require_author) {
-                        (Some(author), _) => author,
-                        (None, true) => required_word_attribute(&start, b"author", &prefixes)?,
-                        (None, false) => String::new(),
-                    };
-                    let timestamp = optional_word_attribute(&start, b"date", &prefixes)?;
-                    break ((kind, id, author, timestamp), prefixes);
-                }
-                Event::Empty(start) => {
-                    let prefixes = word_prefixes_at(&start, word_prefixes)?;
-                    let kind =
-                        revision_kind(start.name().as_ref(), &prefixes).ok_or_else(|| {
-                            crate::OxmlError::InvalidValue(
-                                "unsupported revision element".to_owned(),
-                            )
-                        })?;
-                    let id = required_word_attribute(&start, b"id", &prefixes)?.parse()?;
-                    let author = optional_word_attribute(&start, b"author", &prefixes)?;
-                    let author = match (author, require_author) {
-                        (Some(author), _) => author,
-                        (None, true) => required_word_attribute(&start, b"author", &prefixes)?,
-                        (None, false) => String::new(),
-                    };
-                    let timestamp = optional_word_attribute(&start, b"date", &prefixes)?;
+                    let RevisionHeader {
+                        kind,
+                        id,
+                        author,
+                        timestamp,
+                    } = RevisionHeader::read(&start, &prefixes, require_author)?;
+                    if !empty {
+                        break ((kind, id, author, timestamp), prefixes);
+                    }
                     return Ok(Self {
                         kind,
                         id,
@@ -394,6 +571,7 @@ impl CT_Revision {
                         require_author,
                         accepted_fields_pending: false,
                         accepted_payload_pending: false,
+                        read_context: None,
                     });
                 }
                 Event::Eof => {
@@ -406,24 +584,34 @@ impl CT_Revision {
             buffer.clear();
         };
         let (kind, id, author, timestamp) = kind;
-        let (content, content_paragraph, nested_revisions) =
-            if matches!(kind, RevisionKind::Insertion | RevisionKind::MoveTo)
-                || matches!(kind, RevisionKind::Deletion | RevisionKind::MoveFrom)
+        let (content, content_paragraph, nested_revisions) = if matches!(
+            RevisionBodyMode::selected(
+                kind,
+                RevisionBodyMode::without_source_probe(kind).is_none()
                     && crate::text::source_has_ordered_field_owner(&raw_xml, &prefixes)?
-            {
-                let copy_bound = crate::document::admit_word_xml(&raw_xml, word_prefixes, None)?;
-                let (paragraph, facts) =
-                    parse_revision_content_with_facts(&raw_xml, &prefixes, copy_bound)?;
-                let content = if facts.runs.is_empty() {
-                    RevisionContent::Marker
-                } else {
-                    RevisionContent::Runs(facts.runs)
-                };
-                (content, Some(Arc::new(paragraph)), facts.revisions)
+            ),
+            RevisionBodyMode::Ordered
+        ) {
+            let copy_bound = crate::document::admit_revision_field_input(
+                &raw_xml,
+                word_prefixes,
+                require_author,
+                input.map(crate::document::WordFieldInput::registry),
+            )?;
+            let (paragraph, facts) =
+                parse_revision_content_with_facts(&raw_xml, &prefixes, copy_bound, input, output)?;
+            let content = if facts.runs.is_empty() {
+                RevisionContent::Marker
             } else {
-                let (content, nested_revisions) = parse_content(&mut reader, kind, &prefixes)?;
-                (content, None, nested_revisions)
+                RevisionContent::Runs(facts.runs)
             };
+            (content, Some(Arc::new(paragraph)), facts.revisions)
+        } else {
+            let cursor = input.map(|input| input.cursor(&raw_xml)).transpose()?;
+            let (content, nested_revisions) =
+                parse_content(&mut reader, kind, &prefixes, cursor.as_ref())?;
+            (content, None, nested_revisions)
+        };
         Ok(Self {
             kind,
             id,
@@ -437,7 +625,44 @@ impl CT_Revision {
             require_author,
             accepted_fields_pending: false,
             accepted_payload_pending: false,
+            read_context: None,
         })
+    }
+
+    fn attach_read_context(
+        &mut self,
+        input: &crate::document::WordFieldInput,
+        maps: crate::text::WordBlockSourceMaps,
+    ) {
+        let mut raw_map = input.projection_parts().0.clone();
+        raw_map.freeze_publication();
+        self.read_context = Some(Arc::new(RevisionReadContext {
+            registry: Arc::downgrade(input.registry()),
+            raw_map,
+            maps,
+        }));
+    }
+
+    fn read_context_for(
+        &self,
+        work: &crate::text::WordOperationWork,
+    ) -> Option<Arc<RevisionReadContext>> {
+        let context = self.read_context.as_ref()?;
+        let registry = context.registry.upgrade()?;
+        Arc::ptr_eq(&registry, &work.field_origins).then(|| Arc::clone(context))
+    }
+
+    pub(crate) fn validate_template_install_context(
+        &self,
+        work: &crate::text::WordOperationWork,
+        required: bool,
+    ) -> crate::Result<()> {
+        if self.read_context_for(work).is_none() && required {
+            return Err(crate::OxmlError::InvalidValue(
+                "revision has no successful scoped read".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn kind(&self) -> RevisionKind {
@@ -471,6 +696,7 @@ impl CT_Revision {
     /// The original raw XML remains the serializer's authority.
     #[doc(hidden)]
     pub fn physical_content_paragraph_mut(&mut self) -> crate::Result<Option<&mut CT_P>> {
+        self.read_context = None;
         if !matches!(
             self.kind,
             RevisionKind::Insertion
@@ -517,10 +743,24 @@ impl CT_Revision {
             .accepted_run_segments(path)
     }
 
+    pub(crate) fn template_text_mut(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        content: usize,
+    ) -> Option<&mut String> {
+        if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
+            return None;
+        }
+        // This read never makes a shared paragraph owned just to move text.
+        let paragraph = Arc::get_mut(self.content_paragraph.as_mut()?)?;
+        crate::placeholder::owned_paragraph_text_mut(paragraph, path, content)
+    }
+
     pub(crate) fn accepted_run_segments_mut(
         &mut self,
         path: &[AcceptedRunPathSegment],
     ) -> Option<&mut CT_R> {
+        self.read_context = None;
         if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
             return None;
         }
@@ -529,6 +769,7 @@ impl CT_Revision {
     }
 
     pub(crate) fn ordered_paragraph_mut(&mut self) -> Option<&mut CT_P> {
+        self.read_context = None;
         if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
             return None;
         }
@@ -537,7 +778,42 @@ impl CT_Revision {
         Some(Arc::make_mut(self.content_paragraph.as_mut()?))
     }
 
-    pub(crate) fn normalize_pending_fields(&mut self) -> crate::Result<()> {
+    pub(crate) fn replace_ordered_result_slot(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        replacement: Vec<CT_R>,
+    ) -> crate::Result<bool> {
+        self.read_context = None;
+        if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
+            return Ok(false);
+        }
+        let mut reader = Reader::from_reader(self.raw_xml.as_slice());
+        let root = match reader.read_event()? {
+            Event::Start(root) => root,
+            _ => {
+                return Err(crate::OxmlError::MissingElement(
+                    "revision source root".into(),
+                ));
+            }
+        };
+        let local = crate::text::raw_namespace_declarations(&root)?;
+        let mut context = crate::text::field_scope_bindings(&self.parse_word_prefixes);
+        for (prefix, uri) in &local {
+            context.retain(|(known, _)| *known != prefix);
+            context.push((prefix, uri));
+        }
+        let Some(paragraph) = self.content_paragraph.as_mut().map(Arc::make_mut) else {
+            return Ok(false);
+        };
+        self.accepted_fields_pending = true;
+        self.accepted_payload_pending = true;
+        paragraph.replace_ordered_result_slot(path, replacement, Some(&context))
+    }
+
+    pub(crate) fn normalize_pending_fields_in(
+        &mut self,
+        work: &mut crate::text::WordOperationWork,
+    ) -> crate::Result<()> {
         let Some(paragraph) = self.content_paragraph.as_deref() else {
             return Ok(());
         };
@@ -558,8 +834,8 @@ impl CT_Revision {
                 .as_mut()
                 .expect("stored paragraph"),
         )
-        .normalize_field_owners()?;
-        candidate.refresh_accepted_content()?;
+        .normalize_field_owners_in(work)?;
+        candidate.refresh_accepted_content_in(work, None, false, None)?;
         *self = candidate;
         Ok(())
     }
@@ -569,9 +845,52 @@ impl CT_Revision {
         path: &[AcceptedRunPathSegment],
         replacement: CT_R,
     ) -> crate::Result<bool> {
-        self.edit_accepted_paragraph(|paragraph| {
-            paragraph.replace_accepted_run_segments(path, replacement)
-        })
+        self.replace_accepted_run_segments_in(path, replacement, None, None, false)
+    }
+
+    pub(crate) fn replace_accepted_run_segments_in(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        replacement: CT_R,
+        work: Option<&mut crate::text::WordOperationWork>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+        prepared_fields: bool,
+    ) -> crate::Result<bool> {
+        if !prepared_fields {
+            return self.edit_accepted_paragraph_in(work, emission, |paragraph, work| {
+                paragraph.replace_accepted_run_segments_in(path, replacement, work, emission, false)
+            });
+        }
+        let work = work.ok_or_else(|| {
+            crate::OxmlError::InvalidValue(
+                "prepared Revision install requires its operation".into(),
+            )
+        })?;
+        if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
+            return Ok(false);
+        }
+        ensure_revision_word_prefix_is_mutable(&self.raw_xml)?;
+        let mut candidate = self.clone();
+        let Some(paragraph) = candidate.content_paragraph.as_mut().map(Arc::make_mut) else {
+            return Ok(false);
+        };
+        if !paragraph.replace_accepted_run_segments_in(
+            path,
+            replacement,
+            Some(work),
+            emission,
+            true,
+        )? {
+            return Ok(false);
+        }
+        candidate.refresh_accepted_content_in(
+            work,
+            emission,
+            true,
+            self.content_paragraph.as_deref(),
+        )?;
+        *self = candidate;
+        Ok(true)
     }
 
     pub(crate) fn split_accepted_run_segments(
@@ -579,8 +898,18 @@ impl CT_Revision {
         path: &[AcceptedRunPathSegment],
         offset: usize,
     ) -> crate::Result<bool> {
-        self.edit_accepted_paragraph(|paragraph| {
-            paragraph.split_accepted_run_segments(path, offset)
+        self.split_accepted_run_segments_in(path, offset, None, None)
+    }
+
+    pub(crate) fn split_accepted_run_segments_in(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        offset: usize,
+        work: Option<&mut crate::text::WordOperationWork>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> crate::Result<bool> {
+        self.edit_accepted_paragraph_in(work, emission, |paragraph, work| {
+            paragraph.split_accepted_run_segments_in(path, offset, work, emission)
         })
     }
 
@@ -629,20 +958,48 @@ impl CT_Revision {
         &mut self,
         edit: impl FnOnce(&mut CT_P) -> crate::Result<bool>,
     ) -> crate::Result<bool> {
+        self.edit_accepted_paragraph_in(None, None, |paragraph, _| edit(paragraph))
+    }
+
+    pub(crate) fn edit_accepted_paragraph_in(
+        &mut self,
+        mut work: Option<&mut crate::text::WordOperationWork>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+        edit: impl FnOnce(&mut CT_P, Option<&mut crate::text::WordOperationWork>) -> crate::Result<bool>,
+    ) -> crate::Result<bool> {
         if !matches!(self.kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
             return Ok(false);
         }
         ensure_revision_word_prefix_is_mutable(&self.raw_xml)?;
         let mut candidate = self.clone();
+        candidate.read_context = None;
         let Some(paragraph) = candidate.content_paragraph.as_mut().map(Arc::make_mut) else {
             return Ok(false);
         };
-        if !edit(paragraph)? {
+        if !edit(paragraph, work.as_deref_mut())? {
             return Ok(false);
         }
-        candidate.refresh_accepted_content()?;
+        if let Some(work) = work {
+            candidate.refresh_accepted_content_in(work, emission, true, None)?;
+        } else {
+            candidate.refresh_accepted_content()?;
+        }
         *self = candidate;
         Ok(true)
+    }
+
+    /// Move the actual retained owners out of a discarded checked candidate.
+    pub(crate) fn into_discard_parts(
+        self,
+    ) -> (RevisionContent, Option<Arc<CT_P>>, Vec<CT_Revision>) {
+        (
+            self.content,
+            self.content_paragraph,
+            self.nested_revisions
+                .into_iter()
+                .map(|(_, revision)| revision)
+                .collect(),
+        )
     }
 
     pub(crate) fn shared_content_paragraph(&self) -> Option<Arc<CT_P>> {
@@ -736,7 +1093,89 @@ impl CT_Revision {
         let paragraph = self.content_paragraph.as_deref().ok_or_else(|| {
             crate::OxmlError::MissingElement("accepted revision paragraph".to_owned())
         })?;
-        let paragraph_xml = crate::text::ordered_paragraph_xml(paragraph)?;
+        let mut work =
+            crate::text::WordOperationWork::model_fields(paragraph.writer_field_roots())?;
+        self.refresh_accepted_content_in(&mut work, None, false, None)
+    }
+
+    fn refresh_accepted_content_in(
+        &mut self,
+        work: &mut crate::text::WordOperationWork,
+        emission: Option<&crate::text::FieldXmlEmission>,
+        scoped: bool,
+        clone_from: Option<&CT_P>,
+    ) -> crate::Result<()> {
+        let paragraph = self.content_paragraph.as_deref().ok_or_else(|| {
+            crate::OxmlError::MissingElement("accepted revision paragraph".to_owned())
+        })?;
+        let mut reader = Reader::from_reader(self.raw_xml.as_slice());
+        let own_prefixes = match reader.read_event()? {
+            Event::Start(root) => word_prefixes_at(&root, &self.parse_word_prefixes)?,
+            _ => {
+                return Err(crate::OxmlError::MissingElement(
+                    "revision source root".into(),
+                ));
+            }
+        };
+        let context = if scoped {
+            self.read_context_for(work)
+        } else {
+            None
+        };
+        let (texts, raws) = if let Some(context) = &context {
+            crate::document::returned_block_inputs(
+                crate::document::WordOwner::Revision(self),
+                &context.maps,
+            )?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let emit = |active_work: &mut crate::text::WordOperationWork| -> crate::Result<_> {
+            let clone_lease = clone_from
+                .map(|previous| {
+                    crate::text::TemplateParagraphCloneLease::new(previous, paragraph, active_work)
+                })
+                .transpose()?
+                .flatten();
+            let (bytes, map) = if scoped {
+                let (bytes, map) = crate::text::paragraph_content_mapped_in(
+                    paragraph,
+                    Some(&crate::text::field_scope_bindings(&own_prefixes)),
+                    active_work,
+                    None,
+                    emission,
+                    None,
+                )?;
+                (bytes, Some(map))
+            } else {
+                (
+                    crate::text::ordered_paragraph_xml_in(
+                        paragraph,
+                        Some(&crate::text::field_scope_bindings(&own_prefixes)),
+                        active_work,
+                        None,
+                    )?,
+                    None,
+                )
+            };
+            let raw_map = if scoped {
+                Some(if let Some(context) = &context {
+                    context.raw_map.clone()
+                } else {
+                    active_work.template_word_raw_map(&self.raw_xml)?
+                })
+            } else {
+                None
+            };
+            drop(clone_lease);
+            Ok((bytes, map, raw_map))
+        };
+        let (paragraph_xml, paragraph_map, original_map) = if context.is_some() {
+            let lease = work.template_revision_read_context(&texts, &raws)?;
+            emit(lease.work)?
+        } else {
+            emit(work)?
+        };
         let (content_start, content_end) = revision_content_bounds(&self.raw_xml)?;
         let capacity = self
             .raw_xml
@@ -746,16 +1185,53 @@ impl CT_Revision {
             .ok_or_else(|| {
                 crate::OxmlError::InvalidValue("revision refresh source byte overflow".into())
             })?;
+        if let Some(emission) = emission {
+            emission.reserve_inner_xml(capacity)?;
+        }
         let mut updated = Vec::with_capacity(capacity);
         updated.extend_from_slice(&self.raw_xml[..content_start]);
         updated.extend_from_slice(&paragraph_xml);
         updated.extend_from_slice(&self.raw_xml[content_end..]);
         let prefixes = self.parse_word_prefixes.clone();
         let require_author = self.require_author;
-        let mut normalized = Self::try_from_raw(updated, &prefixes, require_author)?;
+        let mut read_maps = crate::text::WordBlockSourceMaps::default();
+        let mapped = if let (Some(body_map), Some(original_map)) = (paragraph_map, original_map) {
+            let map = crate::document::WordSourceMap::concat(&[
+                original_map.slice(0..content_start)?,
+                body_map,
+                original_map.slice(content_end..self.raw_xml.len())?,
+            ])?;
+            Some(crate::document::WordFieldInput::produced(
+                map,
+                Arc::clone(&work.field_origins),
+            ))
+        } else {
+            None
+        };
+        let mut normalized = Self::try_from_raw_with_read_output(
+            updated,
+            &prefixes,
+            require_author,
+            mapped.as_ref(),
+            mapped.as_ref().map(|_| &mut read_maps),
+        )?;
+        if let Some(mapped) = &mapped {
+            normalized.attach_read_context(mapped, read_maps);
+        }
         let parsed_source = normalized.content_paragraph.clone();
         if let Some(current) = normalized.content_paragraph.as_mut() {
-            crate::text::retain_ordered_field_source_identities(paragraph, Arc::make_mut(current))?;
+            if scoped {
+                crate::text::retain_ordered_field_source_identities_in(
+                    paragraph,
+                    Arc::make_mut(current),
+                    Some(&work.field_origins),
+                )?;
+            } else {
+                crate::text::retain_ordered_field_source_identities(
+                    paragraph,
+                    Arc::make_mut(current),
+                )?;
+            }
         }
         if let Some(source) = parsed_source {
             normalized.synchronize_source_fact_aliases(&source)?;
@@ -767,20 +1243,104 @@ impl CT_Revision {
         Ok(())
     }
 
-    pub(crate) fn write_xml<W: std::io::Write>(
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
         &self,
         writer: &mut quick_xml::Writer<W>,
+        role: crate::text::XmlWriteRole,
+        _source_context: Option<&[(&str, &str)]>,
+        work: &mut crate::text::WordOperationWork,
+        emission: Option<&crate::text::FieldXmlEmission>,
     ) -> crate::Result<()> {
-        writer.get_mut().write_all(&self.raw_xml)?;
-        Ok(())
+        if role == crate::text::XmlWriteRole::Source {
+            let _transport = work.retained_revision_transport(&self.raw_xml)?;
+            let map = if work.template_word_capture().is_some() {
+                self.read_context_for(work)
+                    .map(|context| context.raw_map.clone())
+            } else {
+                None
+            };
+            let _mapped = map
+                .map(|map| work.mapped_source_record(&self.raw_xml, map))
+                .transpose()?;
+            writer.get_mut().write_all(&self.raw_xml)?;
+            Ok(())
+        } else {
+            let destination = crate::text::emitted_bindings();
+            let bindings = destination.bindings_for(&self.raw_xml);
+            let budget =
+                crate::text::retained_owner_work(self.raw_xml.len(), &self.parse_word_prefixes, 0)?;
+            let plan = crate::text::retained_root_plan(
+                &self.raw_xml,
+                &self.parse_word_prefixes,
+                &bindings,
+                budget,
+            )?;
+            let map = if work.template_word_capture().is_some() {
+                Some(if let Some(context) = self.read_context_for(work) {
+                    context.raw_map.clone()
+                } else {
+                    work.template_word_raw_map(&self.raw_xml)?
+                })
+            } else {
+                None
+            };
+            let (produced, prepaid, mapped) = crate::text::emit_retained_roots_mapped_in(
+                &self.raw_xml,
+                plan,
+                emission,
+                map.as_ref(),
+            )?;
+            let _transport = emission
+                .filter(|_| prepaid)
+                .map(|emission| emission.prepaid_xml_transport(&produced))
+                .transpose()?;
+            let _mapped = mapped
+                .map(|map| work.mapped_source_record(&produced, map))
+                .transpose()?;
+            writer.get_mut().write_all(&produced)?;
+            Ok(())
+        }
     }
 
-    pub(crate) fn write_xml_with_word_override<W: std::io::Write>(
+    pub(crate) fn write_xml_with_role_override<W: std::io::Write>(
         &self,
         writer: &mut quick_xml::Writer<W>,
         foreign_word_namespace: Option<&str>,
+        role: crate::text::XmlWriteRole,
+        _source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
     ) -> crate::Result<()> {
-        crate::text::write_raw_with_word_override(writer, &self.raw_xml, foreign_word_namespace)
+        if role == crate::text::XmlWriteRole::Source {
+            return crate::text::write_raw_with_word_override_in(
+                writer,
+                &self.raw_xml,
+                foreign_word_namespace,
+                emission,
+            );
+        }
+
+        let destination = crate::text::emitted_bindings();
+        let mut bindings = destination.bindings_for(&self.raw_xml);
+        if let Some(namespace) = foreign_word_namespace {
+            bindings.retain(|(prefix, _)| *prefix != "w");
+            bindings.push(("w", namespace));
+        }
+        let budget =
+            crate::text::retained_owner_work(self.raw_xml.len(), &self.parse_word_prefixes, 0)?;
+        let plan = crate::text::retained_root_plan(
+            &self.raw_xml,
+            &self.parse_word_prefixes,
+            &bindings,
+            budget,
+        )?;
+        let (produced, prepaid) =
+            crate::text::emit_retained_roots_in(&self.raw_xml, plan, emission)?;
+        let _transport = emission
+            .filter(|_| prepaid)
+            .map(|emission| emission.prepaid_xml_transport(&produced))
+            .transpose()?;
+        writer.get_mut().write_all(&produced)?;
+        Ok(())
     }
 }
 
@@ -788,18 +1348,18 @@ fn validate_revision_nesting_depth(raw_xml: &[u8], word_prefixes: &[String]) -> 
     let mut reader = Reader::from_reader(raw_xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
-    let mut scopes = vec![(word_prefixes.to_vec(), false)];
+    let mut scopes = vec![(Arc::new(word_prefixes.to_vec()), false)];
     let mut revision_depth = 0usize;
 
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(start) => {
                 let inherited = &scopes.last().expect("root namespace scope").0;
-                let prefixes = word_prefixes_at(&start, inherited)?;
+                let prefixes = revision_scope_at(&start, inherited)?;
                 let is_revision = revision_kind(start.name().as_ref(), &prefixes).is_some();
                 if is_revision {
-                    revision_depth += 1;
-                    if revision_depth > MAX_REVISION_NESTING_DEPTH {
+                    revision_depth = revision_depth_height(true, revision_depth);
+                    if revision_depth_exceeds(revision_depth) {
                         return Err(crate::OxmlError::InvalidValue(
                             "revision nesting depth exceeds reader limit".to_owned(),
                         ));
@@ -809,9 +1369,9 @@ fn validate_revision_nesting_depth(raw_xml: &[u8], word_prefixes: &[String]) -> 
             }
             Event::Empty(start) => {
                 let inherited = &scopes.last().expect("root namespace scope").0;
-                let prefixes = word_prefixes_at(&start, inherited)?;
+                let prefixes = revision_scope_at(&start, inherited)?;
                 if revision_kind(start.name().as_ref(), &prefixes).is_some()
-                    && revision_depth + 1 > MAX_REVISION_NESTING_DEPTH
+                    && revision_depth_exceeds(revision_depth_height(true, revision_depth))
                 {
                     return Err(crate::OxmlError::InvalidValue(
                         "revision nesting depth exceeds reader limit".to_owned(),
@@ -1085,7 +1645,7 @@ fn parse_accepted_revision_content(
     word_prefixes: &[String],
 ) -> crate::Result<CT_P> {
     let copy_bound = crate::document::admit_word_xml(raw_xml, word_prefixes, None)?;
-    parse_revision_content_with_facts(raw_xml, word_prefixes, copy_bound)
+    parse_revision_content_with_facts(raw_xml, word_prefixes, copy_bound, None, None)
         .map(|(paragraph, _)| paragraph)
 }
 
@@ -1093,22 +1653,53 @@ fn parse_revision_content_with_facts(
     raw_xml: &[u8],
     word_prefixes: &[String],
     copy_bound: (usize, usize),
+    input: Option<&crate::document::WordFieldInput>,
+    output: Option<&mut crate::text::WordBlockSourceMaps>,
 ) -> crate::Result<(CT_P, RevisionSourceFacts)> {
     let (content_start, content_end) = revision_content_bounds(raw_xml)?;
+    let paragraph_input = input
+        .map(|input| input.slice(content_start..content_end)?.with_shell(5, 6))
+        .transpose()?;
     let mut paragraph_xml = Vec::from(b"<w:p>".as_slice());
     paragraph_xml.extend_from_slice(&raw_xml[content_start..content_end]);
     paragraph_xml.extend_from_slice(b"</w:p>");
+    let mut paragraph_controls = paragraph_input
+        .as_ref()
+        .map(|input| input.cursor(&paragraph_xml))
+        .transpose()?;
     let mut paragraph_reader = Reader::from_reader(paragraph_xml.as_slice());
     let mut paragraph_buffer = Vec::new();
     match paragraph_reader.read_event_into(&mut paragraph_buffer)? {
         Event::Start(start) => {
             let mut facts = RevisionSourceFacts::with_copy_bound(copy_bound);
-            let paragraph = CT_P::from_xml_with_revision_facts(
+            let mut extras = Vec::new();
+            let mut texts = Vec::new();
+            let mut nested = crate::text::WordBlockSourceMaps::default();
+            let paragraph = CT_P::from_xml_with_read_output(
                 &mut paragraph_reader,
                 word_prefixes,
                 Some(&start),
-                Some(&mut facts),
+                paragraph_controls.as_mut(),
+                crate::text::WordParagraphReadOutput {
+                    source_facts: Some(&mut facts),
+                    extra_maps: output.as_ref().map(|_| &mut extras),
+                    text_facts: output.as_ref().map(|_| &mut texts),
+                    nested_maps: output.as_ref().map(|_| &mut nested),
+                    ..Default::default()
+                },
             )?;
+            if let (Some(output), Some(input)) = (output, paragraph_input.as_ref()) {
+                nested.paragraph(extras);
+                nested.word_texts.push((
+                    Vec::new(),
+                    Some(crate::text::WordParagraphReadFacts {
+                        source_map: Arc::new(input.projection_parts().0.clone()),
+                        texts,
+                        nested: Default::default(),
+                    }),
+                ));
+                output.append(crate::text::WordBlockComponent::RevisionParagraph, nested);
+            }
             Ok((paragraph, facts))
         }
         _ => Err(crate::OxmlError::MissingElement(
@@ -1170,6 +1761,16 @@ fn ensure_revision_word_prefix_is_mutable(raw_xml: &[u8]) -> crate::Result<()> {
 }
 
 pub(crate) fn revision_kind(name: &[u8], prefixes: &[String]) -> Option<RevisionKind> {
+    let local = match name.iter().position(|byte| *byte == b':') {
+        Some(colon) => &name[colon + 1..],
+        None => name,
+    };
+    is_word_element(name, local, prefixes)
+        .then(|| revision_kind_for_local(local))
+        .flatten()
+}
+
+pub(crate) fn revision_kind_for_local(local: &[u8]) -> Option<RevisionKind> {
     [
         (b"ins".as_slice(), RevisionKind::Insertion),
         (b"del".as_slice(), RevisionKind::Deletion),
@@ -1187,44 +1788,59 @@ pub(crate) fn revision_kind(name: &[u8], prefixes: &[String]) -> Option<Revision
         ),
     ]
     .into_iter()
-    .find_map(|(local, kind)| is_word_element(name, local, prefixes).then_some(kind))
+    .find_map(|(name, kind)| (name == local).then_some(kind))
 }
 
 fn parse_content(
     reader: &mut Reader<&[u8]>,
     kind: RevisionKind,
     word_prefixes: &[String],
+    cursor: Option<&crate::document::ControlSourceCursor<'_>>,
 ) -> crate::Result<(RevisionContent, Vec<(usize, CT_Revision)>)> {
     let mut runs = Vec::new();
     let mut nested_revisions = Vec::new();
     let mut buffer = Vec::new();
     loop {
+        let event_start = reader.buffer_position();
         match reader.read_event_into(&mut buffer)? {
             Event::Start(start) => {
                 let prefixes = word_prefixes_at(&start, word_prefixes)?;
                 let name = start.name();
-                if is_word_element(name.as_ref(), b"r", &prefixes) {
-                    runs.push(CT_R::from_xml_with_prefixes_and_root(
+                let local = start.local_name();
+                let action = RevisionContentAction::for_names(
+                    Some(kind),
+                    local.as_ref(),
+                    is_word_element(name.as_ref(), local.as_ref(), &prefixes),
+                    false,
+                );
+                if action == RevisionContentAction::Run {
+                    runs.push(CT_R::from_xml_with_prefixes_and_root_in(
                         reader,
                         &prefixes,
                         Some(&start),
+                        None,
+                        cursor,
                     )?);
-                } else if revision_kind(name.as_ref(), &prefixes).is_some() {
+                } else if action == RevisionContentAction::NestedRevision {
                     let raw = crate::raw_xml::capture_element(reader, &start)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw, &prefixes) {
+                    let mapped = cursor.and_then(|cursor| {
+                        cursor.field_input(reader, event_start..reader.buffer_position(), &raw)
+                    });
+                    if let Some(revision) =
+                        CT_Revision::from_raw_with_input(raw, &prefixes, true, mapped.as_ref())?
+                    {
                         nested_revisions.push((runs.len(), revision));
                     }
-                } else if is_word_element(name.as_ref(), b"hyperlink", &prefixes) {
+                } else if action == RevisionContentAction::Hyperlink {
                     parse_run_content_container(
                         reader,
                         b"hyperlink",
                         &prefixes,
                         &mut runs,
                         &mut nested_revisions,
+                        cursor,
                     )?;
-                } else if is_word_element(name.as_ref(), b"rPr", &prefixes)
-                    && kind == RevisionKind::RunPropertyChange
-                {
+                } else if action == RevisionContentAction::PriorRunProperties {
                     let raw = crate::raw_xml::capture_element(reader, &start)?;
                     return Ok((
                         RevisionContent::PriorRunProperties(Box::new(parse_scoped_rpr(
@@ -1233,9 +1849,7 @@ fn parse_content(
                         )?)),
                         nested_revisions,
                     ));
-                } else if is_word_element(name.as_ref(), b"pPr", &prefixes)
-                    && kind == RevisionKind::ParagraphPropertyChange
-                {
+                } else if action == RevisionContentAction::PriorParagraphProperties {
                     let raw = crate::raw_xml::capture_element(reader, &start)?;
                     return Ok((
                         RevisionContent::PriorParagraphProperties(Box::new(parse_scoped_ppr(
@@ -1244,9 +1858,7 @@ fn parse_content(
                         )?)),
                         nested_revisions,
                     ));
-                } else if is_word_element(name.as_ref(), b"tblPr", &prefixes)
-                    && kind == RevisionKind::TablePropertyChange
-                {
+                } else if action == RevisionContentAction::PriorTableProperties {
                     let owner_bindings =
                         crate::numbering::local_namespace_overrides(&start, word_prefixes)?;
                     return Ok((
@@ -1259,9 +1871,7 @@ fn parse_content(
                         )),
                         nested_revisions,
                     ));
-                } else if is_word_element(name.as_ref(), b"sectPr", &prefixes)
-                    && kind == RevisionKind::SectionPropertyChange
-                {
+                } else if action == RevisionContentAction::PriorSectionProperties {
                     let owner_bindings =
                         crate::numbering::local_namespace_overrides(&start, word_prefixes)?;
                     return Ok((
@@ -1281,9 +1891,21 @@ fn parse_content(
             }
             Event::Empty(start) => {
                 let prefixes = word_prefixes_at(&start, word_prefixes)?;
-                if revision_kind(start.name().as_ref(), &prefixes).is_some() {
+                let local = start.local_name();
+                if RevisionContentAction::for_names(
+                    Some(kind),
+                    local.as_ref(),
+                    is_word_element(start.name().as_ref(), local.as_ref(), &prefixes),
+                    true,
+                ) == RevisionContentAction::NestedRevision
+                {
                     let raw = capture_empty_element(&start)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw, &prefixes) {
+                    let mapped = cursor.and_then(|cursor| {
+                        cursor.field_input(reader, event_start..reader.buffer_position(), &raw)
+                    });
+                    if let Some(revision) =
+                        CT_Revision::from_raw_with_input(raw, &prefixes, true, mapped.as_ref())?
+                    {
                         nested_revisions.push((runs.len(), revision));
                     }
                 }
@@ -1300,55 +1922,112 @@ fn parse_content(
     }
 }
 
+struct RunContainerFrame {
+    closing_local: Vec<u8>,
+    prefixes: Arc<Vec<String>>,
+}
+
+// No declaration means the actual decoder would retain exactly this scope.
+// Stop at the first declaration so its decoder/error order stays authoritative.
+fn revision_scope_at(
+    start: &quick_xml::events::BytesStart<'_>,
+    inherited: &Arc<Vec<String>>,
+) -> crate::Result<Arc<Vec<String>>> {
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let name = attribute.key.as_ref();
+        if name == b"xmlns" || name.starts_with(b"xmlns:") {
+            return Ok(Arc::new(word_prefixes_at(start, inherited)?));
+        }
+    }
+    Ok(Arc::clone(inherited))
+}
+
 fn parse_run_content_container(
     reader: &mut Reader<&[u8]>,
     closing_local: &[u8],
     word_prefixes: &[String],
     runs: &mut Vec<CT_R>,
     nested_revisions: &mut Vec<(usize, CT_Revision)>,
+    cursor: Option<&crate::document::ControlSourceCursor<'_>>,
 ) -> crate::Result<()> {
+    let mut frames = vec![RunContainerFrame {
+        closing_local: closing_local.to_vec(),
+        prefixes: Arc::new(word_prefixes.to_vec()),
+    }];
     let mut buffer = Vec::new();
     loop {
+        let event_start = reader.buffer_position();
         match reader.read_event_into(&mut buffer)? {
             Event::Start(start) => {
-                let prefixes = word_prefixes_at(&start, word_prefixes)?;
+                let prefixes =
+                    revision_scope_at(&start, &frames.last().expect("container frame").prefixes)?;
                 let name = start.name();
-                if is_word_element(name.as_ref(), b"r", &prefixes) {
-                    runs.push(CT_R::from_xml_with_prefixes_and_root(
+                let local = start.local_name();
+                let action = RevisionContentAction::for_names(
+                    None,
+                    local.as_ref(),
+                    is_word_element(name.as_ref(), local.as_ref(), &prefixes),
+                    false,
+                );
+                if action == RevisionContentAction::Run {
+                    runs.push(CT_R::from_xml_with_prefixes_and_root_in(
                         reader,
                         &prefixes,
                         Some(&start),
+                        None,
+                        cursor,
                     )?);
-                } else if revision_kind(name.as_ref(), &prefixes).is_some() {
+                } else if action == RevisionContentAction::NestedRevision {
                     let raw = crate::raw_xml::capture_element(reader, &start)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw, &prefixes) {
+                    let mapped = cursor.and_then(|cursor| {
+                        cursor.field_input(reader, event_start..reader.buffer_position(), &raw)
+                    });
+                    if let Some(revision) =
+                        CT_Revision::from_raw_with_input(raw, &prefixes, true, mapped.as_ref())?
+                    {
                         nested_revisions.push((runs.len(), revision));
                     }
-                } else if is_word_element(name.as_ref(), b"hyperlink", &prefixes) {
-                    parse_run_content_container(
-                        reader,
-                        b"hyperlink",
-                        &prefixes,
-                        runs,
-                        nested_revisions,
-                    )?;
+                } else if action == RevisionContentAction::Hyperlink {
+                    frames.push(RunContainerFrame {
+                        closing_local: b"hyperlink".to_vec(),
+                        prefixes,
+                    });
                 } else {
                     reader.read_to_end_into(name, &mut Vec::new())?;
                 }
             }
             Event::Empty(start) => {
-                let prefixes = word_prefixes_at(&start, word_prefixes)?;
-                if revision_kind(start.name().as_ref(), &prefixes).is_some() {
+                let prefixes =
+                    revision_scope_at(&start, &frames.last().expect("container frame").prefixes)?;
+                let local = start.local_name();
+                if RevisionContentAction::for_names(
+                    None,
+                    local.as_ref(),
+                    is_word_element(start.name().as_ref(), local.as_ref(), &prefixes),
+                    true,
+                ) == RevisionContentAction::NestedRevision
+                {
                     let raw = capture_empty_element(&start)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw, &prefixes) {
+                    let mapped = cursor.and_then(|cursor| {
+                        cursor.field_input(reader, event_start..reader.buffer_position(), &raw)
+                    });
+                    if let Some(revision) =
+                        CT_Revision::from_raw_with_input(raw, &prefixes, true, mapped.as_ref())?
+                    {
                         nested_revisions.push((runs.len(), revision));
                     }
                 }
             }
             Event::End(end)
-                if is_word_element(end.name().as_ref(), closing_local, word_prefixes) =>
+                if frames.last().is_some_and(|frame| {
+                    is_word_element(end.name().as_ref(), &frame.closing_local, &frame.prefixes)
+                }) =>
             {
-                break;
+                frames.pop();
+                if frames.is_empty() {
+                    break;
+                }
             }
             Event::Eof => break,
             _ => {}
@@ -1410,6 +2089,63 @@ mod tests {
     }
 
     #[test]
+    fn deleted_hyperlink_frames_preserve_alias_scope_empty_events_and_reader_boundary() {
+        let raw = format!(
+            "<w:del xmlns:w=\"{W_NS}\" xmlns:q=\"{W_NS}\" w:id=\"1\" w:author=\"A\"><w:hyperlink><q:hyperlink xmlns:w=\"urn:foreign\"><w:r><w:delText>foreign</w:delText></w:r><q:r><q:delText>nested</q:delText></q:r><q:ins q:id=\"2\" q:author=\"A\"/><q:hyperlink/></q:hyperlink><w:r><w:delText>tail</w:delText></w:r></w:hyperlink></w:del>"
+        );
+        let revision = CT_Revision::from_raw(raw.into_bytes(), &[]).unwrap();
+        let RevisionContent::Runs(runs) = revision.content() else {
+            panic!("runs")
+        };
+        assert_eq!(
+            runs.iter().map(CT_R::text).collect::<Vec<_>>(),
+            ["nested", "tail"]
+        );
+        assert_eq!(revision.nested_revisions()[0].0, 1);
+        let mut reader = Reader::from_reader(b"<w:hyperlink><w:hyperlink/><w:r><w:delText>inside</w:delText></w:r></w:hyperlink><w:r/>".as_slice());
+        reader.read_event().unwrap();
+        let mut runs = Vec::new();
+        parse_run_content_container(
+            &mut reader,
+            b"hyperlink",
+            &["w".into()],
+            &mut runs,
+            &mut Vec::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(runs[0].text(), "inside");
+        assert!(
+            matches!(reader.read_event().unwrap(), Event::Empty(start) if start.name().as_ref() == b"w:r")
+        );
+    }
+
+    #[test]
+    fn deleted_hyperlink_containers_schedule_zero_weight_source_depth() {
+        const CHILD: &str = "RDOCX_C1_DELETED_HYPERLINK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "revision::tests::deleted_hyperlink_containers_schedule_zero_weight_source_depth", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "finite isolated worker failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        std::thread::Builder::new().stack_size(512 * 1024).spawn(|| {
+            let depth = 4096;
+            let raw = format!("<w:del xmlns:w=\"{}\" w:id=\"1\" w:author=\"A\">{}<w:r><w:delText>x</w:delText></w:r>{}</w:del>", crate::namespace::W_NS, "<w:hyperlink>".repeat(depth), "</w:hyperlink>".repeat(depth));
+            validate_revision_nesting_depth(raw.as_bytes(), &[]).unwrap();
+            let revision = CT_Revision::from_raw(raw.into_bytes(), &[]).expect("one revision with flattened hyperlink runs");
+            let RevisionContent::Runs(runs) = revision.content() else { panic!("runs") };
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].text(), "x");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
     fn revision_identity_reordered_context_preserves_marker_and_nested_projection() {
         let context = revision_identity_context();
         let mut reordered = context.clone();
@@ -1426,7 +2162,7 @@ mod tests {
             assert_eq!(left.raw_xml, raw);
             assert_eq!(right.raw_xml, raw);
             let mut writer = quick_xml::Writer::new(Vec::new());
-            left.write_xml(&mut writer).unwrap();
+            left.write_xml_with_role_override(&mut writer, None, crate::text::XmlWriteRole::Source, None, None).unwrap();
             assert_eq!(writer.into_inner(), raw);
             if label == "nested projection" {
                 assert_eq!(left.nested_revisions().len(), 1);
@@ -1488,7 +2224,9 @@ mod tests {
         assert_eq!(physical.parse_word_prefixes, context);
         assert_ne!(physical, baseline);
         assert_ne!(
-            CT_Revision::from_raw_content(raw.to_vec(), &context).unwrap(),
+            CT_Revision::from_raw_with_input(raw.to_vec(), &context, false, None)
+                .unwrap()
+                .unwrap(),
             baseline
         );
         let insertion = br#"<w:ins w:id="7" w:author="Ada"><w:r><w:t>kept</w:t><v:opaque v:flag="preserved"/></w:r></w:ins>"#;
@@ -1525,6 +2263,127 @@ mod tests {
             xml.push_str("</w:ins>");
         }
         xml.into_bytes()
+    }
+
+    #[test]
+    fn c1_revision_prior_properties_started_empty_and_empty_event_are_distinct() {
+        let prefixes = ["w".to_owned()];
+        let bad_run = r#"<w:r><w:commentReference w:id="bad"/></w:r>"#;
+        assert!(crate::text::parse_run_raw(bad_run.as_bytes(), &prefixes, None).is_err());
+        for (kind, property) in [
+            ("rPrChange", "rPr"),
+            ("pPrChange", "pPr"),
+            ("tblPrChange", "tblPr"),
+            ("sectPrChange", "sectPr"),
+        ] {
+            for empty in [false, true] {
+                let prior = if empty {
+                    format!("<w:{property}/>")
+                } else {
+                    format!("<w:{property}></w:{property}>")
+                };
+                let raw = format!(r#"<w:{kind} w:id="1" w:author="A">{prior}{bad_run}</w:{kind}>"#);
+                crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+                let revision = CT_Revision::from_raw(raw.into_bytes(), &prefixes);
+                assert_eq!(revision.is_none(), empty, "{kind}, empty={empty}");
+                assert_eq!(
+                    crate::text::PARSED_RUN_CONSTRUCTIONS.get(),
+                    usize::from(empty)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c1_revision_checked_root_records_only_actual_resource_failure() {
+        let deep = format!(
+            "{}<w:r/>{}",
+            "<w:sdt><w:sdtContent>".repeat(257),
+            "</w:sdtContent></w:sdt>".repeat(257)
+        );
+        for (body, resource) in [
+            (
+                format!(r#"<w:r><w:commentReference w:id="bad"/></w:r>{deep}"#),
+                false,
+            ),
+            (deep, true),
+        ] {
+            let raw = format!(r#"<w:ins w:id="1" w:author="A">{body}</w:ins>"#);
+            let registry = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::text::FieldOriginRegistry::default(),
+            ));
+            let input = crate::document::WordFieldInput::produced(
+                crate::document::WordSourceMap::generated(raw.len()),
+                std::sync::Arc::clone(&registry),
+            );
+            let parsed = CT_Revision::from_raw_with_input(
+                raw.into_bytes(),
+                &["w".into()],
+                true,
+                Some(&input),
+            );
+            if resource {
+                assert_eq!(
+                    parsed.unwrap_err().to_string(),
+                    input.resource_failure().unwrap().to_string()
+                );
+                let valid = br#"<w:ins w:id="3" w:author="A"><w:r><w:t>next</w:t></w:r></w:ins>"#;
+                let next_input = crate::document::WordFieldInput::produced(
+                    crate::document::WordSourceMap::generated(valid.len()),
+                    std::sync::Arc::clone(&registry),
+                );
+                ORDERED_DIAGNOSTIC_REVISION_PARSE_CALLS.set(0);
+                assert!(
+                    CT_Revision::from_raw_with_input(
+                        valid.to_vec(),
+                        &["w".into()],
+                        true,
+                        Some(&next_input)
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    ORDERED_DIAGNOSTIC_REVISION_PARSE_CALLS.get(),
+                    0,
+                    "sticky checked refusal precedes factory growth"
+                );
+                assert!(
+                    CT_Revision::from_raw(valid.to_vec(), &["w".into()]).is_some(),
+                    "legacy Option parsing has no ambient checked ledger"
+                );
+            } else {
+                assert!(parsed.unwrap().is_none());
+            }
+            assert_eq!(input.resource_failure().is_some(), resource);
+        }
+    }
+
+    #[test]
+    fn c1_revision_shared_depth_precedes_bad_header_without_changing_boundary() {
+        assert_eq!(MAX_REVISION_NESTING_DEPTH, 32);
+        let prefixes = ["w".to_owned()];
+        let over = format!(
+            r#"<w:ins w:id="bad">{}</w:ins>"#,
+            std::str::from_utf8(&nested_insertions(32)).unwrap()
+        );
+        let error =
+            CT_Revision::try_from_raw(over.into_bytes(), &prefixes, true, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("revision nesting depth exceeds reader limit")
+        );
+        let within = format!(
+            r#"<w:ins w:id="bad">{}</w:ins>"#,
+            std::str::from_utf8(&nested_insertions(31)).unwrap()
+        );
+        let error =
+            CT_Revision::try_from_raw(within.into_bytes(), &prefixes, true, None).unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("revision nesting depth exceeds reader limit")
+        );
     }
 
     #[test]
@@ -1767,6 +2626,29 @@ mod tests {
         assert!(raw.contains("<w:instrText>DATE</w:instrText>"), "{raw}");
         assert!(raw.contains("<w:t>first</w:t>"), "{raw}");
         assert!(!raw.contains("second"), "{raw}");
+        // Source emission is the retained raw wrapper verbatim, and reopening
+        // that same source under the same original parent prefixes reproduces
+        // the refreshed accepted content.
+        let mut emitted = Vec::new();
+        revision
+            .write_xml_with_role_override(
+                &mut quick_xml::Writer::new(&mut emitted),
+                None,
+                crate::text::XmlWriteRole::Source,
+                None,
+                None,
+            )
+            .expect("source emission");
+        assert_eq!(emitted, revision.raw_xml);
+        let reopened = CT_Revision::from_raw(revision.raw_xml.clone(), &["w".to_owned()])
+            .expect("refreshed revision reopens");
+        assert_eq!(
+            reopened
+                .content_paragraph()
+                .expect("reopened accepted content")
+                .text(),
+            "firstchanged"
+        );
     }
 
     #[test]
@@ -2506,7 +3388,7 @@ mod tests {
             "</w:ins>".repeat(33)
         );
         assert!(
-            CT_Revision::try_from_raw(nested.into_bytes(), &["w".into()], true).is_err(),
+            CT_Revision::try_from_raw(nested.into_bytes(), &["w".into()], true, None).is_err(),
             "the existing qualified revision nesting admission remains binding"
         );
     }

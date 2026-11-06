@@ -1,11 +1,7 @@
 //! Paragraph properties (`CT_PPr`).
 
-use std::borrow::Cow;
-
 use quick_xml::escape::escape;
-use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
-use quick_xml::name::QName;
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::borders::{CT_PBdr, CT_Tabs};
@@ -15,21 +11,134 @@ use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{
     local_namespace_overrides, merged_owner_bindings, namespace_binding, namespace_bindings,
     parse_scoped_rpr_with_owner_bindings, typed_leaf_requires_raw, typed_leaf_value,
-    write_typed_leaf_raw,
 };
 use crate::properties::{
-    CT_Shd, append_modeled_toggle_attributes, get_word_val_attr, is_word_attribute,
-    is_word_element, modeled_attribute_carrier_occurrence, parse_integer_measurement,
-    parse_word_toggle, raw_is_modeled_attribute_carrier, raw_occurrence,
-    record_modeled_toggle_candidate, remove_redundant_modeled_toggle_candidate,
-    replay_modeled_toggle_raw, toggle_element_is_explicitly_empty,
-    toggle_has_unsupported_attributes, word_prefixes_at, write_toggle,
+    CT_Shd, get_word_val_attr, is_word_attribute, is_word_element,
+    modeled_attribute_carrier_occurrence, parse_integer_measurement, parse_word_toggle,
+    raw_is_modeled_attribute_carrier, raw_occurrence, record_modeled_toggle_candidate,
+    remove_redundant_modeled_toggle_candidate, replay_modeled_toggle_raw,
+    toggle_element_is_explicitly_empty, toggle_has_unsupported_attributes, word_prefixes_at,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
+
 use crate::revision::CT_Revision;
 use crate::run_properties::CT_RPr;
 use crate::shared::{ST_Jc, ST_OnOff};
 use crate::units::Twips;
+
+/// Scalar facts shared by ordinary empty-property parsing and source admission.
+/// These retain the existing signed measurement and unsigned integer decoders.
+#[derive(Clone, Copy)]
+pub(crate) enum ParagraphMeasurement {
+    Before(Option<i32>),
+    After(Option<i32>),
+    Line(Option<i32>),
+    Left(Option<i32>),
+    Right(Option<i32>),
+    Start(Option<i32>),
+    End(Option<i32>),
+    FirstLine(Option<i32>),
+    Hanging(Option<i32>),
+    Division(Option<u32>),
+    Outline(Option<u32>),
+    FrameLines(Option<u32>),
+    FrameWidth(Option<i32>),
+    FrameHeight(Option<i32>),
+    FrameVerticalSpace(Option<i32>),
+    FrameHorizontalSpace(Option<i32>),
+    FrameX(Option<i32>),
+    FrameY(Option<i32>),
+}
+
+impl ParagraphMeasurement {
+    pub(crate) fn for_names(element: &[u8], attribute: &[u8]) -> Option<Self> {
+        Some(match (element, attribute) {
+            (b"spacing", b"before") => Self::Before(None),
+            (b"spacing", b"after") => Self::After(None),
+            (b"spacing", b"line") => Self::Line(None),
+            (b"ind", b"left") => Self::Left(None),
+            (b"ind", b"right") => Self::Right(None),
+            (b"ind", b"start") => Self::Start(None),
+            (b"ind", b"end") => Self::End(None),
+            (b"ind", b"firstLine") => Self::FirstLine(None),
+            (b"ind", b"hanging") => Self::Hanging(None),
+            (b"divId", b"val") => Self::Division(None),
+            (b"outlineLvl", b"val") => Self::Outline(None),
+            (b"framePr", b"lines") => Self::FrameLines(None),
+            (b"framePr", b"w") => Self::FrameWidth(None),
+            (b"framePr", b"h") => Self::FrameHeight(None),
+            (b"framePr", b"vSpace") => Self::FrameVerticalSpace(None),
+            (b"framePr", b"hSpace") => Self::FrameHorizontalSpace(None),
+            (b"framePr", b"x") => Self::FrameX(None),
+            (b"framePr", b"y") => Self::FrameY(None),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn decode(
+        self,
+        element: &[u8],
+        attribute: &[u8],
+        value: Option<&str>,
+    ) -> Result<Self> {
+        let measurement = || {
+            value
+                .map(|value| parse_integer_measurement(element, attribute, value))
+                .transpose()
+        };
+        let integer = || value.map(str::parse).transpose();
+        Ok(match self {
+            Self::Before(_) => Self::Before(measurement()?),
+            Self::After(_) => Self::After(measurement()?),
+            Self::Line(_) => Self::Line(measurement()?),
+            Self::Left(_) => Self::Left(measurement()?),
+            Self::Right(_) => Self::Right(measurement()?),
+            Self::Start(_) => Self::Start(measurement()?),
+            Self::End(_) => Self::End(measurement()?),
+            Self::FirstLine(_) => Self::FirstLine(measurement()?),
+            Self::Hanging(_) => Self::Hanging(measurement()?),
+            Self::Division(_) => Self::Division(integer()?),
+            Self::Outline(_) => Self::Outline(integer()?),
+            Self::FrameLines(_) => Self::FrameLines(integer()?),
+            Self::FrameWidth(_) => Self::FrameWidth(measurement()?),
+            Self::FrameHeight(_) => Self::FrameHeight(measurement()?),
+            Self::FrameVerticalSpace(_) => Self::FrameVerticalSpace(measurement()?),
+            Self::FrameHorizontalSpace(_) => Self::FrameHorizontalSpace(measurement()?),
+            Self::FrameX(_) => Self::FrameX(measurement()?),
+            Self::FrameY(_) => Self::FrameY(measurement()?),
+        })
+    }
+
+    fn apply_frame(self, frame: &mut CT_FramePr) {
+        match self {
+            Self::FrameLines(Some(value)) => frame.lines = Some(value),
+            Self::FrameWidth(Some(value)) => frame.w = Some(Twips(value)),
+            Self::FrameHeight(Some(value)) => frame.h = Some(Twips(value)),
+            Self::FrameVerticalSpace(Some(value)) => frame.v_space = Some(Twips(value)),
+            Self::FrameHorizontalSpace(Some(value)) => frame.h_space = Some(Twips(value)),
+            Self::FrameX(Some(value)) => frame.x = Some(Twips(value)),
+            Self::FrameY(Some(value)) => frame.y = Some(Twips(value)),
+            _ => {}
+        }
+    }
+
+    fn apply(self, properties: &mut CT_PPr) {
+        match self {
+            Self::Before(Some(value)) => properties.space_before = Some(Twips(value)),
+            Self::After(Some(value)) => properties.space_after = Some(Twips(value)),
+            Self::Line(Some(value)) => properties.line_spacing = Some(Twips(value)),
+            Self::Left(Some(value)) => properties.ind_left = Some(Twips(value)),
+            Self::Right(Some(value)) => properties.ind_right = Some(Twips(value)),
+            Self::Start(Some(value)) => properties.ind_start = Some(Twips(value)),
+            Self::End(Some(value)) => properties.ind_end = Some(Twips(value)),
+            Self::FirstLine(Some(value)) => properties.ind_first_line = Some(Twips(value)),
+            Self::Hanging(Some(value)) => properties.ind_hanging = Some(Twips(value)),
+            Self::Division(Some(value)) => properties.div_id = Some(value),
+            Self::Outline(Some(value)) => properties.outline_lvl = Some(value),
+            _ => {}
+        }
+    }
+}
 
 /// `CT_FramePr` — Text frame placement for a paragraph (`w:framePr`).
 ///
@@ -83,31 +192,24 @@ impl CT_FramePr {
             let attribute = attribute?;
             let key = attribute.key.as_ref();
             let value = std::str::from_utf8(&attribute.value)?;
-            let measurement = || parse_integer_measurement(e.name().as_ref(), key, value);
-            if is_word_attribute(key, b"dropCap", word_prefixes) {
+            let local = attribute.key.local_name();
+            if is_word_attribute(key, local.as_ref(), word_prefixes)
+                && let Some(measurement) =
+                    ParagraphMeasurement::for_names(b"framePr", local.as_ref())
+            {
+                measurement
+                    .decode(e.name().as_ref(), key, Some(value))?
+                    .apply_frame(&mut frame);
+            } else if is_word_attribute(key, b"dropCap", word_prefixes) {
                 frame.drop_cap = Some(value.to_owned());
-            } else if is_word_attribute(key, b"lines", word_prefixes) {
-                frame.lines = Some(value.parse()?);
-            } else if is_word_attribute(key, b"w", word_prefixes) {
-                frame.w = Some(Twips(measurement()?));
-            } else if is_word_attribute(key, b"h", word_prefixes) {
-                frame.h = Some(Twips(measurement()?));
-            } else if is_word_attribute(key, b"vSpace", word_prefixes) {
-                frame.v_space = Some(Twips(measurement()?));
-            } else if is_word_attribute(key, b"hSpace", word_prefixes) {
-                frame.h_space = Some(Twips(measurement()?));
             } else if is_word_attribute(key, b"wrap", word_prefixes) {
                 frame.wrap = Some(value.to_owned());
             } else if is_word_attribute(key, b"hAnchor", word_prefixes) {
                 frame.h_anchor = Some(value.to_owned());
             } else if is_word_attribute(key, b"vAnchor", word_prefixes) {
                 frame.v_anchor = Some(value.to_owned());
-            } else if is_word_attribute(key, b"x", word_prefixes) {
-                frame.x = Some(Twips(measurement()?));
             } else if is_word_attribute(key, b"xAlign", word_prefixes) {
                 frame.x_align = Some(value.to_owned());
-            } else if is_word_attribute(key, b"y", word_prefixes) {
-                frame.y = Some(Twips(measurement()?));
             } else if is_word_attribute(key, b"yAlign", word_prefixes) {
                 frame.y_align = Some(value.to_owned());
             } else if is_word_attribute(key, b"hRule", word_prefixes) {
@@ -123,61 +225,80 @@ impl CT_FramePr {
         Ok(frame)
     }
 
-    fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn to_xml<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let mut buf = itoa::Buffer::new();
-        let mut e = BytesStart::new("w:framePr");
-        for (name, value) in &self.extra_attributes {
-            e.push_attribute(Attribute {
-                key: QName(name.as_bytes()),
-                value: Cow::Borrowed(value.as_bytes()),
-            });
+        let mut e = crate::text::FieldXmlStart::new("w:framePr", emission)?;
+        if role == crate::text::XmlWriteRole::Source {
+            for (name, value) in &self.extra_attributes {
+                e.push_raw(name, value)?;
+            }
+        }
+        let word_prefix = if role == crate::text::XmlWriteRole::Source {
+            e.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+        if role != crate::text::XmlWriteRole::Source {
+            for (name, value) in &self.extra_attributes {
+                e.push_raw(name, value)?;
+            }
         }
         if let Some(ref drop_cap) = self.drop_cap {
-            e.push_attribute(("w:dropCap", drop_cap.as_str()));
+            e.push_word(&word_prefix, "dropCap", drop_cap.as_str())?;
         }
         if let Some(lines) = self.lines {
-            e.push_attribute(("w:lines", buf.format(lines)));
+            e.push_word(&word_prefix, "lines", buf.format(lines))?;
         }
         if let Some(w) = self.w {
-            e.push_attribute(("w:w", buf.format(w.0)));
+            e.push_word(&word_prefix, "w", buf.format(w.0))?;
         }
         if let Some(h) = self.h {
-            e.push_attribute(("w:h", buf.format(h.0)));
+            e.push_word(&word_prefix, "h", buf.format(h.0))?;
         }
         if let Some(v_space) = self.v_space {
-            e.push_attribute(("w:vSpace", buf.format(v_space.0)));
+            e.push_word(&word_prefix, "vSpace", buf.format(v_space.0))?;
         }
         if let Some(h_space) = self.h_space {
-            e.push_attribute(("w:hSpace", buf.format(h_space.0)));
+            e.push_word(&word_prefix, "hSpace", buf.format(h_space.0))?;
         }
         if let Some(ref wrap) = self.wrap {
-            e.push_attribute(("w:wrap", wrap.as_str()));
+            e.push_word(&word_prefix, "wrap", wrap.as_str())?;
         }
         if let Some(ref h_anchor) = self.h_anchor {
-            e.push_attribute(("w:hAnchor", h_anchor.as_str()));
+            e.push_word(&word_prefix, "hAnchor", h_anchor.as_str())?;
         }
         if let Some(ref v_anchor) = self.v_anchor {
-            e.push_attribute(("w:vAnchor", v_anchor.as_str()));
+            e.push_word(&word_prefix, "vAnchor", v_anchor.as_str())?;
         }
         if let Some(x) = self.x {
-            e.push_attribute(("w:x", buf.format(x.0)));
+            e.push_word(&word_prefix, "x", buf.format(x.0))?;
         }
         if let Some(ref x_align) = self.x_align {
-            e.push_attribute(("w:xAlign", x_align.as_str()));
+            e.push_word(&word_prefix, "xAlign", x_align.as_str())?;
         }
         if let Some(y) = self.y {
-            e.push_attribute(("w:y", buf.format(y.0)));
+            e.push_word(&word_prefix, "y", buf.format(y.0))?;
         }
         if let Some(ref y_align) = self.y_align {
-            e.push_attribute(("w:yAlign", y_align.as_str()));
+            e.push_word(&word_prefix, "yAlign", y_align.as_str())?;
         }
         if let Some(ref h_rule) = self.h_rule {
-            e.push_attribute(("w:hRule", h_rule.as_str()));
+            e.push_word(&word_prefix, "hRule", h_rule.as_str())?;
         }
         if let Some(anchor_lock) = self.anchor_lock {
-            e.push_attribute(("w:anchorLock", if anchor_lock { "1" } else { "0" }));
+            e.push_word(
+                &word_prefix,
+                "anchorLock",
+                if anchor_lock { "1" } else { "0" },
+            )?;
         }
-        writer.write_event(Event::Empty(e))?;
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -509,21 +630,36 @@ fn write_num_pr_leaf<W: std::io::Write>(
     word_prefixes: &[String],
     original: Option<u32>,
     current: Option<u32>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
+    let mut decimal = itoa::Buffer::new();
     if current == original {
         if let Some(current) = current
             && num_pr_leaf_is_plain(raw, word_prefixes)?
         {
-            let value = current.to_string();
-            write_typed_leaf_raw(writer, raw, word_prefixes, Some(&value), "w")?;
+            crate::numbering::write_typed_leaf_raw_in(
+                writer,
+                raw,
+                word_prefixes,
+                Some(decimal.format(current)),
+                "w",
+                emission,
+            )?;
         } else {
             writer.get_mut().write_all(raw)?;
         }
     } else if current.is_none() && num_pr_leaf_is_plain(raw, word_prefixes)? {
         return Ok(());
     } else {
-        let value = current.map(|value| value.to_string());
-        write_typed_leaf_raw(writer, raw, word_prefixes, value.as_deref(), "w")?;
+        let value = current.map(|value| decimal.format(value) as &str);
+        crate::numbering::write_typed_leaf_raw_in(
+            writer,
+            raw,
+            word_prefixes,
+            value,
+            "w",
+            emission,
+        )?;
     }
     Ok(())
 }
@@ -552,13 +688,21 @@ fn write_num_pr_extras<W: std::io::Write>(
     extras: &[(usize, usize, Vec<u8>)],
     boundary: usize,
     scrub_local: Option<(&[u8], &[String])>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     for (_, _, raw) in extras.iter().filter(|(at, _, _)| *at == boundary) {
         if let Some((local, word_prefixes)) = scrub_local
             && raw_is_num_pr_leaf(raw, word_prefixes, local)?
         {
             if !num_pr_leaf_is_plain(raw, word_prefixes)? {
-                write_typed_leaf_raw(writer, raw, word_prefixes, None, "w")?;
+                crate::numbering::write_typed_leaf_raw_in(
+                    writer,
+                    raw,
+                    word_prefixes,
+                    None,
+                    "w",
+                    emission,
+                )?;
             }
         } else {
             writer.get_mut().write_all(raw)?;
@@ -585,6 +729,19 @@ impl CT_PPr {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_property_observation(reader, word_prefixes, owner_bindings, None)
+    }
+
+    pub(crate) fn from_xml_with_property_observation(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        mut ordinary: Option<&mut Option<std::ops::Range<usize>>>,
+    ) -> Result<Self> {
+        if let Some(output) = &mut ordinary {
+            **output = None;
+        }
+        let mut selected_style = None;
         let word_bindings = word_prefixes
             .iter()
             .filter(|prefix| !prefix.contains('\0'))
@@ -600,6 +757,7 @@ impl CT_PPr {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = ordinary.as_ref().map(|_| reader.buffer_position() as usize);
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
@@ -757,50 +915,41 @@ impl CT_PPr {
                         );
                     } else if is_word_element(name.as_ref(), b"pStyle", &prefixes) {
                         ppr.style_id = get_word_val_attr(e, &prefixes)?;
+                        // Only the last selected style assignment survives.
+                        // Decoder failure exits before any observation escapes.
+                        selected_style =
+                            event_start.map(|start| start..reader.buffer_position() as usize);
                     } else if is_word_element(name.as_ref(), b"jc", &prefixes) {
                         if let Some(val) = get_word_val_attr(e, &prefixes)? {
                             ppr.jc = ST_Jc::from_str(&val).ok();
                         }
-                    } else if is_word_element(name.as_ref(), b"spacing", &prefixes) {
+                    } else if is_word_element(name.as_ref(), b"spacing", &prefixes)
+                        || is_word_element(name.as_ref(), b"ind", &prefixes)
+                    {
                         for attr in e.attributes() {
                             let attr = attr?;
                             let key = attr.key.as_ref();
                             let val_str = std::str::from_utf8(&attr.value)?;
-                            let measurement =
-                                || parse_integer_measurement(name.as_ref(), key, val_str);
-                            if is_word_attribute(key, b"before", &prefixes) {
-                                ppr.space_before = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"after", &prefixes) {
-                                ppr.space_after = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"line", &prefixes) {
-                                ppr.line_spacing = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"lineRule", &prefixes) {
-                                ppr.line_rule = Some(val_str.to_string());
-                            } else if is_word_attribute(key, b"beforeAutospacing", &prefixes) {
-                                ppr.before_autospacing = Some(val_str == "1" || val_str == "true");
-                            } else if is_word_attribute(key, b"afterAutospacing", &prefixes) {
-                                ppr.after_autospacing = Some(val_str == "1" || val_str == "true");
-                            }
-                        }
-                    } else if is_word_element(name.as_ref(), b"ind", &prefixes) {
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val_str = std::str::from_utf8(&attr.value)?;
-                            let measurement =
-                                || parse_integer_measurement(name.as_ref(), key, val_str);
-                            if is_word_attribute(key, b"left", &prefixes) {
-                                ppr.ind_left = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"right", &prefixes) {
-                                ppr.ind_right = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"start", &prefixes) {
-                                ppr.ind_start = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"end", &prefixes) {
-                                ppr.ind_end = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"firstLine", &prefixes) {
-                                ppr.ind_first_line = Some(Twips(measurement()?));
-                            } else if is_word_attribute(key, b"hanging", &prefixes) {
-                                ppr.ind_hanging = Some(Twips(measurement()?));
+                            let local = attr.key.local_name();
+                            if is_word_attribute(key, local.as_ref(), &prefixes)
+                                && let Some(measurement) = ParagraphMeasurement::for_names(
+                                    e.local_name().as_ref(),
+                                    local.as_ref(),
+                                )
+                            {
+                                measurement
+                                    .decode(name.as_ref(), key, Some(val_str))?
+                                    .apply(&mut ppr);
+                            } else if is_word_element(name.as_ref(), b"spacing", &prefixes) {
+                                if is_word_attribute(key, b"lineRule", &prefixes) {
+                                    ppr.line_rule = Some(val_str.to_string());
+                                } else if is_word_attribute(key, b"beforeAutospacing", &prefixes) {
+                                    ppr.before_autospacing =
+                                        Some(val_str == "1" || val_str == "true");
+                                } else if is_word_attribute(key, b"afterAutospacing", &prefixes) {
+                                    ppr.after_autospacing =
+                                        Some(val_str == "1" || val_str == "true");
+                                }
                             }
                         }
                     } else if is_word_element(name.as_ref(), b"keepNext", &prefixes) {
@@ -842,9 +991,10 @@ impl CT_PPr {
                     } else if is_word_element(name.as_ref(), b"textboxTightWrap", &prefixes) {
                         ppr.textbox_tight_wrap = get_word_val_attr(e, &prefixes)?;
                     } else if is_word_element(name.as_ref(), b"divId", &prefixes) {
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            ppr.div_id = Some(val.parse()?);
-                        }
+                        let value = get_word_val_attr(e, &prefixes)?;
+                        ParagraphMeasurement::Division(None)
+                            .decode(name.as_ref(), b"w:val", value.as_deref())?
+                            .apply(&mut ppr);
                     } else if is_word_element(name.as_ref(), b"cnfStyle", &prefixes) {
                         // `CT_Cnf` carries a per-region attribute form beside
                         // `w:val`. The source element is retained as an
@@ -876,9 +1026,10 @@ impl CT_PPr {
                             ppr.cnf_style = value;
                         }
                     } else if is_word_element(name.as_ref(), b"outlineLvl", &prefixes) {
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            ppr.outline_lvl = Some(val.parse()?);
-                        }
+                        let value = get_word_val_attr(e, &prefixes)?;
+                        ParagraphMeasurement::Outline(None)
+                            .decode(name.as_ref(), b"w:val", value.as_deref())?
+                            .apply(&mut ppr);
                     } else if is_word_element(name.as_ref(), b"shd", &prefixes) {
                         ppr.shading = Some(Box::new(CT_Shd::from_xml_attrs(e)?));
                     } else if is_word_element(name.as_ref(), b"numPr", &prefixes) {
@@ -943,6 +1094,9 @@ impl CT_PPr {
             );
         }
 
+        if let Some(output) = ordinary {
+            *output = selected_style;
+        }
         Ok(ppr)
     }
 
@@ -1189,56 +1343,114 @@ impl CT_PPr {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.is_empty() {
+        self.write_xml_role(writer, crate::text::XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        self.write_xml_role_core(writer, role, source_context, emission, true)
+    }
+
+    fn write_xml_role_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+        positioned: bool,
+    ) -> Result<()> {
+        if self.is_empty_in(positioned) {
             return Ok(());
         }
 
-        if !self.revision_xml.is_empty()
+        if positioned
+            && !self.revision_xml.is_empty()
             && self.revision_xml_positions.len() == self.revision_xml.len()
         {
-            let mut modeled = self.clone();
-            modeled.revision_xml.clear();
-            modeled.revision_xml_positions.clear();
-            if self.modeled_source_index(PPR_TABS_SLOT).is_some() {
-                modeled.tabs = None;
-            }
-            if self.modeled_source_index(PPR_BORDER_SLOT).is_some() {
-                modeled.borders = None;
-            }
-            let mut generated = Writer::new(Vec::new());
-            modeled.to_xml(&mut generated)?;
-            let generated = generated.into_inner();
-            let generated = if generated.is_empty() {
-                b"<w:pPr></w:pPr>".to_vec()
+            let generated = if let Some(emission) = emission {
+                let (output, _outer) = emission.new_source_record_output();
+                let mut generated = Writer::new(output);
+                self.write_modeled_record(&mut generated, role, source_context, Some(emission))?;
+                generated.into_inner().into_mapped_parts().0
             } else {
-                generated
+                let mut generated = Writer::new(Vec::new());
+                self.write_modeled_record(&mut generated, role, source_context, None)?;
+                generated.into_inner()
             };
-            return write_ppr_with_positioned_raw(writer, &generated, self);
+            return write_ppr_with_positioned_raw(writer, &generated, self, emission);
         }
 
         let mut buf = itoa::Buffer::new();
-        writer.write_event(Event::Start(BytesStart::new("w:pPr")))?;
+        let mut start = crate::text::FieldXmlStart::new("w:pPr", emission)?;
+        let word_prefix = if role == crate::text::XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+        start.write(writer, false)?;
 
         if let Some(ref style_id) = self.style_id {
-            let mut e = BytesStart::new("w:pStyle");
-            e.push_attribute(("w:val", style_id.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "pStyle", emission)?;
+            e.push_word(&word_prefix, "val", style_id.as_str())?;
+            e.write(writer, true)?;
         }
 
         if let Some(keep_next) = self.keep_next {
-            write_toggle(writer, "w:keepNext", keep_next)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "keepNext",
+                keep_next,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(keep_lines) = self.keep_lines {
-            write_toggle(writer, "w:keepLines", keep_lines)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "keepLines",
+                keep_lines,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(page_break) = self.page_break_before {
-            write_toggle(writer, "w:pageBreakBefore", page_break)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "pageBreakBefore",
+                page_break,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(ref frame) = self.frame {
-            frame.to_xml(writer)?;
+            frame.to_xml(writer, role, source_context, emission)?;
         }
         if let Some(widow) = self.widow_control {
-            write_toggle(writer, "w:widowControl", widow)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "widowControl",
+                widow,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         // numPr
@@ -1267,19 +1479,33 @@ impl CT_PPr {
             || self.numbering_revision.is_some()
             || !self.numbering_revision_xml.is_empty()
         {
-            let mut num_pr = BytesStart::new("w:numPr");
+            let mut num_pr = crate::text::FieldXmlStart::word(&word_prefix, "numPr", emission)?;
             for (name, value) in &self.num_pr_extra_attributes {
-                if name == "xmlns:w" && value != W_NS {
+                if role != crate::text::XmlWriteRole::Source && name == "xmlns:w" && value != W_NS {
                     return Err(crate::error::OxmlError::InvalidValue(
                         "w:numPr shadows the Word namespace".to_owned(),
                     ));
                 }
-                num_pr.push_attribute(Attribute {
-                    key: QName(name.as_bytes()),
-                    value: Cow::Borrowed(value.as_bytes()),
-                });
+                num_pr.push_raw(name, value)?;
             }
-            writer.write_event(Event::Start(num_pr))?;
+            let word_prefix = if role == crate::text::XmlWriteRole::Source {
+                num_pr.qualify(&[], role, source_context)?
+            } else {
+                word_prefix.clone()
+            };
+            // The numPr start can declare producer aliases that its retained
+            // and typed revision children rely on. Register those facts for
+            // the nested writers instead of redeclaring them per child.
+            let _num_pr_scope = if role == crate::text::XmlWriteRole::Publication {
+                Some(crate::text::emitted_binding_scope(
+                    num_pr.element(),
+                    false,
+                    false,
+                )?)
+            } else {
+                None
+            };
+            num_pr.write(writer, false)?;
             let ilvl_scrub = self
                 .num_ilvl_raw
                 .as_ref()
@@ -1287,13 +1513,13 @@ impl CT_PPr {
                     (original.is_some() && self.num_ilvl.is_none())
                         .then_some((b"ilvl".as_slice(), prefixes.as_slice()))
                 });
-            write_num_pr_extras(writer, &self.num_pr_extra_xml, 0, ilvl_scrub)?;
+            write_num_pr_extras(writer, &self.num_pr_extra_xml, 0, ilvl_scrub, emission)?;
             if let Some((original, raw, prefixes)) = &self.num_ilvl_raw {
-                write_num_pr_leaf(writer, raw, prefixes, *original, self.num_ilvl)?;
+                write_num_pr_leaf(writer, raw, prefixes, *original, self.num_ilvl, emission)?;
             } else if let Some(ilvl) = self.num_ilvl {
-                let mut e = BytesStart::new("w:ilvl");
-                e.push_attribute(("w:val", buf.format(ilvl)));
-                writer.write_event(Event::Empty(e))?;
+                let mut e = crate::text::FieldXmlStart::word(&word_prefix, "ilvl", emission)?;
+                e.push_word(&word_prefix, "val", buf.format(ilvl))?;
+                e.write(writer, true)?;
             }
             let num_id_scrub = self
                 .num_id_raw
@@ -1302,15 +1528,15 @@ impl CT_PPr {
                     (original.is_some() && self.num_id.is_none())
                         .then_some((b"numId".as_slice(), prefixes.as_slice()))
                 });
-            write_num_pr_extras(writer, &self.num_pr_extra_xml, 1, num_id_scrub)?;
+            write_num_pr_extras(writer, &self.num_pr_extra_xml, 1, num_id_scrub, emission)?;
             if let Some((original, raw, prefixes)) = &self.num_id_raw {
-                write_num_pr_leaf(writer, raw, prefixes, *original, self.num_id)?;
+                write_num_pr_leaf(writer, raw, prefixes, *original, self.num_id, emission)?;
             } else if let Some(num_id) = self.num_id {
-                let mut e = BytesStart::new("w:numId");
-                e.push_attribute(("w:val", buf.format(num_id)));
-                writer.write_event(Event::Empty(e))?;
+                let mut e = crate::text::FieldXmlStart::word(&word_prefix, "numId", emission)?;
+                e.push_word(&word_prefix, "val", buf.format(num_id))?;
+                e.write(writer, true)?;
             }
-            write_num_pr_extras(writer, &self.num_pr_extra_xml, 2, None)?;
+            write_num_pr_extras(writer, &self.num_pr_extra_xml, 2, None, emission)?;
             enum Tail<'a> {
                 Raw(&'a [u8]),
                 Extra(&'a [u8]),
@@ -1344,71 +1570,165 @@ impl CT_PPr {
             for (_, child) in tail {
                 match child {
                     Tail::Raw(raw) | Tail::Extra(raw) => writer.get_mut().write_all(raw)?,
-                    Tail::Revision(revision) => revision.write_xml(writer)?,
+                    Tail::Revision(revision) => revision.write_xml_with_role_override(
+                        writer,
+                        None,
+                        role,
+                        source_context,
+                        emission,
+                    )?,
                 }
             }
-            writer.write_event(Event::End(BytesEnd::new("w:numPr")))?;
+            if let Some(emission) = emission {
+                emission.write_word_end(writer, &word_prefix, "numPr")?;
+            } else {
+                writer.write_event(Event::End(BytesEnd::new(format!("{word_prefix}:numPr"))))?;
+            }
         }
 
         if let Some(suppress) = self.suppress_line_numbers {
-            write_toggle(writer, "w:suppressLineNumbers", suppress)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "suppressLineNumbers",
+                suppress,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         // pBdr
         if let Some(ref borders) = self.borders
+            && (positioned || self.modeled_source_index(PPR_BORDER_SLOT).is_none())
             && !borders.is_empty()
         {
-            borders.to_xml(writer)?;
+            borders.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         // shd
         if let Some(ref shd) = self.shading {
-            shd.write_xml(writer, "w:shd")?;
+            if role == crate::text::XmlWriteRole::Source {
+                shd.write_xml_in(writer, "shd", role, source_context, emission)?;
+            } else {
+                shd.write_xml_in(writer, "w:shd", role, source_context, emission)?;
+            }
         }
 
         // tabs
-        if let Some(ref tabs) = self.tabs {
-            tabs.to_xml(writer)?;
+        if let Some(ref tabs) = self.tabs
+            && (positioned || self.modeled_source_index(PPR_TABS_SLOT).is_none())
+        {
+            tabs.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         if let Some(suppress) = self.suppress_auto_hyphens {
-            write_toggle(writer, "w:suppressAutoHyphens", suppress)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "suppressAutoHyphens",
+                suppress,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(kinsoku) = self.kinsoku {
-            write_toggle(writer, "w:kinsoku", kinsoku)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "kinsoku",
+                kinsoku,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(word_wrap) = self.word_wrap {
-            write_toggle(writer, "w:wordWrap", word_wrap)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "wordWrap",
+                word_wrap,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(overflow_punct) = self.overflow_punct {
-            write_toggle(writer, "w:overflowPunct", overflow_punct)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "overflowPunct",
+                overflow_punct,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(top_line_punct) = self.top_line_punct {
-            write_toggle(writer, "w:topLinePunct", top_line_punct)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "topLinePunct",
+                top_line_punct,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(auto_space_de) = self.auto_space_de {
-            write_toggle(writer, "w:autoSpaceDE", auto_space_de)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "autoSpaceDE",
+                auto_space_de,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(auto_space_dn) = self.auto_space_dn {
-            write_toggle(writer, "w:autoSpaceDN", auto_space_dn)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "autoSpaceDN",
+                auto_space_dn,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(bidi) = self.bidi {
-            write_toggle(writer, "w:bidi", bidi)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "bidi",
+                bidi,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(adjust) = self.adjust_right_ind {
-            write_toggle(writer, "w:adjustRightInd", adjust)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "adjustRightInd",
+                adjust,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(snap_to_grid) = self.snap_to_grid {
-            write_toggle(writer, "w:snapToGrid", snap_to_grid)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "snapToGrid",
+                snap_to_grid,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         // spacing
@@ -1418,26 +1738,30 @@ impl CT_PPr {
             || self.before_autospacing.is_some()
             || self.after_autospacing.is_some()
         {
-            let mut e = BytesStart::new("w:spacing");
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "spacing", emission)?;
             if let Some(before) = self.space_before {
-                e.push_attribute(("w:before", buf.format(before.0)));
+                e.push_word(&word_prefix, "before", buf.format(before.0))?;
             }
             if let Some(after) = self.space_after {
-                e.push_attribute(("w:after", buf.format(after.0)));
+                e.push_word(&word_prefix, "after", buf.format(after.0))?;
             }
             if let Some(line) = self.line_spacing {
-                e.push_attribute(("w:line", buf.format(line.0)));
+                e.push_word(&word_prefix, "line", buf.format(line.0))?;
             }
             if let Some(ref rule) = self.line_rule {
-                e.push_attribute(("w:lineRule", rule.as_str()));
+                e.push_word(&word_prefix, "lineRule", rule.as_str())?;
             }
             if let Some(ba) = self.before_autospacing {
-                e.push_attribute(("w:beforeAutospacing", if ba { "1" } else { "0" }));
+                e.push_word(
+                    &word_prefix,
+                    "beforeAutospacing",
+                    if ba { "1" } else { "0" },
+                )?;
             }
             if let Some(aa) = self.after_autospacing {
-                e.push_attribute(("w:afterAutospacing", if aa { "1" } else { "0" }));
+                e.push_word(&word_prefix, "afterAutospacing", if aa { "1" } else { "0" })?;
             }
-            writer.write_event(Event::Empty(e))?;
+            e.write(writer, true)?;
         }
 
         // ind
@@ -1448,98 +1772,146 @@ impl CT_PPr {
             || self.ind_first_line.is_some()
             || self.ind_hanging.is_some()
         {
-            let mut e = BytesStart::new("w:ind");
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "ind", emission)?;
             if let Some(left) = self.ind_left {
-                e.push_attribute(("w:left", buf.format(left.0)));
+                e.push_word(&word_prefix, "left", buf.format(left.0))?;
             }
             if let Some(right) = self.ind_right {
-                e.push_attribute(("w:right", buf.format(right.0)));
+                e.push_word(&word_prefix, "right", buf.format(right.0))?;
             }
             if let Some(start) = self.ind_start {
-                e.push_attribute(("w:start", buf.format(start.0)));
+                e.push_word(&word_prefix, "start", buf.format(start.0))?;
             }
             if let Some(end) = self.ind_end {
-                e.push_attribute(("w:end", buf.format(end.0)));
+                e.push_word(&word_prefix, "end", buf.format(end.0))?;
             }
             if let Some(fl) = self.ind_first_line {
-                e.push_attribute(("w:firstLine", buf.format(fl.0)));
+                e.push_word(&word_prefix, "firstLine", buf.format(fl.0))?;
             }
             if let Some(hang) = self.ind_hanging {
-                e.push_attribute(("w:hanging", buf.format(hang.0)));
+                e.push_word(&word_prefix, "hanging", buf.format(hang.0))?;
             }
-            writer.write_event(Event::Empty(e))?;
+            e.write(writer, true)?;
         }
 
         if let Some(contextual) = self.contextual_spacing {
-            write_toggle(writer, "w:contextualSpacing", contextual)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "contextualSpacing",
+                contextual,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(mirror) = self.mirror_indents {
-            write_toggle(writer, "w:mirrorIndents", mirror)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "mirrorIndents",
+                mirror,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(overlap) = self.suppress_overlap {
-            write_toggle(writer, "w:suppressOverlap", overlap)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "suppressOverlap",
+                overlap,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if let Some(jc) = self.jc {
-            let mut e = BytesStart::new("w:jc");
-            e.push_attribute(("w:val", jc.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "jc", emission)?;
+            e.push_word(&word_prefix, "val", jc.to_str())?;
+            e.write(writer, true)?;
         }
 
         if let Some(ref direction) = self.text_direction {
-            let mut e = BytesStart::new("w:textDirection");
-            e.push_attribute(("w:val", direction.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "textDirection", emission)?;
+            e.push_word(&word_prefix, "val", direction.as_str())?;
+            e.write(writer, true)?;
         }
         if let Some(ref alignment) = self.text_alignment {
-            let mut e = BytesStart::new("w:textAlignment");
-            e.push_attribute(("w:val", alignment.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "textAlignment", emission)?;
+            e.push_word(&word_prefix, "val", alignment.as_str())?;
+            e.write(writer, true)?;
         }
         if let Some(ref tight_wrap) = self.textbox_tight_wrap {
-            let mut e = BytesStart::new("w:textboxTightWrap");
-            e.push_attribute(("w:val", tight_wrap.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e =
+                crate::text::FieldXmlStart::word(&word_prefix, "textboxTightWrap", emission)?;
+            e.push_word(&word_prefix, "val", tight_wrap.as_str())?;
+            e.write(writer, true)?;
         }
 
         if let Some(lvl) = self.outline_lvl {
-            let mut e = BytesStart::new("w:outlineLvl");
-            e.push_attribute(("w:val", buf.format(lvl)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "outlineLvl", emission)?;
+            e.push_word(&word_prefix, "val", buf.format(lvl))?;
+            e.write(writer, true)?;
         }
 
         if let Some(div_id) = self.div_id {
-            let mut e = BytesStart::new("w:divId");
-            e.push_attribute(("w:val", buf.format(div_id)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "divId", emission)?;
+            e.push_word(&word_prefix, "val", buf.format(div_id))?;
+            e.write(writer, true)?;
         }
 
         if let Some(ref cnf_style) = self.cnf_style {
-            let mut e = BytesStart::new("w:cnfStyle");
-            e.push_attribute(("w:val", cnf_style.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&word_prefix, "cnfStyle", emission)?;
+            e.push_word(&word_prefix, "val", cnf_style.as_str())?;
+            e.write(writer, true)?;
         }
 
         if let Some(ref rpr) = self.rpr {
-            rpr.to_xml(writer)?;
+            rpr.write_xml_role(writer, None, role, source_context, emission)?;
         }
 
         if let Some(ref sect) = self.sect_pr {
-            sect.to_xml(writer)?;
+            sect.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
-        for raw in &self.revision_xml {
-            writer.get_mut().write_all(raw)?;
+        if positioned {
+            for raw in &self.revision_xml {
+                writer.get_mut().write_all(raw)?;
+            }
         }
         if let Some(change) = &self.change {
-            change.write_xml(writer)?;
+            change.write_xml_with_role_override(writer, None, role, source_context, emission)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:pPr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &word_prefix, "pPr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{word_prefix}:pPr"))))?;
+        }
         Ok(())
     }
 
-    fn is_empty(&self) -> bool {
+    fn write_modeled_record<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        if self.is_empty_in(false) {
+            crate::text::FieldXmlStart::new("w:pPr", emission)?.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_end_name(writer, "w:pPr")?;
+            } else {
+                writer.write_event(Event::End(BytesEnd::new("w:pPr")))?;
+            }
+            Ok(())
+        } else {
+            self.write_xml_role_core(writer, role, source_context, emission, false)
+        }
+    }
+
+    fn is_empty_in(&self, positioned: bool) -> bool {
         self.style_id.is_none()
             && self.jc.is_none()
             && self.space_before.is_none()
@@ -1578,8 +1950,10 @@ impl CT_PPr {
             && self.div_id.is_none()
             && self.cnf_style.is_none()
             && self.outline_lvl.is_none()
-            && self.borders.is_none()
-            && self.tabs.is_none()
+            && (self.borders.is_none()
+                || (!positioned && self.modeled_source_index(PPR_BORDER_SLOT).is_some()))
+            && (self.tabs.is_none()
+                || (!positioned && self.modeled_source_index(PPR_TABS_SLOT).is_some()))
             && self.shading.is_none()
             && self.rpr.is_none()
             && self.num_id.is_none()
@@ -1592,7 +1966,7 @@ impl CT_PPr {
             && self.numbering_revision.is_none()
             && self.numbering_revision_xml.is_empty()
             && self.change.is_none()
-            && self.revision_xml.is_empty()
+            && (!positioned || self.revision_xml.is_empty())
     }
 
     /// Merge another CT_PPr into this one (non-None fields override).
@@ -1769,6 +2143,7 @@ fn write_ppr_with_positioned_raw<W: std::io::Write>(
     writer: &mut Writer<W>,
     generated: &[u8],
     ppr: &CT_PPr,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let mut raw_order = (0..ppr.revision_xml.len())
         .filter(|index| {
@@ -1786,13 +2161,20 @@ fn write_ppr_with_positioned_raw<W: std::io::Write>(
     let mut occurrences = [0usize; PPR_END_SLOT as usize + 1];
     let mut reader = Reader::from_reader(generated);
     reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
     let mut inside = false;
     loop {
-        match reader.read_event_into(&mut buffer)? {
+        let event_start = reader.buffer_position() as usize;
+        match reader.read_event()? {
             Event::Start(element) if !inside => {
                 inside = true;
-                writer.write_event(Event::Start(element.into_owned()))?;
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(Event::Start(element))?;
+                }
             }
             Event::Start(element) => {
                 let slot = ppr_slot_for_name(element.local_name().as_ref());
@@ -1801,46 +2183,74 @@ fn write_ppr_with_positioned_raw<W: std::io::Write>(
                     ppr,
                     &raw_order,
                     &mut raw_index,
-                    slot,
-                    occurrences[slot as usize],
+                    (slot, occurrences[slot as usize]),
+                    emission,
                 )?;
-                let raw = capture_element(&mut reader, &element)?;
-                writer.get_mut().write_all(&raw)?;
+                let end = crate::text::generated_subtree_end(&mut reader, element.name().as_ref())?;
+                if let Some(emission) = emission {
+                    emission.write_copy(writer, &generated[event_start..end])?;
+                } else {
+                    writer.get_mut().write_all(&generated[event_start..end])?;
+                }
                 occurrences[slot as usize] += 1;
             }
-            Event::Empty(mut element) => {
+            Event::Empty(element) => {
                 let slot = ppr_slot_for_name(element.local_name().as_ref());
                 write_ppr_raw_before(
                     writer,
                     ppr,
                     &raw_order,
                     &mut raw_index,
-                    slot,
-                    occurrences[slot as usize],
+                    (slot, occurrences[slot as usize]),
+                    emission,
                 )?;
-                append_modeled_toggle_attributes(
-                    &mut element,
+                let attributes = crate::properties::modeled_toggle_attributes(
                     &ppr.revision_xml,
                     &ppr.revision_xml_positions,
                     slot,
-                    occurrences[slot as usize],
                 )?;
-                writer.write_event(Event::Empty(element.into_owned()))?;
+                let mut element = crate::text::FieldXmlStart::from_start(element, emission)?;
+                for (name, value) in attributes {
+                    element.push(&name, &value)?;
+                }
+                element.write(writer, true)?;
                 occurrences[slot as usize] += 1;
             }
             Event::End(element) if inside => {
-                write_ppr_raw_before(writer, ppr, &raw_order, &mut raw_index, PPR_END_SLOT, 0)?;
+                write_ppr_raw_before(
+                    writer,
+                    ppr,
+                    &raw_order,
+                    &mut raw_index,
+                    (PPR_END_SLOT, 0),
+                    emission,
+                )?;
                 while let Some(index) = raw_order.get(raw_index).copied() {
                     writer.get_mut().write_all(&ppr.revision_xml[index])?;
                     raw_index += 1;
                 }
-                writer.write_event(Event::End(element.into_owned()))?;
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(Event::End(element))?;
+                }
                 return Ok(());
             }
             Event::Eof => return Ok(()),
-            event => writer.write_event(event.into_owned())?,
+            event => {
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(event)?;
+                }
+            }
         }
-        buffer.clear();
     }
 }
 
@@ -1849,34 +2259,42 @@ fn write_ppr_raw_before<W: std::io::Write>(
     ppr: &CT_PPr,
     raw_order: &[usize],
     raw_index: &mut usize,
-    slot: u8,
-    occurrence: usize,
+    before: (u8, usize),
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     while let Some(index) = raw_order.get(*raw_index).copied() {
         let position = effective_ppr_raw_position(ppr, index);
-        if position.0 > slot || (position.0 == slot && position.1 > occurrence) {
+        if position > before {
             break;
         }
         if ppr.revision_xml_positions[index].0 == PPR_BORDER_SLOT
             && raw_is_modeled_attribute_carrier(ppr.revision_xml_positions[index])
         {
             let selected_index = ppr.modeled_source_index(PPR_BORDER_SLOT).unwrap();
-            let raw = CT_PBdr::merge_source(
+            let raw = CT_PBdr::merge_source_in(
                 &ppr.revision_xml[index],
                 &ppr.revision_xml[selected_index],
                 ppr.borders.as_deref(),
                 selected_index == index,
+                emission,
             )?;
+            let _transport = emission
+                .map(|emission| emission.prepaid_xml_transport(&raw))
+                .transpose()?;
             writer.get_mut().write_all(&raw)?;
         } else if ppr.revision_xml_positions[index].0 == PPR_TABS_SLOT
             && raw_is_modeled_attribute_carrier(ppr.revision_xml_positions[index])
         {
             if ppr.modeled_source_index(PPR_TABS_SLOT) == Some(index) || ppr.tabs.is_none() {
-                let raw = crate::numbering::merge_tabs_source(
+                let raw = crate::numbering::merge_tabs_source_in(
                     &ppr.revision_xml[index],
                     ppr.tabs.as_ref(),
                     None,
+                    emission,
                 )?;
+                let _transport = emission
+                    .map(|emission| emission.prepaid_xml_transport(&raw))
+                    .transpose()?;
                 writer.get_mut().write_all(&raw)?;
             } else {
                 writer.get_mut().write_all(&ppr.revision_xml[index])?;
@@ -2399,6 +2817,38 @@ mod tests {
         let ppr = parse_ppr(r#"<w:pStyle w:val="Heading1"/><w:jc w:val="center"/>"#);
         assert_eq!(ppr.style_id, Some("Heading1".to_string()));
         assert_eq!(ppr.jc, Some(ST_Jc::Center));
+    }
+
+    #[test]
+    fn paragraph_scalar_decoding_keeps_signed_measurements_and_unsigned_ids_distinct() {
+        let signed = parse_ppr(
+            r#"<w:spacing w:before="-0.5" w:after="1.5" w:line="2147483647"/><w:ind w:left="-2147483648" w:firstLine="-0.5"/>"#,
+        );
+        assert_eq!(signed.space_before, Some(Twips(-1)));
+        assert_eq!(signed.space_after, Some(Twips(2)));
+        assert_eq!(signed.line_spacing, Some(Twips(i32::MAX)));
+        assert_eq!(signed.ind_left, Some(Twips(i32::MIN)));
+        assert_eq!(signed.ind_first_line, Some(Twips(-1)));
+        for child in [
+            r#"<w:spacing w:before="2147483647.5"/>"#,
+            r#"<w:ind w:left="-2147483648.5"/>"#,
+        ] {
+            assert!(try_parse_ppr(child).is_err(), "{child}");
+        }
+        let ids = parse_ppr(r#"<w:divId w:val="4294967295"/><w:outlineLvl w:val="0"/>"#);
+        assert_eq!(ids.div_id, Some(u32::MAX));
+        assert_eq!(ids.outline_lvl, Some(0));
+        for element in ["divId", "outlineLvl"] {
+            for value in ["-1", "1.0", "4294967296"] {
+                assert!(try_parse_ppr(&format!(r#"<w:{element} w:val="{value}"/>"#)).is_err());
+            }
+        }
+        let missing = parse_ppr(
+            r#"<w:spacing w:before="7"/><w:spacing/><w:divId w:val="8"/><w:divId/><w:outlineLvl w:val="9"/><w:outlineLvl/>"#,
+        );
+        assert_eq!(missing.space_before, Some(Twips(7)));
+        assert_eq!(missing.div_id, Some(8));
+        assert_eq!(missing.outline_lvl, Some(9));
     }
 
     #[test]

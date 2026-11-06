@@ -15,6 +15,103 @@ use crate::numbering::word_prefixes_at;
 use crate::properties::{is_word_attribute, is_word_element};
 use crate::raw_xml::{capture_element, capture_empty_element};
 
+/// Bytes and invocation-only companions follow the same existing glossary edit
+/// recipe. Legacy callers keep no maps or events.
+pub(crate) struct GlossaryXml {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) source_map: Option<crate::document::WordSourceMap>,
+    pub(crate) events: Vec<crate::text::TemplateWordEvent>,
+}
+
+impl GlossaryXml {
+    fn generated(bytes: Vec<u8>, tracked: bool) -> Self {
+        Self {
+            source_map: tracked.then(|| crate::document::WordSourceMap::generated(bytes.len())),
+            bytes,
+            events: Vec::new(),
+        }
+    }
+
+    fn retained(raw: &[u8], work: Option<&mut crate::text::WordOperationWork>) -> Result<Self> {
+        if let Some(work) = work {
+            let (mut output, lease) = work.template_word_record_output();
+            std::io::Write::write_all(&mut output, raw)?;
+            let (bytes, source_map, events) = output.into_word_parts();
+            drop(lease);
+            Ok(Self {
+                bytes,
+                source_map: Some(source_map),
+                events,
+            })
+        } else {
+            Ok(Self::generated(raw.to_vec(), false))
+        }
+    }
+
+    fn append(&mut self, mut other: Self) -> Result<()> {
+        let offset = self.bytes.len();
+        if let Some(map) = &mut self.source_map {
+            map.extend(other.source_map.as_ref().expect("tracked glossary piece"))?;
+            for event in &mut other.events {
+                event.encoded.start = event.encoded.start.checked_add(offset).ok_or_else(|| {
+                    OxmlError::InvalidValue("glossary Word event position overflow".into())
+                })?;
+                event.encoded.end = event.encoded.end.checked_add(offset).ok_or_else(|| {
+                    OxmlError::InvalidValue("glossary Word event position overflow".into())
+                })?;
+            }
+            self.events.extend(other.events);
+        }
+        self.bytes.extend(other.bytes);
+        Ok(())
+    }
+
+    fn append_slice(&mut self, other: &Self, range: Range<usize>) -> Result<()> {
+        let offset = self.bytes.len();
+        if let Some(map) = &mut self.source_map {
+            map.extend(
+                &other
+                    .source_map
+                    .as_ref()
+                    .expect("tracked glossary piece")
+                    .slice(range.clone())?,
+            )?;
+            self.events.extend(
+                other
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event.encoded.start >= range.start && event.encoded.end <= range.end
+                    })
+                    .cloned()
+                    .map(|mut event| {
+                        event.encoded.start = offset + event.encoded.start - range.start;
+                        event.encoded.end = offset + event.encoded.end - range.start;
+                        event
+                    }),
+            );
+        }
+        self.bytes.extend_from_slice(&other.bytes[range]);
+        Ok(())
+    }
+
+    fn append_retained(
+        &mut self,
+        raw: &[u8],
+        work: Option<&crate::text::WordOperationWork>,
+    ) -> Result<()> {
+        if let Some(map) = &mut self.source_map {
+            map.extend(
+                &work
+                    .expect("tracked glossary writer")
+                    .template_word_raw_map(raw)?,
+            )?;
+        }
+        self.bytes.extend_from_slice(raw);
+        Ok(())
+    }
+}
+
 /// The `w:glossaryDocument` root.
 #[derive(Debug, Clone)]
 pub struct CT_GlossaryDocument {
@@ -260,6 +357,16 @@ fn write_value<W: std::io::Write>(
 }
 
 impl CT_DocPart {
+    /// Borrow the stored record without asserting current publication eligibility.
+    #[doc(hidden)]
+    pub fn retained_xml(&self) -> &[u8] {
+        &self.raw_xml
+    }
+
+    fn to_xml(&self) -> Result<Vec<u8>> {
+        Ok(self.to_xml_in(None)?.bytes)
+    }
+
     /// Create an entry whose body is owned, namespace-complete XML.
     pub fn from_body_xml(content: &[u8]) -> Result<Self> {
         let mut xml =
@@ -279,7 +386,12 @@ impl CT_DocPart {
         let (mut body, end) = expanded_root_wrapper(&current.body_xml)?;
         body.extend_from_slice(content);
         body.extend(end);
-        let updated = apply_structural_edits(&current.raw_xml, vec![(current.body_span, body)])?;
+        let updated = apply_glossary_edits(
+            &current.raw_xml,
+            vec![(current.body_span, GlossaryXml::generated(body, false))],
+            None,
+        )?
+        .bytes;
         let mut writer = Writer::new(Vec::new());
         let mut wrapper = BytesStart::new("namespaceScope");
         for (name, namespace) in &self.inherited_namespaces {
@@ -312,9 +424,13 @@ impl CT_DocPart {
             && self.body == self.original_body
     }
 
-    fn to_xml(&self) -> Result<Vec<u8>> {
+    fn to_xml_in(
+        &self,
+        mut work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<GlossaryXml> {
+        let _part_scope = crate::text::raw_root_binding_scope(&self.raw_xml, false)?;
         if self.is_unchanged() {
-            return Ok(self.raw_xml.clone());
+            return GlossaryXml::retained(&self.raw_xml, work);
         }
         let properties_changed = self.properties.snapshot() != self.original_properties;
         let body_changed = self.body != self.original_body;
@@ -322,22 +438,34 @@ impl CT_DocPart {
         if properties_changed {
             let properties = self.properties.to_xml(&self.original_properties)?;
             if let Some(properties_span) = self.properties_span.clone() {
-                edits.push((properties_span, properties));
+                edits.push((
+                    properties_span,
+                    GlossaryXml::generated(properties, work.is_some()),
+                ));
             } else {
-                edits.push((self.body_span.start..self.body_span.start, properties));
+                edits.push((
+                    self.body_span.start..self.body_span.start,
+                    GlossaryXml::generated(properties, work.is_some()),
+                ));
             }
         }
         if body_changed {
-            let body = serialize_doc_part_body(&self.body, &self.body_xml)?;
+            let body = serialize_doc_part_body(&self.body, &self.body_xml, work.as_deref_mut())?;
             edits.push((self.body_span.clone(), body));
         }
-        apply_structural_edits(&self.raw_xml, edits)
+        apply_glossary_edits(&self.raw_xml, edits, work)
     }
 }
 
 impl CT_GlossaryDocument {
+    /// Borrow the stored incoming glossary record without serialization.
+    #[doc(hidden)]
+    pub fn retained_xml(&self) -> &[u8] {
+        &self.raw_xml
+    }
+
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
+        crate::document::admit_word_xml(xml, &[], None)?;
         validate_document_declarations_and_doctype(xml)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(false);
@@ -542,11 +670,19 @@ impl CT_GlossaryDocument {
     }
 
     pub fn to_xml(&self) -> Result<Vec<u8>> {
+        Ok(self.to_xml_in(None)?.bytes)
+    }
+
+    pub(crate) fn to_xml_in(
+        &self,
+        mut work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<GlossaryXml> {
+        let _root_scope = crate::text::raw_root_binding_scope(&self.raw_xml, true)?;
         self.validate_resource_limits()?;
         let (container, empty) = doc_parts_close(&self.raw_xml)?;
         if empty {
             if self.doc_parts.is_empty() {
-                return Ok(self.raw_xml.clone());
+                return GlossaryXml::retained(&self.raw_xml, work);
             }
             if self.doc_parts.iter().any(|part| part.source_span.is_some()) {
                 return Err(OxmlError::InvalidValue(
@@ -554,16 +690,16 @@ impl CT_GlossaryDocument {
                 ));
             }
             let (start, end) = expanded_root_wrapper(&self.raw_xml[container.clone()])?;
-            let mut replacement = start;
+            let mut replacement = GlossaryXml::generated(start, work.is_some());
             for part in &self.doc_parts {
-                replacement.extend(part.to_xml()?);
+                replacement.append(part.to_xml_in(work.as_deref_mut())?)?;
             }
-            replacement.extend(end);
-            return apply_structural_edits(&self.raw_xml, vec![(container, replacement)]);
+            replacement.append(GlossaryXml::generated(end, work.is_some()))?;
+            return apply_glossary_edits(&self.raw_xml, vec![(container, replacement)], work);
         }
         let mut edits = Vec::new();
         let mut retained = Vec::new();
-        let mut pending = Vec::new();
+        let mut pending = GlossaryXml::generated(Vec::new(), work.is_some());
         let mut previous = None;
         for part in &self.doc_parts {
             if let Some(span) = &part.source_span {
@@ -581,25 +717,34 @@ impl CT_GlossaryDocument {
                 }
                 previous = Some(index);
                 retained.push(span.clone());
-                if !pending.is_empty() {
-                    edits.push((span.start..span.start, std::mem::take(&mut pending)));
+                if !pending.bytes.is_empty() {
+                    edits.push((
+                        span.start..span.start,
+                        std::mem::replace(
+                            &mut pending,
+                            GlossaryXml::generated(Vec::new(), work.is_some()),
+                        ),
+                    ));
                 }
                 if !part.is_unchanged() {
-                    edits.push((span.clone(), part.to_xml()?));
+                    edits.push((span.clone(), part.to_xml_in(work.as_deref_mut())?));
                 }
             } else {
-                pending.extend(part.to_xml()?);
+                pending.append(part.to_xml_in(work.as_deref_mut())?)?;
             }
         }
-        if !pending.is_empty() {
+        if !pending.bytes.is_empty() {
             edits.push((container.start..container.start, pending));
         }
         for span in &self.source_spans {
             if !retained.contains(span) {
-                edits.push((span.clone(), Vec::new()));
+                edits.push((
+                    span.clone(),
+                    GlossaryXml::generated(Vec::new(), work.is_some()),
+                ));
             }
         }
-        apply_structural_edits(&self.raw_xml, edits)
+        apply_glossary_edits(&self.raw_xml, edits, work)
     }
 }
 
@@ -1853,6 +1998,7 @@ fn parse_doc_part_body(raw: &[u8], inherited_prefixes: &[String]) -> Result<CT_B
                         &prefixes,
                         &[],
                         b"docPartBody",
+                        None,
                     );
                 }
             }
@@ -1874,18 +2020,73 @@ fn parse_doc_part_body(raw: &[u8], inherited_prefixes: &[String]) -> Result<CT_B
     }
 }
 
-fn serialize_doc_part_body(body: &CT_Body, source: &[u8]) -> Result<Vec<u8>> {
-    let mut writer = Writer::new(Vec::new());
-    body.to_xml(&mut writer)?;
-    let xml = writer.into_inner();
+fn serialize_doc_part_body(
+    body: &CT_Body,
+    source: &[u8],
+    work: Option<&mut crate::text::WordOperationWork>,
+) -> Result<GlossaryXml> {
+    let _body_scope = crate::text::raw_root_binding_scope(source, false)?;
+    let tracked = work.is_some();
+    let xml = if let Some(work) = work {
+        let (output, lease) = work.template_word_record_output();
+        let mut writer = Writer::new(output);
+        body.write_marked(
+            &mut writer,
+            crate::document::PartWrite::Whole,
+            &mut |_| {},
+            Some(lease.work),
+        )?;
+        let (bytes, source_map, events) = writer.into_inner().into_word_parts();
+        drop(lease);
+        GlossaryXml {
+            bytes,
+            source_map: Some(source_map),
+            events,
+        }
+    } else {
+        let mut writer = Writer::new(Vec::new());
+        body.to_xml(&mut writer)?;
+        GlossaryXml::generated(writer.into_inner(), false)
+    };
     let content = xml
+        .bytes
         .strip_prefix(b"<w:body>")
         .and_then(|xml| xml.strip_suffix(b"</w:body>"))
         .ok_or_else(|| OxmlError::MissingElement("serialized w:body wrapper".to_owned()))?;
     let (root_start, root_end) = expanded_root_wrapper(source)?;
-    let mut output = root_start;
-    output.extend_from_slice(content);
-    output.extend_from_slice(&root_end);
+    let mut output = GlossaryXml::generated(root_start, tracked);
+    output.append_slice(&xml, 8..8 + content.len())?;
+    output.append(GlossaryXml::generated(root_end, tracked))?;
+    Ok(output)
+}
+
+fn apply_glossary_edits(
+    input: &[u8],
+    mut edits: Vec<(Range<usize>, GlossaryXml)>,
+    work: Option<&mut crate::text::WordOperationWork>,
+) -> Result<GlossaryXml> {
+    edits.sort_by_key(|(span, _)| (span.start, span.end));
+    let replacement_bytes: usize = edits
+        .iter()
+        .map(|(_, replacement)| replacement.bytes.len())
+        .sum();
+    let removed_bytes = edits.iter().map(|(span, _)| span.len()).sum::<usize>();
+    let mut output = GlossaryXml::generated(
+        Vec::with_capacity(input.len() + replacement_bytes - removed_bytes),
+        work.is_some(),
+    );
+    let mut cursor = 0usize;
+    for (span, replacement) in edits {
+        if span.start > span.end || span.end > input.len() || span.start < cursor {
+            return Err(OxmlError::InvalidValue(
+                "overlapping or invalid retained glossary source spans".to_owned(),
+            ));
+        }
+        output.append_retained(&input[cursor..span.start], work.as_deref())?;
+        output.append(replacement)?;
+        cursor = span.end;
+    }
+    output.append_retained(&input[cursor..], work.as_deref())?;
     Ok(output)
 }
 
@@ -1915,29 +2116,6 @@ fn expanded_root_wrapper(source: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         }
         buffer.clear();
     }
-}
-
-fn apply_structural_edits(
-    input: &[u8],
-    mut edits: Vec<(Range<usize>, Vec<u8>)>,
-) -> Result<Vec<u8>> {
-    edits.sort_by_key(|(span, _)| (span.start, span.end));
-    let replacement_bytes: usize = edits.iter().map(|(_, replacement)| replacement.len()).sum();
-    let removed_bytes = edits.iter().map(|(span, _)| span.len()).sum::<usize>();
-    let mut output = Vec::with_capacity(input.len() + replacement_bytes - removed_bytes);
-    let mut cursor = 0usize;
-    for (span, replacement) in edits {
-        if span.start > span.end || span.end > input.len() || span.start < cursor {
-            return Err(OxmlError::InvalidValue(
-                "overlapping or invalid retained glossary source spans".to_owned(),
-            ));
-        }
-        output.extend_from_slice(&input[cursor..span.start]);
-        output.extend_from_slice(&replacement);
-        cursor = span.end;
-    }
-    output.extend_from_slice(&input[cursor..]);
-    Ok(output)
 }
 
 fn word_local_name(element: &BytesStart<'_>, prefixes: &[String]) -> Option<String> {

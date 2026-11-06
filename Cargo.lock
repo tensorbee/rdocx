@@ -1582,6 +1582,7 @@ dependencies = [
  "oxml-drawing",
  "quick-xml",
  "regex",
+ "serde_json",
  "thiserror",
 ]
 

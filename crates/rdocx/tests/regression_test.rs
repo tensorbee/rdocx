@@ -409261,7 +409261,7 @@ fn issue425_comparison_refuses_changes_that_touch_an_existing_revision() {
     );
     assert!(
         error.contains(
-            "comparison cannot change footnotes:/word/footnotes.xml/footnote[2]/paragraph[0], which holds an existing tracked revision: the edited document changes it"
+            "comparison cannot change footnotes:/word/footnotes.xml/footnote-id[1]/paragraph[0], which holds an existing tracked revision: the edited document changes it"
         ),
         "{error}"
     );

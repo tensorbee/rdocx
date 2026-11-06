@@ -864,7 +864,7 @@ impl Document {
     ) -> Result<Vec<(LegacyFormFieldInfo, Option<LegacyFormFieldValue>)>> {
         let mut fields = Vec::new();
         let mut paragraphs = Vec::new();
-        collect_body_paragraphs(&self.document.body, &mut paragraphs);
+        collect_body_paragraphs(&self.document.body, &mut paragraphs, None);
         append_legacy_form_infos(&mut fields, &self.doc_part_name, &paragraphs, false)?;
         append_legacy_textbox_fields(&mut fields, &self.doc_part_name, &paragraphs, false)?;
 
@@ -1412,7 +1412,7 @@ fn collect_drawings_in_run<'a>(
         {
             if let Some(body) = &shape.text_body {
                 let mut nested = Vec::new();
-                collect_body_paragraphs(body, &mut nested);
+                collect_body_paragraphs(body, &mut nested, None);
                 for nested in nested {
                     push_unseen_paragraph(nested, seen, extra);
                 }
@@ -1661,7 +1661,7 @@ fn shape_textbox_paragraph_groups(drawing: &CT_Drawing) -> Result<TextBoxFieldSo
     };
     let mut paragraphs = Vec::new();
     if let Some(body) = &shape.text_body {
-        collect_body_paragraphs(body, &mut paragraphs);
+        collect_body_paragraphs(body, &mut paragraphs, None);
     } else {
         paragraphs.extend(shape.text.iter());
     }
@@ -2039,7 +2039,7 @@ fn set_nth_legacy_form_in_shape_body(
             }
             BodyContent::ContentControl(control) => set_nth_legacy_form_in_shape_control(
                 control,
-                BlockControlOwner::Body,
+                LegacyBlockOwner::Root,
                 remaining,
                 value.clone(),
             )?,
@@ -2065,7 +2065,7 @@ fn set_nth_legacy_form_in_shape_table(
         {
             if set_nth_legacy_form_in_shape_control(
                 control,
-                BlockControlOwner::Table,
+                LegacyBlockOwner::Table,
                 remaining,
                 value.clone(),
             )? {
@@ -2094,7 +2094,7 @@ fn set_nth_legacy_form_in_shape_row(
         {
             if set_nth_legacy_form_in_shape_control(
                 control,
-                BlockControlOwner::Row,
+                LegacyBlockOwner::Row,
                 remaining,
                 value.clone(),
             )? {
@@ -2117,7 +2117,7 @@ fn set_nth_legacy_form_in_shape_row(
                     }
                     CellContent::ContentControl(control) => set_nth_legacy_form_in_shape_control(
                         control,
-                        BlockControlOwner::Cell,
+                        LegacyBlockOwner::Cell,
                         remaining,
                         value.clone(),
                     )?,
@@ -2133,26 +2133,23 @@ fn set_nth_legacy_form_in_shape_row(
 
 fn set_nth_legacy_form_in_shape_control(
     control: &mut CT_Sdt,
-    owner: BlockControlOwner,
+    owner: LegacyBlockOwner,
     remaining: &mut usize,
     value: LegacyFormFieldValue,
 ) -> Result<bool> {
     for content in &mut control.content {
         let changed = match (owner, content) {
-            (
-                BlockControlOwner::Body | BlockControlOwner::Cell,
-                SdtContent::Paragraph(paragraph),
-            ) => {
+            (LegacyBlockOwner::Root | LegacyBlockOwner::Cell, SdtContent::Paragraph(paragraph)) => {
                 set_nth_legacy_form_in_paragraph(paragraph, remaining, value.clone())?
                     || set_nth_legacy_textbox_in_paragraph(paragraph, remaining, value.clone())?
             }
-            (BlockControlOwner::Body | BlockControlOwner::Cell, SdtContent::Table(table)) => {
+            (LegacyBlockOwner::Root | LegacyBlockOwner::Cell, SdtContent::Table(table)) => {
                 set_nth_legacy_form_in_shape_table(table, remaining, value.clone())?
             }
-            (BlockControlOwner::Table, SdtContent::Row(row)) => {
+            (LegacyBlockOwner::Table, SdtContent::Row(row)) => {
                 set_nth_legacy_form_in_shape_row(row, remaining, value.clone())?
             }
-            (BlockControlOwner::Row, SdtContent::Cell(cell)) => {
+            (LegacyBlockOwner::Row, SdtContent::Cell(cell)) => {
                 let mut row = CT_Row::new();
                 row.cells.push(cell.clone());
                 let changed = set_nth_legacy_form_in_shape_row(&mut row, remaining, value.clone())?;
@@ -2787,7 +2784,7 @@ impl Document {
             }
         }
         let mut paragraphs = Vec::new();
-        collect_body_paragraphs(&input.document.body, &mut paragraphs);
+        collect_body_paragraphs(&input.document.body, &mut paragraphs, None);
         if paragraphs.len() != paths.len() {
             return Err(Error::Other(
                 "navigation generated-range physical source inventory disagrees".into(),
@@ -2907,7 +2904,7 @@ impl Document {
         }
         evaluator.sequence_snapshot = Some(Arc::new(snapshot));
         let mut main = Vec::new();
-        collect_body_paragraphs(&source.document.body, &mut main);
+        collect_body_paragraphs(&source.document.body, &mut main, None);
         evaluator.sequence_nodes = nodes_by_story
             .get(&rdocx_layout::WordStory::Document)
             .map(|nodes| nodes.iter().copied().map(Some).collect())
@@ -3200,7 +3197,7 @@ impl Document {
         let mut report = LayoutBackedFieldUpdateReport::default();
 
         let mut main = Vec::new();
-        collect_body_paragraphs(&self.document.body, &mut main);
+        collect_body_paragraphs(&self.document.body, &mut main, None);
         // Layout registers main-story paragraphs in this same flattened order.
         let main_paths = (1u32..)
             .map_while(|index| SourceNodeId::new(index).and_then(|id| layout.source_node(id)))
@@ -3679,7 +3676,7 @@ impl Document {
         let original = self.clone_for_staging();
         let mut fields = Vec::new();
         let mut body = Vec::new();
-        collect_body_paragraphs(&original.document.body, &mut body);
+        collect_body_paragraphs(&original.document.body, &mut body, None);
         for paragraph in body {
             append_ref_copy_paragraph(paragraph, false, &mut fields);
         }
@@ -3760,7 +3757,8 @@ impl Document {
             if sequence_updates.iter().any(Option::is_some) {
                 let mut projection = original.clone_for_staging();
                 projection.apply_cached_physical_field_updates(&sequence_updates)?;
-                projection.document = CT_Document::from_xml(&projection.document.to_xml()?)?;
+                let canonical = projection.main_part_with_body_spans()?.0;
+                projection.document = CT_Document::from_xml(&canonical)?;
                 Some(projection)
             } else {
                 None
@@ -4009,9 +4007,8 @@ impl Document {
             return Ok(0);
         }
         let package_before = self.package.clone();
-        let mut document = self.document.clone();
         let mut update_index = 0;
-        apply_updates_to_body(&mut document.body, updates, &mut update_index)?;
+        let main_source = self.updated_main_field_source(updates, &mut update_index)?;
         let mut staged = Vec::new();
         for (part_name, kind, xml) in field_story_parts(self, include_comments) {
             let mut paragraphs = legacy_story_paragraphs(&xml, kind)?;
@@ -4044,8 +4041,10 @@ impl Document {
                 updates.len()
             )));
         }
-        CT_Document::from_xml(&document.to_xml()?)?;
-        self.document = document;
+        if let Some(xml) = main_source {
+            let part = self.doc_part_name.clone();
+            crate::document::set_story_source_xml(self, &part, xml)?;
+        }
         for (part_name, kind, xml) in staged {
             if matches!(kind, PackageStoryKind::Footnotes) {
                 self.footnotes = CT_Footnotes::from_xml(&xml)?;
@@ -4065,6 +4064,219 @@ impl Document {
             );
         self.invalidate_layout();
         Ok(updated)
+    }
+
+    // Map the one immutable current writer into the guarded restored source.
+    // Paths select owners, same-context emission proves each occurrence, and
+    // only those independently parsed source owners receive cache updates.
+    fn updated_main_field_source(
+        &self,
+        updates: &[Option<CachedFieldUpdate>],
+        update_index: &mut usize,
+    ) -> Result<Option<Vec<u8>>> {
+        self.validate_model_resource_limits()?;
+        let (canonical, _, roots) = self.main_part_with_body_spans()?;
+        let source = self.namespace_restored_main_source()?;
+        let (boundaries, _) =
+            crate::document::comment_namespace_source_boundaries(&canonical, &source)?.ok_or_else(
+                || Error::Other("field-cache restored source changed physical events".into()),
+            )?;
+        let mut inverse = BTreeMap::new();
+        for (before, after) in boundaries {
+            if inverse
+                .insert(after, before)
+                .is_some_and(|prior| prior != before)
+            {
+                return Err(Error::Other(
+                    "field-cache source has ambiguous event boundaries".into(),
+                ));
+            }
+        }
+        if roots.len() != self.document.body.content.len() {
+            return Err(Error::Other(
+                "field-cache direct body inventory changed".into(),
+            ));
+        }
+        for (item, range) in self.document.body.content.iter().zip(&roots) {
+            let emitted = self.document.body_item_xml(item)?;
+            crate::document::note_transaction_buffer("field_cache_root_emission", emitted.len());
+            if canonical.get(range.clone()) != Some(emitted.as_slice()) {
+                return Err(Error::Other(
+                    "field-cache direct body emitter differs from current source".into(),
+                ));
+            }
+        }
+        let root_indices = self
+            .document
+            .body
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (!matches!(item, BodyContent::RawXml(_))).then_some(index))
+            .collect::<Vec<_>>();
+        let mut paragraphs = Vec::new();
+        let mut paths = Vec::new();
+        collect_body_paragraphs(&self.document.body, &mut paragraphs, Some(&mut paths));
+        let parsed = legacy_story_paragraphs(&source, PackageStoryKind::Document)?;
+        if parsed.len() != paragraphs.len() || paths.len() != paragraphs.len() {
+            return Err(Error::Other(
+                "field-cache modeled/source paragraph inventory differs".into(),
+            ));
+        }
+        let mut source_paragraphs = BTreeMap::new();
+        for paragraph in parsed {
+            if source_paragraphs
+                .insert(paragraph.path.clone(), paragraph)
+                .is_some()
+            {
+                return Err(Error::Other(
+                    "field-cache duplicate physical paragraph path".into(),
+                ));
+            }
+        }
+        let canonical_starts = source_paragraphs
+            .values()
+            .map(|paragraph| {
+                inverse.get(&paragraph.start).copied().ok_or_else(|| {
+                    Error::Other("field-cache paragraph start lacks a source boundary".into())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (ancestor_frames, ancestor_paths) =
+            crate::document::story_namespace_ancestors_at(&canonical, &canonical_starts)?;
+        let mut edits = Vec::<FieldSourceEdit>::new();
+        for (paragraph, path) in paragraphs.into_iter().zip(paths) {
+            let mut physical = source_paragraphs.remove(&path).ok_or_else(|| {
+                Error::Other("field-cache paragraph has no matching container path".into())
+            })?;
+            let first = *inverse.get(&physical.start).ok_or_else(|| {
+                Error::Other("field-cache paragraph start lacks a source boundary".into())
+            })?;
+            let last = *inverse.get(&physical.end).ok_or_else(|| {
+                Error::Other("field-cache paragraph end lacks a source boundary".into())
+            })?;
+            let root = path
+                .first()
+                .and_then(|(_, index)| root_indices.get(*index))
+                .and_then(|index| roots.get(*index))
+                .ok_or_else(|| {
+                    Error::Other("field-cache paragraph lacks a direct body certificate".into())
+                })?;
+            if first > last || first < root.start || last > root.end {
+                return Err(Error::Other(
+                    "field-cache paragraph escapes its certified body owner".into(),
+                ));
+            }
+            paragraph.validate_resource_limits()?;
+            let ancestor_indices = ancestor_paths.get(&first).ok_or_else(|| {
+                Error::Other("field-cache paragraph lacks writer-time ancestors".into())
+            })?;
+            let ancestors = ancestor_indices
+                .iter()
+                .map(|index| ancestor_frames[*index].as_slice())
+                .collect::<Vec<_>>();
+            let emitted = self.document.body_item_xml_with_ancestor_declarations(
+                &BodyContent::Paragraph(Box::new(paragraph.clone())),
+                &ancestors,
+            )?;
+            crate::document::note_transaction_buffer(
+                "field_cache_paragraph_emission",
+                emitted.len(),
+            );
+            if canonical.get(first..last) != Some(emitted.as_slice()) {
+                return Err(Error::Other(
+                    "field-cache paragraph emitter differs at its proved physical path".into(),
+                ));
+            }
+            if !same_field_inventory(paragraph, &physical.original) {
+                return Err(Error::Other(
+                    "field-cache evaluation and physical field inventories differ".into(),
+                ));
+            }
+            let before = *update_index;
+            apply_updates_to_paragraph(&mut physical.paragraph, updates, update_index)?;
+            if !updates
+                .get(before..*update_index)
+                .ok_or_else(|| Error::Other("field-cache update cursor escaped inventory".into()))?
+                .iter()
+                .any(Option::is_some)
+            {
+                continue;
+            }
+            let pairs =
+                paragraph_field_source_replacements(&physical.original, &physical.paragraph)?;
+            let mut cursor = 0;
+            for (original, replacement) in pairs {
+                if original.is_empty() {
+                    return Err(Error::Other("empty field source identity".into()));
+                }
+                let relative = find_typed_field_source(
+                    &source,
+                    physical.start,
+                    physical.end,
+                    &original,
+                    cursor,
+                )?
+                .ok_or_else(|| {
+                    Error::Other("field cache source left its proved paragraph owner".into())
+                })?;
+                cursor = relative
+                    .checked_add(original.len())
+                    .ok_or_else(|| Error::Other("field-cache source bounds overflow".into()))?;
+                if original == replacement {
+                    continue;
+                }
+                let start = physical
+                    .start
+                    .checked_add(relative)
+                    .ok_or_else(|| Error::Other("field-cache source bounds overflow".into()))?;
+                let end = start
+                    .checked_add(original.len())
+                    .filter(|end| *end <= physical.end)
+                    .ok_or_else(|| {
+                        Error::Other("field-cache source escaped paragraph bounds".into())
+                    })?;
+                edits.push(FieldSourceEdit {
+                    start,
+                    end,
+                    replacement,
+                });
+            }
+        }
+        if !source_paragraphs.is_empty() {
+            return Err(Error::Other(
+                "field-cache physical paragraph inventory not consumed".into(),
+            ));
+        }
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        edits.sort_by_key(|edit| edit.start);
+        let mut cursor = 0;
+        let mut length = source.len();
+        for edit in &edits {
+            if edit.start < cursor || edit.start > edit.end || edit.end > source.len() {
+                return Err(Error::Other(
+                    "field-cache source edits overlap or escape source".into(),
+                ));
+            }
+            length = length
+                .checked_sub(edit.end - edit.start)
+                .and_then(|length| length.checked_add(edit.replacement.len()))
+                .ok_or_else(|| Error::Other("field-cache output length overflow".into()))?;
+            cursor = edit.end;
+        }
+        let mut output = Vec::with_capacity(length);
+        cursor = 0;
+        for edit in edits {
+            output.extend_from_slice(&source[cursor..edit.start]);
+            output.extend_from_slice(&edit.replacement);
+            cursor = edit.end;
+        }
+        output.extend_from_slice(&source[cursor..]);
+        debug_assert_eq!(output.len(), length);
+        crate::document::note_transaction_output("field_cache_source_patch", output.len());
+        Ok(Some(output))
     }
 
     /// Write one mail-merge package.
@@ -4950,6 +5162,7 @@ fn import_rich_fragment(
         identity_state,
         false,
         &mut Vec::new(),
+        None,
     )
     .map(|imported| imported.typed)
 }
@@ -4962,7 +5175,11 @@ pub(crate) fn import_document_fragment_content(
     destination_part: &str,
     source_owned_numbering: bool,
     note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
-) -> Result<Vec<u8>> {
+    template: Option<(
+        &mut crate::template::TemplateEvaluation<'_, '_>,
+        crate::document::TemplateFragmentSources,
+    )>,
+) -> Result<(Vec<u8>, Option<Arc<rdocx_oxml::document::ScopedWordSource>>)> {
     let mut identity_state = BodyIdentityState::from_documents(std::slice::from_ref(document))?;
     import_fragment_content_with_state(
         document,
@@ -4974,19 +5191,58 @@ pub(crate) fn import_document_fragment_content(
         &mut identity_state,
         source_owned_numbering,
         note_copy_sources,
+        template,
     )
-    .map(|imported| imported.xml)
+    .map(|imported| (imported.xml, imported.source))
+}
+
+fn apply_fragment_xml_edits(
+    xml: &mut Vec<u8>,
+    source: &mut Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    operation: Option<&mut rdocx_oxml::document::ScopedWordOperation<'_>>,
+    mut edits: Vec<FieldSourceEdit>,
+) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    edits.sort_by_key(|edit| edit.start);
+    if let Some(parent) = source.as_ref() {
+        let operation =
+            operation.ok_or_else(|| Error::Other("fragment source lost its operation".into()))?;
+        let mut pieces = Vec::new();
+        let mut at = 0;
+        for edit in &edits {
+            if edit.start < at || edit.start > edit.end || edit.end > parent.as_bytes().len() {
+                return Err(Error::Other("invalid fragment source edit ranges".into()));
+            }
+            pieces.push((Some(parent.as_ref()), at..edit.start, &[][..]));
+            pieces.push((None, 0..0, edit.replacement.as_slice()));
+            at = edit.end;
+        }
+        pieces.push((Some(parent.as_ref()), at..parent.as_bytes().len(), &[][..]));
+        let updated = operation.compose_sources(&pieces)?;
+        let retained = operation.repeat_source(&updated)?;
+        *xml = operation.finish_source(retained)?;
+        *source = Some(Arc::new(updated));
+    } else {
+        for edit in edits.into_iter().rev() {
+            xml.splice(edit.start..edit.end, edit.replacement);
+        }
+    }
+    Ok(())
 }
 
 struct ImportedFragmentContent {
     typed: Vec<BodyContent>,
     xml: Vec<u8>,
+    source: Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
 }
 
 struct FragmentNoteCopy {
     kind: StoryKind,
     destination_part: String,
     xml: Vec<u8>,
+    source: Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
     replace_id: Option<i32>,
 }
 
@@ -5000,19 +5256,87 @@ fn import_fragment_content_with_state(
     identity_state: &mut BodyIdentityState,
     source_owned_numbering: bool,
     note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
+    mut template: Option<(
+        &mut crate::template::TemplateEvaluation<'_, '_>,
+        crate::document::TemplateFragmentSources,
+    )>,
 ) -> Result<ImportedFragmentContent> {
-    let mut fragment = Document::from_bytes(bytes)
-        .map_err(|error| Error::Other(format!("invalid document fragment: {error}")))?;
-    let mut fragment_xml = fragment
-        .package
-        .get_part(&fragment.doc_part_name)
-        .ok_or_else(|| Error::Other("document fragment main part is missing".to_owned()))?
-        .to_vec();
-    fragment.prepare_staged_package()?;
+    let mut fragment_sources = None;
+    let mut fragment = if let Some((evaluation, input)) = template.as_mut() {
+        let package = OpcPackage::from_reader(std::io::Cursor::new(bytes))?;
+        Document::from_opened_package(
+            package,
+            true,
+            Some(crate::document::ScopedDocumentRead {
+                operation: &mut evaluation.operation,
+                source: input.main.as_ref(),
+                related: Some(&input.related),
+            }),
+        )
+    } else {
+        Document::from_bytes(bytes)
+    }
+    .map_err(|error| Error::Other(format!("invalid document fragment: {error}")))?;
+    if let Some((_, input)) = template.as_mut() {
+        let input = crate::document::TemplateFragmentSources {
+            main: Arc::clone(&input.main),
+            related: std::mem::take(&mut input.related),
+        };
+        fragment_sources = Some(crate::document::TemplateMainSources::from_fragment_read(
+            &fragment.package,
+            &fragment.doc_part_name,
+            &fragment.footnotes,
+            input,
+        ));
+    }
+    let mut fragment_xml_source = template.as_ref().map(|(_, input)| Arc::clone(&input.main));
+    let mut fragment_xml = if template.is_none() {
+        fragment
+            .package
+            .get_part(&fragment.doc_part_name)
+            .ok_or_else(|| Error::Other("document fragment main part is missing".to_owned()))?
+            .to_vec()
+    } else {
+        Vec::new()
+    };
+    if let Some((evaluation, _)) = template.as_mut() {
+        fragment.prepare_staged_template_package(
+            &mut evaluation.operation,
+            &mut evaluation.lineage,
+            fragment_sources
+                .as_mut()
+                .expect("actual fragment reader companions"),
+        )?;
+    } else {
+        fragment.prepare_staged_package()?;
+    }
+    if let Some((evaluation, _)) = template.as_mut() {
+        let retained = evaluation.operation.repeat_source(
+            fragment_xml_source
+                .as_ref()
+                .expect("actual authoritative fragment input"),
+        )?;
+        fragment_xml = evaluation.operation.finish_source(retained)?;
+    }
     if document.glossary_part_name.as_deref() == Some(destination_part) {
         // The prepared physical body selects current note ids, excluding root payload.
-        fragment_xml =
-            fragment.omit_glossary_selected_body_comments(include_final_section_properties)?;
+        if let Some((evaluation, _)) = template.as_mut() {
+            let mut writer = crate::document::TemplateMainWriter {
+                operation: &mut evaluation.operation,
+                lineage: &evaluation.lineage,
+                sources: fragment_sources
+                    .as_mut()
+                    .expect("fragment omission sources"),
+            };
+            (fragment_xml, fragment_xml_source) = fragment
+                .omit_glossary_selected_body_comments_in(
+                    include_final_section_properties,
+                    Some(&mut writer),
+                )?;
+        } else {
+            fragment_xml =
+                fragment.omit_glossary_selected_body_comments(include_final_section_properties)?;
+        }
     }
     let final_section_properties = fragment.document.body.sect_pr.take();
     if include_final_section_properties && let Some(section_properties) = final_section_properties {
@@ -5027,14 +5351,25 @@ fn import_fragment_content_with_state(
             .content
             .push(BodyContent::Paragraph(Box::new(paragraph)));
     }
+    let model_xml = if let Some((evaluation, _)) = template.as_mut() {
+        let mut writer = crate::document::TemplateMainWriter {
+            operation: &mut evaluation.operation,
+            lineage: &evaluation.lineage,
+            sources: fragment_sources.as_mut().expect("fragment reader writer"),
+        };
+        let source = writer.document_source(&fragment.document)?;
+        writer.operation.finish_source(source)?
+    } else {
+        fragment.document.to_xml()?
+    };
     let dependency_source = if document.glossary_part_name.as_deref() == Some(destination_part) {
         wrap_fragment_companion(&crate::document::package_authoritative_body_fragment(
-            &fragment.document.to_xml()?,
+            &model_xml,
             false,
             &BTreeMap::new(),
         )?)
     } else {
-        fragment.document.to_xml()?
+        model_xml
     };
     prune_document_fragment_dependencies(&mut fragment, &dependency_source)?;
     let mut fragment_identity_values = body_identity_values(&fragment_xml)?;
@@ -5056,6 +5391,15 @@ fn import_fragment_content_with_state(
         policy.reuse_styles(),
         policy.reuse_numbering(),
         source_owned_numbering,
+        template.as_mut().map(|(evaluation, _)| {
+            (
+                &mut evaluation.operation,
+                &mut fragment_xml_source,
+                fragment_sources
+                    .as_mut()
+                    .expect("fragment style source graph"),
+            )
+        }),
     )?;
     let dependency_xml =
         wrap_fragment_companion(&crate::document::package_authoritative_body_fragment(
@@ -5210,7 +5554,18 @@ fn import_fragment_content_with_state(
         if !seen_notes.insert((kind, old_id)) {
             continue;
         }
-        let (source_part, note_xml) = fragment.fragment_note_dependency(kind, old_id)?;
+        let (source_part, note_xml, note_source) = fragment.fragment_note_dependency_in(
+            kind,
+            old_id,
+            template.as_mut().map(|(evaluation, _)| {
+                (
+                    &mut evaluation.operation,
+                    fragment_sources
+                        .as_ref()
+                        .expect("actual fragment note sources"),
+                )
+            }),
+        )?;
         for store_item_id in fragment_store_item_ids(&note_xml)? {
             let source_item_part = crate::content_control::resolve_custom_xml_part(
                 &fragment.package,
@@ -5221,23 +5576,59 @@ fn import_fragment_content_with_state(
                 binding_stores.push((store_item_id, source_item_part));
             }
         }
-        let destination_note_part = document.ensure_fragment_note_part_staged(kind)?;
-        let current_notes = CT_Footnotes::from_xml(
-            document
+        let destination_note_part = if let Some((evaluation, _)) = template.as_mut() {
+            let mut writer = crate::document::TemplateMainWriter {
+                operation: &mut evaluation.operation,
+                lineage: &evaluation.lineage,
+                sources: &mut evaluation.sources,
+            };
+            document.ensure_fragment_note_part_staged_in(kind, Some(&mut writer))?
+        } else {
+            document.ensure_fragment_note_part_staged(kind)?
+        };
+        let current_notes = if let Some((evaluation, _)) = template.as_mut() {
+            let mut writer = crate::document::TemplateMainWriter {
+                operation: &mut evaluation.operation,
+                lineage: &evaluation.lineage,
+                sources: &mut evaluation.sources,
+            };
+            let bytes = document
                 .package
-                .get_part(&destination_note_part)
+                .get_part_shared(&destination_note_part)
                 .ok_or_else(|| {
                     Error::Other(format!(
                         "document fragment destination note part {destination_note_part} is missing"
                     ))
-                })?,
-        )?;
-        let source_notes =
-            CT_Footnotes::from_xml(fragment.package.get_part(&source_part).ok_or_else(|| {
+                })?;
+            if let Some(source) = writer.take_related_source(&destination_note_part, bytes)? {
+                let notes = writer.operation.source_notes(&source)?;
+                writer
+                    .sources
+                    .put_related_source(&destination_note_part, bytes, source);
+                notes
+            } else {
+                CT_Footnotes::from_xml(bytes)?
+            }
+        } else {
+            CT_Footnotes::from_xml(document.package.get_part(&destination_note_part).ok_or_else(|| Error::Other(format!("document fragment destination note part {destination_note_part} is missing")))?)?
+        };
+        let source_bytes = fragment
+            .package
+            .get_part_shared(&source_part)
+            .ok_or_else(|| {
                 Error::Other(format!(
                     "document fragment source note part {source_part} is missing"
                 ))
-            })?)?;
+            })?;
+        let source_notes = if let Some((evaluation, _)) = template.as_mut()
+            && let Some(source) = fragment_sources
+                .as_ref()
+                .and_then(|sources| sources.related_source(&source_part, source_bytes))
+        {
+            evaluation.operation.source_notes(source)?
+        } else {
+            CT_Footnotes::from_xml(source_bytes)?
+        };
         let used = reserved_note_ids.entry(kind).or_insert_with(|| {
             current_notes
                 .footnotes
@@ -5322,12 +5713,29 @@ fn import_fragment_content_with_state(
             kind,
             destination_part: destination_note_part,
             xml: note_xml,
+            source: note_source,
             replace_id: None,
         });
     }
-    fragment_xml = patch_fragment_note_ids(&fragment_xml, &note_id_maps)?;
+    let edits = fragment_note_id_edits(&fragment_xml, &note_id_maps)?;
+    apply_fragment_xml_edits(
+        &mut fragment_xml,
+        &mut fragment_xml_source,
+        template
+            .as_mut()
+            .map(|(evaluation, _)| &mut evaluation.operation),
+        edits,
+    )?;
     for note in &mut note_copies {
-        note.xml = patch_fragment_note_ids(&note.xml, &note_id_maps)?;
+        let edits = fragment_note_id_edits(&note.xml, &note_id_maps)?;
+        apply_fragment_xml_edits(
+            &mut note.xml,
+            &mut note.source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
+        )?;
     }
     if let Some(comments) = fragment.comments.as_mut() {
         *comments = CT_Comments::from_xml(&patch_fragment_note_ids(
@@ -5595,22 +6003,38 @@ fn import_fragment_content_with_state(
             ))
         })?;
         if fragment_store_item_ids(&fragment_xml)?.contains(&store_item_id) {
-            fragment_xml = replace_fragment_store_id(
+            let edits = fragment_store_id_edits(
                 &fragment_xml,
                 &store_item_id,
                 &new_id,
                 b"dataBinding",
                 b"storeItemID",
             )?;
+            apply_fragment_xml_edits(
+                &mut fragment_xml,
+                &mut fragment_xml_source,
+                template
+                    .as_mut()
+                    .map(|(evaluation, _)| &mut evaluation.operation),
+                edits,
+            )?;
         }
         for note in &mut note_copies {
             if fragment_store_item_ids(&note.xml)?.contains(&store_item_id) {
-                note.xml = replace_fragment_store_id(
+                let edits = fragment_store_id_edits(
                     &note.xml,
                     &store_item_id,
                     &new_id,
                     b"dataBinding",
                     b"storeItemID",
+                )?;
+                apply_fragment_xml_edits(
+                    &mut note.xml,
+                    &mut note.source,
+                    template
+                        .as_mut()
+                        .map(|(evaluation, _)| &mut evaluation.operation),
+                    edits,
                 )?;
             }
         }
@@ -5644,9 +6068,26 @@ fn import_fragment_content_with_state(
         document.package.set_part(destination_props, patched_props);
     }
     if !relationship_map.is_empty() {
-        fragment_xml = patch_relationship_ids(&fragment_xml, &relationship_map)?;
+        let edits = relationship_value_edits(&fragment_xml, &relationship_map)?;
+        apply_fragment_xml_edits(
+            &mut fragment_xml,
+            &mut fragment_xml_source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
+        )?;
     }
-    fragment.document = CT_Document::from_xml(&fragment_xml)?;
+    fragment.document = if let (Some((evaluation, _)), Some(source)) =
+        (template.as_mut(), fragment_xml_source.as_ref())
+    {
+        fragment_sources
+            .as_mut()
+            .expect("fragment read state")
+            .read_document(&mut evaluation.operation, Arc::clone(source))?
+    } else {
+        CT_Document::from_xml(&fragment_xml)?
+    };
     let mut identity_xml = fragment_xml.clone();
     for note in &note_copies {
         validate_fragment_identity_ownership(&body_identity_values(&wrap_fragment_companion(
@@ -5692,22 +6133,94 @@ fn import_fragment_content_with_state(
             comment_ids: comment_ids.clone(),
             ..Default::default()
         };
-        fragment_xml = patch_body_identity_attributes(&fragment_xml, &comment_remap)?;
+        let edits = body_identity_edits(&fragment_xml, &comment_remap)?;
+        apply_fragment_xml_edits(
+            &mut fragment_xml,
+            &mut fragment_xml_source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
+        )?;
         for note in &mut note_copies {
-            note.xml = unwrap_fragment_companion(&patch_body_identity_attributes(
-                &wrap_fragment_companion(&note.xml),
+            remap_fragment_companion(
+                &mut note.xml,
+                &mut note.source,
+                template
+                    .as_mut()
+                    .map(|(evaluation, _)| &mut evaluation.operation),
                 &comment_remap,
-            )?);
+            )?;
         }
-        let updated = patch_body_identity_attributes(&fragment.document.to_xml()?, &comment_remap)?;
-        fragment.document = CT_Document::from_xml(&updated)?;
+        let (mut updated, mut updated_source) = if let Some((evaluation, _)) = template.as_mut() {
+            let mut writer = crate::document::TemplateMainWriter {
+                operation: &mut evaluation.operation,
+                lineage: &evaluation.lineage,
+                sources: fragment_sources
+                    .as_mut()
+                    .expect("fragment canonical writer"),
+            };
+            let source = Arc::new(writer.document_source(&fragment.document)?);
+            let retained = writer.operation.repeat_source(&source)?;
+            (writer.operation.finish_source(retained)?, Some(source))
+        } else {
+            (fragment.document.to_xml()?, None)
+        };
+        let edits = body_identity_edits(&updated, &comment_remap)?;
+        apply_fragment_xml_edits(
+            &mut updated,
+            &mut updated_source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
+        )?;
+        fragment.document =
+            if let (Some((evaluation, _)), Some(source)) = (template.as_mut(), updated_source) {
+                fragment_sources
+                    .as_mut()
+                    .expect("fragment canonical read")
+                    .read_document(&mut evaluation.operation, source)?
+            } else {
+                CT_Document::from_xml(&updated)?
+            };
     }
     identity_remap.drop_paragraph_identities = true;
-    fragment_xml = patch_body_identity_attributes(
-        &uniquify_drawing_ids_in_xml(&fragment_xml)?,
-        &identity_remap,
+    let edits = crate::document::unique_drawing_id_edits(&fragment_xml)?
+        .into_iter()
+        .map(|(start, end, replacement)| FieldSourceEdit {
+            start,
+            end,
+            replacement,
+        })
+        .collect();
+    apply_fragment_xml_edits(
+        &mut fragment_xml,
+        &mut fragment_xml_source,
+        template
+            .as_mut()
+            .map(|(evaluation, _)| &mut evaluation.operation),
+        edits,
     )?;
-    fragment.document = CT_Document::from_xml(&fragment_xml)?;
+    let edits = body_identity_edits(&fragment_xml, &identity_remap)?;
+    apply_fragment_xml_edits(
+        &mut fragment_xml,
+        &mut fragment_xml_source,
+        template
+            .as_mut()
+            .map(|(evaluation, _)| &mut evaluation.operation),
+        edits,
+    )?;
+    fragment.document = if let (Some((evaluation, _)), Some(source)) =
+        (template.as_mut(), fragment_xml_source.as_ref())
+    {
+        fragment_sources
+            .as_mut()
+            .expect("fragment read state")
+            .read_document(&mut evaluation.operation, Arc::clone(source))?
+    } else {
+        CT_Document::from_xml(&fragment_xml)?
+    };
     let insert_at = document.document.body.content.len();
     let numbering_remap = document.insert_document_fragment_content_staged(
         insert_at,
@@ -5720,7 +6233,15 @@ fn import_fragment_content_with_state(
         .iter()
         .map(|(old, new)| (old.to_string(), new.to_string()))
         .collect::<BTreeMap<_, _>>();
-    patch_word_values(&mut fragment_xml, &[b"numId"], &numbering_values)?;
+    let edits = word_value_edits(&fragment_xml, &[b"numId"], &numbering_values)?;
+    apply_fragment_xml_edits(
+        &mut fragment_xml,
+        &mut fragment_xml_source,
+        template
+            .as_mut()
+            .map(|(evaluation, _)| &mut evaluation.operation),
+        edits,
+    )?;
     if let Some(comments) = document.comments.as_mut() {
         for comment in &mut comments.comments {
             if !comment_ids.values().any(|id| *id == comment.id.to_string()) {
@@ -5733,24 +6254,80 @@ fn import_fragment_content_with_state(
             *comment = CT_Comments::from_xml(&xml)?.comments.remove(0);
         }
     }
-    for note in note_copies {
-        let mut xml = match note_relationship_maps.get(&note.destination_part) {
-            Some(map) => patch_relationship_ids(&note.xml, map)?,
-            None => note.xml,
-        };
-        patch_word_values(&mut xml, &[b"numId"], &numbering_values)?;
-        let wrapped =
-            patch_body_identity_attributes(&wrap_fragment_companion(&xml), &identity_remap)?;
-        let xml = freshen_fragment_marker_ids(document, &unwrap_fragment_companion(&wrapped))?;
-        document.publish_fragment_note_staged(
-            note.kind,
-            &note.destination_part,
-            xml,
-            note.replace_id,
+    for mut note in note_copies {
+        if let Some(map) = note_relationship_maps.get(&note.destination_part) {
+            let edits = relationship_value_edits(&note.xml, map)?;
+            apply_fragment_xml_edits(
+                &mut note.xml,
+                &mut note.source,
+                template
+                    .as_mut()
+                    .map(|(evaluation, _)| &mut evaluation.operation),
+                edits,
+            )?;
+        }
+        let edits = word_value_edits(&note.xml, &[b"numId"], &numbering_values)?;
+        apply_fragment_xml_edits(
+            &mut note.xml,
+            &mut note.source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
         )?;
+        remap_fragment_companion(
+            &mut note.xml,
+            &mut note.source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            &identity_remap,
+        )?;
+        let edits = fragment_marker_id_edits(document, &note.xml)?;
+        apply_fragment_xml_edits(
+            &mut note.xml,
+            &mut note.source,
+            template
+                .as_mut()
+                .map(|(evaluation, _)| &mut evaluation.operation),
+            edits,
+        )?;
+        if let (Some((evaluation, _)), Some(source)) = (template.as_mut(), note.source) {
+            let mut writer = crate::document::TemplateMainWriter {
+                operation: &mut evaluation.operation,
+                lineage: &evaluation.lineage,
+                sources: &mut evaluation.sources,
+            };
+            document.publish_fragment_note_staged_in(
+                note.kind,
+                &note.destination_part,
+                note.xml,
+                note.replace_id,
+                Some((&mut writer, source)),
+            )?;
+        } else {
+            document.publish_fragment_note_staged(
+                note.kind,
+                &note.destination_part,
+                note.xml,
+                note.replace_id,
+            )?;
+        }
     }
-    let xml = freshen_fragment_marker_ids(document, &fragment_xml)?;
-    Ok(ImportedFragmentContent { typed, xml })
+    let edits = fragment_marker_id_edits(document, &fragment_xml)?;
+    apply_fragment_xml_edits(
+        &mut fragment_xml,
+        &mut fragment_xml_source,
+        template
+            .as_mut()
+            .map(|(evaluation, _)| &mut evaluation.operation),
+        edits,
+    )?;
+    Ok(ImportedFragmentContent {
+        typed,
+        xml: fragment_xml,
+        source: fragment_xml_source,
+    })
 }
 
 fn equivalent_fragment_leaf_part(
@@ -6049,6 +6626,11 @@ fn remap_fragment_style_collisions(
     reuse_equivalent: bool,
     reuse_equivalent_numbering: bool,
     source_owned_numbering: bool,
+    mut source: Option<(
+        &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+        &mut Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+        &mut crate::document::TemplateMainSources,
+    )>,
 ) -> Result<bool> {
     let mut replacements = BTreeMap::new();
     let mut used = destination
@@ -6148,24 +6730,62 @@ fn remap_fragment_style_collisions(
     }
     for (old, new) in &replacements {
         for element in [b"pStyle".as_slice(), b"rStyle", b"tblStyle"] {
-            patch_word_value(fragment_xml, element, old, new)?;
+            if let Some((operation, source, _)) = source.as_mut() {
+                let replacements = BTreeMap::from([(old.clone(), new.clone())]);
+                let edits = word_value_edits(fragment_xml, &[element], &replacements)?;
+                apply_fragment_xml_edits(fragment_xml, source, Some(operation), edits)?;
+            } else {
+                patch_word_value(fragment_xml, element, old, new)?;
+            }
         }
     }
     for kind in [StoryKind::Footnote, StoryKind::Endnote] {
         let stories = fragment.stories()?;
         if let Some(story) = stories.iter().find(|story| story.kind() == kind) {
             let part = story.part_name().to_owned();
-            let mut xml = fragment
+            let storage = fragment
                 .package
-                .get_part(&part)
-                .ok_or_else(|| Error::Other(format!("fragment note part {part} is missing")))?
-                .to_vec();
+                .get_part_shared(&part)
+                .ok_or_else(|| Error::Other(format!("fragment note part {part} is missing")))?;
+            let mut note_source = source
+                .as_ref()
+                .and_then(|(_, _, sources)| sources.related_source(&part, storage))
+                .cloned();
+            let mut xml = if let (Some((operation, _, _)), Some(parent)) =
+                (source.as_mut(), note_source.as_ref())
+            {
+                let retained = operation.repeat_source(parent)?;
+                operation.finish_source(retained)?
+            } else {
+                storage.as_ref().clone()
+            };
+            let mut changed = false;
             for (old, new) in &replacements {
                 for element in [b"pStyle".as_slice(), b"rStyle", b"tblStyle"] {
-                    patch_word_value(&mut xml, element, old, new)?;
+                    let values = BTreeMap::from([(old.clone(), new.clone())]);
+                    let edits = word_value_edits(&xml, &[element], &values)?;
+                    changed |= !edits.is_empty();
+                    apply_fragment_xml_edits(
+                        &mut xml,
+                        &mut note_source,
+                        source.as_mut().map(|(operation, _, _)| &mut **operation),
+                        edits,
+                    )?;
                 }
             }
-            fragment.package.set_part(&part, xml);
+            if changed {
+                fragment.package.set_part(&part, xml);
+                if let (Some((_, _, sources)), Some(parent)) = (source.as_mut(), note_source) {
+                    sources.put_related_source(
+                        &part,
+                        fragment
+                            .package
+                            .get_part_shared(&part)
+                            .expect("actual style-remapped note part"),
+                        parent,
+                    );
+                }
+            }
         }
     }
     if let Some(comments) = fragment.comments.as_mut() {
@@ -6265,7 +6885,21 @@ fn patch_word_values(
     elements: &[&[u8]],
     replacements: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut reader = NsReader::from_reader(xml.as_slice());
+    for edit in word_value_edits(xml, elements, replacements)?
+        .into_iter()
+        .rev()
+    {
+        xml.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(())
+}
+
+fn word_value_edits(
+    xml: &[u8],
+    elements: &[&[u8]],
+    replacements: &BTreeMap<String, String>,
+) -> Result<Vec<FieldSourceEdit>> {
+    let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut edits = Vec::new();
     loop {
@@ -6310,24 +6944,65 @@ fn patch_word_values(
         buffer.clear();
     }
     edits.sort_by_key(|edit| edit.start);
-    for edit in edits.into_iter().rev() {
-        xml.splice(edit.start..edit.end, edit.replacement);
-    }
-    Ok(())
+    Ok(edits)
 }
+
+const FRAGMENT_COMPANION_OPEN: &[u8] = b"<f276:document xmlns:f276=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><f276:body>";
+const FRAGMENT_COMPANION_CLOSE: &[u8] = b"</f276:body></f276:document>";
 
 // Companion roots are namespace-complete, so the existing body identity scanner can
 // inspect them without changing their own namespace bindings.
 fn wrap_fragment_companion(xml: &[u8]) -> Vec<u8> {
-    let mut wrapped = b"<f276:document xmlns:f276=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><f276:body>".to_vec();
+    let mut wrapped = FRAGMENT_COMPANION_OPEN.to_vec();
     wrapped.extend_from_slice(xml);
-    wrapped.extend_from_slice(b"</f276:body></f276:document>");
+    wrapped.extend_from_slice(FRAGMENT_COMPANION_CLOSE);
     wrapped
 }
 
 fn unwrap_fragment_companion(xml: &[u8]) -> Vec<u8> {
-    let prefix_len = wrap_fragment_companion(&[]).len() - b"</f276:body></f276:document>".len();
-    xml[prefix_len..xml.len() - b"</f276:body></f276:document>".len()].to_vec()
+    xml[FRAGMENT_COMPANION_OPEN.len()..xml.len() - FRAGMENT_COMPANION_CLOSE.len()].to_vec()
+}
+
+fn remap_fragment_companion(
+    xml: &mut Vec<u8>,
+    source: &mut Option<Arc<rdocx_oxml::document::ScopedWordSource>>,
+    operation: Option<&mut rdocx_oxml::document::ScopedWordOperation<'_>>,
+    remap: &BodyIdentityRemap,
+) -> Result<()> {
+    if let (Some(parent), Some(operation)) = (source.as_ref(), operation) {
+        let wrapped = operation.compose_sources(&[
+            (None, 0..0, FRAGMENT_COMPANION_OPEN),
+            (Some(parent.as_ref()), 0..parent.as_bytes().len(), &[]),
+            (None, 0..0, FRAGMENT_COMPANION_CLOSE),
+        ])?;
+        let edits = body_identity_edits(wrapped.as_bytes(), remap)?;
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let updated = crate::document::apply_template_source_edits(
+            operation,
+            wrapped,
+            edits
+                .into_iter()
+                .map(|edit| (edit.start, edit.end, edit.replacement))
+                .collect(),
+        )?;
+        let selected = operation.compose_sources(&[(
+            Some(&updated),
+            FRAGMENT_COMPANION_OPEN.len()
+                ..updated.as_bytes().len() - FRAGMENT_COMPANION_CLOSE.len(),
+            &[],
+        )])?;
+        let retained = operation.repeat_source(&selected)?;
+        *xml = operation.finish_source(retained)?;
+        *source = Some(Arc::new(selected));
+    } else {
+        *xml = unwrap_fragment_companion(&patch_body_identity_attributes(
+            &wrap_fragment_companion(xml),
+            remap,
+        )?);
+    }
+    Ok(())
 }
 
 fn fragment_dependency_companions(fragment: &Document, selected: &[u8]) -> Result<Vec<Vec<u8>>> {
@@ -6367,6 +7042,18 @@ fn patch_fragment_note_ids(
     xml: &[u8],
     maps: &HashMap<StoryKind, BTreeMap<String, String>>,
 ) -> Result<Vec<u8>> {
+    let edits = fragment_note_id_edits(xml, maps)?;
+    let mut updated = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        updated.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(updated)
+}
+
+fn fragment_note_id_edits(
+    xml: &[u8],
+    maps: &HashMap<StoryKind, BTreeMap<String, String>>,
+) -> Result<Vec<FieldSourceEdit>> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut edits = Vec::new();
@@ -6405,11 +7092,7 @@ fn patch_fragment_note_ids(
         }
         buffer.clear();
     }
-    let mut updated = xml.to_vec();
-    for edit in edits.into_iter().rev() {
-        updated.splice(edit.start..edit.end, edit.replacement);
-    }
-    Ok(updated)
+    Ok(edits)
 }
 
 fn fragment_marker_family(local: &[u8]) -> Option<(&'static str, u8)> {
@@ -6436,6 +7119,15 @@ fn fragment_marker_family(local: &[u8]) -> Option<(&'static str, u8)> {
 }
 
 fn freshen_fragment_marker_ids(document: &Document, xml: &[u8]) -> Result<Vec<u8>> {
+    let edits = fragment_marker_id_edits(document, xml)?;
+    let mut updated = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        updated.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(updated)
+}
+
+fn fragment_marker_id_edits(document: &Document, xml: &[u8]) -> Result<Vec<FieldSourceEdit>> {
     let mut occupied = HashSet::new();
     // All Word IDs form a conservative occupied set. This also avoids aliases
     // between the separately scoped annotation families.
@@ -6530,11 +7222,7 @@ fn freshen_fragment_marker_ids(document: &Document, xml: &[u8]) -> Result<Vec<u8
             "document fragment {family} range {id} has incomplete or ambiguous ownership"
         )));
     }
-    let mut updated = xml.to_vec();
-    for edit in pending.into_iter().rev() {
-        updated.splice(edit.start..edit.end, edit.replacement);
-    }
-    Ok(updated)
+    Ok(pending)
 }
 
 fn fragment_store_item_ids(xml: &[u8]) -> Result<BTreeSet<String>> {
@@ -6620,6 +7308,21 @@ fn replace_fragment_store_id(
     element_name: &[u8],
     attribute_name: &[u8],
 ) -> Result<Vec<u8>> {
+    let edits = fragment_store_id_edits(xml, old, new, element_name, attribute_name)?;
+    let mut result = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        result.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(result)
+}
+
+fn fragment_store_id_edits(
+    xml: &[u8],
+    old: &str,
+    new: &str,
+    element_name: &[u8],
+    attribute_name: &[u8],
+) -> Result<Vec<FieldSourceEdit>> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut edits = Vec::new();
@@ -6702,11 +7405,14 @@ fn replace_fragment_store_id(
             "document fragment custom XML store {old} cannot be rewritten without corrupting its XML"
         )));
     }
-    let mut result = xml.to_vec();
-    for (start, end) in edits.into_iter().rev() {
-        result.splice(start..end, new.as_bytes().iter().copied());
-    }
-    Ok(result)
+    Ok(edits
+        .into_iter()
+        .map(|(start, end)| FieldSourceEdit {
+            start,
+            end,
+            replacement: new.as_bytes().to_vec(),
+        })
+        .collect())
 }
 
 pub(crate) fn relationship_ids_in_xml(xml: &[u8]) -> Result<Vec<String>> {
@@ -6758,6 +7464,34 @@ pub(crate) fn patch_relationship_ids(
     xml: &[u8],
     replacements: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>> {
+    let edits = relationship_value_edits(xml, replacements)?;
+    let mut updated = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        updated.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(updated)
+}
+
+pub(crate) fn patch_relationship_source(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: rdocx_oxml::document::ScopedWordSource,
+    replacements: &BTreeMap<String, String>,
+) -> Result<rdocx_oxml::document::ScopedWordSource> {
+    let edits = relationship_value_edits(source.as_bytes(), replacements)?;
+    crate::document::apply_template_source_edits(
+        operation,
+        source,
+        edits
+            .into_iter()
+            .map(|edit| (edit.start, edit.end, edit.replacement))
+            .collect(),
+    )
+}
+
+fn relationship_value_edits(
+    xml: &[u8],
+    replacements: &BTreeMap<String, String>,
+) -> Result<Vec<FieldSourceEdit>> {
     let mut reader = NsReader::from_reader(xml);
     let mut buffer = Vec::new();
     let mut edits = Vec::new();
@@ -6810,12 +7544,8 @@ pub(crate) fn patch_relationship_ids(
         }
         buffer.clear();
     }
-    let mut updated = xml.to_vec();
     edits.sort_by_key(|edit| edit.start);
-    for edit in edits.into_iter().rev() {
-        updated.splice(edit.start..edit.end, edit.replacement);
-    }
-    Ok(updated)
+    Ok(edits)
 }
 
 pub(crate) fn copy_fragment_part(
@@ -7648,8 +8378,8 @@ enum TypedBlockOwner {
     Table,
     Row,
     Cell,
-    ContentControl(BlockControlOwner),
-    Content(BlockControlOwner),
+    ContentControl(LegacyBlockOwner),
+    Content(LegacyBlockOwner),
     Paragraph,
 }
 
@@ -7690,7 +8420,7 @@ fn dynamic_namespace_bindings(
 
 #[derive(Clone, Copy)]
 enum DynamicContentControlOwner {
-    Block(BlockControlOwner),
+    Block(LegacyBlockOwner),
     Inline,
 }
 
@@ -7795,14 +8525,14 @@ fn dynamic_content_control_is_typed(
     let mut candidate = Vec::with_capacity(control.len() + 256);
     candidate.extend_from_slice(format!(r#"<w:document xmlns:w="{W_NS}"><w:body>"#).as_bytes());
     let (prefix, suffix): (&[u8], &[u8]) = match owner {
-        DynamicContentControlOwner::Block(BlockControlOwner::Body) => (b"", b""),
-        DynamicContentControlOwner::Block(BlockControlOwner::Table) => {
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Root) => (b"", b""),
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Table) => {
             (b"<w:tbl>", b"<w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>")
         }
-        DynamicContentControlOwner::Block(BlockControlOwner::Row) => {
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Row) => {
             (b"<w:tbl><w:tr>", b"<w:tc><w:p/></w:tc></w:tr></w:tbl>")
         }
-        DynamicContentControlOwner::Block(BlockControlOwner::Cell) => {
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Cell) => {
             (b"<w:tbl><w:tr><w:tc>", b"<w:p/></w:tc></w:tr></w:tbl>")
         }
         DynamicContentControlOwner::Inline => (b"<w:p>", b"</w:p>"),
@@ -7815,22 +8545,22 @@ fn dynamic_content_control_is_typed(
         return Ok(false);
     };
     let accepted = match owner {
-        DynamicContentControlOwner::Block(BlockControlOwner::Body) => matches!(
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Root) => matches!(
             document.body.content.first(),
             Some(BodyContent::ContentControl(_))
         ),
-        DynamicContentControlOwner::Block(BlockControlOwner::Table) => document
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Table) => document
             .body
             .tables()
             .next()
             .is_some_and(|table| table.content_controls.len() == 1),
-        DynamicContentControlOwner::Block(BlockControlOwner::Row) => document
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Row) => document
             .body
             .tables()
             .next()
             .and_then(|table| table.rows.first())
             .is_some_and(|row| row.content_controls.len() == 1),
-        DynamicContentControlOwner::Block(BlockControlOwner::Cell) => document
+        DynamicContentControlOwner::Block(LegacyBlockOwner::Cell) => document
             .body
             .tables()
             .next()
@@ -8095,6 +8825,8 @@ fn scan_dynamic_table_spans(
             }
             Event::Empty(element) => {
                 let local = local_name(element.name().as_ref()).to_vec();
+                // Empty content is a retained raw slot, not the typed Start slot.
+                let word = word && &local[..] != b"sdtContent";
                 if let Some(start) = invalidate_overdeep_revision_owner(word, &local, &mut elements)
                 {
                     fields.retain(|field| field.field_start < start);
@@ -8439,6 +9171,8 @@ fn collect_simple_toc_diagnostics(xml: &[u8]) -> Result<Vec<(usize, String)>> {
             }
             Event::Empty(element) => {
                 let local = local_name(element.name().as_ref()).to_vec();
+                // Empty content is a retained raw slot, not the typed Start slot.
+                let word = word && &local[..] != b"sdtContent";
                 if let Some(start) = invalidate_overdeep_revision_owner(word, &local, &mut elements)
                 {
                     simple_toc_starts.retain(|field_start| *field_start < start);
@@ -8514,17 +9248,17 @@ fn classify_typed_block_owner(
         .last()
         .and_then(|element| element.typed_block_owner);
     let content_owner = match parent {
-        Some(TypedBlockOwner::Body | TypedBlockOwner::Content(BlockControlOwner::Body)) => {
-            Some(BlockControlOwner::Body)
+        Some(TypedBlockOwner::Body | TypedBlockOwner::Content(LegacyBlockOwner::Root)) => {
+            Some(LegacyBlockOwner::Root)
         }
-        Some(TypedBlockOwner::Table | TypedBlockOwner::Content(BlockControlOwner::Table)) => {
-            Some(BlockControlOwner::Table)
+        Some(TypedBlockOwner::Table | TypedBlockOwner::Content(LegacyBlockOwner::Table)) => {
+            Some(LegacyBlockOwner::Table)
         }
-        Some(TypedBlockOwner::Row | TypedBlockOwner::Content(BlockControlOwner::Row)) => {
-            Some(BlockControlOwner::Row)
+        Some(TypedBlockOwner::Row | TypedBlockOwner::Content(LegacyBlockOwner::Row)) => {
+            Some(LegacyBlockOwner::Row)
         }
-        Some(TypedBlockOwner::Cell | TypedBlockOwner::Content(BlockControlOwner::Cell)) => {
-            Some(BlockControlOwner::Cell)
+        Some(TypedBlockOwner::Cell | TypedBlockOwner::Content(LegacyBlockOwner::Cell)) => {
+            Some(LegacyBlockOwner::Cell)
         }
         _ => None,
     };
@@ -8533,7 +9267,7 @@ fn classify_typed_block_owner(
         b"body" if parent == Some(TypedBlockOwner::Document) => Some(TypedBlockOwner::Body),
         b"p" if matches!(
             content_owner,
-            Some(BlockControlOwner::Body | BlockControlOwner::Cell)
+            Some(LegacyBlockOwner::Root | LegacyBlockOwner::Cell)
         ) =>
         {
             Some(TypedBlockOwner::Paragraph)
@@ -8541,13 +9275,13 @@ fn classify_typed_block_owner(
         b"tbl"
             if matches!(
                 content_owner,
-                Some(BlockControlOwner::Body | BlockControlOwner::Cell)
+                Some(LegacyBlockOwner::Root | LegacyBlockOwner::Cell)
             ) =>
         {
             Some(TypedBlockOwner::Table)
         }
-        b"tr" if content_owner == Some(BlockControlOwner::Table) => Some(TypedBlockOwner::Row),
-        b"tc" if content_owner == Some(BlockControlOwner::Row) => Some(TypedBlockOwner::Cell),
+        b"tr" if content_owner == Some(LegacyBlockOwner::Table) => Some(TypedBlockOwner::Row),
+        b"tc" if content_owner == Some(LegacyBlockOwner::Row) => Some(TypedBlockOwner::Cell),
         b"sdt" if content_owner.is_some() => {
             Some(TypedBlockOwner::ContentControl(content_owner.unwrap()))
         }
@@ -9196,7 +9930,7 @@ fn parse_dynamic_toc_fields(
     prepare_physical_story_projection(&mut projected.document.body, &mut [])?;
     let document = &projected;
     let mut paragraphs = Vec::new();
-    collect_body_paragraphs(&document.document.body, &mut paragraphs);
+    collect_body_paragraphs(&document.document.body, &mut paragraphs, None);
     let context = FieldEvaluationContext::default();
     let mut output = Vec::with_capacity(spans.len());
     let mut diagnostics = Vec::new();
@@ -9423,7 +10157,7 @@ fn inspect_toc_bookmarks(body: &CT_Body, xml: &[u8]) -> Result<TocBookmarkState>
     let whole_bookmarks = whole_paragraph_bookmark_ids(xml)?;
     let marker_offsets = toc_bookmark_marker_offsets(xml)?;
     let mut paragraphs = Vec::new();
-    collect_body_paragraphs(body, &mut paragraphs);
+    collect_body_paragraphs(body, &mut paragraphs, None);
     let mut starts = HashMap::<i32, (String, usize, usize)>::new();
     let mut start_order = Vec::new();
     let mut ends = HashMap::<i32, (usize, usize)>::new();
@@ -9670,6 +10404,8 @@ fn toc_bookmark_marker_offsets(xml: &[u8]) -> Result<HashMap<(i32, bool), usize>
             }
             Event::Empty(element) => {
                 let local = local_name(element.name().as_ref()).to_vec();
+                // Empty content is a retained raw slot, not the typed Start slot.
+                let word = word && &local[..] != b"sdtContent";
                 invalidate_overdeep_revision_owner(word, &local, &mut elements);
                 let paragraph = elements.last().and_then(|element| element.paragraph);
                 let typed_block_owner = classify_typed_block_owner(word, &local, &elements);
@@ -9788,6 +10524,8 @@ fn whole_paragraph_bookmark_ids(xml: &[u8]) -> Result<HashSet<i32>> {
             Event::Empty(element) => {
                 let name = element.name();
                 let local = local_name(name.as_ref());
+                // Empty content is a retained raw slot, not the typed Start slot.
+                let word = word && local != b"sdtContent";
                 let typed_block_owner = classify_typed_block_owner(word, local, &elements);
                 mark_typed_sdt_content(&mut elements, local, typed_block_owner, false);
                 if let Some(parent) = elements.last()
@@ -9947,7 +10685,7 @@ fn discover_toc_sources(
     numbering_layout: &Arc<rdocx_layout::WordLayoutResult>,
 ) -> Result<Vec<Vec<TocSource>>> {
     let mut paragraphs = Vec::new();
-    collect_body_paragraphs(&document.document.body, &mut paragraphs);
+    collect_body_paragraphs(&document.document.body, &mut paragraphs, None);
     let context = FieldEvaluationContext::default();
     let sequence_snapshot = Arc::new(
         rdocx_layout::engine::evaluate_sequence_fields(&document.build_layout_input()?).map_err(
@@ -10293,7 +11031,7 @@ fn toc_section_text_width(body: &CT_Body, paragraph_index: usize) -> i32 {
     const DEFAULT_TEXT_WIDTH: i32 = DEFAULT_PAGE_WIDTH - 2 * DEFAULT_MARGIN;
 
     let mut paragraphs = Vec::new();
-    collect_body_paragraphs(body, &mut paragraphs);
+    collect_body_paragraphs(body, &mut paragraphs, None);
     let section = paragraphs
         .iter()
         .skip(paragraph_index)
@@ -10858,6 +11596,8 @@ fn toc_paragraph_insertions(xml: &[u8]) -> Result<Vec<TocParagraphInsertion>> {
             Event::Empty(element) => {
                 let name = element.name();
                 let local = local_name(name.as_ref());
+                // Empty content is a retained raw slot, not the typed Start slot.
+                let word = word && local != b"sdtContent";
                 let typed_block_owner = classify_typed_block_owner(word, local, &elements);
                 if typed_block_owner == Some(TypedBlockOwner::Paragraph) {
                     paragraphs.push(TocParagraphInsertion {
@@ -12883,6 +13623,15 @@ fn namespace_is_non_visual_drawing(namespace: &ResolveResult<'_>) -> bool {
 }
 
 fn patch_body_identity_attributes(xml: &[u8], remap: &BodyIdentityRemap) -> Result<Vec<u8>> {
+    let edits = body_identity_edits(xml, remap)?;
+    let mut updated = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        updated.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(updated)
+}
+
+fn body_identity_edits(xml: &[u8], remap: &BodyIdentityRemap) -> Result<Vec<FieldSourceEdit>> {
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -13013,12 +13762,37 @@ fn patch_body_identity_attributes(xml: &[u8], remap: &BodyIdentityRemap) -> Resu
         buffer.clear();
     }
 
-    let mut updated = xml.to_vec();
     edits.sort_by_key(|edit: &FieldSourceEdit| edit.start);
-    for edit in edits.into_iter().rev() {
-        updated.splice(edit.start..edit.end, edit.replacement);
+    Ok(edits)
+}
+
+pub(crate) fn patch_bookmark_source(
+    operation: &mut rdocx_oxml::document::ScopedWordOperation<'_>,
+    source: rdocx_oxml::document::ScopedWordSource,
+    bookmark_ids: &BTreeMap<String, String>,
+) -> Result<rdocx_oxml::document::ScopedWordSource> {
+    let edits = body_identity_edits(
+        source.as_bytes(),
+        &BodyIdentityRemap {
+            bookmark_ids: bookmark_ids.clone(),
+            ..Default::default()
+        },
+    )?;
+    if edits.is_empty() {
+        return Ok(source);
     }
-    Ok(updated)
+    let mut chunks = Vec::new();
+    let mut at = 0;
+    for edit in &edits {
+        if at > edit.start {
+            return Err(Error::Other("overlapping document identity edits".into()));
+        }
+        chunks.push((Some(&source), at..edit.start, &[][..]));
+        chunks.push((None, 0..0, edit.replacement.as_slice()));
+        at = edit.end;
+    }
+    chunks.push((Some(&source), at..source.as_bytes().len(), &[][..]));
+    Ok(operation.compose_sources(&chunks)?)
 }
 
 pub(crate) fn patch_bookmark_ids(
@@ -14578,6 +15352,7 @@ fn prepare_ref_note_copy(
             kind,
             destination_part: part,
             xml,
+            source: None,
             replace_id,
         },
     ))
@@ -14939,7 +15714,7 @@ fn ref_bookmark_runs(document: &Document, target: &str) -> Result<Option<RefBook
             .range()
             .ok_or_else(|| Error::Other("REF f target lacks a range".into()))?;
         let mut paragraphs = Vec::new();
-        collect_body_paragraphs(&document.document.body, &mut paragraphs);
+        collect_body_paragraphs(&document.document.body, &mut paragraphs, None);
         let mut cache = RefBookmarkCache {
             runs: Vec::new(),
             comment_ranges: Vec::new(),
@@ -16951,7 +17726,7 @@ enum PackageStoryKind {
     Comments,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LegacyBlockOwner {
     Root,
     Table,
@@ -16972,12 +17747,13 @@ enum LegacyStoryElementKind {
     Table,
     Row,
     Cell,
-    ContentControl(LegacyBlockOwner),
+    ContentControl(LegacyBlockOwner, bool),
     ContentControlContent(LegacyBlockOwner),
     Other,
 }
 
 struct LegacyStoryParagraph {
+    path: Vec<(&'static str, usize)>,
     start: usize,
     end: usize,
     general_context: bool,
@@ -17010,6 +17786,9 @@ fn legacy_story_paragraphs(
     let mut bindings = BTreeMap::<String, Vec<u8>>::new();
     let mut binding_scopes = Vec::new();
     let mut paragraphs = Vec::new();
+    let mut path = Vec::new();
+    let mut path_lengths = Vec::new();
+    let mut child_counts = Vec::<usize>::new();
     let mut root_seen = false;
     let mut root_closed = false;
     let general_context = |depth: usize| match story_kind {
@@ -17044,7 +17823,15 @@ fn legacy_story_paragraphs(
                     &element,
                     reader.resolver(),
                 );
-                if matches!(kind, Some(LegacyStoryElementKind::Other)) && word && local == b"p" {
+                if matches!(kind, Some(LegacyStoryElementKind::Other))
+                    && word
+                    && (local == b"p"
+                        || (local == b"sdtContent"
+                            && matches!(
+                                stack.last(),
+                                Some(LegacyStoryElementKind::ContentControl(_, true))
+                            )))
+                {
                     reader
                         .read_to_end_into(element.name(), &mut Vec::new())
                         .map_err(|error| {
@@ -17064,7 +17851,16 @@ fn legacy_story_paragraphs(
                         &bindings,
                     )?;
                     let paragraph = parsed_physical_field_paragraph(&fragment)?;
+                    let index = child_counts.last_mut().ok_or_else(|| {
+                        Error::Other("field paragraph has no source owner".into())
+                    })?;
+                    let mut paragraph_path = path.clone();
+                    paragraph_path.push(("p", *index));
+                    *index = index
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Other("field source path overflow".into()))?;
                     paragraphs.push(LegacyStoryParagraph {
+                        path: paragraph_path,
                         start: before,
                         end,
                         general_context: general_context(stack.len()),
@@ -17072,10 +17868,35 @@ fn legacy_story_paragraphs(
                         paragraph,
                     });
                 } else {
+                    if matches!(kind, Some(LegacyStoryElementKind::ContentControlContent(_)))
+                        && let Some(LegacyStoryElementKind::ContentControl(_, seen)) =
+                            stack.last_mut()
+                    {
+                        *seen = true;
+                    }
                     let mut local_bindings = bindings.clone();
                     apply_namespace_declarations(&element, &mut local_bindings)?;
                     binding_scopes.push(std::mem::replace(&mut bindings, local_bindings));
-                    stack.push(kind.unwrap_or(LegacyStoryElementKind::Other));
+                    let kind = kind.unwrap_or(LegacyStoryElementKind::Other);
+                    path_lengths.push(path.len());
+                    let token = match kind {
+                        LegacyStoryElementKind::Table => Some("tbl"),
+                        LegacyStoryElementKind::Row => Some("tr"),
+                        LegacyStoryElementKind::Cell => Some("tc"),
+                        LegacyStoryElementKind::ContentControl(_, _) => Some("sdt"),
+                        _ => None,
+                    };
+                    if let Some(token) = token {
+                        let index = child_counts.last_mut().ok_or_else(|| {
+                            Error::Other("field source container has no parent".into())
+                        })?;
+                        path.push((token, *index));
+                        *index = index
+                            .checked_add(1)
+                            .ok_or_else(|| Error::Other("field source path overflow".into()))?;
+                    }
+                    child_counts.push(0);
+                    stack.push(kind);
                 }
             }
             Event::End(_) => {
@@ -17085,6 +17906,12 @@ fn legacy_story_paragraphs(
                     ));
                 }
                 bindings = binding_scopes.pop().unwrap_or_default();
+                path.truncate(
+                    path_lengths
+                        .pop()
+                        .ok_or_else(|| Error::Other("field source path stack underflow".into()))?,
+                );
+                child_counts.pop();
                 if stack.is_empty() {
                     root_closed = true;
                 }
@@ -17114,13 +17941,44 @@ fn legacy_story_paragraphs(
                         &bindings,
                     )?;
                     let paragraph = parsed_physical_field_paragraph(&fragment)?;
+                    let index = child_counts.last_mut().ok_or_else(|| {
+                        Error::Other("field paragraph has no source owner".into())
+                    })?;
+                    let mut paragraph_path = path.clone();
+                    paragraph_path.push(("p", *index));
+                    *index = index
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Other("field source path overflow".into()))?;
                     paragraphs.push(LegacyStoryParagraph {
+                        path: paragraph_path,
                         start: before,
                         end,
                         general_context: general_context(stack.len()),
                         original: paragraph.clone(),
                         paragraph,
                     });
+                } else if matches!(
+                    legacy_story_element_kind(
+                        story_kind,
+                        &stack,
+                        word,
+                        local,
+                        &element,
+                        reader.resolver()
+                    ),
+                    Some(
+                        LegacyStoryElementKind::Table
+                            | LegacyStoryElementKind::Row
+                            | LegacyStoryElementKind::Cell
+                            | LegacyStoryElementKind::ContentControl(_, _)
+                    )
+                ) {
+                    let index = child_counts.last_mut().ok_or_else(|| {
+                        Error::Other("field source empty container has no owner".into())
+                    })?;
+                    *index = index
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Other("field source path overflow".into()))?;
                 }
             }
             Event::Empty(element) if stack.is_empty() => {
@@ -17359,7 +18217,7 @@ fn legacy_story_element_kind(
     {
         return Some(LegacyStoryElementKind::BodyRoot);
     }
-    if let Some(LegacyStoryElementKind::ContentControl(owner)) = stack.last()
+    if let Some(LegacyStoryElementKind::ContentControl(owner, false)) = stack.last()
         && word
         && local == b"sdtContent"
     {
@@ -17386,7 +18244,7 @@ fn legacy_story_element_kind(
         }
         b"tr" if owner == LegacyBlockOwner::Table => Some(LegacyStoryElementKind::Row),
         b"tc" if owner == LegacyBlockOwner::Row => Some(LegacyStoryElementKind::Cell),
-        b"sdt" => Some(LegacyStoryElementKind::ContentControl(owner)),
+        b"sdt" => Some(LegacyStoryElementKind::ContentControl(owner, false)),
         _ => Some(LegacyStoryElementKind::Other),
     }
 }
@@ -17547,6 +18405,80 @@ struct FieldSourceEdit {
     start: usize,
     end: usize,
     replacement: Vec<u8>,
+}
+
+fn same_field_inventory(left: &CT_P, right: &CT_P) -> bool {
+    fn fields(paragraph: &CT_P) -> Vec<(&Field, bool)> {
+        let mut fields = Vec::new();
+        for run in accepted_toc_runs(paragraph) {
+            for content in &run.run.content {
+                if let RunContent::Field(field) = content {
+                    collect_preorder_fields(field, false, &mut fields);
+                }
+            }
+        }
+        fields
+    }
+    let left = fields(left);
+    let right = fields(right);
+    if left.len() != right.len() {
+        return false;
+    }
+    fn argument(argument: &FieldArgument) -> Option<&str> {
+        match argument {
+            FieldArgument::Text(text) => Some(text.as_str()),
+            FieldArgument::Nested(_) => None,
+        }
+    }
+    for ((left, locked_left), (right, locked_right)) in left.iter().zip(&right) {
+        if locked_left != locked_right || left.effective_display() != right.effective_display() {
+            return false;
+        }
+        let a = left.effective_instruction();
+        let b = right.effective_instruction();
+        if a.name != b.name
+            || a.arguments.len() != b.arguments.len()
+            || a.switches.len() != b.switches.len()
+        {
+            return false;
+        }
+        if a.arguments
+            .iter()
+            .zip(&b.arguments)
+            .any(|(a, b)| argument(a) != argument(b))
+        {
+            return false;
+        }
+        if a.switches.iter().zip(&b.switches).any(|(a, b)| {
+            a.name != b.name
+                || match (&a.argument, &b.argument) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => argument(a) != argument(b),
+                    _ => true,
+                }
+        }) {
+            return false;
+        }
+    }
+    // Physical shared-owner equivalence is checked without treating fresh
+    // source IDs as persistent identities across independent parsing.
+    let groups = |fields: &[(&Field, bool)]| {
+        let mut owners = HashMap::new();
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, (field, _))| {
+                field
+                    .source_owner_id()
+                    .map_or(index, |owner| *owners.entry(owner).or_insert(index))
+            })
+            .collect::<Vec<_>>()
+    };
+    if groups(&left) != groups(&right) {
+        return false;
+    }
+
+    true
 }
 
 fn paragraph_field_source_replacements(
@@ -17833,7 +18765,7 @@ fn push_shape_paragraphs<'a>(drawing: &'a CT_Drawing, output: &mut Vec<&'a CT_P>
     };
     let mut paragraphs = Vec::new();
     if let Some(body) = &shape.text_body {
-        collect_body_paragraphs(body, &mut paragraphs);
+        collect_body_paragraphs(body, &mut paragraphs, None);
     } else {
         paragraphs.extend(shape.text.iter());
     }
@@ -17968,107 +18900,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
 }
 
-fn apply_updates_to_body(
-    body: &mut CT_Body,
-    updates: &[Option<CachedFieldUpdate>],
-    update_index: &mut usize,
-) -> Result<()> {
-    for content in &mut body.content {
-        match content {
-            BodyContent::Paragraph(paragraph) => {
-                apply_updates_to_paragraph(paragraph, updates, update_index)?;
-            }
-            BodyContent::Table(table) => apply_updates_to_table(table, updates, update_index)?,
-            BodyContent::ContentControl(control) => {
-                apply_updates_to_block_control(control, updates, update_index)?;
-            }
-            BodyContent::RawXml(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn apply_updates_to_table(
-    table: &mut CT_Tbl,
-    updates: &[Option<CachedFieldUpdate>],
-    update_index: &mut usize,
-) -> Result<()> {
-    for boundary in 0..=table.rows.len() {
-        for (_, _, control) in table
-            .content_controls
-            .iter_mut()
-            .filter(|(position, _, _)| *position == boundary)
-        {
-            apply_updates_to_block_control(control, updates, update_index)?;
-        }
-        if let Some(row) = table.rows.get_mut(boundary) {
-            apply_updates_to_row(row, updates, update_index)?;
-        }
-    }
-    Ok(())
-}
-
-fn apply_updates_to_row(
-    row: &mut CT_Row,
-    updates: &[Option<CachedFieldUpdate>],
-    update_index: &mut usize,
-) -> Result<()> {
-    for boundary in 0..=row.cells.len() {
-        for (_, _, control) in row
-            .content_controls
-            .iter_mut()
-            .filter(|(position, _, _)| *position == boundary)
-        {
-            apply_updates_to_block_control(control, updates, update_index)?;
-        }
-        if let Some(cell) = row.cells.get_mut(boundary) {
-            apply_updates_to_cell(cell, updates, update_index)?;
-        }
-    }
-    Ok(())
-}
-
-fn apply_updates_to_cell(
-    cell: &mut CT_Tc,
-    updates: &[Option<CachedFieldUpdate>],
-    update_index: &mut usize,
-) -> Result<()> {
-    for content in &mut cell.content {
-        match content {
-            CellContent::Paragraph(paragraph) => {
-                apply_updates_to_paragraph(paragraph, updates, update_index)?;
-            }
-            CellContent::Table(table) => apply_updates_to_table(table, updates, update_index)?,
-            CellContent::ContentControl(control) => {
-                apply_updates_to_block_control(control, updates, update_index)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn apply_updates_to_block_control(
-    control: &mut CT_Sdt,
-    updates: &[Option<CachedFieldUpdate>],
-    update_index: &mut usize,
-) -> Result<()> {
-    for content in &mut control.content {
-        match content {
-            SdtContent::Paragraph(paragraph) => {
-                apply_updates_to_paragraph(paragraph, updates, update_index)?;
-            }
-            SdtContent::Table(table) => apply_updates_to_table(table, updates, update_index)?,
-            SdtContent::Row(row) => apply_updates_to_row(row, updates, update_index)?,
-            SdtContent::Cell(cell) => apply_updates_to_cell(cell, updates, update_index)?,
-            SdtContent::ContentControl(control) => {
-                apply_updates_to_block_control(control, updates, update_index)?;
-            }
-            SdtContent::Run(_) | SdtContent::RawXml(_) => {}
-        }
-    }
-    Ok(())
-}
-
 fn apply_updates_to_paragraph(
     paragraph: &mut CT_P,
     updates: &[Option<CachedFieldUpdate>],
@@ -18178,92 +19009,197 @@ fn nested_field_mut(field: &mut Field, pointer: usize) -> Option<&mut Field> {
     None
 }
 
-fn collect_body_paragraphs<'a>(body: &'a CT_Body, output: &mut Vec<&'a CT_P>) {
-    for content in &body.content {
+fn collect_body_paragraphs<'a>(
+    body: &'a CT_Body,
+    output: &mut Vec<&'a CT_P>,
+    mut paths: Option<&mut Vec<Vec<(&'static str, usize)>>>,
+) {
+    let mut path = Vec::new();
+    for (index, content) in body
+        .content
+        .iter()
+        .filter(|content| !matches!(content, BodyContent::RawXml(_)))
+        .enumerate()
+    {
+        let kind = match content {
+            BodyContent::Paragraph(_) => "p",
+            BodyContent::Table(_) => "tbl",
+            BodyContent::ContentControl(_) => "sdt",
+            BodyContent::RawXml(_) => continue,
+        };
+        if paths.is_some() {
+            path.push((kind, index));
+        }
         match content {
-            BodyContent::Paragraph(paragraph) => output.push(paragraph),
-            BodyContent::Table(table) => collect_table_paragraphs(table, output),
-            BodyContent::ContentControl(control) => {
-                collect_control_paragraphs(control, BlockControlOwner::Body, output)
+            BodyContent::Paragraph(paragraph) => {
+                record_field_paragraph(paragraph, output, &path, &mut paths)
             }
+            BodyContent::Table(table) => {
+                collect_table_paragraphs(table, output, &mut path, &mut paths)
+            }
+            BodyContent::ContentControl(control) => collect_control_paragraphs(
+                control,
+                LegacyBlockOwner::Root,
+                output,
+                &mut path,
+                &mut paths,
+            ),
             BodyContent::RawXml(_) => {}
+        }
+        if paths.is_some() {
+            path.pop();
         }
     }
 }
 
-fn collect_table_paragraphs<'a>(table: &'a CT_Tbl, output: &mut Vec<&'a CT_P>) {
+fn record_field_paragraph<'a>(
+    paragraph: &'a CT_P,
+    output: &mut Vec<&'a CT_P>,
+    path: &[(&'static str, usize)],
+    paths: &mut Option<&mut Vec<Vec<(&'static str, usize)>>>,
+) {
+    output.push(paragraph);
+    if let Some(paths) = paths {
+        paths.push(path.to_vec());
+    }
+}
+
+fn collect_table_paragraphs<'a>(
+    table: &'a CT_Tbl,
+    output: &mut Vec<&'a CT_P>,
+    path: &mut Vec<(&'static str, usize)>,
+    paths: &mut Option<&mut Vec<Vec<(&'static str, usize)>>>,
+) {
+    let mut index = 0usize;
     for boundary in 0..=table.rows.len() {
         for (_, _, control) in table
             .content_controls
             .iter()
             .filter(|(position, _, _)| *position == boundary)
         {
-            collect_control_paragraphs(control, BlockControlOwner::Table, output);
+            if paths.is_some() {
+                path.push(("sdt", index));
+            }
+            collect_control_paragraphs(control, LegacyBlockOwner::Table, output, path, paths);
+            if paths.is_some() {
+                path.pop();
+            }
+            index = index.checked_add(1).expect("admitted modeled owner count");
         }
         if let Some(row) = table.rows.get(boundary) {
-            collect_row_paragraphs(row, output);
+            if paths.is_some() {
+                path.push(("tr", index));
+            }
+            collect_row_paragraphs(row, output, path, paths);
+            if paths.is_some() {
+                path.pop();
+            }
+            index = index.checked_add(1).expect("admitted modeled owner count");
         }
     }
 }
 
-fn collect_row_paragraphs<'a>(row: &'a CT_Row, output: &mut Vec<&'a CT_P>) {
+fn collect_row_paragraphs<'a>(
+    row: &'a CT_Row,
+    output: &mut Vec<&'a CT_P>,
+    path: &mut Vec<(&'static str, usize)>,
+    paths: &mut Option<&mut Vec<Vec<(&'static str, usize)>>>,
+) {
+    let mut index = 0usize;
     for boundary in 0..=row.cells.len() {
         for (_, _, control) in row
             .content_controls
             .iter()
             .filter(|(position, _, _)| *position == boundary)
         {
-            collect_control_paragraphs(control, BlockControlOwner::Row, output);
+            if paths.is_some() {
+                path.push(("sdt", index));
+            }
+            collect_control_paragraphs(control, LegacyBlockOwner::Row, output, path, paths);
+            if paths.is_some() {
+                path.pop();
+            }
+            index = index.checked_add(1).expect("admitted modeled owner count");
         }
         if let Some(cell) = row.cells.get(boundary) {
-            collect_cell_paragraphs(cell, output);
+            if paths.is_some() {
+                path.push(("tc", index));
+            }
+            collect_cell_paragraphs(cell, output, path, paths);
+            if paths.is_some() {
+                path.pop();
+            }
+            index = index.checked_add(1).expect("admitted modeled owner count");
         }
     }
 }
 
-fn collect_cell_paragraphs<'a>(cell: &'a CT_Tc, output: &mut Vec<&'a CT_P>) {
-    for content in &cell.content {
+fn collect_cell_paragraphs<'a>(
+    cell: &'a CT_Tc,
+    output: &mut Vec<&'a CT_P>,
+    path: &mut Vec<(&'static str, usize)>,
+    paths: &mut Option<&mut Vec<Vec<(&'static str, usize)>>>,
+) {
+    for (index, content) in cell.content.iter().enumerate() {
+        let kind = match content {
+            CellContent::Paragraph(_) => "p",
+            CellContent::Table(_) => "tbl",
+            CellContent::ContentControl(_) => "sdt",
+        };
+        if paths.is_some() {
+            path.push((kind, index));
+        }
         match content {
-            CellContent::Paragraph(paragraph) => output.push(paragraph),
-            CellContent::Table(table) => collect_table_paragraphs(table, output),
+            CellContent::Paragraph(paragraph) => {
+                record_field_paragraph(paragraph, output, path, paths)
+            }
+            CellContent::Table(table) => collect_table_paragraphs(table, output, path, paths),
             CellContent::ContentControl(control) => {
-                collect_control_paragraphs(control, BlockControlOwner::Cell, output)
+                collect_control_paragraphs(control, LegacyBlockOwner::Cell, output, path, paths)
             }
         }
+        if paths.is_some() {
+            path.pop();
+        }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockControlOwner {
-    Body,
-    Table,
-    Row,
-    Cell,
 }
 
 fn collect_control_paragraphs<'a>(
     control: &'a CT_Sdt,
-    owner: BlockControlOwner,
+    owner: LegacyBlockOwner,
     output: &mut Vec<&'a CT_P>,
+    path: &mut Vec<(&'static str, usize)>,
+    paths: &mut Option<&mut Vec<Vec<(&'static str, usize)>>>,
 ) {
+    let mut index = 0usize;
     for content in &control.content {
-        match (owner, content) {
-            (
-                BlockControlOwner::Body | BlockControlOwner::Cell,
-                SdtContent::Paragraph(paragraph),
-            ) => output.push(paragraph),
-            (BlockControlOwner::Body | BlockControlOwner::Cell, SdtContent::Table(table)) => {
-                collect_table_paragraphs(table, output)
-            }
-            (BlockControlOwner::Table, SdtContent::Row(row)) => collect_row_paragraphs(row, output),
-            (BlockControlOwner::Row, SdtContent::Cell(cell)) => {
-                collect_cell_paragraphs(cell, output)
-            }
-            (_, SdtContent::ContentControl(control)) => {
-                collect_control_paragraphs(control, owner, output)
-            }
-            _ => {}
+        let kind = match (owner, content) {
+            (LegacyBlockOwner::Root | LegacyBlockOwner::Cell, SdtContent::Paragraph(_)) => "p",
+            (LegacyBlockOwner::Root | LegacyBlockOwner::Cell, SdtContent::Table(_)) => "tbl",
+            (LegacyBlockOwner::Table, SdtContent::Row(_)) => "tr",
+            (LegacyBlockOwner::Row, SdtContent::Cell(_)) => "tc",
+            (_, SdtContent::ContentControl(_)) => "sdt",
+            _ => continue,
+        };
+        if paths.is_some() {
+            path.push((kind, index));
         }
+        match content {
+            SdtContent::Paragraph(paragraph) => {
+                record_field_paragraph(paragraph, output, path, paths)
+            }
+            SdtContent::Table(table) => collect_table_paragraphs(table, output, path, paths),
+            SdtContent::Row(row) => collect_row_paragraphs(row, output, path, paths),
+            SdtContent::Cell(cell) => collect_cell_paragraphs(cell, output, path, paths),
+            SdtContent::ContentControl(control) => {
+                collect_control_paragraphs(control, owner, output, path, paths)
+            }
+            _ => unreachable!("accepted control role"),
+        }
+        if paths.is_some() {
+            path.pop();
+        }
+        index = index.checked_add(1).expect("admitted modeled owner count");
     }
 }
 
@@ -22463,6 +23399,7 @@ mod tests {
                 true,
                 true,
                 false,
+                None,
             )
             .unwrap()
         );
@@ -22477,6 +23414,7 @@ mod tests {
                 true,
                 true,
                 false,
+                None,
             )
             .unwrap()
         );
@@ -22608,6 +23546,105 @@ mod tests {
             .content
             .push(BodyContent::Paragraph(Box::new(paragraph)));
         document
+    }
+
+    #[test]
+    fn foreign_w_main_part_does_not_block_page_field_cache_association() {
+        let word = rdocx_oxml::namespace::W_NS;
+        let foreign = format!(
+            r#"<q:p xmlns:q="{word}" xmlns:w="urn:producer" w:flag="keep"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></q:p>"#
+        );
+        let mut document = Document::new();
+        document.add_paragraph("before");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        document.replace_paragraph_xml(&location, &foreign).unwrap();
+        assert_eq!(document.paragraph(0).unwrap().text(), "7");
+
+        let updated = document.update_page_fields().unwrap();
+        assert_eq!(updated, 1);
+        let canonical = document.main_part_with_body_spans().unwrap().0;
+        let canonical_text = String::from_utf8_lossy(&canonical);
+        assert!(
+            canonical_text.contains(r#"xmlns:w="urn:producer""#),
+            "canonical source must keep the foreign w binding: {canonical_text}"
+        );
+        assert!(
+            canonical_text.contains(r#"w:flag="keep""#),
+            "canonical source must keep the producer attribute: {canonical_text}"
+        );
+        let public = document.document.to_xml().unwrap();
+        let public_text = String::from_utf8_lossy(&public);
+        assert!(
+            public_text.contains(r#"xmlns:rdocxProducer="urn:producer""#),
+            "public serialization must rewrite the producer namespace: {public_text}"
+        );
+        assert!(
+            public_text.contains(r#"rdocxProducer:flag="keep""#),
+            "public serialization must rewrite the producer attribute: {public_text}"
+        );
+        assert_eq!(document.paragraph(0).unwrap().text(), "1");
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.paragraph(0).unwrap().text(), "1");
+    }
+
+    #[test]
+    fn foreign_w_main_part_does_not_block_header_field_cache_association() {
+        let word = rdocx_oxml::namespace::W_NS;
+        let foreign = format!(
+            r#"<q:p xmlns:q="{word}" xmlns:w="urn:producer" w:flag="keep"><q:fldSimple q:instr="PAGE"><q:r><q:t>7</q:t></q:r></q:fldSimple></q:p>"#
+        );
+        let mut document = Document::new();
+        document.add_paragraph("before");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        document.replace_paragraph_xml(&location, &foreign).unwrap();
+        document.set_header("placeholder");
+        let header_part = document
+            .part_names()
+            .unwrap()
+            .into_iter()
+            .find(|part| part.contains("header"))
+            .expect("header part");
+        let header_xml = format!(
+            r#"<w:hdr xmlns:w="{word}"><w:p><w:fldSimple w:instr="DATE"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p></w:hdr>"#
+        );
+        document
+            .package
+            .set_part(&header_part, header_xml.into_bytes());
+
+        let context = FieldEvaluationContext {
+            now: Some(FieldDateTime {
+                year: 2026,
+                month: 10,
+                day: 31,
+                hour: 12,
+                minute: 0,
+                second: 0,
+            }),
+            ..FieldEvaluationContext::default()
+        };
+        let updated = document.update_fields(&context).unwrap();
+        assert!(updated >= 1, "header DATE update must run");
+        let canonical = document.main_part_with_body_spans().unwrap().0;
+        let canonical_text = String::from_utf8_lossy(&canonical);
+        assert!(
+            canonical_text.contains(r#"xmlns:w="urn:producer""#),
+            "canonical source must keep the foreign w binding: {canonical_text}"
+        );
+        let header = document.package.get_part(&header_part).unwrap();
+        let header_text = String::from_utf8_lossy(header);
+        assert!(
+            header_text.contains("2026"),
+            "header DATE cache must update: {header_text}"
+        );
+        let public = document.document.to_xml().unwrap();
+        assert!(
+            String::from_utf8_lossy(&public).contains(r#"xmlns:rdocxProducer="urn:producer""#),
+            "public serialization must rewrite the producer namespace"
+        );
     }
 
     #[test]
@@ -25037,7 +26074,7 @@ fn generated_table_owners(
     let mut result = Vec::new();
     for (story_index, story) in stories.iter().enumerate() {
         let mut paragraphs = Vec::new();
-        collect_body_paragraphs(&story.body, &mut paragraphs);
+        collect_body_paragraphs(&story.body, &mut paragraphs, None);
         for (span_index, span) in story.spans.iter().enumerate() {
             let field = parse_dynamic_toc_field(&story.xml, span)?;
             if span.simple_field.is_some() && field.locked() != Some(true) {
@@ -25504,7 +26541,7 @@ fn generated_table_sources(
     let mut sequence_values = BTreeMap::new();
     for story in stories {
         let mut typed = Vec::new();
-        collect_body_paragraphs(&story.body, &mut typed);
+        collect_body_paragraphs(&story.body, &mut typed, None);
         let locations = paragraphs
             .iter()
             .filter(|(location, range)| {

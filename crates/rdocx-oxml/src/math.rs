@@ -75,7 +75,7 @@ impl CT_OMath {
 
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         let mut writer = Writer::new(Vec::new());
-        self.write_xml(&mut writer, true)?;
+        self.write_xml_in(&mut writer, true, None)?;
         Ok(writer.into_inner())
     }
 
@@ -88,16 +88,17 @@ impl CT_OMath {
                 .any(MathExpression::has_unsupported_content)
     }
 
-    pub(crate) fn write_xml<W: Write>(
+    pub(crate) fn write_xml_in<W: Write>(
         &self,
         writer: &mut Writer<W>,
         declare_math: bool,
+        emission: Option<&crate::text::FieldXmlEmission>,
     ) -> Result<()> {
-        let root = math_start("oMath", &self.preservation, declare_math);
-        writer.write_event(Event::Start(root.borrow()))?;
+        let root = math_start("oMath", &self.preservation, declare_math, emission)?;
+        root.write(writer, false)?;
         write_raw_slot(writer, &self.preservation, 0)?;
         for (index, expression) in self.expressions.iter().enumerate() {
-            expression.write_xml(writer)?;
+            expression.write_xml_in(writer, emission)?;
             write_raw_slot(writer, &self.preservation, index + 1)?;
         }
         write_raw_tail(writer, &self.preservation, self.expressions.len() + 1)?;
@@ -167,7 +168,7 @@ impl CT_OMathPara {
 
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         let mut writer = Writer::new(Vec::new());
-        self.write_xml(&mut writer, true)?;
+        self.write_xml_in(&mut writer, true, None)?;
         Ok(writer.into_inner())
     }
 
@@ -181,32 +182,33 @@ impl CT_OMathPara {
             || self.equations.iter().any(CT_OMath::has_unsupported_content)
     }
 
-    pub(crate) fn write_xml<W: Write>(
+    pub(crate) fn write_xml_in<W: Write>(
         &self,
         writer: &mut Writer<W>,
         declare_math: bool,
+        emission: Option<&crate::text::FieldXmlEmission>,
     ) -> Result<()> {
         if self.equations.is_empty() {
             return Err(OxmlError::InvalidValue(
                 "OfficeMath display requires at least one equation".to_owned(),
             ));
         }
-        let root = math_start("oMathPara", &self.preservation, declare_math);
-        writer.write_event(Event::Start(root.borrow()))?;
+        let root = math_start("oMathPara", &self.preservation, declare_math, emission)?;
+        root.write(writer, false)?;
         let had_properties = has_preserved_modeled_child(&self.preservation, "oMathParaPr");
         let has_properties = !self.properties.is_empty() || had_properties;
         if has_properties && !had_properties {
-            self.properties.write_xml(writer)?;
+            self.properties.write_xml_in(writer, emission)?;
         }
         let mut modeled = 0usize;
         write_raw_slot(writer, &self.preservation, modeled)?;
         if has_properties && had_properties {
-            self.properties.write_xml(writer)?;
+            self.properties.write_xml_in(writer, emission)?;
             modeled += 1;
             write_raw_slot(writer, &self.preservation, modeled)?;
         }
         for equation in &self.equations {
-            equation.write_xml(writer, false)?;
+            equation.write_xml_in(writer, false, emission)?;
             modeled += 1;
             write_raw_slot(writer, &self.preservation, modeled)?;
         }
@@ -261,10 +263,14 @@ impl OfficeMath {
         })
     }
 
-    pub(crate) fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    pub(crate) fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         match self {
-            Self::Inline(value) => value.write_xml(writer, true),
-            Self::Display(value) => value.write_xml(writer, true),
+            Self::Inline(value) => value.write_xml_in(writer, true, emission),
+            Self::Display(value) => value.write_xml_in(writer, true, emission),
         }
     }
 }
@@ -386,21 +392,25 @@ impl MathExpression {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         match self {
-            Self::Run(value) => value.write_xml(writer),
-            Self::Fraction(value) => value.write_xml(writer),
-            Self::Subscript(value) => value.write_xml(writer, "sSub"),
-            Self::Superscript(value) => value.write_xml(writer, "sSup"),
-            Self::SubSuperscript(value) => value.write_xml(writer),
-            Self::PreSubSuperscript(value) => value.write_xml(writer),
-            Self::Radical(value) => value.write_xml(writer),
-            Self::Matrix(value) => value.write_xml(writer),
-            Self::LowerLimit(value) => value.write_xml(writer, "limLow"),
-            Self::UpperLimit(value) => value.write_xml(writer, "limUpp"),
-            Self::Nary(value) => value.write_xml(writer),
-            Self::Delimiter(value) => value.write_xml(writer),
-            Self::Accent(value) => value.write_xml(writer),
+            Self::Run(value) => value.write_xml_in(writer, emission),
+            Self::Fraction(value) => value.write_xml_in(writer, emission),
+            Self::Subscript(value) => value.write_xml_in(writer, "sSub", emission),
+            Self::Superscript(value) => value.write_xml_in(writer, "sSup", emission),
+            Self::SubSuperscript(value) => value.write_xml_in(writer, emission),
+            Self::PreSubSuperscript(value) => value.write_xml_in(writer, emission),
+            Self::Radical(value) => value.write_xml_in(writer, emission),
+            Self::Matrix(value) => value.write_xml_in(writer, emission),
+            Self::LowerLimit(value) => value.write_xml_in(writer, "limLow", emission),
+            Self::UpperLimit(value) => value.write_xml_in(writer, "limUpp", emission),
+            Self::Nary(value) => value.write_xml_in(writer, emission),
+            Self::Delimiter(value) => value.write_xml_in(writer, emission),
+            Self::Accent(value) => value.write_xml_in(writer, emission),
         }
     }
 }
@@ -458,15 +468,26 @@ impl MathArgument {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        write_container(writer, tag, &self.preservation, |writer| {
-            write_raw_slot(writer, &self.preservation, 0)?;
-            for (index, expression) in self.expressions.iter().enumerate() {
-                expression.write_xml(writer)?;
-                write_raw_slot(writer, &self.preservation, index + 1)?;
-            }
-            write_raw_tail(writer, &self.preservation, self.expressions.len() + 1)
-        })
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        write_container(
+            writer,
+            tag,
+            &self.preservation,
+            |writer| {
+                write_raw_slot(writer, &self.preservation, 0)?;
+                for (index, expression) in self.expressions.iter().enumerate() {
+                    expression.write_xml_in(writer, emission)?;
+                    write_raw_slot(writer, &self.preservation, index + 1)?;
+                }
+                write_raw_tail(writer, &self.preservation, self.expressions.len() + 1)
+            },
+            emission,
+        )
     }
 }
 
@@ -596,24 +617,34 @@ impl MathRun {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_container(writer, "r", &self.preservation, |writer| {
-            let had_properties = has_preserved_modeled_child(&self.preservation, "rPr");
-            let emit_properties = !self.properties.is_empty() || had_properties;
-            if emit_properties && !had_properties {
-                write_run_properties(writer, &self.properties)?;
-            }
-            let mut modeled = 0usize;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            if emit_properties && had_properties {
-                write_run_properties(writer, &self.properties)?;
-                modeled += 1;
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        write_container(
+            writer,
+            "r",
+            &self.preservation,
+            |writer| {
+                let had_properties = has_preserved_modeled_child(&self.preservation, "rPr");
+                let emit_properties = !self.properties.is_empty() || had_properties;
+                if emit_properties && !had_properties {
+                    write_run_properties(writer, &self.properties, emission)?;
+                }
+                let mut modeled = 0usize;
                 write_raw_slot(writer, &self.preservation, modeled)?;
-            }
-            write_math_text(writer, &self.text, &self.preservation)?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+                if emit_properties && had_properties {
+                    write_run_properties(writer, &self.properties, emission)?;
+                    modeled += 1;
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                }
+                write_math_text(writer, &self.text, &self.preservation, emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -719,22 +750,33 @@ impl MathFraction {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_container(writer, "f", &self.preservation, |writer| {
-            let mut modeled = write_leading_property_container(
-                writer,
-                "fPr",
-                &[Property::text("type", self.fraction_type.as_str())],
-                &self.preservation,
-                true,
-            )?;
-            self.numerator.write_xml(writer, "num")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.denominator.write_xml(writer, "den")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        write_container(
+            writer,
+            "f",
+            &self.preservation,
+            |writer| {
+                let mut modeled = write_leading_property_container(
+                    writer,
+                    "fPr",
+                    &[Property::text("type", self.fraction_type.as_str())],
+                    &self.preservation,
+                    true,
+                    emission,
+                )?;
+                self.numerator.write_xml_in(writer, "num", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                self.denominator.write_xml_in(writer, "den", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -797,31 +839,43 @@ impl MathScript {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let property_tag = if tag == "sSub" { "sSubPr" } else { "sSupPr" };
         let script_tag = if tag == "sSub" { "sub" } else { "sup" };
-        write_container(writer, tag, &self.preservation, |writer| {
-            let properties = self
-                .alignment
-                .map(|value| Property::boolean("alnScr", value))
-                .into_iter()
-                .collect::<Vec<_>>();
-            let emit_properties = self.alignment.is_some()
-                || has_preserved_modeled_child(&self.preservation, property_tag);
-            let mut modeled = write_leading_property_container(
-                writer,
-                property_tag,
-                &properties,
-                &self.preservation,
-                emit_properties,
-            )?;
-            self.base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.script.write_xml(writer, script_tag)?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+        write_container(
+            writer,
+            tag,
+            &self.preservation,
+            |writer| {
+                let properties = self
+                    .alignment
+                    .map(|value| Property::boolean("alnScr", value))
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let emit_properties = self.alignment.is_some()
+                    || has_preserved_modeled_child(&self.preservation, property_tag);
+                let mut modeled = write_leading_property_container(
+                    writer,
+                    property_tag,
+                    &properties,
+                    &self.preservation,
+                    emit_properties,
+                    emission,
+                )?;
+                self.base.write_xml_in(writer, "e", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                self.script.write_xml_in(writer, script_tag, emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -855,7 +909,11 @@ impl MathSubSuperscript {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         write_three_argument_script(
             writer,
             "sSubSup",
@@ -866,6 +924,7 @@ impl MathSubSuperscript {
             self.alignment,
             &self.preservation,
             false,
+            emission,
         )
     }
 }
@@ -900,7 +959,11 @@ impl MathPreSubSuperscript {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         write_three_argument_script(
             writer,
             "sPre",
@@ -911,6 +974,7 @@ impl MathPreSubSuperscript {
             self.alignment,
             &self.preservation,
             true,
+            emission,
         )
     }
 }
@@ -976,41 +1040,49 @@ fn write_three_argument_script<W: Write>(
     alignment: Option<bool>,
     preservation: &Preservation,
     pre: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
-    write_container(writer, root_tag, preservation, |writer| {
-        let properties = alignment
-            .map(|value| Property::boolean("alnScr", value))
-            .into_iter()
-            .collect::<Vec<_>>();
-        let emit_properties =
-            alignment.is_some() || has_preserved_modeled_child(preservation, property_tag);
-        let mut modeled = write_leading_property_container(
-            writer,
-            property_tag,
-            &properties,
-            preservation,
-            emit_properties,
-        )?;
-        if pre {
-            subscript.write_xml(writer, "sub")?;
+    write_container(
+        writer,
+        root_tag,
+        preservation,
+        |writer| {
+            let properties = alignment
+                .map(|value| Property::boolean("alnScr", value))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let emit_properties =
+                alignment.is_some() || has_preserved_modeled_child(preservation, property_tag);
+            let mut modeled = write_leading_property_container(
+                writer,
+                property_tag,
+                &properties,
+                preservation,
+                emit_properties,
+                emission,
+            )?;
+            if pre {
+                subscript.write_xml_in(writer, "sub", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, preservation, modeled)?;
+                superscript.write_xml_in(writer, "sup", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, preservation, modeled)?;
+                base.write_xml_in(writer, "e", emission)?;
+            } else {
+                base.write_xml_in(writer, "e", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, preservation, modeled)?;
+                subscript.write_xml_in(writer, "sub", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, preservation, modeled)?;
+                superscript.write_xml_in(writer, "sup", emission)?;
+            }
             modeled += 1;
-            write_raw_slot(writer, preservation, modeled)?;
-            superscript.write_xml(writer, "sup")?;
-            modeled += 1;
-            write_raw_slot(writer, preservation, modeled)?;
-            base.write_xml(writer, "e")?;
-        } else {
-            base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, preservation, modeled)?;
-            subscript.write_xml(writer, "sub")?;
-            modeled += 1;
-            write_raw_slot(writer, preservation, modeled)?;
-            superscript.write_xml(writer, "sup")?;
-        }
-        modeled += 1;
-        write_raw_slot(writer, preservation, modeled)
-    })
+            write_raw_slot(writer, preservation, modeled)
+        },
+        emission,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1084,30 +1156,41 @@ impl MathRadical {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_container(writer, "rad", &self.preservation, |writer| {
-            let mut modeled = write_leading_property_container_before_raw(
-                writer,
-                "radPr",
-                &[Property::boolean("degHide", self.hide_degree)],
-                &self.preservation,
-                true,
-            )?;
-            let emit_degree = self.degree_present
-                || !self.degree.expressions.is_empty()
-                || self.degree.has_unsupported_content();
-            if self.degree_present {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        write_container(
+            writer,
+            "rad",
+            &self.preservation,
+            |writer| {
+                let mut modeled = write_leading_property_container_before_raw(
+                    writer,
+                    "radPr",
+                    &[Property::boolean("degHide", self.hide_degree)],
+                    &self.preservation,
+                    true,
+                    emission,
+                )?;
+                let emit_degree = self.degree_present
+                    || !self.degree.expressions.is_empty()
+                    || self.degree.has_unsupported_content();
+                if self.degree_present {
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                    self.degree.write_xml_in(writer, "deg", emission)?;
+                    modeled += 1;
+                } else if emit_degree {
+                    self.degree.write_xml_in(writer, "deg", emission)?;
+                }
                 write_raw_slot(writer, &self.preservation, modeled)?;
-                self.degree.write_xml(writer, "deg")?;
+                self.base.write_xml_in(writer, "e", emission)?;
                 modeled += 1;
-            } else if emit_degree {
-                self.degree.write_xml(writer, "deg")?;
-            }
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -1159,7 +1242,11 @@ impl MathParagraphProperties {
         self.justification.is_none() && self.preservation == Preservation::default()
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let properties = self
             .justification
             .map(|value| Property::text("jc", value.as_str()))
@@ -1170,6 +1257,7 @@ impl MathParagraphProperties {
             "oMathParaPr",
             &properties,
             &self.preservation,
+            emission,
         )
     }
 }
@@ -1276,50 +1364,67 @@ impl MathMatrix {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.rows.is_empty() || self.rows.iter().any(|row| row.cells.is_empty()) {
             return Err(OxmlError::InvalidValue(
                 "OfficeMath matrix requires at least one nonempty row".to_owned(),
             ));
         }
-        write_container(writer, "m", &self.preservation, |writer| {
-            let properties = [
-                self.properties
-                    .base_justification
-                    .map(|value| Property::text("baseJc", value.as_str())),
-                self.properties
-                    .row_spacing
-                    .map(|value| Property::unsigned("rSp", value.into())),
-                self.properties
-                    .column_spacing
-                    .map(|value| Property::unsigned("cSp", value.into())),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-            let emit_properties =
-                !properties.is_empty() || has_preserved_modeled_child(&self.preservation, "mPr");
-            let mut modeled = write_leading_property_container(
-                writer,
-                "mPr",
-                &properties,
-                &self.preservation,
-                emit_properties,
-            )?;
-            for row in &self.rows {
-                write_container(writer, "mr", &row.preservation, |writer| {
-                    write_raw_slot(writer, &row.preservation, 0)?;
-                    for (index, cell) in row.cells.iter().enumerate() {
-                        cell.write_xml(writer, "e")?;
-                        write_raw_slot(writer, &row.preservation, index + 1)?;
-                    }
-                    write_raw_tail(writer, &row.preservation, row.cells.len() + 1)
-                })?;
-                modeled += 1;
-                write_raw_slot(writer, &self.preservation, modeled)?;
-            }
-            write_raw_tail(writer, &self.preservation, modeled + 1)
-        })
+        write_container(
+            writer,
+            "m",
+            &self.preservation,
+            |writer| {
+                let properties = [
+                    self.properties
+                        .base_justification
+                        .map(|value| Property::text("baseJc", value.as_str())),
+                    self.properties
+                        .row_spacing
+                        .map(|value| Property::unsigned("rSp", value.into())),
+                    self.properties
+                        .column_spacing
+                        .map(|value| Property::unsigned("cSp", value.into())),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+                let emit_properties = !properties.is_empty()
+                    || has_preserved_modeled_child(&self.preservation, "mPr");
+                let mut modeled = write_leading_property_container(
+                    writer,
+                    "mPr",
+                    &properties,
+                    &self.preservation,
+                    emit_properties,
+                    emission,
+                )?;
+                for row in &self.rows {
+                    write_container(
+                        writer,
+                        "mr",
+                        &row.preservation,
+                        |writer| {
+                            write_raw_slot(writer, &row.preservation, 0)?;
+                            for (index, cell) in row.cells.iter().enumerate() {
+                                cell.write_xml_in(writer, "e", emission)?;
+                                write_raw_slot(writer, &row.preservation, index + 1)?;
+                            }
+                            write_raw_tail(writer, &row.preservation, row.cells.len() + 1)
+                        },
+                        emission,
+                    )?;
+                    modeled += 1;
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                }
+                write_raw_tail(writer, &self.preservation, modeled + 1)
+            },
+            emission,
+        )
     }
 }
 
@@ -1389,32 +1494,44 @@ impl MathLimit {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        write_container(writer, tag, &self.preservation, |writer| {
-            let property_tag = if tag == "limLow" {
-                "limLowPr"
-            } else {
-                "limUppPr"
-            };
-            let mut modeled = 0usize;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            if has_preserved_modeled_child(&self.preservation, property_tag) {
-                write_property_container_from_parent(
-                    writer,
-                    property_tag,
-                    &[],
-                    &self.preservation,
-                )?;
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        write_container(
+            writer,
+            tag,
+            &self.preservation,
+            |writer| {
+                let property_tag = if tag == "limLow" {
+                    "limLowPr"
+                } else {
+                    "limUppPr"
+                };
+                let mut modeled = 0usize;
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                if has_preserved_modeled_child(&self.preservation, property_tag) {
+                    write_property_container_from_parent(
+                        writer,
+                        property_tag,
+                        &[],
+                        &self.preservation,
+                        emission,
+                    )?;
+                    modeled += 1;
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                }
+                self.base.write_xml_in(writer, "e", emission)?;
                 modeled += 1;
                 write_raw_slot(writer, &self.preservation, modeled)?;
-            }
-            self.base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.limit.write_xml(writer, "lim")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+                self.limit.write_xml_in(writer, "lim", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -1521,54 +1638,65 @@ impl MathNary {
         Ok(value)
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.character.chars().count() > 1 {
             return Err(OxmlError::InvalidValue(
                 "OfficeMath n-ary character must contain at most one Unicode scalar".to_owned(),
             ));
         }
-        write_container(writer, "nary", &self.preservation, |writer| {
-            let mut properties = vec![Property::text("chr", &self.character)];
-            if let Some(value) = self.limit_location {
-                properties.push(Property::text("limLoc", value.as_str()));
-            }
-            if let Some(value) = self.grow {
-                properties.push(Property::boolean("grow", value));
-            }
-            properties.push(Property::boolean("subHide", self.hide_subscript));
-            properties.push(Property::boolean("supHide", self.hide_superscript));
-            let mut modeled = write_leading_property_container_before_raw(
-                writer,
-                "naryPr",
-                &properties,
-                &self.preservation,
-                true,
-            )?;
-            let emit_subscript = self.subscript_present
-                || !self.subscript.expressions.is_empty()
-                || self.subscript.has_unsupported_content();
-            if self.subscript_present {
+        write_container(
+            writer,
+            "nary",
+            &self.preservation,
+            |writer| {
+                let mut properties = vec![Property::text("chr", &self.character)];
+                if let Some(value) = self.limit_location {
+                    properties.push(Property::text("limLoc", value.as_str()));
+                }
+                if let Some(value) = self.grow {
+                    properties.push(Property::boolean("grow", value));
+                }
+                properties.push(Property::boolean("subHide", self.hide_subscript));
+                properties.push(Property::boolean("supHide", self.hide_superscript));
+                let mut modeled = write_leading_property_container_before_raw(
+                    writer,
+                    "naryPr",
+                    &properties,
+                    &self.preservation,
+                    true,
+                    emission,
+                )?;
+                let emit_subscript = self.subscript_present
+                    || !self.subscript.expressions.is_empty()
+                    || self.subscript.has_unsupported_content();
+                if self.subscript_present {
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                    self.subscript.write_xml_in(writer, "sub", emission)?;
+                    modeled += 1;
+                } else if emit_subscript {
+                    self.subscript.write_xml_in(writer, "sub", emission)?;
+                }
+                let emit_superscript = self.superscript_present
+                    || !self.superscript.expressions.is_empty()
+                    || self.superscript.has_unsupported_content();
+                if self.superscript_present {
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                    self.superscript.write_xml_in(writer, "sup", emission)?;
+                    modeled += 1;
+                } else if emit_superscript {
+                    self.superscript.write_xml_in(writer, "sup", emission)?;
+                }
                 write_raw_slot(writer, &self.preservation, modeled)?;
-                self.subscript.write_xml(writer, "sub")?;
+                self.base.write_xml_in(writer, "e", emission)?;
                 modeled += 1;
-            } else if emit_subscript {
-                self.subscript.write_xml(writer, "sub")?;
-            }
-            let emit_superscript = self.superscript_present
-                || !self.superscript.expressions.is_empty()
-                || self.superscript.has_unsupported_content();
-            if self.superscript_present {
-                write_raw_slot(writer, &self.preservation, modeled)?;
-                self.superscript.write_xml(writer, "sup")?;
-                modeled += 1;
-            } else if emit_superscript {
-                self.superscript.write_xml(writer, "sup")?;
-            }
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -1636,7 +1764,11 @@ impl MathDelimiter {
         Ok(value)
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.arguments.is_empty()
             || [
                 &self.begin_character,
@@ -1650,29 +1782,36 @@ impl MathDelimiter {
                 "OfficeMath delimiter requires arguments and scalar characters".to_owned(),
             ));
         }
-        write_container(writer, "d", &self.preservation, |writer| {
-            let mut properties = vec![
-                Property::text("begChr", &self.begin_character),
-                Property::text("sepChr", &self.separator_character),
-                Property::text("endChr", &self.end_character),
-            ];
-            if let Some(value) = self.grow {
-                properties.push(Property::boolean("grow", value));
-            }
-            let mut modeled = write_leading_property_container(
-                writer,
-                "dPr",
-                &properties,
-                &self.preservation,
-                true,
-            )?;
-            for argument in &self.arguments {
-                argument.write_xml(writer, "e")?;
-                modeled += 1;
-                write_raw_slot(writer, &self.preservation, modeled)?;
-            }
-            write_raw_tail(writer, &self.preservation, modeled + 1)
-        })
+        write_container(
+            writer,
+            "d",
+            &self.preservation,
+            |writer| {
+                let mut properties = vec![
+                    Property::text("begChr", &self.begin_character),
+                    Property::text("sepChr", &self.separator_character),
+                    Property::text("endChr", &self.end_character),
+                ];
+                if let Some(value) = self.grow {
+                    properties.push(Property::boolean("grow", value));
+                }
+                let mut modeled = write_leading_property_container(
+                    writer,
+                    "dPr",
+                    &properties,
+                    &self.preservation,
+                    true,
+                    emission,
+                )?;
+                for argument in &self.arguments {
+                    argument.write_xml_in(writer, "e", emission)?;
+                    modeled += 1;
+                    write_raw_slot(writer, &self.preservation, modeled)?;
+                }
+                write_raw_tail(writer, &self.preservation, modeled + 1)
+            },
+            emission,
+        )
     }
 }
 
@@ -1724,24 +1863,35 @@ impl MathAccent {
         })
     }
 
-    fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.character.chars().count() > 1 {
             return Err(OxmlError::InvalidValue(
                 "OfficeMath accent character must contain at most one Unicode scalar".to_owned(),
             ));
         }
-        write_container(writer, "acc", &self.preservation, |writer| {
-            let mut modeled = write_leading_property_container(
-                writer,
-                "accPr",
-                &[Property::text("chr", &self.character)],
-                &self.preservation,
-                true,
-            )?;
-            self.base.write_xml(writer, "e")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)
-        })
+        write_container(
+            writer,
+            "acc",
+            &self.preservation,
+            |writer| {
+                let mut modeled = write_leading_property_container(
+                    writer,
+                    "accPr",
+                    &[Property::text("chr", &self.character)],
+                    &self.preservation,
+                    true,
+                    emission,
+                )?;
+                self.base.write_xml_in(writer, "e", emission)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)
+            },
+            emission,
+        )
     }
 }
 
@@ -1872,6 +2022,14 @@ impl MathProperties {
     }
 
     pub(crate) fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_in(writer, None)
+    }
+
+    pub(crate) fn write_xml_in<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let mut properties = Vec::new();
         if let Some(value) = &self.math_font {
             properties.push(Property::text("mathFont", value));
@@ -1913,6 +2071,7 @@ impl MathProperties {
             "mathPr",
             &properties,
             &self.preservation,
+            emission,
         )
     }
 }
@@ -2006,7 +2165,11 @@ fn parse_run_properties(raw: &[u8], inherited: &[(String, String)]) -> Result<Ma
     Ok(value)
 }
 
-fn write_run_properties<W: Write>(writer: &mut Writer<W>, value: &MathRunProperties) -> Result<()> {
+fn write_run_properties<W: Write>(
+    writer: &mut Writer<W>,
+    value: &MathRunProperties,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
     let mut properties = Vec::new();
     if let Some(literal) = value.literal {
         properties.push(Property::boolean("lit", literal));
@@ -2021,16 +2184,22 @@ fn write_run_properties<W: Write>(writer: &mut Writer<W>, value: &MathRunPropert
         properties.push(Property::text("sty", style.as_str()));
     }
     if let Some(alignment) = value.break_alignment {
-        properties.push(Property::attribute("brk", "alnAt", alignment.to_string()));
+        properties.push(Property::attribute("brk", "alnAt", alignment.into()));
     } else if value.break_before {
         properties.push(Property::marker("brk"));
     }
-    write_property_container_with_preservation(writer, "rPr", &properties, &value.preservation)
+    write_property_container_with_preservation(
+        writer,
+        "rPr",
+        &properties,
+        &value.preservation,
+        emission,
+    )
 }
 
 enum PropertyValue<'a> {
     Text(&'a str),
-    Owned(String),
+    Unsigned(u64),
 }
 struct Property<'a> {
     name: &'a str,
@@ -2052,13 +2221,13 @@ impl<'a> Property<'a> {
     fn unsigned(name: &'a str, value: u64) -> Self {
         Self {
             name,
-            attribute: Some(("val", PropertyValue::Owned(value.to_string()))),
+            attribute: Some(("val", PropertyValue::Unsigned(value))),
         }
     }
-    fn attribute(name: &'a str, attribute: &'a str, value: String) -> Self {
+    fn attribute(name: &'a str, attribute: &'a str, value: u64) -> Self {
         Self {
             name,
-            attribute: Some((attribute, PropertyValue::Owned(value))),
+            attribute: Some((attribute, PropertyValue::Unsigned(value))),
         }
     }
     fn marker(name: &'a str) -> Self {
@@ -2067,11 +2236,11 @@ impl<'a> Property<'a> {
             attribute: None,
         }
     }
-    fn attribute_value(&self) -> Option<(&str, &str)> {
+    fn attribute_value<'b>(&'b self, decimal: &'b mut itoa::Buffer) -> Option<(&'b str, &'b str)> {
         let (name, value) = self.attribute.as_ref()?;
         let value = match value {
             PropertyValue::Text(value) => *value,
-            PropertyValue::Owned(value) => value.as_str(),
+            PropertyValue::Unsigned(value) => decimal.format(*value),
         };
         Some((name, value))
     }
@@ -2081,14 +2250,22 @@ fn write_property_container<W: Write>(
     writer: &mut Writer<W>,
     tag: &str,
     properties: &[Property<'_>],
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
-    write_property_container_with_preservation(writer, tag, properties, &Preservation::default())
+    write_property_container_with_preservation(
+        writer,
+        tag,
+        properties,
+        &Preservation::default(),
+        emission,
+    )
 }
 
 fn write_math_text<W: Write>(
     writer: &mut Writer<W>,
     text_value: &str,
     parent: &Preservation,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let mut preservation = if let Some(source) = parent
         .modeled_children
@@ -2102,12 +2279,22 @@ fn write_math_text<W: Write>(
     preservation
         .attributes
         .retain(|(name, _)| name != "xml:space");
-    let mut start = math_start("t", &preservation, false);
+    let mut start = math_start("t", &preservation, false, emission)?;
     if text_value.starts_with(char::is_whitespace) || text_value.ends_with(char::is_whitespace) {
-        start.push_attribute(("xml:space", "preserve"));
+        start.push("xml:space", "preserve")?;
     }
-    writer.write_event(Event::Start(start.borrow()))?;
-    writer.write_event(Event::Text(BytesText::new(text_value)))?;
+    start.write(writer, false)?;
+    if let Some(emission) = emission {
+        emission.write_text(writer, text_value, None)?;
+    } else {
+        let text = BytesText::new(text_value);
+        #[cfg(test)]
+        if text.len() != text_value.len() {
+            crate::text::WORD_TEXT_ESCAPE_MATERIALIZATIONS
+                .set(crate::text::WORD_TEXT_ESCAPE_MATERIALIZATIONS.get() + 1);
+        }
+        writer.write_event(Event::Text(text))?;
+    }
     writer.write_event(Event::End(BytesEnd::new("m:t")))?;
     Ok(())
 }
@@ -2237,9 +2424,16 @@ fn write_leading_property_container<W: Write>(
     properties: &[Property<'_>],
     preservation: &Preservation,
     emit: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<usize> {
-    let modeled =
-        write_leading_property_container_before_raw(writer, tag, properties, preservation, emit)?;
+    let modeled = write_leading_property_container_before_raw(
+        writer,
+        tag,
+        properties,
+        preservation,
+        emit,
+        emission,
+    )?;
     write_raw_slot(writer, preservation, modeled)?;
     Ok(modeled)
 }
@@ -2250,15 +2444,16 @@ fn write_leading_property_container_before_raw<W: Write>(
     properties: &[Property<'_>],
     preservation: &Preservation,
     emit: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<usize> {
     let existed_in_source = has_preserved_modeled_child(preservation, tag);
     if emit && existed_in_source {
         write_raw_slot(writer, preservation, 0)?;
-        write_property_container_from_parent(writer, tag, properties, preservation)?;
+        write_property_container_from_parent(writer, tag, properties, preservation, emission)?;
         Ok(1)
     } else {
         if emit {
-            write_property_container_from_parent(writer, tag, properties, preservation)?;
+            write_property_container_from_parent(writer, tag, properties, preservation, emission)?;
         }
         Ok(0)
     }
@@ -2269,13 +2464,14 @@ fn write_property_container_from_parent<W: Write>(
     tag: &str,
     properties: &[Property<'_>],
     parent: &Preservation,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let Some(source) = parent
         .modeled_children
         .iter()
         .find(|child| child.name == tag)
     else {
-        return write_property_container(writer, tag, properties);
+        return write_property_container(writer, tag, properties, emission);
     };
     let preservation = preserve_property_container(
         &source.raw,
@@ -2283,7 +2479,7 @@ fn write_property_container_from_parent<W: Write>(
         tag,
         supported_properties(tag),
     )?;
-    write_property_container_with_preservation(writer, tag, properties, &preservation)
+    write_property_container_with_preservation(writer, tag, properties, &preservation, emission)
 }
 
 fn write_property_container_with_preservation<W: Write>(
@@ -2291,16 +2487,16 @@ fn write_property_container_with_preservation<W: Write>(
     tag: &str,
     properties: &[Property<'_>],
     preservation: &Preservation,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let declare_math = tag == "mathPr";
-    let qname = format!("m:{tag}");
-    let start = math_start(tag, preservation, declare_math);
-    writer.write_event(Event::Start(start.borrow()))?;
+    let start = math_start(tag, preservation, declare_math, emission)?;
+    start.write(writer, false)?;
     let result = if preservation.property_raw_children.is_empty() {
         (|| {
             write_raw_slot(writer, preservation, 0)?;
             for (index, property) in properties.iter().enumerate() {
-                write_property(writer, property, preservation)?;
+                write_property(writer, property, preservation, emission)?;
                 if index + 1 < properties.len() {
                     write_raw_slot(writer, preservation, index + 1)?;
                 }
@@ -2334,9 +2530,10 @@ fn write_property_container_with_preservation<W: Write>(
                     property.expect("source requires a property"),
                     &source.raw,
                     &source.bindings,
+                    emission,
                 )?;
             } else if let Some(property) = property {
-                write_new_property(writer, property)?;
+                write_new_property(writer, property, emission)?;
             } else if let Some(raw) = raw {
                 writer.get_mut().write_all(raw)?;
             }
@@ -2344,7 +2541,7 @@ fn write_property_container_with_preservation<W: Write>(
         Ok(())
     };
     result?;
-    writer.write_event(Event::End(BytesEnd::new(qname)))?;
+    write_math_end(writer, tag, emission)?;
     Ok(())
 }
 
@@ -2352,24 +2549,30 @@ fn write_property<W: Write>(
     writer: &mut Writer<W>,
     property: &Property<'_>,
     preservation: &Preservation,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     if let Some(source) = preservation
         .modeled_children
         .iter()
         .find(|child| child.name == property.name)
     {
-        write_property_leaf(writer, property, &source.raw, &source.bindings)
+        write_property_leaf(writer, property, &source.raw, &source.bindings, emission)
     } else {
-        write_new_property(writer, property)
+        write_new_property(writer, property, emission)
     }
 }
 
-fn write_new_property<W: Write>(writer: &mut Writer<W>, property: &Property<'_>) -> Result<()> {
-    let mut child = BytesStart::new(format!("m:{}", property.name));
-    if let Some((name, value)) = property.attribute_value() {
-        child.push_attribute((format!("m:{name}").as_str(), value));
+fn write_new_property<W: Write>(
+    writer: &mut Writer<W>,
+    property: &Property<'_>,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    let mut child = crate::text::FieldXmlStart::word("m", property.name, emission)?;
+    let mut decimal = itoa::Buffer::new();
+    if let Some((name, value)) = property.attribute_value(&mut decimal) {
+        child.push_word("m", name, value)?;
     }
-    writer.write_event(Event::Empty(child))?;
+    child.write(writer, true)?;
     Ok(())
 }
 
@@ -2378,29 +2581,32 @@ fn write_property_leaf<W: Write>(
     property: &Property<'_>,
     raw: &[u8],
     inherited: &[(String, String)],
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let parsed = parse_element(raw, inherited)?;
     let mut preservation = parsed.preservation;
     let modeled_attribute = property
-        .attribute_value()
+        .attribute
+        .as_ref()
         .map(|(name, _)| name.as_bytes())
         .unwrap_or(b"alnAt");
     preservation.attributes.retain(|(name, _)| {
         expanded_attribute_name(name.as_bytes(), &parsed.bindings)
             .is_none_or(|(namespace, local)| namespace != M_NS || local != modeled_attribute)
     });
-    let mut start = math_start(property.name, &preservation, false);
-    if let Some((name, value)) = property.attribute_value() {
-        start.push_attribute((format!("m:{name}").as_str(), value));
+    let mut start = math_start(property.name, &preservation, false, emission)?;
+    let mut decimal = itoa::Buffer::new();
+    if let Some((name, value)) = property.attribute_value(&mut decimal) {
+        start.push_word("m", name, value)?;
     }
     if parsed.children.is_empty() {
-        writer.write_event(Event::Empty(start))?;
+        start.write(writer, true)?;
     } else {
-        writer.write_event(Event::Start(start.borrow()))?;
+        start.write(writer, false)?;
         for child in parsed.children {
             writer.get_mut().write_all(&child)?;
         }
-        writer.write_event(Event::End(BytesEnd::new(format!("m:{}", property.name))))?;
+        write_math_end(writer, property.name, emission)?;
     }
     Ok(())
 }
@@ -2570,42 +2776,60 @@ fn write_container<W: Write>(
     tag: &str,
     preservation: &Preservation,
     children: impl FnOnce(&mut Writer<W>) -> Result<()>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
-    let qname = format!("m:{tag}");
-    let start = math_start(tag, preservation, false);
-    writer.write_event(Event::Start(start.borrow()))?;
+    let start = math_start(tag, preservation, false, emission)?;
+    start.write(writer, false)?;
     children(writer)?;
-    writer.write_event(Event::End(BytesEnd::new(qname)))?;
+    write_math_end(writer, tag, emission)?;
     Ok(())
 }
 
-fn math_start(tag: &str, preservation: &Preservation, declare_math: bool) -> BytesStart<'static> {
-    let mut start = BytesStart::new(format!("m:{tag}"));
+fn math_start<'e>(
+    tag: &str,
+    preservation: &Preservation,
+    declare_math: bool,
+    emission: Option<&'e crate::text::FieldXmlEmission>,
+) -> Result<crate::text::FieldXmlStart<'e, 'static>> {
+    let mut start = crate::text::FieldXmlStart::word("m", tag, emission)?;
     if declare_math {
-        start.push_attribute(("xmlns:m", M_NS));
+        start.push("xmlns:m", M_NS)?;
         for (prefix, namespace) in &preservation.inherited_bindings {
-            let name = if prefix.is_empty() {
-                "xmlns".to_owned()
-            } else {
-                format!("xmlns:{prefix}")
-            };
-            if prefix != "m"
-                && prefix != "xml"
-                && !preservation
-                    .attributes
-                    .iter()
-                    .any(|(candidate, _)| candidate == &name)
-            {
-                start.push_attribute((name.as_str(), namespace.as_str()));
+            let retained = preservation.attributes.iter().any(|(candidate, _)| {
+                if prefix.is_empty() {
+                    candidate == "xmlns"
+                } else {
+                    candidate.strip_prefix("xmlns:") == Some(prefix.as_str())
+                }
+            });
+            if prefix != "m" && prefix != "xml" && !retained {
+                if prefix.is_empty() {
+                    start.push("xmlns", namespace)?;
+                } else {
+                    start.push_word("xmlns", prefix, namespace)?;
+                }
             }
         }
     }
     for (name, value) in &preservation.attributes {
         if name != "xmlns:m" {
-            start.push_attribute((name.as_str(), value.as_str()));
+            start.push(name, value)?;
         }
     }
-    start.into_owned()
+    Ok(start)
+}
+
+fn write_math_end<W: Write>(
+    writer: &mut Writer<W>,
+    tag: &str,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    if let Some(emission) = emission {
+        emission.write_word_end(writer, "m", tag)
+    } else {
+        writer.write_event(Event::End(BytesEnd::new(format!("m:{tag}"))))?;
+        Ok(())
+    }
 }
 
 fn write_raw_slot<W: Write>(
@@ -4135,7 +4359,7 @@ mod tests {
         let mut properties = MathProperties::from_raw(xml.as_bytes(), &[]).unwrap();
         properties.math_font = Some("STIX Two Math".to_owned());
         let mut writer = Writer::new(Vec::new());
-        properties.write_xml(&mut writer).unwrap();
+        properties.write_xml_in(&mut writer, None).unwrap();
         let output = String::from_utf8(writer.into_inner()).unwrap();
         assert!(output.starts_with(&format!(r#"<m:mathPr xmlns:m="{M_NS}""#)));
         assert!(output.contains("data=\"root\""));
@@ -4342,7 +4566,7 @@ mod tests {
         assert!(parsed.has_unsupported_content());
 
         let mut writer = Writer::new(Vec::new());
-        parsed.write_xml(&mut writer).unwrap();
+        parsed.write_xml_in(&mut writer, None).unwrap();
         let first = writer.into_inner();
         let first_text = String::from_utf8(first.clone()).unwrap();
         for raw in [
@@ -4360,7 +4584,7 @@ mod tests {
         assert_eq!(reopened.wrap_indent, Some(1440));
         assert!(reopened.has_unsupported_content());
         let mut writer = Writer::new(Vec::new());
-        reopened.write_xml(&mut writer).unwrap();
+        reopened.write_xml_in(&mut writer, None).unwrap();
         assert_eq!(writer.into_inner(), first);
     }
 
@@ -4419,7 +4643,7 @@ mod tests {
         assert_eq!(properties.math_font.as_deref(), Some("Cambria Math"));
         assert_eq!(properties.justification, None);
         let mut writer = Writer::new(Vec::new());
-        properties.write_xml(&mut writer).unwrap();
+        properties.write_xml_in(&mut writer, None).unwrap();
         let output = String::from_utf8(writer.into_inner()).unwrap();
         assert!(output.contains(r#"<m:mathFont m:val="duplicate"/>"#));
         assert!(output.contains(r#"<m:defJc m:val="sideways"/>"#));
@@ -4429,7 +4653,7 @@ mod tests {
         let properties = MathProperties::from_raw(negative_margin.as_bytes(), &[]).unwrap();
         assert_eq!(properties.left_margin, None);
         let mut writer = Writer::new(Vec::new());
-        properties.write_xml(&mut writer).unwrap();
+        properties.write_xml_in(&mut writer, None).unwrap();
         assert!(
             String::from_utf8(writer.into_inner())
                 .unwrap()
@@ -4523,7 +4747,7 @@ mod tests {
         let mut parsed = MathProperties::from_raw(raw.as_bytes(), &[]).unwrap();
         parsed.small_fraction = Some(true);
         let mut writer = Writer::new(Vec::new());
-        parsed.write_xml(&mut writer).unwrap();
+        parsed.write_xml_in(&mut writer, None).unwrap();
         let output = String::from_utf8(writer.into_inner()).unwrap();
         assert!(output.find("<m:mathFont").unwrap() < output.find("<m:brkBin").unwrap());
         assert!(output.find("<m:brkBin").unwrap() < output.find("<m:smallFrac").unwrap());

@@ -1,10 +1,6 @@
 //! Paragraph properties (`CT_PPr`) and run properties (`CT_RPr`).
 
-use std::borrow::Cow;
-
-use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::QName;
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{OxmlError, Result};
@@ -76,13 +72,12 @@ pub(crate) fn parse_uchar_hex(value: &str) -> Option<u8> {
         .flatten()
 }
 
-pub(crate) fn push_uchar_hex(e: &mut BytesStart<'_>, name: &str, value: u8) {
+pub(crate) fn uchar_hex_bytes(value: u8) -> [u8; 2] {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    let encoded = [
+    [
         DIGITS[usize::from(value >> 4)],
         DIGITS[usize::from(value & 0x0f)],
-    ];
-    e.push_attribute((name.as_bytes(), encoded.as_slice()));
+    ]
 }
 
 impl CT_Shd {
@@ -190,39 +185,85 @@ impl CT_Shd {
     }
 
     pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        let mut e = BytesStart::new(tag);
-        for (name, value) in &self.extra_attributes {
-            e.push_attribute(Attribute {
-                key: QName(name.as_bytes()),
-                value: Cow::Borrowed(value.as_bytes()),
-            });
+        self.write_xml_in(
+            writer,
+            tag,
+            crate::text::XmlWriteRole::Publication,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn write_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        name: &str,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        if role == crate::text::XmlWriteRole::Source {
+            let mut root = crate::text::FieldXmlStart::word("w", name, emission)?;
+            for (name, value) in &self.extra_attributes {
+                root.push_raw(name, value)?;
+            }
+            let prefix = root.qualify(&[], role, source_context)?;
+            self.write_xml_core(writer, root, &prefix, false)
+        } else {
+            let root = crate::text::FieldXmlStart::new(name, emission)?;
+            self.write_xml_core(writer, root, "w", true)
         }
-        e.push_attribute(("w:val", self.val.as_str()));
+    }
+
+    fn write_xml_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        mut e: crate::text::FieldXmlStart<'_, '_>,
+        word_prefix: &str,
+        include_retained: bool,
+    ) -> Result<()> {
+        if include_retained {
+            for (name, value) in &self.extra_attributes {
+                e.push_raw(name, value)?;
+            }
+        }
+        e.push_word(word_prefix, "val", self.val.as_str())?;
         if let Some(ref c) = self.color {
-            e.push_attribute(("w:color", c.as_str()));
+            e.push_word(word_prefix, "color", c.as_str())?;
         }
         if let Some(ref c) = self.theme_color {
-            e.push_attribute(("w:themeColor", c.as_str()));
+            e.push_word(word_prefix, "themeColor", c.as_str())?;
         }
         if let Some(tint) = self.theme_tint {
-            push_uchar_hex(&mut e, "w:themeTint", tint);
+            let encoded = uchar_hex_bytes(tint);
+            e.push_word(word_prefix, "themeTint", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(shade) = self.theme_shade {
-            push_uchar_hex(&mut e, "w:themeShade", shade);
+            let encoded = uchar_hex_bytes(shade);
+            e.push_word(word_prefix, "themeShade", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(ref f) = self.fill {
-            e.push_attribute(("w:fill", f.as_str()));
+            e.push_word(word_prefix, "fill", f.as_str())?;
         }
         if let Some(ref f) = self.theme_fill {
-            e.push_attribute(("w:themeFill", f.as_str()));
+            e.push_word(word_prefix, "themeFill", f.as_str())?;
         }
         if let Some(tint) = self.theme_fill_tint {
-            push_uchar_hex(&mut e, "w:themeFillTint", tint);
+            let encoded = uchar_hex_bytes(tint);
+            e.push_word(word_prefix, "themeFillTint", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(shade) = self.theme_fill_shade {
-            push_uchar_hex(&mut e, "w:themeFillShade", shade);
+            let encoded = uchar_hex_bytes(shade);
+            e.push_word(
+                word_prefix,
+                "themeFillShade",
+                std::str::from_utf8(&encoded)?,
+            )?;
         }
-        writer.write_event(Event::Empty(e))?;
+        #[cfg(test)]
+        crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS.get() + 1);
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -329,41 +370,60 @@ pub(crate) fn toggle_has_unsupported_attributes(
     Ok(false)
 }
 
-pub(crate) fn append_modeled_toggle_attributes(
-    element: &mut BytesStart<'_>,
-    raw_xml: &[Vec<u8>],
+pub(crate) fn modeled_toggle_attributes<'a>(
+    raw_xml: &'a [Vec<u8>],
     positions: &[(u8, usize)],
     slot: u8,
-    _occurrence: usize,
-) -> Result<()> {
+) -> Result<Vec<(std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>)>> {
+    let mut preserved = Vec::new();
     for (raw, position) in raw_xml.iter().zip(positions) {
         if position.0 != slot || !raw_is_modeled_attribute_carrier(*position) {
             continue;
         }
         let mut reader = Reader::from_reader(raw.as_slice());
-        let mut buffer = Vec::new();
-        let source = match reader.read_event_into(&mut buffer)? {
-            Event::Start(source) | Event::Empty(source) => source.into_owned(),
+        let (source, close) = match reader.read_event()? {
+            Event::Start(source) => (source, 1),
+            Event::Empty(source) => (source, 2),
             _ => continue,
         };
         let prefixes = word_prefixes_at(&source, &["w".to_owned()])?;
-        let mut preserved = Vec::new();
-        for attribute in source.attributes() {
-            let attribute = attribute?;
-            if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
-                continue;
+        // Actual reader positions select the borrowed physical header. The
+        // UTF8 probe selects borrowing only, it never refuses a legacy input.
+        let end = reader.buffer_position() as usize - close;
+        let header = &raw[end - source.as_ref().len()..end];
+        if let Ok(header) = std::str::from_utf8(header) {
+            for attribute in
+                quick_xml::events::attributes::Attributes::new(header, source.name().as_ref().len())
+            {
+                let attribute = attribute?;
+                if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
+                    continue;
+                }
+                let name = std::str::from_utf8(attribute.key.0)?;
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?;
+                preserved.push((std::borrow::Cow::Borrowed(name), value));
             }
-            let name = std::str::from_utf8(attribute.key.as_ref())?.to_owned();
-            let value = attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?
-                .into_owned();
-            preserved.push((name, value));
-        }
-        for (name, value) in &preserved {
-            element.push_attribute((name.as_str(), value.as_str()));
+        } else {
+            // An invalid outer QName was not decoded by the legacy helper.
+            // Keep that exact acceptance/error path instead of validating it.
+            for attribute in source.attributes() {
+                let attribute = attribute?;
+                if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
+                    continue;
+                }
+                let name = std::str::from_utf8(attribute.key.as_ref())?.to_owned();
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?
+                    .into_owned();
+                preserved.push((
+                    std::borrow::Cow::Owned(name),
+                    std::borrow::Cow::Owned(value),
+                ));
+            }
         }
     }
-    Ok(())
+    Ok(preserved)
 }
 
 pub(crate) fn word_prefixes_at(
@@ -494,12 +554,40 @@ pub(crate) fn write_toggle<W: std::io::Write>(
     tag: &str,
     value: bool,
 ) -> Result<()> {
+    write_toggle_core(writer, BytesStart::new(tag), "w", value)
+}
+
+pub(crate) fn write_toggle_source<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    local: &str,
+    value: bool,
+    source_context: Option<&[(&str, &str)]>,
+) -> Result<()> {
+    let (start, prefix) = crate::text::generated_word_start(
+        BytesStart::new(format!("w:{local}")),
+        &[],
+        crate::text::XmlWriteRole::Source,
+        source_context,
+    )?;
+    write_toggle_core(writer, start, &prefix, value)
+}
+
+fn write_toggle_core<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    mut start: BytesStart<'_>,
+    word_prefix: &str,
+    value: bool,
+) -> Result<()> {
+    #[cfg(test)]
+    if start.local_name().as_ref() == b"b" {
+        crate::text::WORD_BOLD_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_BOLD_EVENT_MATERIALIZATIONS.get() + 1);
+    }
     if value {
-        writer.write_event(Event::Empty(BytesStart::new(tag)))?;
+        writer.write_event(Event::Empty(start))?;
     } else {
-        let mut e = BytesStart::new(tag);
-        e.push_attribute(("w:val", "false"));
-        writer.write_event(Event::Empty(e))?;
+        start.push_attribute((format!("{word_prefix}:val").as_str(), "false"));
+        writer.write_event(Event::Empty(start))?;
     }
     Ok(())
 }

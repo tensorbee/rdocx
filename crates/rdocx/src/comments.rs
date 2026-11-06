@@ -3456,8 +3456,17 @@ impl Document {
 
     /// Omit only qualified marker spans, retaining mixed runs and opaque siblings.
     pub(crate) fn omit_comment_markers(xml: &[u8]) -> Result<Vec<u8>> {
-        let markers = comment_source_markers(xml)?;
+        let edits = Self::omit_comment_marker_edits(xml)?;
         let mut result = xml.to_vec();
+        for (start, end, _) in edits {
+            result.drain(start..end);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn omit_comment_marker_edits(xml: &[u8]) -> Result<Vec<(usize, usize, Vec<u8>)>> {
+        let markers = comment_source_markers(xml)?;
+        let mut edits = Vec::new();
         for marker in markers.into_iter().rev() {
             let mut reader = quick_xml::Reader::from_reader(&xml[marker.span.clone()]);
             if matches!(
@@ -3476,9 +3485,9 @@ impl Document {
                     marker.id
                 )));
             }
-            result.drain(marker.span);
+            edits.push((marker.span.start, marker.span.end, Vec::new()));
         }
-        Ok(result)
+        Ok(edits)
     }
 
     fn comment_relationship_part_at(

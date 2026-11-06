@@ -150,7 +150,60 @@ impl WrapType {
 /// The extension URI Word writes around `adec:decorative`.
 const DECORATIVE_EXTENSION_URI: &str = "{C183D7F6-B498-43B3-948B-1728B52AA6E4}";
 /// The namespace of Word's decorative-drawing marker.
-const DECORATIVE_NAMESPACE: &str = "http://schemas.microsoft.com/office/drawing/2017/decorative";
+pub(crate) const DECORATIVE_NAMESPACE: &str =
+    "http://schemas.microsoft.com/office/drawing/2017/decorative";
+
+pub(crate) struct DecorativeChildPlan {
+    pub(crate) admitted: bool,
+    decorative: bool,
+}
+
+impl DecorativeChildPlan {
+    pub(crate) fn read(
+        element: &BytesStart<'_>,
+        depth: usize,
+        parent_admitted: bool,
+        drawing_namespace: bool,
+        decorative_namespace: bool,
+        decoder: quick_xml::encoding::Decoder,
+    ) -> Result<Self> {
+        let local = element.local_name();
+        let admitted = match depth {
+            0 => drawing_namespace && local.as_ref() == b"extLst",
+            1 => {
+                parent_admitted
+                    && drawing_namespace
+                    && local.as_ref() == b"ext"
+                    && element
+                        .try_get_attribute("uri")?
+                        .map(|attribute| {
+                            attribute
+                                .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                                .map(|value| value == DECORATIVE_EXTENSION_URI)
+                        })
+                        .transpose()?
+                        .unwrap_or(false)
+            }
+            2 => parent_admitted && decorative_namespace && local.as_ref() == b"decorative",
+            _ => false,
+        };
+        let mut decorative = false;
+        if depth == 2 && admitted {
+            for attribute in element.attributes() {
+                let attribute = attribute?;
+                if attribute.key.as_ref() == b"val" {
+                    let value =
+                        attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
+                    decorative |= matches!(value.as_ref(), "1" | "true" | "on");
+                }
+            }
+        }
+        Ok(Self {
+            admitted,
+            decorative,
+        })
+    }
+}
 
 /// Read the rest of a `wp:docPr` element and report whether its extension
 /// list marks the drawing decorative, as Word writes it.
@@ -163,47 +216,17 @@ fn read_doc_pr_decorative(reader: &mut NsReader<&[u8]>) -> Result<bool> {
         let is_start = matches!(event, Event::Start(_));
         match event {
             Event::Start(ref element) | Event::Empty(ref element) => {
-                let (namespace, local) = reader.resolver().resolve_element(element.name());
-                let admitted = match path.len() {
-                    0 => {
-                        matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == drawing_ns::A.as_bytes())
-                            && local.as_ref() == b"extLst"
-                    }
-                    1 => {
-                        path[0]
-                            && matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == drawing_ns::A.as_bytes())
-                            && local.as_ref() == b"ext"
-                            && element
-                                .try_get_attribute("uri")?
-                                .map(|attr| {
-                                    attr.decoded_and_normalized_value(
-                                        XmlVersion::Implicit1_0,
-                                        reader.decoder(),
-                                    )
-                                    .map(|value| value == DECORATIVE_EXTENSION_URI)
-                                })
-                                .transpose()?
-                                .unwrap_or(false)
-                    }
-                    2 => {
-                        path[1]
-                            && matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == DECORATIVE_NAMESPACE.as_bytes())
-                            && local.as_ref() == b"decorative"
-                    }
-                    _ => false,
-                };
-                if path.len() == 2 && admitted {
-                    for attr in element.attributes() {
-                        let attr = attr?;
-                        if attr.key.as_ref() == b"val" {
-                            let value = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                reader.decoder(),
-                            )?;
-                            decorative |= matches!(value.as_ref(), "1" | "true" | "on");
-                        }
-                    }
-                }
+                let (namespace, _) = reader.resolver().resolve_element(element.name());
+                let plan = DecorativeChildPlan::read(
+                    element,
+                    path.len(),
+                    path.last().copied().unwrap_or(true),
+                    matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == drawing_ns::A.as_bytes()),
+                    matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == DECORATIVE_NAMESPACE.as_bytes()),
+                    reader.decoder(),
+                )?;
+                let admitted = plan.admitted;
+                decorative |= plan.decorative;
                 if is_start {
                     path.push(admitted);
                 }
@@ -233,55 +256,60 @@ fn write_doc_pr<W: std::io::Write>(
     description: Option<&str>,
     title: Option<&str>,
     decorative: bool,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let mut buf = itoa::Buffer::new();
-    let mut doc_pr = BytesStart::new("wp:docPr");
-    doc_pr.push_attribute(("id", buf.format(id)));
-    doc_pr.push_attribute(("name", name.unwrap_or("Picture")));
+    let mut doc_pr = crate::text::FieldXmlStart::new("wp:docPr", emission)?;
+    doc_pr.push("id", buf.format(id))?;
+    doc_pr.push("name", name.unwrap_or("Picture"))?;
     if let Some(description) = description {
-        doc_pr.push_attribute(("descr", description));
+        doc_pr.push("descr", description)?;
     }
     if let Some(title) = title {
-        doc_pr.push_attribute(("title", title));
+        doc_pr.push("title", title)?;
     }
     if !decorative {
-        writer.write_event(Event::Empty(doc_pr))?;
+        doc_pr.write(writer, true)?;
         return Ok(());
     }
-    writer.write_event(Event::Start(doc_pr))?;
-    let mut list = BytesStart::new("a:extLst");
-    list.push_attribute(("xmlns:a", drawing_ns::A));
-    writer.write_event(Event::Start(list))?;
-    let mut extension = BytesStart::new("a:ext");
-    extension.push_attribute(("uri", DECORATIVE_EXTENSION_URI));
-    writer.write_event(Event::Start(extension))?;
-    let mut marker = BytesStart::new("adec:decorative");
-    marker.push_attribute(("xmlns:adec", DECORATIVE_NAMESPACE));
-    marker.push_attribute(("val", "1"));
-    writer.write_event(Event::Empty(marker))?;
+    doc_pr.write(writer, false)?;
+    let mut list = crate::text::FieldXmlStart::new("a:extLst", emission)?;
+    list.push("xmlns:a", drawing_ns::A)?;
+    list.write(writer, false)?;
+    let mut extension = crate::text::FieldXmlStart::new("a:ext", emission)?;
+    extension.push("uri", DECORATIVE_EXTENSION_URI)?;
+    extension.write(writer, false)?;
+    let mut marker = crate::text::FieldXmlStart::new("adec:decorative", emission)?;
+    marker.push("xmlns:adec", DECORATIVE_NAMESPACE)?;
+    marker.push("val", "1")?;
+    marker.write(writer, true)?;
     writer.write_event(Event::End(BytesEnd::new("a:ext")))?;
     writer.write_event(Event::End(BytesEnd::new("a:extLst")))?;
     writer.write_event(Event::End(BytesEnd::new("wp:docPr")))?;
     Ok(())
 }
 
-fn write_wrap_element<W: std::io::Write>(writer: &mut Writer<W>, wrap: WrapType) -> Result<()> {
+fn write_wrap_element<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    wrap: WrapType,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
     match wrap {
         WrapType::None | WrapType::TopAndBottom => {
-            writer.write_event(Event::Empty(BytesStart::new(wrap.element_name())))?;
+            crate::text::FieldXmlStart::new(wrap.element_name(), emission)?.write(writer, true)?;
         }
         WrapType::Square => {
-            let mut element = BytesStart::new(wrap.element_name());
-            element.push_attribute(("wrapText", "bothSides"));
-            writer.write_event(Event::Empty(element))?;
+            let mut element = crate::text::FieldXmlStart::new(wrap.element_name(), emission)?;
+            element.push("wrapText", "bothSides")?;
+            element.write(writer, true)?;
         }
         WrapType::Tight | WrapType::Through => {
-            let mut element = BytesStart::new(wrap.element_name());
-            element.push_attribute(("wrapText", "bothSides"));
-            writer.write_event(Event::Start(element))?;
-            let mut polygon = BytesStart::new("wp:wrapPolygon");
-            polygon.push_attribute(("edited", "0"));
-            writer.write_event(Event::Start(polygon))?;
+            let mut element = crate::text::FieldXmlStart::new(wrap.element_name(), emission)?;
+            element.push("wrapText", "bothSides")?;
+            element.write(writer, false)?;
+            let mut polygon = crate::text::FieldXmlStart::new("wp:wrapPolygon", emission)?;
+            polygon.push("edited", "0")?;
+            polygon.write(writer, false)?;
             for (name, x, y) in [
                 ("wp:start", "0", "0"),
                 ("wp:lineTo", "0", "21600"),
@@ -289,10 +317,10 @@ fn write_wrap_element<W: std::io::Write>(writer: &mut Writer<W>, wrap: WrapType)
                 ("wp:lineTo", "21600", "0"),
                 ("wp:lineTo", "0", "0"),
             ] {
-                let mut point = BytesStart::new(name);
-                point.push_attribute(("x", x));
-                point.push_attribute(("y", y));
-                writer.write_event(Event::Empty(point))?;
+                let mut point = crate::text::FieldXmlStart::new(name, emission)?;
+                point.push("x", x)?;
+                point.push("y", y)?;
+                point.write(writer, true)?;
             }
             writer.write_event(Event::End(BytesEnd::new("wp:wrapPolygon")))?;
             writer.write_event(Event::End(BytesEnd::new(wrap.element_name())))?;
@@ -979,32 +1007,23 @@ impl CT_Anchor {
     }
 
     fn from_xml_admitted(reader: &mut NsReader<&[u8]>, start: &BytesStart) -> Result<Self> {
-        let mut behind_doc = false;
-        let mut relative_height = 0u32;
-        let mut dist_t = Emu(0);
-        let mut dist_b = Emu(0);
-        let mut dist_l = Emu(0);
-        let mut dist_r = Emu(0);
+        Self::from_xml_admitted_in(reader, start, None)
+    }
 
-        // Parse attributes from the <wp:anchor> start tag
-        for attr in start.attributes() {
-            let attr = attr?;
-            let key = attr.key.as_ref();
-            let val = std::str::from_utf8(&attr.value)?;
-            if key == b"behindDoc" {
-                behind_doc = val == "1" || val == "true";
-            } else if key == b"relativeHeight" {
-                relative_height = val.parse().unwrap_or(0);
-            } else if key == b"distT" {
-                dist_t = Emu(val.parse().unwrap_or(0));
-            } else if key == b"distB" {
-                dist_b = Emu(val.parse().unwrap_or(0));
-            } else if key == b"distL" {
-                dist_l = Emu(val.parse().unwrap_or(0));
-            } else if key == b"distR" {
-                dist_r = Emu(val.parse().unwrap_or(0));
-            }
-        }
+    fn from_xml_admitted_in(
+        reader: &mut NsReader<&[u8]>,
+        start: &BytesStart,
+        mapped: Option<(&crate::document::WordFieldInput, &[u8])>,
+    ) -> Result<Self> {
+        let cursor = mapped.map(|(input, raw)| input.cursor(raw)).transpose()?;
+        let AnchorAttributes {
+            behind_doc,
+            relative_height,
+            dist_t,
+            dist_b,
+            dist_l,
+            dist_r,
+        } = AnchorAttributes::read(start)?;
 
         let mut pos_h_offset = Emu(0);
         let mut pos_h_relative_from = ST_RelativeFromH::Page;
@@ -1025,46 +1044,41 @@ impl CT_Anchor {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = reader.buffer_position();
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) => {
                     let ename = e.name();
-                    if matches_local_name(ename.as_ref(), b"extent") {
+                    let action = DrawingChildAction::for_name(
+                        DrawingContainerKind::Anchor,
+                        ename.as_ref(),
+                        true,
+                        canonical_wp_element(reader, e, b"docPr"),
+                        false,
+                    );
+                    if action == DrawingChildAction::Extent {
+                        read_extent(e, &mut extent_cx, &mut extent_cy)?;
+                    } else if action == DrawingChildAction::DocPr {
                         for attr in e.attributes() {
                             let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"cx" {
-                                extent_cx = Emu(val.parse()?);
-                            } else if key == b"cy" {
-                                extent_cy = Emu(val.parse()?);
+                            match DrawingDocPrAttribute::read(&attr, e.decoder())? {
+                                DrawingDocPrAttribute::Description(value) => {
+                                    description = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Title(value) => {
+                                    title = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Name(value) => {
+                                    name = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Id(value) => doc_pr_id = Some(value),
+                                DrawingDocPrAttribute::Ignored => {}
                             }
                         }
-                    } else if canonical_wp_element(reader, e, b"docPr") {
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"descr" {
-                                description = Some(val.to_string());
-                            } else if key == b"title" {
-                                title = Some(val.to_string());
-                            } else if key == b"name" {
-                                name = Some(val.to_string());
-                            } else if key == b"id" {
-                                doc_pr_id = Some(val.parse()?);
-                            }
-                        }
-                    } else if matches_local_name(ename.as_ref(), b"srcRect") {
+                    } else if action == DrawingChildAction::SourceRect {
                         source_rect = Some(parse_source_rect(e)?);
                     } else if matches_local_name(ename.as_ref(), b"simplePos") {
                         // Ignore simplePos
-                    } else if let Some(parsed) = wrap_type_of(ename.as_ref()) {
+                    } else if let DrawingChildAction::Wrap(parsed) = action {
                         wrap = parsed;
                     }
                 }
@@ -1075,16 +1089,21 @@ impl CT_Anchor {
                         namespace_matches(&namespace, crate::namespace::W_NS, b"w")
                             && local.as_ref() == b"txbxContent"
                     };
-                    if matches_local_name(ename.as_ref(), b"srcRect") {
+                    let action = DrawingChildAction::for_name(
+                        DrawingContainerKind::Anchor,
+                        ename.as_ref(),
+                        false,
+                        canonical_wp_element(reader, e, b"docPr"),
+                        is_word_text_box,
+                    );
+                    if action == DrawingChildAction::SourceRect {
                         source_rect = Some(parse_source_rect(e)?);
                         reader.read_to_end_into(ename, &mut Vec::new())?;
-                    } else if matches_local_name(ename.as_ref(), b"positionH") {
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            if attr.key.as_ref() == b"relativeFrom" {
-                                pos_h_relative_from =
-                                    ST_RelativeFromH::from_str(std::str::from_utf8(&attr.value)?);
-                            }
+                    } else if action == DrawingChildAction::PositionH {
+                        if let Some(DrawingPositionReference::Horizontal(value)) =
+                            DrawingPositionReference::read(e, true)?
+                        {
+                            pos_h_relative_from = value;
                         }
                         // Read child <wp:posOffset>
                         let mut inner_buf = Vec::new();
@@ -1119,18 +1138,16 @@ impl CT_Anchor {
                             }
                             inner_buf.clear();
                         }
-                    } else if let Some(parsed) = wrap_type_of(ename.as_ref()) {
+                    } else if let DrawingChildAction::Wrap(parsed) = action {
                         // Expanded spelling. wrapSquare and the outline wraps
                         // carry children we do not model, so skip the subtree.
                         wrap = parsed;
                         reader.read_to_end_into(ename, &mut Vec::new())?;
-                    } else if matches_local_name(ename.as_ref(), b"positionV") {
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            if attr.key.as_ref() == b"relativeFrom" {
-                                pos_v_relative_from =
-                                    ST_RelativeFromV::from_str(std::str::from_utf8(&attr.value)?);
-                            }
+                    } else if action == DrawingChildAction::PositionV {
+                        if let Some(DrawingPositionReference::Vertical(value)) =
+                            DrawingPositionReference::read(e, false)?
+                        {
+                            pos_v_relative_from = value;
                         }
                         let mut inner_buf = Vec::new();
                         loop {
@@ -1164,7 +1181,7 @@ impl CT_Anchor {
                             }
                             inner_buf.clear();
                         }
-                    } else if matches_local_name(ename.as_ref(), b"spPr") {
+                    } else if action == DrawingChildAction::ShapeProperties {
                         // Capture the shape properties and read geometry and
                         // fill out of them separately, so the fill colour is
                         // not confused with the outline colour.
@@ -1173,28 +1190,27 @@ impl CT_Anchor {
                         let s = shape.get_or_insert_with(CT_Shape::default);
                         s.preset = preset;
                         s.solid_fill = solid_fill;
-                    } else if is_word_text_box {
-                        let body = text_box_body(reader, e)?;
+                    } else if action == DrawingChildAction::TextBox {
+                        let body = text_box_body(reader, e, cursor.as_ref(), event_start)?;
                         let shape = shape.get_or_insert_with(CT_Shape::default);
                         shape.text_body = Some(body);
-                    } else if matches_local_name(ename.as_ref(), b"blip") {
+                    } else if action == DrawingChildAction::Blip {
                         reader.read_to_end_into(ename, &mut Vec::new())?;
-                    } else if canonical_wp_element(reader, e, b"docPr") {
+                    } else if action == DrawingChildAction::DocPr {
                         for attr in e.attributes() {
                             let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"descr" {
-                                description = Some(val.to_string());
-                            } else if key == b"title" {
-                                title = Some(val.to_string());
-                            } else if key == b"name" {
-                                name = Some(val.to_string());
-                            } else if key == b"id" {
-                                doc_pr_id = Some(val.parse()?);
+                            match DrawingDocPrAttribute::read(&attr, e.decoder())? {
+                                DrawingDocPrAttribute::Description(value) => {
+                                    description = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Title(value) => {
+                                    title = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Name(value) => {
+                                    name = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Id(value) => doc_pr_id = Some(value),
+                                DrawingDocPrAttribute::Ignored => {}
                             }
                         }
                         decorative = read_doc_pr_decorative(reader)?;
@@ -1202,7 +1218,9 @@ impl CT_Anchor {
                         // Continue into nested elements (graphic, graphicData, pic, etc.)
                     }
                 }
-                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"anchor") => {
+                Ok(Event::End(ref e))
+                    if DrawingContainerKind::Anchor.matches_end(e.name().as_ref()) =>
+                {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -1245,6 +1263,14 @@ impl CT_Anchor {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.to_xml_in(writer, None)
+    }
+
+    fn to_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         crate::document::admit_word_model(crate::document::WordOwner::Anchor(self))?;
         // If we have raw XML from parsing, use it for perfect round-trip
         if let Some(ref raw) = self.raw_xml {
@@ -1256,83 +1282,95 @@ impl CT_Anchor {
         let payload = drawing_payload(&self.embed_id, self.chart_rel_id.as_deref())?;
 
         let mut buf = itoa::Buffer::new();
-        let mut anchor = BytesStart::new("wp:anchor");
-        anchor.push_attribute(("behindDoc", if self.behind_doc { "1" } else { "0" }));
-        anchor.push_attribute(("simplePos", "0"));
-        anchor.push_attribute(("relativeHeight", buf.format(self.relative_height)));
+        let mut anchor = crate::text::FieldXmlStart::new("wp:anchor", emission)?;
+        anchor.push("behindDoc", if self.behind_doc { "1" } else { "0" })?;
+        anchor.push("simplePos", "0")?;
+        anchor.push("relativeHeight", buf.format(self.relative_height))?;
         // A zero distance is the default, and an absent attribute means the
         // same thing. Emitting zeros would change the bytes of every anchor
         // that never asked for a wrap distance, for no difference in meaning.
-        let dist_t = self.dist_t.0.to_string();
-        let dist_b = self.dist_b.0.to_string();
-        let dist_l = self.dist_l.0.to_string();
-        let dist_r = self.dist_r.0.to_string();
         if self.dist_t.0 != 0 {
-            anchor.push_attribute(("distT", dist_t.as_str()));
+            anchor.push("distT", buf.format(self.dist_t.0))?;
         }
         if self.dist_b.0 != 0 {
-            anchor.push_attribute(("distB", dist_b.as_str()));
+            anchor.push("distB", buf.format(self.dist_b.0))?;
         }
         if self.dist_l.0 != 0 {
-            anchor.push_attribute(("distL", dist_l.as_str()));
+            anchor.push("distL", buf.format(self.dist_l.0))?;
         }
         if self.dist_r.0 != 0 {
-            anchor.push_attribute(("distR", dist_r.as_str()));
+            anchor.push("distR", buf.format(self.dist_r.0))?;
         }
-        anchor.push_attribute(("locked", "0"));
-        anchor.push_attribute(("layoutInCell", "1"));
-        anchor.push_attribute(("allowOverlap", "1"));
-        writer.write_event(Event::Start(anchor))?;
+        anchor.push("locked", "0")?;
+        anchor.push("layoutInCell", "1")?;
+        anchor.push("allowOverlap", "1")?;
+        if emission.is_some_and(crate::text::FieldXmlEmission::note_drawing_bindings) {
+            anchor.push("xmlns:r", drawing_ns::R)?;
+            anchor.push("xmlns:wp", drawing_ns::WP)?;
+        }
+        anchor.write(writer, false)?;
 
         // wp:simplePos
-        let mut sp = BytesStart::new("wp:simplePos");
-        sp.push_attribute(("x", "0"));
-        sp.push_attribute(("y", "0"));
-        writer.write_event(Event::Empty(sp))?;
+        let mut sp = crate::text::FieldXmlStart::new("wp:simplePos", emission)?;
+        sp.push("x", "0")?;
+        sp.push("y", "0")?;
+        sp.write(writer, true)?;
 
         // wp:positionH
-        let mut pos_h = BytesStart::new("wp:positionH");
-        pos_h.push_attribute(("relativeFrom", self.pos_h_relative_from.to_str()));
-        writer.write_event(Event::Start(pos_h))?;
+        let mut pos_h = crate::text::FieldXmlStart::new("wp:positionH", emission)?;
+        pos_h.push("relativeFrom", self.pos_h_relative_from.to_str())?;
+        pos_h.write(writer, false)?;
         // An anchor positions by an alignment or by an offset, never both.
         if let Some(align) = self.pos_h_align {
-            writer.write_event(Event::Start(BytesStart::new("wp:align")))?;
-            writer.write_event(Event::Text(BytesText::new(align.to_str())))?;
+            crate::text::FieldXmlStart::new("wp:align", emission)?.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_text(writer, align.to_str(), None)?;
+            } else {
+                writer.write_event(Event::Text(BytesText::new(align.to_str())))?;
+            }
             writer.write_event(Event::End(BytesEnd::new("wp:align")))?;
         } else {
-            writer.write_event(Event::Start(BytesStart::new("wp:posOffset")))?;
-            writer.write_event(Event::Text(BytesText::new(
-                &self.pos_h_offset.0.to_string(),
-            )))?;
+            crate::text::FieldXmlStart::new("wp:posOffset", emission)?.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_text(writer, buf.format(self.pos_h_offset.0), None)?;
+            } else {
+                writer.write_event(Event::Text(BytesText::new(buf.format(self.pos_h_offset.0))))?;
+            }
             writer.write_event(Event::End(BytesEnd::new("wp:posOffset")))?;
         }
         writer.write_event(Event::End(BytesEnd::new("wp:positionH")))?;
 
         // wp:positionV
-        let mut pos_v = BytesStart::new("wp:positionV");
-        pos_v.push_attribute(("relativeFrom", self.pos_v_relative_from.to_str()));
-        writer.write_event(Event::Start(pos_v))?;
+        let mut pos_v = crate::text::FieldXmlStart::new("wp:positionV", emission)?;
+        pos_v.push("relativeFrom", self.pos_v_relative_from.to_str())?;
+        pos_v.write(writer, false)?;
         if let Some(align) = self.pos_v_align {
-            writer.write_event(Event::Start(BytesStart::new("wp:align")))?;
-            writer.write_event(Event::Text(BytesText::new(align.to_str())))?;
+            crate::text::FieldXmlStart::new("wp:align", emission)?.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_text(writer, align.to_str(), None)?;
+            } else {
+                writer.write_event(Event::Text(BytesText::new(align.to_str())))?;
+            }
             writer.write_event(Event::End(BytesEnd::new("wp:align")))?;
         } else {
-            writer.write_event(Event::Start(BytesStart::new("wp:posOffset")))?;
-            writer.write_event(Event::Text(BytesText::new(
-                &self.pos_v_offset.0.to_string(),
-            )))?;
+            crate::text::FieldXmlStart::new("wp:posOffset", emission)?.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_text(writer, buf.format(self.pos_v_offset.0), None)?;
+            } else {
+                writer.write_event(Event::Text(BytesText::new(buf.format(self.pos_v_offset.0))))?;
+            }
             writer.write_event(Event::End(BytesEnd::new("wp:posOffset")))?;
         }
         writer.write_event(Event::End(BytesEnd::new("wp:positionV")))?;
 
         // wp:extent
-        let mut extent = BytesStart::new("wp:extent");
-        extent.push_attribute(("cx", buf.format(self.extent_cx.0)));
-        extent.push_attribute(("cy", buf.format(self.extent_cy.0)));
-        writer.write_event(Event::Empty(extent))?;
+        let mut extent = crate::text::FieldXmlStart::new("wp:extent", emission)?;
+        extent.push("cx", buf.format(self.extent_cx.0))?;
+        extent.push("cy", buf.format(self.extent_cy.0))?;
+        extent.write(writer, true)?;
 
         // The wrapping element, in the sequence position wp:wrapNone held.
-        write_wrap_element(writer, self.wrap)?;
+        write_wrap_element(writer, self.wrap, emission)?;
 
         // wp:docPr
         write_doc_pr(
@@ -1342,6 +1380,7 @@ impl CT_Anchor {
             self.description.as_deref(),
             self.title.as_deref(),
             self.decorative,
+            emission,
         )?;
 
         write_graphic_element(
@@ -1351,6 +1390,7 @@ impl CT_Anchor {
             self.extent_cy,
             self.name.as_deref(),
             self.source_rect,
+            emission,
         )?;
 
         writer.write_event(Event::End(BytesEnd::new("wp:anchor")))?;
@@ -1455,65 +1495,65 @@ impl CT_Inline {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) => {
                     let ename = e.name();
-                    if matches_local_name(ename.as_ref(), b"extent") {
+                    let action = DrawingChildAction::for_name(
+                        DrawingContainerKind::Inline,
+                        ename.as_ref(),
+                        true,
+                        canonical_wp_element(reader, e, b"docPr"),
+                        false,
+                    );
+                    if action == DrawingChildAction::Extent {
+                        read_extent(e, &mut cx, &mut cy)?;
+                    } else if action == DrawingChildAction::DocPr {
                         for attr in e.attributes() {
                             let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"cx" {
-                                cx = Emu(val.parse()?);
-                            } else if key == b"cy" {
-                                cy = Emu(val.parse()?);
+                            match DrawingDocPrAttribute::read(&attr, e.decoder())? {
+                                DrawingDocPrAttribute::Description(value) => {
+                                    description = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Title(value) => {
+                                    title = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Name(value) => {
+                                    name = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Id(value) => doc_pr_id = Some(value),
+                                DrawingDocPrAttribute::Ignored => {}
                             }
                         }
-                    } else if canonical_wp_element(reader, e, b"docPr") {
-                        for attr in e.attributes() {
-                            let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"descr" {
-                                description = Some(val.to_string());
-                            } else if key == b"title" {
-                                title = Some(val.to_string());
-                            } else if key == b"name" {
-                                name = Some(val.to_string());
-                            } else if key == b"id" {
-                                doc_pr_id = Some(val.parse()?);
-                            }
-                        }
-                    } else if matches_local_name(ename.as_ref(), b"srcRect") {
+                    } else if action == DrawingChildAction::SourceRect {
                         source_rect = Some(parse_source_rect(e)?);
                     }
                 }
                 Ok(Event::Start(ref e)) => {
                     let ename = e.name();
-                    if matches_local_name(ename.as_ref(), b"srcRect") {
+                    let action = DrawingChildAction::for_name(
+                        DrawingContainerKind::Inline,
+                        ename.as_ref(),
+                        false,
+                        canonical_wp_element(reader, e, b"docPr"),
+                        false,
+                    );
+                    if action == DrawingChildAction::SourceRect {
                         source_rect = Some(parse_source_rect(e)?);
                         reader.read_to_end_into(ename, &mut Vec::new())?;
-                    } else if matches_local_name(ename.as_ref(), b"blip") {
+                    } else if action == DrawingChildAction::Blip {
                         reader.read_to_end_into(ename, &mut Vec::new())?;
-                    } else if canonical_wp_element(reader, e, b"docPr") {
+                    } else if action == DrawingChildAction::DocPr {
                         for attr in e.attributes() {
                             let attr = attr?;
-                            let key = attr.key.as_ref();
-                            let val = attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                e.decoder(),
-                            )?;
-                            if key == b"descr" {
-                                description = Some(val.to_string());
-                            } else if key == b"title" {
-                                title = Some(val.to_string());
-                            } else if key == b"name" {
-                                name = Some(val.to_string());
-                            } else if key == b"id" {
-                                doc_pr_id = Some(val.parse()?);
+                            match DrawingDocPrAttribute::read(&attr, e.decoder())? {
+                                DrawingDocPrAttribute::Description(value) => {
+                                    description = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Title(value) => {
+                                    title = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Name(value) => {
+                                    name = Some(value.into_owned())
+                                }
+                                DrawingDocPrAttribute::Id(value) => doc_pr_id = Some(value),
+                                DrawingDocPrAttribute::Ignored => {}
                             }
                         }
                         decorative = read_doc_pr_decorative(reader)?;
@@ -1521,7 +1561,9 @@ impl CT_Inline {
                         // Continue parsing nested elements (graphic, graphicData, pic, etc.)
                     }
                 }
-                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"inline") => {
+                Ok(Event::End(ref e))
+                    if DrawingContainerKind::Inline.matches_end(e.name().as_ref()) =>
+                {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -1549,6 +1591,14 @@ impl CT_Inline {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.to_xml_in(writer, None)
+    }
+
+    fn to_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         // If we have raw XML from parsing, use it for perfect round-trip
         if let Some(ref raw) = self.raw_xml {
             writer.write_indent()?;
@@ -1560,18 +1610,22 @@ impl CT_Inline {
 
         // wp:inline
         let mut buf = itoa::Buffer::new();
-        let mut inline = BytesStart::new("wp:inline");
-        inline.push_attribute(("distT", "0"));
-        inline.push_attribute(("distB", "0"));
-        inline.push_attribute(("distL", "0"));
-        inline.push_attribute(("distR", "0"));
-        writer.write_event(Event::Start(inline))?;
+        let mut inline = crate::text::FieldXmlStart::new("wp:inline", emission)?;
+        inline.push("distT", "0")?;
+        inline.push("distB", "0")?;
+        inline.push("distL", "0")?;
+        inline.push("distR", "0")?;
+        if emission.is_some_and(crate::text::FieldXmlEmission::note_drawing_bindings) {
+            inline.push("xmlns:r", drawing_ns::R)?;
+            inline.push("xmlns:wp", drawing_ns::WP)?;
+        }
+        inline.write(writer, false)?;
 
         // wp:extent
-        let mut extent = BytesStart::new("wp:extent");
-        extent.push_attribute(("cx", buf.format(self.extent_cx.0)));
-        extent.push_attribute(("cy", buf.format(self.extent_cy.0)));
-        writer.write_event(Event::Empty(extent))?;
+        let mut extent = crate::text::FieldXmlStart::new("wp:extent", emission)?;
+        extent.push("cx", buf.format(self.extent_cx.0))?;
+        extent.push("cy", buf.format(self.extent_cy.0))?;
+        extent.write(writer, true)?;
 
         // wp:docPr
         write_doc_pr(
@@ -1581,6 +1635,7 @@ impl CT_Inline {
             self.description.as_deref(),
             self.title.as_deref(),
             self.decorative,
+            emission,
         )?;
 
         // a:graphic
@@ -1591,6 +1646,7 @@ impl CT_Inline {
             self.extent_cy,
             self.name.as_deref(),
             self.source_rect,
+            emission,
         )?;
 
         writer.write_event(Event::End(BytesEnd::new("wp:inline")))?;
@@ -1872,6 +1928,8 @@ fn canonical_wp_element(
 fn text_box_body(
     reader: &mut NsReader<&[u8]>,
     start: &BytesStart<'_>,
+    cursor: Option<&crate::document::ControlSourceCursor<'_>>,
+    event_start: u64,
 ) -> Result<crate::document::CT_Body> {
     let mut bindings = Vec::new();
     for (prefix, namespace) in reader.resolver().bindings() {
@@ -1883,8 +1941,20 @@ fn text_box_body(
             .map_err(quick_xml::Error::from)?;
         bindings.push((prefix.to_owned(), namespace.into_owned()));
     }
-    let raw =
-        crate::text::raw_with_external_bindings(&capture_ns_element(reader, start)?, &bindings)?;
+    let captured = capture_ns_element(reader, start)?;
+    let input = cursor.and_then(|cursor| {
+        cursor.field_input(reader, event_start..reader.buffer_position(), &captured)
+    });
+    let (raw, input) = if let Some(input) = input {
+        let (bytes, input) = input.close_namespaces(&captured, &bindings)?;
+        (bytes, Some(input))
+    } else {
+        (
+            crate::text::raw_with_external_bindings(&captured, &bindings)?,
+            None,
+        )
+    };
+    let mut controls = input.as_ref().map(|input| input.cursor(&raw)).transpose()?;
     let mut body_reader = Reader::from_reader(raw.as_slice());
     let mut buffer = Vec::new();
     let Event::Start(root) = body_reader.read_event_into(&mut buffer)? else {
@@ -1898,6 +1968,7 @@ fn text_box_body(
         &prefixes,
         &bindings,
         b"txbxContent",
+        controls.as_mut(),
     )
 }
 
@@ -1964,28 +2035,29 @@ fn write_graphic_element<W: std::io::Write>(
     cy: Emu,
     name: Option<&str>,
     source_rect: Option<SourceRect>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let mut buf = itoa::Buffer::new();
-    let mut graphic = BytesStart::new("a:graphic");
-    graphic.push_attribute(("xmlns:a", drawing_ns::A));
-    writer.write_event(Event::Start(graphic))?;
+    let mut graphic = crate::text::FieldXmlStart::new("a:graphic", emission)?;
+    graphic.push("xmlns:a", drawing_ns::A)?;
+    graphic.write(writer, false)?;
 
-    let mut gd = BytesStart::new("a:graphicData");
-    gd.push_attribute((
+    let mut gd = crate::text::FieldXmlStart::new("a:graphicData", emission)?;
+    gd.push(
         "uri",
         match payload {
             DrawingPayload::Picture(_) => drawing_ns::PIC,
             DrawingPayload::Chart(_) => drawing_ns::C,
         },
-    ));
-    writer.write_event(Event::Start(gd))?;
+    )?;
+    gd.write(writer, false)?;
 
     if let DrawingPayload::Chart(chart_rel_id) = payload {
-        let mut chart = BytesStart::new("c:chart");
-        chart.push_attribute(("xmlns:c", drawing_ns::C));
-        chart.push_attribute(("xmlns:r", drawing_ns::R));
-        chart.push_attribute(("r:id", chart_rel_id));
-        writer.write_event(Event::Empty(chart))?;
+        let mut chart = crate::text::FieldXmlStart::new("c:chart", emission)?;
+        chart.push("xmlns:c", drawing_ns::C)?;
+        chart.push("xmlns:r", drawing_ns::R)?;
+        chart.push("r:id", chart_rel_id)?;
+        chart.write(writer, true)?;
         writer.write_event(Event::End(BytesEnd::new("a:graphicData")))?;
         writer.write_event(Event::End(BytesEnd::new("a:graphic")))?;
         return Ok(());
@@ -1995,57 +2067,53 @@ fn write_graphic_element<W: std::io::Write>(
         unreachable!();
     };
 
-    let mut pic = BytesStart::new("pic:pic");
-    pic.push_attribute(("xmlns:pic", drawing_ns::PIC));
-    writer.write_event(Event::Start(pic))?;
+    let mut pic = crate::text::FieldXmlStart::new("pic:pic", emission)?;
+    pic.push("xmlns:pic", drawing_ns::PIC)?;
+    pic.write(writer, false)?;
 
     // pic:nvPicPr
-    writer.write_event(Event::Start(BytesStart::new("pic:nvPicPr")))?;
-    let mut cnvpr = BytesStart::new("pic:cNvPr");
-    cnvpr.push_attribute(("id", "0"));
-    cnvpr.push_attribute(("name", name.unwrap_or("Picture")));
-    writer.write_event(Event::Empty(cnvpr))?;
-    writer.write_event(Event::Empty(BytesStart::new("pic:cNvPicPr")))?;
+    crate::text::FieldXmlStart::new("pic:nvPicPr", emission)?.write(writer, false)?;
+    let mut cnvpr = crate::text::FieldXmlStart::new("pic:cNvPr", emission)?;
+    cnvpr.push("id", "0")?;
+    cnvpr.push("name", name.unwrap_or("Picture"))?;
+    cnvpr.write(writer, true)?;
+    crate::text::FieldXmlStart::new("pic:cNvPicPr", emission)?.write(writer, true)?;
     writer.write_event(Event::End(BytesEnd::new("pic:nvPicPr")))?;
 
     // pic:blipFill
-    writer.write_event(Event::Start(BytesStart::new("pic:blipFill")))?;
-    let mut blip = BytesStart::new("a:blip");
-    blip.push_attribute(("r:embed", embed_id));
-    writer.write_event(Event::Empty(blip))?;
+    crate::text::FieldXmlStart::new("pic:blipFill", emission)?.write(writer, false)?;
+    let mut blip = crate::text::FieldXmlStart::new("a:blip", emission)?;
+    blip.push("r:embed", embed_id)?;
+    blip.write(writer, true)?;
     if let Some(source_rect) = source_rect {
-        let mut rect = BytesStart::new("a:srcRect");
-        let left = source_rect.left.to_string();
-        let top = source_rect.top.to_string();
-        let right = source_rect.right.to_string();
-        let bottom = source_rect.bottom.to_string();
-        rect.push_attribute(("l", left.as_str()));
-        rect.push_attribute(("t", top.as_str()));
-        rect.push_attribute(("r", right.as_str()));
-        rect.push_attribute(("b", bottom.as_str()));
-        writer.write_event(Event::Empty(rect))?;
+        let mut rect = crate::text::FieldXmlStart::new("a:srcRect", emission)?;
+        rect.push("l", buf.format(source_rect.left))?;
+        rect.push("t", buf.format(source_rect.top))?;
+        rect.push("r", buf.format(source_rect.right))?;
+        rect.push("b", buf.format(source_rect.bottom))?;
+        rect.write(writer, true)?;
     }
-    writer.write_event(Event::Start(BytesStart::new("a:stretch")))?;
-    writer.write_event(Event::Empty(BytesStart::new("a:fillRect")))?;
+    crate::text::FieldXmlStart::new("a:stretch", emission)?.write(writer, false)?;
+    crate::text::FieldXmlStart::new("a:fillRect", emission)?.write(writer, true)?;
     writer.write_event(Event::End(BytesEnd::new("a:stretch")))?;
     writer.write_event(Event::End(BytesEnd::new("pic:blipFill")))?;
 
     // pic:spPr
-    writer.write_event(Event::Start(BytesStart::new("pic:spPr")))?;
-    writer.write_event(Event::Start(BytesStart::new("a:xfrm")))?;
-    let mut off = BytesStart::new("a:off");
-    off.push_attribute(("x", "0"));
-    off.push_attribute(("y", "0"));
-    writer.write_event(Event::Empty(off))?;
-    let mut ext = BytesStart::new("a:ext");
-    ext.push_attribute(("cx", buf.format(cx.0)));
-    ext.push_attribute(("cy", buf.format(cy.0)));
-    writer.write_event(Event::Empty(ext))?;
+    crate::text::FieldXmlStart::new("pic:spPr", emission)?.write(writer, false)?;
+    crate::text::FieldXmlStart::new("a:xfrm", emission)?.write(writer, false)?;
+    let mut off = crate::text::FieldXmlStart::new("a:off", emission)?;
+    off.push("x", "0")?;
+    off.push("y", "0")?;
+    off.write(writer, true)?;
+    let mut ext = crate::text::FieldXmlStart::new("a:ext", emission)?;
+    ext.push("cx", buf.format(cx.0))?;
+    ext.push("cy", buf.format(cy.0))?;
+    ext.write(writer, true)?;
     writer.write_event(Event::End(BytesEnd::new("a:xfrm")))?;
-    let mut prst = BytesStart::new("a:prstGeom");
-    prst.push_attribute(("prst", "rect"));
-    writer.write_event(Event::Start(prst))?;
-    writer.write_event(Event::Empty(BytesStart::new("a:avLst")))?;
+    let mut prst = crate::text::FieldXmlStart::new("a:prstGeom", emission)?;
+    prst.push("prst", "rect")?;
+    prst.write(writer, false)?;
+    crate::text::FieldXmlStart::new("a:avLst", emission)?.write(writer, true)?;
     writer.write_event(Event::End(BytesEnd::new("a:prstGeom")))?;
     writer.write_event(Event::End(BytesEnd::new("pic:spPr")))?;
 
@@ -2056,7 +2124,7 @@ fn write_graphic_element<W: std::io::Write>(
     Ok(())
 }
 
-fn parse_source_rect(element: &BytesStart<'_>) -> Result<SourceRect> {
+pub(crate) fn parse_source_rect(element: &BytesStart<'_>) -> Result<SourceRect> {
     let mut rect = SourceRect::default();
     for attribute in element.attributes() {
         let attribute = attribute?;
@@ -2077,6 +2145,209 @@ fn parse_source_rect(element: &BytesStart<'_>) -> Result<SourceRect> {
 pub struct CT_Drawing {
     pub inline: Option<CT_Inline>,
     pub anchor: Option<CT_Anchor>,
+}
+
+/// Apply the actual Empty-extent attribute action without constructing a drawing.
+/// Missing dimensions retain the caller's previous values.
+pub(crate) fn read_extent(element: &BytesStart<'_>, cx: &mut Emu, cy: &mut Emu) -> Result<()> {
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        let key = attribute.key.as_ref();
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+        if key == b"cx" {
+            *cx = Emu(value.parse()?);
+        } else if key == b"cy" {
+            *cy = Emu(value.parse()?);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) struct AnchorAttributes {
+    behind_doc: bool,
+    relative_height: u32,
+    dist_t: Emu,
+    dist_b: Emu,
+    dist_l: Emu,
+    dist_r: Emu,
+}
+
+impl AnchorAttributes {
+    pub(crate) fn read(start: &BytesStart<'_>) -> Result<Self> {
+        let mut result = Self {
+            behind_doc: false,
+            relative_height: 0,
+            dist_t: Emu(0),
+            dist_b: Emu(0),
+            dist_l: Emu(0),
+            dist_r: Emu(0),
+        };
+        for attribute in start.attributes() {
+            let attribute = attribute?;
+            let value = std::str::from_utf8(&attribute.value)?;
+            match attribute.key.as_ref() {
+                b"behindDoc" => result.behind_doc = value == "1" || value == "true",
+                b"relativeHeight" => result.relative_height = value.parse().unwrap_or(0),
+                b"distT" => result.dist_t = Emu(value.parse().unwrap_or(0)),
+                b"distB" => result.dist_b = Emu(value.parse().unwrap_or(0)),
+                b"distL" => result.dist_l = Emu(value.parse().unwrap_or(0)),
+                b"distR" => result.dist_r = Emu(value.parse().unwrap_or(0)),
+                _ => {}
+            }
+        }
+        Ok(result)
+    }
+}
+
+pub(crate) enum DrawingPositionReference {
+    Horizontal(ST_RelativeFromH),
+    Vertical(ST_RelativeFromV),
+}
+
+impl DrawingPositionReference {
+    pub(crate) fn read(start: &BytesStart<'_>, horizontal: bool) -> Result<Option<Self>> {
+        let mut selected = None;
+        for attribute in start.attributes() {
+            let attribute = attribute?;
+            if attribute.key.as_ref() == b"relativeFrom" {
+                let value = std::str::from_utf8(&attribute.value)?;
+                selected = Some(if horizontal {
+                    Self::Horizontal(ST_RelativeFromH::from_str(value))
+                } else {
+                    Self::Vertical(ST_RelativeFromV::from_str(value))
+                });
+            }
+        }
+        Ok(selected)
+    }
+}
+
+/// One actual container event action. Consuming Started actions do not expose
+/// their descendants to the container loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrawingChildAction {
+    Extent,
+    DocPr,
+    SourceRect,
+    PositionH,
+    PositionV,
+    Wrap(WrapType),
+    ShapeProperties,
+    TextBox,
+    Blip,
+    Walk,
+}
+
+impl DrawingChildAction {
+    pub(crate) fn for_name(
+        kind: DrawingContainerKind,
+        name: &[u8],
+        empty: bool,
+        doc_pr: bool,
+        word_text_box: bool,
+    ) -> Self {
+        if empty {
+            if matches_local_name(name, b"extent") {
+                Self::Extent
+            } else if doc_pr {
+                Self::DocPr
+            } else if matches_local_name(name, b"srcRect") {
+                Self::SourceRect
+            } else if kind == DrawingContainerKind::Anchor {
+                wrap_type_of(name).map_or(Self::Walk, Self::Wrap)
+            } else {
+                Self::Walk
+            }
+        } else if matches_local_name(name, b"srcRect") {
+            Self::SourceRect
+        } else if kind == DrawingContainerKind::Anchor {
+            if matches_local_name(name, b"positionH") {
+                Self::PositionH
+            } else if let Some(wrap) = wrap_type_of(name) {
+                Self::Wrap(wrap)
+            } else if matches_local_name(name, b"positionV") {
+                Self::PositionV
+            } else if matches_local_name(name, b"spPr") {
+                Self::ShapeProperties
+            } else if word_text_box {
+                Self::TextBox
+            } else if matches_local_name(name, b"blip") {
+                Self::Blip
+            } else if doc_pr {
+                Self::DocPr
+            } else {
+                Self::Walk
+            }
+        } else if matches_local_name(name, b"blip") {
+            Self::Blip
+        } else if doc_pr {
+            Self::DocPr
+        } else {
+            Self::Walk
+        }
+    }
+}
+
+/// The actual docPr reader decodes every attribute, including ignored ones.
+pub(crate) enum DrawingDocPrAttribute<'a> {
+    Description(std::borrow::Cow<'a, str>),
+    Title(std::borrow::Cow<'a, str>),
+    Name(std::borrow::Cow<'a, str>),
+    Id(u32),
+    Ignored,
+}
+
+impl<'a> DrawingDocPrAttribute<'a> {
+    pub(crate) fn read(
+        attribute: &'a quick_xml::events::attributes::Attribute<'_>,
+        decoder: quick_xml::encoding::Decoder,
+    ) -> Result<Self> {
+        let value = attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?;
+        Ok(match attribute.key.as_ref() {
+            b"descr" => Self::Description(value),
+            b"title" => Self::Title(value),
+            b"name" => Self::Name(value),
+            b"id" => Self::Id(value.parse()?),
+            _ => Self::Ignored,
+        })
+    }
+}
+
+/// Direct nonempty drawing containers selected by the actual drawing reader.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DrawingContainerKind {
+    Inline,
+    Anchor,
+}
+impl DrawingContainerKind {
+    pub(crate) fn matches_end(self, name: &[u8]) -> bool {
+        matches_local_name(
+            name,
+            match self {
+                Self::Inline => b"inline",
+                Self::Anchor => b"anchor",
+            },
+        )
+    }
+
+    pub(crate) fn for_name(name: &[u8], empty: bool) -> Option<Self> {
+        if empty {
+            None
+        } else if matches_local_name(name, b"inline") {
+            Some(Self::Inline)
+        } else if matches_local_name(name, b"anchor") {
+            Some(Self::Anchor)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DrawingSourceMaps {
+    pub(crate) inline: Option<std::sync::Arc<crate::document::WordSourceMap>>,
+    pub(crate) anchor: Option<std::sync::Arc<crate::document::WordSourceMap>>,
 }
 
 impl CT_Drawing {
@@ -2109,6 +2380,16 @@ impl CT_Drawing {
         prefixes: &[String],
         ancestor_prefixes: &[String],
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_in(reader, prefixes, ancestor_prefixes, None, None)
+    }
+
+    pub(crate) fn from_xml_with_prefixes_in(
+        reader: &mut Reader<&[u8]>,
+        prefixes: &[String],
+        ancestor_prefixes: &[String],
+        cursor: Option<&crate::document::ControlSourceCursor<'_>>,
+        read_output: Option<&mut DrawingSourceMaps>,
+    ) -> Result<Self> {
         #[cfg(test)]
         FX211_DRAWING_READS.with(|reads| reads.set(reads.get() + 1));
         let mut bindings = namespace_bindings(prefixes);
@@ -2135,17 +2416,27 @@ impl CT_Drawing {
             })
             .cloned()
             .collect();
+        let mut retained = DrawingSourceMaps::default();
         let mut inline = None;
         let mut anchor = None;
         let mut buf = Vec::new();
 
         loop {
+            let event_start = reader.buffer_position();
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
-                    if matches_local_name(name.as_ref(), b"inline") {
+                    if DrawingContainerKind::for_name(name.as_ref(), false)
+                        == Some(DrawingContainerKind::Inline)
+                    {
                         // Capture full raw XML, then re-parse for structured fields
-                        let raw = capture_element(reader, e)?;
+                        let (raw, captured) = if read_output.is_some()
+                            && let Some(cursor) = cursor
+                        {
+                            cursor.capture_element(reader, e, event_start)?
+                        } else {
+                            (capture_element(reader, e)?, None)
+                        };
                         let scoped_raw = crate::text::raw_with_external_bindings(&raw, &bindings)?;
                         let mut re_reader = NsReader::from_reader(scoped_raw.as_slice());
                         re_reader.config_mut().trim_text(false);
@@ -2161,10 +2452,19 @@ impl CT_Drawing {
                                     (inl.embed_id, inl.link_id) =
                                         image_relationship_ids(&scoped_raw)?;
                                     inl.chart_rel_id = chart_relationship_id(&scoped_raw)?;
-                                    inl.raw_xml = Some(crate::text::raw_with_external_bindings(
-                                        &raw,
-                                        &lost_bindings,
-                                    )?);
+                                    let (stored, map) =
+                                        crate::text::raw_with_external_bindings_and_map(
+                                            &raw,
+                                            &lost_bindings,
+                                            None,
+                                            captured.as_ref().map(|input| {
+                                                std::sync::Arc::new(
+                                                    input.projection_parts().0.clone(),
+                                                )
+                                            }),
+                                        )?;
+                                    inl.raw_xml = Some(stored);
+                                    retained.inline = map;
                                     inline = Some(inl);
                                     break;
                                 }
@@ -2174,10 +2474,24 @@ impl CT_Drawing {
                             }
                             rbuf.clear();
                         }
-                    } else if matches_local_name(name.as_ref(), b"anchor") {
+                    } else if DrawingContainerKind::for_name(name.as_ref(), false)
+                        == Some(DrawingContainerKind::Anchor)
+                    {
                         // Capture full raw XML, then re-parse for structured fields
-                        let raw = capture_element(reader, e)?;
-                        let scoped_raw = crate::text::raw_with_external_bindings(&raw, &bindings)?;
+                        let (raw, captured) = if let Some(cursor) = cursor {
+                            cursor.capture_element(reader, e, event_start)?
+                        } else {
+                            (capture_element(reader, e)?, None)
+                        };
+                        let (scoped_raw, scoped_input) = if let Some(input) = captured.as_ref() {
+                            let (bytes, input) = input.close_namespaces(&raw, &bindings)?;
+                            (bytes, Some(input))
+                        } else {
+                            (
+                                crate::text::raw_with_external_bindings(&raw, &bindings)?,
+                                None,
+                            )
+                        };
                         let mut re_reader = NsReader::from_reader(scoped_raw.as_slice());
                         re_reader.config_mut().trim_text(false);
                         let mut rbuf = Vec::new();
@@ -2186,15 +2500,32 @@ impl CT_Drawing {
                                 Ok(Event::Start(ref ie))
                                     if matches_local_name(ie.name().as_ref(), b"anchor") =>
                                 {
-                                    let mut anc = CT_Anchor::from_xml_admitted(&mut re_reader, ie)?;
+                                    let mut anc = CT_Anchor::from_xml_admitted_in(
+                                        &mut re_reader,
+                                        ie,
+                                        scoped_input
+                                            .as_ref()
+                                            .map(|input| (input, scoped_raw.as_slice())),
+                                    )?;
                                     anc.doc_pr_id = non_visual_drawing_id(&scoped_raw)?;
                                     (anc.embed_id, anc.link_id) =
                                         image_relationship_ids(&scoped_raw)?;
                                     anc.chart_rel_id = chart_relationship_id(&scoped_raw)?;
-                                    anc.raw_xml = Some(crate::text::raw_with_external_bindings(
-                                        &raw,
-                                        &lost_bindings,
-                                    )?);
+                                    let (stored, map) =
+                                        crate::text::raw_with_external_bindings_and_map(
+                                            &raw,
+                                            &lost_bindings,
+                                            None,
+                                            read_output.as_ref().and(captured.as_ref()).map(
+                                                |input| {
+                                                    std::sync::Arc::new(
+                                                        input.projection_parts().0.clone(),
+                                                    )
+                                                },
+                                            ),
+                                        )?;
+                                    anc.raw_xml = Some(stored);
+                                    retained.anchor = map;
                                     // Projection scope excludes only prefixes absent from the
                                     // entire physical owner, including opaque values and text.
                                     // Default bindings and all referenced foreign bindings stay.
@@ -2242,23 +2573,65 @@ impl CT_Drawing {
             buf.clear();
         }
 
+        if let Some(output) = read_output {
+            *output = retained;
+        }
         Ok(CT_Drawing { inline, anchor })
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role_in(writer, crate::text::XmlWriteRole::Publication, None, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         crate::document::admit_word_model(crate::document::WordOwner::Drawing(self))?;
-        let drawing = BytesStart::new("w:drawing");
-        writer.write_event(Event::Start(drawing))?;
-
-        if let Some(ref inl) = self.inline {
-            inl.to_xml(writer)?;
+        let mut root = crate::text::FieldXmlStart::new("w:drawing", emission)?;
+        let source = role == crate::text::XmlWriteRole::Source;
+        let prefix = if source {
+            std::borrow::Cow::Owned(root.qualify(&[], role, source_context)?)
+        } else {
+            std::borrow::Cow::Borrowed("w")
+        };
+        root.write(writer, false)?;
+        // Raw payloads keep their original consumer. Fresh payloads retain
+        // their existing concrete local binding declarations.
+        if let Some(inline) = &self.inline {
+            inline.to_xml_in(writer, emission)?;
         }
-        if let Some(ref anc) = self.anchor {
-            anc.to_xml(writer)?;
+        if let Some(anchor) = &self.anchor {
+            anchor.to_xml_in(writer, emission)?;
         }
-
-        writer.write_event(Event::End(BytesEnd::new("w:drawing")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "drawing")?;
+        } else if source {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:drawing"))))?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new("w:drawing")))?;
+        }
         Ok(())
+    }
+}
+
+/// Decode only the actually selected unqualified metadata id attribute.
+pub(crate) fn drawing_id_value(
+    attribute: &quick_xml::events::attributes::Attribute<'_>,
+    selected: bool,
+    decoder: quick_xml::encoding::Decoder,
+) -> Result<Option<u32>> {
+    if selected {
+        Ok(Some(
+            attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)?
+                .parse()?,
+        ))
+    } else {
+        Ok(None)
     }
 }
 
@@ -2275,13 +2648,12 @@ fn non_visual_drawing_id(xml: &[u8]) -> Result<u32> {
                 for attribute in element.attributes() {
                     let attribute = attribute?;
                     let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-                    if matches!(namespace, ResolveResult::Unbound) && local.as_ref() == b"id" {
-                        return Ok(attribute
-                            .decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                element.decoder(),
-                            )?
-                            .parse()?);
+                    if let Some(value) = drawing_id_value(
+                        &attribute,
+                        matches!(namespace, ResolveResult::Unbound) && local.as_ref() == b"id",
+                        element.decoder(),
+                    )? {
+                        return Ok(value);
                     }
                 }
                 return Err(crate::OxmlError::InvalidValue(
@@ -2299,6 +2671,51 @@ fn non_visual_drawing_id(xml: &[u8]) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drawing_container_shared_actions_preserve_anchor_and_decorative_policy() {
+        for horizontal in [false, true] {
+            let start =
+                BytesStart::from_content(r#"position relativeFrom="column" unused="&unknown;""#, 8);
+            let value = DrawingPositionReference::read(&start, horizontal)
+                .unwrap()
+                .unwrap();
+            match value {
+                DrawingPositionReference::Horizontal(value) => {
+                    assert_eq!(value, ST_RelativeFromH::Column)
+                }
+                DrawingPositionReference::Vertical(value) => {
+                    assert_eq!(value, ST_RelativeFromV::Page)
+                }
+            }
+        }
+        let anchor = BytesStart::from_content(
+            r#"anchor behindDoc="true" relativeHeight="bad" distT="-2" distB="bad""#,
+            6,
+        );
+        let parsed = AnchorAttributes::read(&anchor).unwrap();
+        assert!(parsed.behind_doc);
+        assert_eq!(parsed.relative_height, 0);
+        assert_eq!(parsed.dist_t, Emu(-2));
+        assert_eq!(parsed.dist_b, Emu(0));
+        let bad = BytesStart::from_content(r#"decorative val="&unknown;""#, 10);
+        assert!(DecorativeChildPlan::read(&bad, 2, true, false, true, bad.decoder()).is_err());
+        assert!(
+            !DecorativeChildPlan::read(&bad, 2, false, false, true, bad.decoder())
+                .unwrap()
+                .decorative
+        );
+        assert!(
+            !DecorativeChildPlan::read(&bad, 3, true, false, true, bad.decoder())
+                .unwrap()
+                .admitted
+        );
+        assert!(
+            !DecorativeChildPlan::read(&bad, 2, true, false, false, bad.decoder())
+                .unwrap()
+                .admitted
+        );
+    }
+
     use super::*;
 
     #[test]

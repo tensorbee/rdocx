@@ -24,9 +24,9 @@ use crate::properties::is_word_element;
 use crate::revision::{CT_Revision, RevisionKind};
 use crate::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 use crate::text::{
-    AcceptedRunPath, AcceptedRunPathSegment, BoundaryOwner, CT_P, CT_R, RunContent,
-    boundary_owners, optional_word_attribute, raw_with_external_bindings, run_wrapper_paragraph,
-    set_simple_field_source, simple_field_source, with_run_wrapper_content,
+    AcceptedRunPath, AcceptedRunPathSegment, BoundaryOwner, CT_P, CT_R, FieldXmlEmission,
+    RunContent, WordExtraSourceMaps, WordOperationWork, boundary_owners, optional_word_attribute,
+    raw_with_external_bindings, simple_field_source,
 };
 
 /// Replace all occurrences of `placeholder` with `replacement` in a paragraph.
@@ -38,13 +38,46 @@ use crate::text::{
 /// Preserves the formatting of the first matched run. Returns the number of
 /// replacements made.
 pub fn replace_in_paragraph(para: &mut CT_P, placeholder: &str, replacement: &str) -> usize {
+    try_replace_in_paragraph(para, placeholder, replacement).unwrap_or(0)
+}
+
+/// Fallible paragraph replacement for checked document operations.
+#[doc(hidden)]
+pub fn try_replace_in_paragraph(
+    para: &mut CT_P,
+    placeholder: &str,
+    replacement: &str,
+) -> crate::Result<usize> {
     if placeholder.is_empty() {
-        return 0;
+        return Ok(0);
     }
-    replace_matches(para, &mut |text, from| {
-        let start = from + text[from..].find(placeholder)?;
-        Some((start, start + placeholder.len(), replacement.to_owned()))
+    install_paragraph_replacement(para, |candidate| {
+        replace_matches(candidate, &mut |text, from| {
+            let start = from + text[from..].find(placeholder)?;
+            Some((start, start + placeholder.len(), replacement.to_owned()))
+        })
     })
+}
+
+/// Run replacement, nested removal and wrapper write-back on one uninstalled
+/// candidate. Refusals propagate and leave `para` unchanged.
+fn install_paragraph_replacement(
+    para: &mut CT_P,
+    edit: impl FnOnce(&mut CT_P) -> crate::Result<usize>,
+) -> crate::Result<usize> {
+    crate::document::admit_word_model(crate::document::WordOwner::Paragraph(para))?;
+    let mut candidate = para.clone();
+    match edit(&mut candidate) {
+        Ok(count) if count > 0 => {
+            let previous = std::mem::replace(para, candidate);
+            crate::text::discard_checked_paragraph(previous);
+            Ok(count)
+        }
+        result => {
+            crate::text::discard_checked_paragraph(candidate);
+            result
+        }
+    }
 }
 
 /// Apply prepared edits to original replaceable stretches atomically.
@@ -62,16 +95,95 @@ pub fn replace_prepared_occurrences(
         Option<crate::properties::CT_RPr>,
     )],
 ) -> crate::Result<()> {
+    let borrowed = occurrences
+        .iter()
+        .map(|(stretch, range, replacement, properties)| {
+            (
+                *stretch,
+                range.clone(),
+                replacement.as_str(),
+                properties.as_ref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    replace_prepared_occurrences_borrowed(paragraph, &borrowed)
+}
+
+/// The substantive prepared replacement kernel. Replacement payloads stay
+/// borrowed until the existing edit installs owned run text and properties.
+#[allow(clippy::type_complexity)] // The borrowed form of the existing four-field coordination surface.
+pub(crate) fn replace_prepared_occurrences_borrowed(
+    paragraph: &mut CT_P,
+    occurrences: &[(
+        usize,
+        std::ops::Range<usize>,
+        &str,
+        Option<&crate::properties::CT_RPr>,
+    )],
+) -> crate::Result<()> {
+    replace_prepared_occurrences_borrowed_in(paragraph, occurrences, None, None, None)
+}
+
+pub(crate) struct PreparedTemplateInputs<'a, 'b> {
+    pub(crate) datums: &'b std::collections::HashMap<usize, &'a serde_json::Value>,
+    pub(crate) operands: &'b [(
+        Option<&'b std::cell::Cell<bool>>,
+        &'b [&'a serde_json::Value],
+    )],
+}
+
+#[allow(clippy::type_complexity)] // Same borrowed payloads and actual optional operation companions.
+pub(crate) fn replace_prepared_occurrences_borrowed_in(
+    paragraph: &mut CT_P,
+    occurrences: &[(
+        usize,
+        std::ops::Range<usize>,
+        &str,
+        Option<&crate::properties::CT_RPr>,
+    )],
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+    inputs: Option<PreparedTemplateInputs<'_, '_>>,
+) -> crate::Result<()> {
+    let walk = text_runs_in(paragraph, extra_maps.as_deref(), work.as_deref_mut())?;
+    let stretches = text_stretches(paragraph, &walk);
+    let edits = prepared_walk_edits(occurrences, &stretches)?;
+    replace_prepared_walk(
+        paragraph,
+        edits,
+        occurrences.len(),
+        extra_maps,
+        work,
+        inputs,
+        walk,
+    )
+}
+
+type PreparedEdit<'a> = (
+    std::ops::Range<usize>,
+    &'a str,
+    Option<&'a crate::properties::CT_RPr>,
+    usize,
+);
+
+fn prepared_walk_edits<'a>(
+    occurrences: &[(
+        usize,
+        std::ops::Range<usize>,
+        &'a str,
+        Option<&'a crate::properties::CT_RPr>,
+    )],
+    stretches: &[String],
+) -> crate::Result<Vec<PreparedEdit<'a>>> {
     let invalid = || crate::OxmlError::InvalidValue("invalid prepared template occurrence".into());
-    let stretches = replaceable_texts(paragraph);
     let mut offsets = Vec::with_capacity(stretches.len());
     let mut total = 0;
-    for stretch in &stretches {
+    for stretch in stretches {
         offsets.push(total);
         total += stretch.len();
     }
     let mut edits = Vec::with_capacity(occurrences.len());
-    for (stretch, range, replacement, properties) in occurrences {
+    for (index, (stretch, range, replacement, properties)) in occurrences.iter().enumerate() {
         let source = stretches.get(*stretch).ok_or_else(invalid)?;
         if range.start >= range.end
             || source.get(range.clone()).is_none()
@@ -81,28 +193,106 @@ pub fn replace_prepared_occurrences(
         {
             return Err(invalid());
         }
-        let mut probe = CT_P::new();
-        let mut run = CT_R::new(replacement);
-        run.properties = properties.clone();
-        probe.runs.push(run);
-        validate_prepared_paragraph(&probe)?;
+        validate_borrowed_prepared_properties(replacement, *properties)?;
         edits.push((
             offsets[*stretch] + range.start..offsets[*stretch] + range.end,
-            replacement,
-            properties,
+            *replacement,
+            *properties,
+            index,
         ));
     }
-    edits.sort_by_key(|(range, _, _)| range.start);
+    edits.sort_by_key(|(range, _, _, _)| range.start);
     if edits.windows(2).any(|pair| pair[0].0.end > pair[1].0.start) {
         return Err(invalid());
     }
+    Ok(edits)
+}
+
+fn replace_prepared_walk(
+    paragraph: &mut CT_P,
+    edits: Vec<PreparedEdit<'_>>,
+    occurrence_count: usize,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+    inputs: Option<PreparedTemplateInputs<'_, '_>>,
+    walk: TextWalk,
+) -> crate::Result<()> {
+    let invalid = || crate::OxmlError::InvalidValue("invalid prepared template occurrence".into());
+    crate::document::admit_word_model(crate::document::WordOwner::Paragraph(paragraph))?;
+    let mut operand_bytes = Vec::new();
+    if let Some(inputs) = &inputs {
+        if inputs.operands.len() != occurrence_count {
+            return Err(invalid());
+        }
+        for (callback, dependencies) in inputs.operands {
+            if callback.is_some() && !dependencies.is_empty() {
+                return Err(invalid());
+            }
+            let mut selected = Vec::new();
+            for value in *dependencies {
+                let key = std::ptr::from_ref(*value) as usize;
+                if !inputs
+                    .datums
+                    .get(&key)
+                    .is_some_and(|input| std::ptr::eq(*input, *value))
+                {
+                    return Err(crate::OxmlError::InvalidValue(
+                        "template datum is not a selected input".into(),
+                    ));
+                }
+                selected.push((key, crate::document::template_scalar_bytes(value)?));
+            }
+            operand_bytes.push(selected);
+        }
+    }
+    if let Some(work) = work.as_deref_mut() {
+        let (text, map) = build_char_map(paragraph, &walk.wrappers, &walk.runs);
+        let mut fields = Vec::new();
+        let mut callbacks = Vec::new();
+        let mut datums = Vec::new();
+        for (range, replacement, _, index) in &edits {
+            let (first, last, _, _) =
+                accepted_match_runs(&text, &map, &walk.runs, range.start, range.end)
+                    .ok_or_else(invalid)?;
+            let selected_range = first..last;
+            let selected = selected_field_ancestors(
+                paragraph,
+                &walk,
+                &map,
+                std::slice::from_ref(&selected_range),
+            );
+            if !selected.is_empty()
+                && let Some(inputs) = &inputs
+            {
+                if let Some(callback) = inputs.operands[*index].0 {
+                    callbacks.push((*replacement, callback));
+                } else {
+                    datums.extend_from_slice(&operand_bytes[*index]);
+                }
+            }
+            fields.extend(selected);
+        }
+        work.register_original_fields_with_inputs(fields, &callbacks, &datums)?;
+    }
+    drop(walk);
     let mut candidate = paragraph.clone();
+    let mut candidate_maps = extra_maps.as_deref().cloned();
     // Original offsets remain valid to the left of edits already applied.
-    for (range, replacement, properties) in edits.into_iter().rev() {
+    for (range, replacement, properties, _) in edits.into_iter().rev() {
         if properties.is_some() {
-            split_prepared_boundary(&mut candidate, range.end)?;
-            split_prepared_boundary(&mut candidate, range.start)?;
-            let mut walk = text_runs(&candidate);
+            split_prepared_boundary_in(
+                &mut candidate,
+                range.end,
+                candidate_maps.as_mut(),
+                work.as_deref_mut(),
+            )?;
+            split_prepared_boundary_in(
+                &mut candidate,
+                range.start,
+                candidate_maps.as_mut(),
+                work.as_deref_mut(),
+            )?;
+            let mut walk = text_runs_in(&candidate, candidate_maps.as_ref(), work.as_deref_mut())?;
             let (text, map) = build_char_map(&candidate, &walk.wrappers, &walk.runs);
             let first = map
                 .get(text[..range.start].chars().count())
@@ -111,43 +301,124 @@ pub fn replace_prepared_occurrences(
                 &mut candidate,
                 &mut walk.wrappers,
                 &walk.runs[first.run_index],
+                work.as_deref_mut(),
                 |run| {
-                    run.properties = properties.clone();
+                    run.properties = properties.cloned();
                 },
-            );
-            remove_emptied_runs(&mut candidate, walk.wrappers, &walk.runs, Vec::new());
+            )?;
+            remove_emptied_runs_in(
+                &mut candidate,
+                walk.wrappers,
+                &walk.runs,
+                Vec::new(),
+                candidate_maps.as_mut(),
+                work.as_deref_mut(),
+            )?;
         }
         let mut applied = false;
-        let count = replace_matches(&mut candidate, &mut |text, from| {
-            if applied || from > range.start || text.get(range.clone()).is_none() {
-                return None;
-            }
-            applied = true;
-            Some((range.start, range.end, replacement.clone()))
-        });
+        let count = replace_matches_in(
+            &mut candidate,
+            &mut |text, from| {
+                if applied || from > range.start || text.get(range.clone()).is_none() {
+                    return None;
+                }
+                applied = true;
+                Some((range.start, range.end, replacement.to_owned()))
+            },
+            candidate_maps.as_mut(),
+            work.as_deref_mut(),
+        )?;
         if count != 1 {
             return Err(invalid());
         }
     }
-    validate_prepared_paragraph(&candidate)?;
+    validate_prepared_paragraph_in(&candidate, work)?;
     *paragraph = candidate;
+    if let (Some(output), Some(maps)) = (extra_maps, candidate_maps) {
+        *output = maps;
+    }
     Ok(())
 }
 
+fn validate_borrowed_prepared_properties(
+    replacement: &str,
+    properties: Option<&crate::properties::CT_RPr>,
+) -> crate::Result<()> {
+    use quick_xml::events::{BytesEnd, BytesStart, Event};
+
+    let xml = {
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        let (paragraph, paragraph_prefix) = crate::text::generated_word_start(
+            BytesStart::new("w:p"),
+            &[],
+            crate::text::XmlWriteRole::Publication,
+            None,
+        )?;
+        let _paragraph_scope = crate::text::emitted_binding_scope(&paragraph, false, false)?;
+        writer.write_event(Event::Start(paragraph))?;
+        let mut run = BytesStart::new("w:r");
+        crate::text::restore_generated_word_binding(&mut run)?;
+        let run_scope = crate::text::emitted_binding_scope(&run, false, false)?;
+        writer.write_event(Event::Start(run))?;
+        if let Some(properties) = properties {
+            properties.write_xml_role(
+                &mut writer,
+                None,
+                crate::text::XmlWriteRole::Publication,
+                None,
+                None,
+            )?;
+        }
+        // Character validation precedes this probe. Keep the actual text
+        // scaffold and space policy without owning its escaped payload.
+        let mut text = BytesStart::new("w:t");
+        if replacement.starts_with(' ') || replacement.ends_with(' ') {
+            text.push_attribute(("xml:space", "preserve"));
+        }
+        writer.write_event(Event::Start(text))?;
+        writer.write_event(Event::End(BytesEnd::new("w:t")))?;
+        writer.write_event(Event::End(BytesEnd::new("w:r")))?;
+        drop(run_scope);
+        writer.write_event(Event::End(BytesEnd::new(format!("{paragraph_prefix}:p"))))?;
+        writer.into_inner()
+    };
+    validate_prepared_xml(&xml)
+}
+
+#[cfg(test)]
 fn validate_prepared_paragraph(paragraph: &CT_P) -> crate::Result<()> {
+    validate_prepared_paragraph_in(paragraph, None)
+}
+
+fn validate_prepared_paragraph_in(
+    paragraph: &CT_P,
+    work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     let mut writer = quick_xml::Writer::new(Vec::new());
-    paragraph.to_xml(&mut writer)?;
-    let xml = writer.into_inner();
-    let text = std::str::from_utf8(&xml)?;
+    if let Some(work) = work {
+        crate::text::write_prepared_validation_xml(paragraph, &mut writer, work)?;
+    } else {
+        paragraph.to_xml(&mut writer)?;
+    }
+    validate_prepared_xml(&writer.into_inner())
+}
+
+fn validate_prepared_xml(xml: &[u8]) -> crate::Result<()> {
+    let text = std::str::from_utf8(xml)?;
     oxml_core::xml::reject_non_xml_characters("prepared template XML", text)?;
     // Opaque source may rely on inherited namespace bindings. Use the existing
     // preservation validator here, then the facade validates the final owning
     // part under its real namespace authority before publishing the document.
-    crate::text::validate_word_owner_fragment(&xml, b"p", false)
+    crate::text::validate_word_owner_fragment(xml, b"p", false)
 }
 
-fn split_prepared_boundary(paragraph: &mut CT_P, byte: usize) -> crate::Result<()> {
-    let mut walk = text_runs(paragraph);
+fn split_prepared_boundary_in(
+    paragraph: &mut CT_P,
+    byte: usize,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
+    let mut walk = text_runs_in(paragraph, extra_maps.as_deref(), work.as_deref_mut())?;
     let (text, map) = build_char_map(paragraph, &walk.wrappers, &walk.runs);
     let index = text
         .get(..byte)
@@ -158,6 +429,14 @@ fn split_prepared_boundary(paragraph: &mut CT_P, byte: usize) -> crate::Result<(
         return Ok(());
     };
     let source = &walk.runs[mapping.run_index];
+    let emission = work
+        .as_deref()
+        .filter(|_| {
+            source
+                .wrapper
+                .is_some_and(|index| walk.wrappers[index].in_field)
+        })
+        .map(WordOperationWork::field_xml_emission);
     let owner = match source.wrapper {
         Some(index) => {
             walk.wrappers[index].changed = true;
@@ -184,8 +463,21 @@ fn split_prepared_boundary(paragraph: &mut CT_P, byte: usize) -> crate::Result<(
         .iter()
         .position(|path| path == &source.path)
         .ok_or_else(|| crate::OxmlError::InvalidValue("stale prepared run boundary".into()))?;
-    owner.split_accepted_run(&source.path, accepted, offset)?;
-    remove_emptied_runs(paragraph, walk.wrappers, &walk.runs, Vec::new());
+    owner.split_accepted_run_in(
+        &source.path,
+        accepted,
+        offset,
+        work.as_deref_mut(),
+        emission.as_ref(),
+    )?;
+    remove_emptied_runs_in(
+        paragraph,
+        walk.wrappers,
+        &walk.runs,
+        Vec::new(),
+        extra_maps,
+        work,
+    )?;
     Ok(())
 }
 
@@ -197,9 +489,21 @@ fn split_prepared_boundary(paragraph: &mut CT_P, byte: usize) -> crate::Result<(
 /// two stretches.
 #[doc(hidden)]
 pub fn replaceable_texts(para: &CT_P) -> Vec<String> {
+    replaceable_texts_in(para, None, None).unwrap_or_default()
+}
+
+fn replaceable_texts_in(
+    para: &CT_P,
+    extra_maps: Option<&WordExtraSourceMaps>,
+    work: Option<&mut WordOperationWork>,
+) -> crate::Result<Vec<String>> {
+    let walk = text_runs_in(para, extra_maps, work)?;
+    Ok(text_stretches(para, &walk))
+}
+
+fn text_stretches(para: &CT_P, walk: &TextWalk) -> Vec<String> {
     let mut texts: Vec<String> = Vec::new();
     let mut previous = None;
-    let walk = text_runs(para);
     for run in &walk.runs {
         if previous != Some(run.stretch) {
             texts.push(String::new());
@@ -215,16 +519,517 @@ pub fn replaceable_texts(para: &CT_P) -> Vec<String> {
     texts
 }
 
+pub(crate) fn template_replaceable_texts_in(
+    paragraph: &mut CT_P,
+    extras: &WordExtraSourceMaps,
+    work: &mut WordOperationWork,
+    word: &mut crate::document::TemplateWordRead<'_>,
+) -> crate::Result<Vec<String>> {
+    let mut walk = text_runs_in(paragraph, Some(extras), Some(work))?;
+    select_walk_words(paragraph, &walk, word)?;
+    owned_walk_stretches(paragraph, &mut walk, word, None)
+}
+
+fn select_walk_words(
+    paragraph: &CT_P,
+    walk: &TextWalk,
+    word: &mut crate::document::TemplateWordRead<'_>,
+) -> crate::Result<()> {
+    // Wrapper paragraphs are actual additional returned models. Bind their
+    // nested Text objects to the same reader facts before consuming this walk.
+    let mut nested_wrappers = std::collections::HashMap::new();
+    for wrapper in &walk.wrappers {
+        if let Some(facts) = &wrapper.word_facts {
+            for (text, event) in crate::document::returned_block_inputs(
+                crate::document::WordOwner::Paragraph(&wrapper.content),
+                &facts.nested,
+            )?
+            .0
+            {
+                nested_wrappers.insert(std::ptr::from_ref(text) as usize, event);
+            }
+        }
+    }
+    // This is the same complete walk that aggregation consumes. Register its
+    // actual visited inputs before any generated prefix needs an append.
+    for item in &walk.runs {
+        if let Some(run) = text_run(paragraph, &walk.wrappers, item) {
+            for (content, value) in run.content.iter().enumerate() {
+                if let RunContent::Text(text) = value {
+                    if item.wrapper.is_some()
+                        && let Some(event) =
+                            nested_wrappers.get(&(std::ptr::from_ref(text) as usize))
+                    {
+                        word.work
+                            .select_word(event.origin.clone(), event.decoded.clone())?;
+                        continue;
+                    }
+                    word.select(
+                        &item.path,
+                        item.wrapper,
+                        item.wrapper
+                            .and_then(|index| walk.wrappers[index].word_facts.as_ref()),
+                        content,
+                        text,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+struct MovedWalkText {
+    stretch: usize,
+    run: usize,
+    content: usize,
+    length: usize,
+}
+
+fn owned_walk_stretches(
+    paragraph: &mut CT_P,
+    walk: &mut TextWalk,
+    word: &mut crate::document::TemplateWordRead<'_>,
+    mut moved: Option<&mut Vec<MovedWalkText>>,
+) -> crate::Result<Vec<String>> {
+    let mut visits = std::collections::HashMap::new();
+    for item in &walk.runs {
+        *visits.entry((item.wrapper, &item.path)).or_insert(0usize) += 1;
+    }
+    let mut texts: Vec<String> = Vec::new();
+    let mut previous = None;
+    for (run_index, item) in walk.runs.iter().enumerate() {
+        if previous != Some(item.stretch) {
+            texts.push(String::new());
+            previous = Some(item.stretch);
+        }
+        let length = text_run(paragraph, &walk.wrappers, item).map_or(0, |run| run.content.len());
+        let stretch = texts.len() - 1;
+        for content in 0..length {
+            let output = texts.last_mut().expect("selected stretch");
+            if output.is_empty()
+                && visits.get(&(item.wrapper, &item.path)) == Some(&1)
+                && let Some(text) =
+                    owned_walk_text_mut(paragraph, &mut walk.wrappers, item, content)
+            {
+                if !text.is_empty()
+                    && let Some(moved) = moved.as_deref_mut()
+                {
+                    moved.push(MovedWalkText {
+                        stretch,
+                        run: run_index,
+                        content,
+                        length: text.len(),
+                    });
+                }
+                *output = std::mem::take(text);
+                continue;
+            }
+            if let Some(run) = text_run(paragraph, &walk.wrappers, item)
+                && let Some(RunContent::Text(text)) = run.content.get(content)
+                && let Err(error) = word.append(output, &text.text)
+            {
+                if let Some(moved) = moved.as_deref() {
+                    restore_walk_texts(paragraph, walk, &mut texts, moved);
+                }
+                return Err(error);
+            }
+        }
+        *visits
+            .get_mut(&(item.wrapper, &item.path))
+            .expect("counted selected run") -= 1;
+    }
+    Ok(texts)
+}
+
+// These are the two existing Native row visitors, expressed over the unchanged
+// model returned by this one parser. Paths consume its producer companions.
+fn row_grammar_visits(row: &CT_Row, direct: bool) -> Vec<Vec<crate::text::WordBlockComponent>> {
+    use crate::text::WordBlockComponent as C;
+    enum Node<'a> {
+        Row(&'a CT_Row),
+        Cell(&'a CT_Tc),
+        Table(&'a CT_Tbl),
+        Control(&'a CT_Sdt),
+        Paragraph,
+        Run,
+    }
+    let mut pending = vec![(Node::Row(row), vec![C::TableRow(0)])];
+    let mut visits = Vec::new();
+    while let Some((node, path)) = pending.pop() {
+        let mut children = Vec::new();
+        match node {
+            Node::Paragraph | Node::Run => {
+                visits.push(path);
+                continue;
+            }
+            Node::Row(row) => {
+                for (index, (_, _, control)) in row.content_controls.iter().enumerate() {
+                    children.push((Node::Control(control), C::RowControl(index)));
+                }
+                for (index, cell) in row.cells.iter().enumerate() {
+                    children.push((Node::Cell(cell), C::RowCell(index)));
+                }
+            }
+            Node::Table(table) => {
+                for (index, (_, _, control)) in table.content_controls.iter().enumerate() {
+                    children.push((Node::Control(control), C::TableControl(index)));
+                }
+                for (index, row) in table.rows.iter().enumerate() {
+                    children.push((Node::Row(row), C::TableRow(index)));
+                }
+            }
+            Node::Cell(cell) => {
+                for (index, content) in cell.content.iter().enumerate() {
+                    let node = match content {
+                        CellContent::Paragraph(_) => Node::Paragraph,
+                        CellContent::Table(table) if !direct => Node::Table(table),
+                        CellContent::Table(_) => continue,
+                        CellContent::ContentControl(control) => Node::Control(control),
+                    };
+                    children.push((node, C::CellContent(index)));
+                }
+            }
+            Node::Control(control) => {
+                for (index, content) in control.content.iter().enumerate() {
+                    let node = match content {
+                        SdtContent::Paragraph(_) => Node::Paragraph,
+                        SdtContent::Table(table) if !direct => Node::Table(table),
+                        SdtContent::Table(_) => continue,
+                        SdtContent::Row(row) => Node::Row(row),
+                        SdtContent::Cell(cell) => Node::Cell(cell),
+                        SdtContent::ContentControl(control) => Node::Control(control),
+                        SdtContent::Run(_) if direct => Node::Run,
+                        SdtContent::Run(_) | SdtContent::RawXml(_) => continue,
+                    };
+                    children.push((node, C::SdtContent(index)));
+                }
+            }
+        }
+        for (child, component) in children.into_iter().rev() {
+            let mut child_path = path.clone();
+            child_path.push(component);
+            pending.push((child, child_path));
+        }
+    }
+    visits
+}
+
+enum RowTextOwner<'a> {
+    Paragraph(&'a mut CT_P),
+    Run(&'a mut CT_R),
+}
+
+fn row_text_owner<'a>(
+    row: &'a mut CT_Row,
+    path: &[crate::text::WordBlockComponent],
+) -> crate::Result<RowTextOwner<'a>> {
+    use crate::text::WordBlockComponent as C;
+    let invalid = || crate::OxmlError::InvalidValue("constructed row Text path changed".into());
+    let Some((C::TableRow(0), path)) = path.split_first() else {
+        return Err(invalid());
+    };
+    let mut owner = ParagraphEditOwner::Row(row);
+    for (position, component) in path.iter().enumerate() {
+        let last = position + 1 == path.len();
+        owner = match (owner, component) {
+            (ParagraphEditOwner::Row(row), C::RowCell(index)) => {
+                ParagraphEditOwner::Cell(row.cells.get_mut(*index).ok_or_else(invalid)?)
+            }
+            (ParagraphEditOwner::Row(row), C::RowControl(index)) => ParagraphEditOwner::Control(
+                &mut row.content_controls.get_mut(*index).ok_or_else(invalid)?.2,
+            ),
+            (ParagraphEditOwner::Table(table), C::TableRow(index)) => {
+                ParagraphEditOwner::Row(table.rows.get_mut(*index).ok_or_else(invalid)?)
+            }
+            (ParagraphEditOwner::Table(table), C::TableControl(index)) => {
+                ParagraphEditOwner::Control(
+                    &mut table
+                        .content_controls
+                        .get_mut(*index)
+                        .ok_or_else(invalid)?
+                        .2,
+                )
+            }
+            (ParagraphEditOwner::Cell(cell), C::CellContent(index)) => {
+                match cell.content.get_mut(*index).ok_or_else(invalid)? {
+                    CellContent::Paragraph(paragraph) if last => {
+                        return Ok(RowTextOwner::Paragraph(paragraph));
+                    }
+                    CellContent::Table(table) => ParagraphEditOwner::Table(table),
+                    CellContent::ContentControl(control) => ParagraphEditOwner::Control(control),
+                    _ => return Err(invalid()),
+                }
+            }
+            (ParagraphEditOwner::Control(control), C::SdtContent(index)) => {
+                match control.content.get_mut(*index).ok_or_else(invalid)? {
+                    SdtContent::Paragraph(paragraph) if last => {
+                        return Ok(RowTextOwner::Paragraph(paragraph));
+                    }
+                    SdtContent::Run(run) if last => return Ok(RowTextOwner::Run(run)),
+                    SdtContent::Table(table) => ParagraphEditOwner::Table(table),
+                    SdtContent::Row(row) => ParagraphEditOwner::Row(row),
+                    SdtContent::Cell(cell) => ParagraphEditOwner::Cell(cell),
+                    SdtContent::ContentControl(control) => ParagraphEditOwner::Control(control),
+                    _ => return Err(invalid()),
+                }
+            }
+            _ => return Err(invalid()),
+        };
+    }
+    Err(invalid())
+}
+
+struct RowTextPlan {
+    path: Vec<crate::text::WordBlockComponent>,
+    walk: Option<TextWalk>,
+    paragraph: Option<crate::text::WordParagraphReadFacts>,
+    run: Option<crate::text::ParsedWordRunTexts>,
+}
+
+pub(crate) fn template_row_texts_in(
+    row: &mut CT_Row,
+    maps: crate::text::WordBlockSourceMaps,
+    input: &crate::document::WordSourceMap,
+    work: &mut WordOperationWork,
+    copies: &mut crate::document::TemplateCopyWork,
+) -> crate::Result<(Vec<String>, Vec<usize>, Vec<usize>)> {
+    let nested =
+        crate::document::returned_block_inputs(crate::document::WordOwner::Row(row), &maps)?
+            .0
+            .into_iter()
+            .map(|(text, event)| (std::ptr::from_ref(text) as usize, event))
+            .collect::<std::collections::HashMap<_, _>>();
+    let direct = row_grammar_visits(row, true);
+    let all = row_grammar_visits(row, false);
+    let mut extras = maps
+        .paragraphs
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut paragraphs = maps
+        .word_texts
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut runs = maps
+        .word_runs
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut seen = std::collections::BTreeMap::new();
+    let mut plans = Vec::new();
+    // Exactly the old direct-before-all order, with no second wrapper read for
+    // the same actual parsed paragraph occurrence.
+    for path in direct.iter().chain(&all) {
+        if seen.contains_key(path) {
+            continue;
+        }
+        let owner = row_text_owner(row, path)?;
+        let (walk, paragraph, run) = match owner {
+            RowTextOwner::Paragraph(paragraph) => {
+                let extras = extras.remove(path).ok_or_else(|| {
+                    crate::OxmlError::InvalidValue("missing row paragraph source companion".into())
+                })?;
+                (
+                    Some(text_runs_in(paragraph, Some(&extras), Some(work))?),
+                    paragraphs.remove(path).flatten(),
+                    None,
+                )
+            }
+            RowTextOwner::Run(_) => (None, None, runs.remove(path).flatten()),
+        };
+        seen.insert(path.clone(), plans.len());
+        plans.push(RowTextPlan {
+            path: path.clone(),
+            walk,
+            paragraph,
+            run,
+        });
+    }
+    let empty = Vec::new();
+    // All these are genuinely visited by the two already-built views. Select
+    // inputs before aggregation so a generated prefix cannot hide later input.
+    for plan in &plans {
+        let mut read = crate::document::TemplateWordRead {
+            map: plan
+                .paragraph
+                .as_ref()
+                .map_or(input, |facts| facts.source_map.as_ref()),
+            texts: plan.paragraph.as_ref().map_or(&empty, |facts| &facts.texts),
+            work: copies,
+            nested: Some(&nested),
+        };
+        match row_text_owner(row, &plan.path)? {
+            RowTextOwner::Paragraph(paragraph) => select_walk_words(
+                paragraph,
+                plan.walk.as_ref().expect("paragraph walk"),
+                &mut read,
+            )?,
+            RowTextOwner::Run(run) => {
+                if let Some(facts) = &plan.run {
+                    for (content, value) in run.content.iter().enumerate() {
+                        if let RunContent::Text(text) = value {
+                            read.select_run(facts, content, text)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut buffers = Vec::new();
+    let mut indexes = Vec::new();
+    for mut plan in plans {
+        let mut read = crate::document::TemplateWordRead {
+            map: plan
+                .paragraph
+                .as_ref()
+                .map_or(input, |facts| facts.source_map.as_ref()),
+            texts: plan.paragraph.as_ref().map_or(&empty, |facts| &facts.texts),
+            work: copies,
+            nested: Some(&nested),
+        };
+        let values = match row_text_owner(row, &plan.path)? {
+            RowTextOwner::Paragraph(paragraph) => owned_walk_stretches(
+                paragraph,
+                plan.walk.as_mut().expect("paragraph walk"),
+                &mut read,
+                None,
+            )?,
+            RowTextOwner::Run(run) => {
+                let mut value = String::new();
+                for content in &mut run.content {
+                    if let RunContent::Text(text) = content {
+                        if value.is_empty() {
+                            value = std::mem::take(&mut text.text);
+                        } else {
+                            read.append(&mut value, &text.text)?;
+                        }
+                    }
+                }
+                vec![value]
+            }
+        };
+        let start = buffers.len();
+        buffers.extend(values);
+        indexes.push(start..buffers.len());
+    }
+    let view = |paths: Vec<Vec<crate::text::WordBlockComponent>>| {
+        paths
+            .into_iter()
+            .flat_map(|path| indexes[seen[&path]].clone())
+            .collect::<Vec<_>>()
+    };
+    Ok((buffers, view(direct), view(all)))
+}
+
+// Only the first nonempty uniquely owned Text of a stretch can move. The
+// editing consumer restores that exact buffer before model validation/cloning.
+fn restore_walk_texts(
+    paragraph: &mut CT_P,
+    walk: &mut TextWalk,
+    texts: &mut [String],
+    moved: &[MovedWalkText],
+) {
+    for moved in moved {
+        texts[moved.stretch].truncate(moved.length);
+        let slot = owned_walk_text_mut(
+            paragraph,
+            &mut walk.wrappers,
+            &walk.runs[moved.run],
+            moved.content,
+        )
+        .expect("unchanged uniquely owned Text slot");
+        *slot = std::mem::take(&mut texts[moved.stretch]);
+    }
+}
+
+fn owned_walk_text_mut<'a>(
+    paragraph: &'a mut CT_P,
+    wrappers: &'a mut [Wrapper],
+    item: &TextRun,
+    content: usize,
+) -> Option<&'a mut String> {
+    let owner = match item.wrapper {
+        Some(index) => &mut wrappers.get_mut(index)?.content,
+        None => paragraph,
+    };
+    owned_paragraph_text_mut(owner, item.path.segments(), content)
+}
+
+pub(crate) fn owned_paragraph_text_mut<'a>(
+    paragraph: &'a mut CT_P,
+    path: &[AcceptedRunPathSegment],
+    content: usize,
+) -> Option<&'a mut String> {
+    let (first, rest) = path.split_first()?;
+    match *first {
+        AcceptedRunPathSegment::Run(index) if rest.is_empty() => {
+            owned_run_text_mut(paragraph.runs.get_mut(index)?, content)
+        }
+        AcceptedRunPathSegment::ContentControl(index) => owned_control_text_mut(
+            &mut paragraph.content_controls.get_mut(index)?.3,
+            rest,
+            content,
+        ),
+        AcceptedRunPathSegment::Revision(index) => paragraph
+            .revisions
+            .get_mut(index)?
+            .2
+            .template_text_mut(rest, content),
+        AcceptedRunPathSegment::Run(_) => None,
+    }
+}
+
+fn owned_control_text_mut<'a>(
+    control: &'a mut CT_Sdt,
+    path: &[AcceptedRunPathSegment],
+    content: usize,
+) -> Option<&'a mut String> {
+    let (first, rest) = path.split_first()?;
+    match *first {
+        AcceptedRunPathSegment::Run(index) if rest.is_empty() => {
+            match control.content.get_mut(index)? {
+                SdtContent::Run(run) => owned_run_text_mut(run, content),
+                _ => None,
+            }
+        }
+        AcceptedRunPathSegment::ContentControl(index) => match control.content.get_mut(index)? {
+            SdtContent::ContentControl(child) => owned_control_text_mut(child, rest, content),
+            _ => None,
+        },
+        AcceptedRunPathSegment::Revision(index) => control
+            .revisions
+            .get_mut(index)?
+            .1
+            .template_text_mut(rest, content),
+        AcceptedRunPathSegment::Run(_) => None,
+    }
+}
+
+fn owned_run_text_mut(run: &mut CT_R, content: usize) -> Option<&mut String> {
+    match run.content.get_mut(content)? {
+        RunContent::Text(text) => Some(&mut text.text),
+        _ => None,
+    }
+}
+
 /// Takes a text and the byte offset to search from, and returns the byte
 /// range of the next match and the text that replaces it.
 type MatchFinder<'a> = dyn FnMut(&str, usize) -> Option<(usize, usize, String)> + 'a;
 
 /// Find each match that `next_match` reports in the text of `para` and
 /// replace it.
-fn replace_matches(para: &mut CT_P, next_match: &mut MatchFinder<'_>) -> usize {
+fn replace_matches(para: &mut CT_P, next_match: &mut MatchFinder<'_>) -> crate::Result<usize> {
+    replace_matches_in(para, next_match, None, None)
+}
+
+fn replace_matches_in(
+    para: &mut CT_P,
+    next_match: &mut MatchFinder<'_>,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<usize> {
     let TextWalk {
         runs, mut wrappers, ..
-    } = text_runs(para);
+    } = text_runs_in(para, extra_maps.as_deref(), work.as_deref_mut())?;
     let mut emptied = Vec::new();
     let mut total = 0;
 
@@ -258,28 +1063,26 @@ fn replace_matches(para: &mut CT_P, next_match: &mut MatchFinder<'_>) -> usize {
             continue;
         }
 
-        // Convert byte offsets to char indices (char_map is indexed by char position).
-        let match_start = full_text[..byte_start].chars().count();
-        let match_end = match_start + full_text[byte_start..byte_end].chars().count();
-
-        // 3. Determine which runs are affected.
-        let first_run = char_map[match_start].run_index;
-        let last_run = char_map[match_end - 1].run_index;
-
-        if runs[first_run].stretch != runs[last_run].stretch {
-            // The match straddles a content-control boundary, so it is no
-            // match. Look again after it, as after a replaced match, so that
-            // no shorter match inside it, such as `\d+` finds in the digits
-            // after a boundary, replaces part of the text it covers.
+        let Some((match_start, match_end, first_run, last_run)) =
+            accepted_match_runs(&full_text, &char_map, &runs, byte_start, byte_end)
+        else {
+            // Preserve the old whole-stream crossing skip, including a later
+            // overlapping candidate that starts before this rejected end.
             search_from = byte_end;
             continue;
-        }
+        };
 
         if first_run == last_run {
             // Single-run match: simple in-place replacement on that run's text content.
-            edit_run(para, &mut wrappers, &runs[first_run], |run| {
-                replace_in_single_run(run, &char_map, match_start, match_end, &replacement);
-            });
+            edit_run(
+                para,
+                &mut wrappers,
+                &runs[first_run],
+                work.as_deref_mut(),
+                |run| {
+                    replace_in_single_run(run, &char_map, match_start, match_end, &replacement);
+                },
+            )?;
         } else {
             // Cross-run match: put replacement in first run, clear matched parts from others.
             replace_across_runs(
@@ -287,10 +1090,10 @@ fn replace_matches(para: &mut CT_P, next_match: &mut MatchFinder<'_>) -> usize {
                 &mut wrappers,
                 &runs,
                 &char_map,
-                match_start,
-                match_end,
+                match_start..match_end,
                 &replacement,
-            );
+                work.as_deref_mut(),
+            )?;
             emptied.extend(first_run + 1..=last_run);
         }
 
@@ -302,8 +1105,118 @@ fn replace_matches(para: &mut CT_P, next_match: &mut MatchFinder<'_>) -> usize {
         total += 1;
     }
 
-    remove_emptied_runs(para, wrappers, &runs, emptied);
-    total
+    remove_emptied_runs_in(para, wrappers, &runs, emptied, extra_maps, work)?;
+    Ok(total)
+}
+
+// Byte ranges come from the unchanged actual matcher. This is the same
+// run/stretch decision for selection-before-growth and subsequent mutation.
+fn accepted_match_runs(
+    text: &str,
+    map: &[CharMapping],
+    runs: &[TextRun],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let first = text[..start].chars().count();
+    let last = first + text[start..end].chars().count();
+    let first_run = map[first].run_index;
+    let last_run = map[last - 1].run_index;
+    (runs[first_run].stretch == runs[last_run].stretch)
+        .then_some((first, last, first_run, last_run))
+}
+
+fn selected_field_ancestors<'a>(
+    paragraph: &'a CT_P,
+    walk: &'a TextWalk,
+    map: &[CharMapping],
+    ranges: &[std::ops::Range<usize>],
+) -> Vec<&'a crate::text::Field> {
+    let mut selected = std::collections::BTreeSet::new();
+    for range in ranges {
+        for item in &map[range.clone()] {
+            let mut wrapper = walk.runs[item.run_index].wrapper;
+            while let Some(index) = wrapper {
+                if matches!(walk.wrappers[index].source, WrapperSource::Field(_)) {
+                    selected.insert(index);
+                }
+                wrapper = walk.wrappers[index].parent;
+            }
+        }
+    }
+    selected
+        .into_iter()
+        .filter_map(|index| {
+            let wrapper = &walk.wrappers[index];
+            let WrapperSource::Field(run) = wrapper.source else {
+                return None;
+            };
+            let parent = wrapper
+                .parent
+                .map_or(paragraph, |parent| &walk.wrappers[parent].content);
+            let [RunContent::Field(field)] = parent.runs.get(run)?.content.as_slice() else {
+                return None;
+            };
+            Some(field)
+        })
+        .collect()
+}
+
+/// The real external literal event is separate from generated XML provenance.
+/// Internal prepared/template replay does not enter this adapter.
+fn try_replace_in_paragraph_with_literal(
+    paragraph: &mut CT_P,
+    placeholder: &str,
+    replacement: &str,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    work: &mut WordOperationWork,
+    delivered: &std::cell::Cell<bool>,
+) -> crate::Result<usize> {
+    if placeholder.is_empty() {
+        return Ok(0);
+    }
+    crate::document::admit_word_model(crate::document::WordOwner::Paragraph(paragraph))?;
+    let walk = text_runs_in(paragraph, extra_maps.as_deref(), Some(work))?;
+    let (text, map) = build_char_map(paragraph, &walk.wrappers, &walk.runs);
+    let mut from = 0;
+    let mut selected = Vec::new();
+    while let Some(relative) = text[from..].find(placeholder) {
+        let start = from + relative;
+        let end = start + placeholder.len();
+        if let Some((first, last, _, _)) = accepted_match_runs(&text, &map, &walk.runs, start, end)
+        {
+            selected.push(first..last);
+        }
+        from = end;
+    }
+    let fields = selected_field_ancestors(paragraph, &walk, &map, &selected);
+    work.register_original_fields_with_inputs(fields, &[(replacement, delivered)], &[])?;
+    drop(walk);
+    let mut candidate = paragraph.clone();
+    let mut candidate_maps = extra_maps.as_deref().cloned();
+    let result = replace_matches_in(
+        &mut candidate,
+        &mut |text, from| {
+            let start = from + text[from..].find(placeholder)?;
+            Some((start, start + placeholder.len(), replacement.to_owned()))
+        },
+        candidate_maps.as_mut(),
+        Some(work),
+    );
+    match result {
+        Ok(count) if count > 0 => {
+            let previous = std::mem::replace(paragraph, candidate);
+            crate::text::discard_checked_paragraph(previous);
+            if let (Some(output), Some(maps)) = (extra_maps, candidate_maps) {
+                *output = maps;
+            }
+            Ok(count)
+        }
+        result => {
+            crate::text::discard_checked_paragraph(candidate);
+            result
+        }
+    }
 }
 
 /// A run of the text a replacement reads.
@@ -328,6 +1241,10 @@ struct Wrapper {
     parent: Option<usize>,
     source: WrapperSource,
     changed: bool,
+    source_map: Option<crate::document::WordSourceMap>,
+    extra_maps: Option<WordExtraSourceMaps>,
+    in_field: bool,
+    word_facts: Option<crate::text::WordParagraphReadFacts>,
 }
 
 /// Where the source of a [`Wrapper`] is in the paragraph that holds it.
@@ -364,10 +1281,19 @@ impl TextWalk {
 /// The runs of `para` that a replacement reads, in the order of the accepted
 /// view that `Paragraph::text` reads, each with the stretch it belongs to
 /// and its address, and the wrappers that hold some of them.
-fn text_runs(para: &CT_P) -> TextWalk {
+fn text_runs_in(
+    para: &CT_P,
+    extra_maps: Option<&WordExtraSourceMaps>,
+    work: Option<&mut WordOperationWork>,
+) -> crate::Result<TextWalk> {
+    if extra_maps.is_some_and(|maps| maps.len() != para.extra_xml.len()) {
+        return Err(crate::OxmlError::InvalidValue(
+            "paragraph extra source map alignment changed".into(),
+        ));
+    }
     let mut walk = TextWalk::default();
-    paragraph_text_runs(para, &mut Vec::new(), &mut walk);
-    walk
+    paragraph_text_runs(para, &mut Vec::new(), &mut walk, extra_maps, work)?;
+    Ok(walk)
 }
 
 /// The run that `run` addresses.
@@ -377,7 +1303,13 @@ fn text_run<'a>(para: &'a CT_P, wrappers: &'a [Wrapper], run: &TextRun) -> Optio
         .accepted_run(&run.path)
 }
 
-fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, walk: &mut TextWalk) {
+fn paragraph_text_runs(
+    para: &CT_P,
+    prefix: &mut Vec<AcceptedRunPathSegment>,
+    walk: &mut TextWalk,
+    extra_maps: Option<&WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     let word = ["w".to_owned()];
     for index in 0..=para.runs.len() {
         for owner in boundary_owners(para, index) {
@@ -385,7 +1317,12 @@ fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, wa
                 BoundaryOwner::ContentControl(control) => {
                     prefix.push(AcceptedRunPathSegment::ContentControl(control));
                     walk.stretch += 1;
-                    control_text_runs(&para.content_controls[control].3, prefix, walk);
+                    control_text_runs(
+                        &para.content_controls[control].3,
+                        prefix,
+                        walk,
+                        work.as_deref_mut(),
+                    )?;
                     walk.stretch += 1;
                     prefix.pop();
                 }
@@ -394,13 +1331,19 @@ fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, wa
                     AcceptedRunPathSegment::Revision(revision),
                     prefix,
                     walk,
-                ),
+                    work.as_deref_mut(),
+                )?,
                 // `Paragraph::text` reads the wrappers of the paragraph and
                 // those nested in them, not those inside a control or a
                 // revision.
-                BoundaryOwner::Wrapper(raw) if prefix.is_empty() => {
-                    wrapper_text_runs(&para.extra_xml[raw].1, &word, WrapperSource::Raw(raw), walk)
-                }
+                BoundaryOwner::Wrapper(raw) if prefix.is_empty() => wrapper_text_runs(
+                    &para.extra_xml[raw].1,
+                    &word,
+                    WrapperSource::Raw(raw),
+                    walk,
+                    extra_maps.and_then(|maps| maps[raw].as_deref()).cloned(),
+                    work.as_deref_mut(),
+                )?,
                 BoundaryOwner::Wrapper(_) => {}
             }
         }
@@ -409,7 +1352,23 @@ fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, wa
         };
         match simple_field_source(run) {
             Some((raw, prefixes)) if prefix.is_empty() => {
-                wrapper_text_runs(raw, prefixes, WrapperSource::Field(index), walk);
+                let map = work.as_deref().and_then(|work| {
+                    let [RunContent::Field(field)] = run.content.as_slice() else {
+                        return None;
+                    };
+                    work.field_origins
+                        .lock()
+                        .expect("field origin registry poisoned")
+                        .source_map(field)
+                });
+                wrapper_text_runs(
+                    raw,
+                    prefixes,
+                    WrapperSource::Field(index),
+                    walk,
+                    map,
+                    work.as_deref_mut(),
+                )?;
             }
             _ => {
                 prefix.push(AcceptedRunPathSegment::Run(index));
@@ -418,6 +1377,7 @@ fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, wa
             }
         }
     }
+    Ok(())
 }
 
 /// The runs of a smart tag, an inline custom XML element or a simple field
@@ -426,25 +1386,75 @@ fn paragraph_text_runs(para: &CT_P, prefix: &mut Vec<AcceptedRunPathSegment>, wa
 /// stretch before it. For a simple field, the runs are its cached result,
 /// which Word computes again when it updates the field, and its instruction
 /// is never read.
-fn wrapper_text_runs(raw: &[u8], prefixes: &[String], source: WrapperSource, walk: &mut TextWalk) {
+fn wrapper_text_runs(
+    raw: &[u8],
+    prefixes: &[String],
+    source: WrapperSource,
+    walk: &mut TextWalk,
+    source_map: Option<crate::document::WordSourceMap>,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     walk.stretch += 1;
-    if let Some(content) = run_wrapper_paragraph(raw, prefixes) {
+    let mapped = work.as_deref().map(|work| {
+        crate::document::WordFieldInput::produced(
+            source_map
+                .clone()
+                .unwrap_or_else(|| crate::document::WordSourceMap::generated(raw.len())),
+            std::sync::Arc::clone(&work.field_origins),
+        )
+    });
+    let mut extra_maps = Vec::new();
+    let mut word_facts = None;
+    let word_input = mapped
+        .as_ref()
+        .is_some_and(|input| input.projection_parts().0.has_word_inputs());
+    if let Some(content) = crate::text::run_wrapper_paragraph_in(
+        raw,
+        prefixes,
+        mapped.as_ref(),
+        work.as_deref_mut(),
+        mapped.as_ref().map(|_| &mut extra_maps),
+        word_input.then_some(&mut word_facts),
+    )? {
+        let in_field = matches!(source, WrapperSource::Field(_))
+            || walk
+                .wrapper
+                .is_some_and(|index| walk.wrappers[index].in_field);
         let index = walk.wrappers.len();
         walk.wrappers.push(Wrapper {
             content: CT_P::new(),
             parent: walk.wrapper,
             source,
             changed: false,
+            source_map: mapped
+                .as_ref()
+                .map(|input| input.projection_parts().0.clone()),
+            extra_maps: None,
+            in_field,
+            word_facts,
         });
         let parent = walk.wrapper.replace(index);
-        paragraph_text_runs(&content, &mut Vec::new(), walk);
+        paragraph_text_runs(
+            &content,
+            &mut Vec::new(),
+            walk,
+            mapped.as_ref().map(|_| &extra_maps),
+            work,
+        )?;
         walk.wrapper = parent;
         walk.wrappers[index].content = content;
+        walk.wrappers[index].extra_maps = mapped.map(|_| extra_maps);
     }
     walk.stretch += 1;
+    Ok(())
 }
 
-fn control_text_runs(sdt: &CT_Sdt, prefix: &mut Vec<AcceptedRunPathSegment>, walk: &mut TextWalk) {
+fn control_text_runs(
+    sdt: &CT_Sdt,
+    prefix: &mut Vec<AcceptedRunPathSegment>,
+    walk: &mut TextWalk,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     for index in 0..=sdt.content.len() {
         for (revision, (_, wrapper)) in sdt
             .revisions()
@@ -457,7 +1467,8 @@ fn control_text_runs(sdt: &CT_Sdt, prefix: &mut Vec<AcceptedRunPathSegment>, wal
                 AcceptedRunPathSegment::Revision(revision),
                 prefix,
                 walk,
-            );
+                work.as_deref_mut(),
+            )?;
         }
         match sdt.content.get(index) {
             Some(SdtContent::Run(_)) => {
@@ -468,13 +1479,14 @@ fn control_text_runs(sdt: &CT_Sdt, prefix: &mut Vec<AcceptedRunPathSegment>, wal
             Some(SdtContent::ContentControl(nested)) => {
                 prefix.push(AcceptedRunPathSegment::ContentControl(index));
                 walk.stretch += 1;
-                control_text_runs(nested, prefix, walk);
+                control_text_runs(nested, prefix, walk, work.as_deref_mut())?;
                 walk.stretch += 1;
                 prefix.pop();
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// The runs of a tracked insertion or move destination form a stretch of
@@ -487,21 +1499,23 @@ fn revision_text_runs(
     segment: AcceptedRunPathSegment,
     prefix: &mut Vec<AcceptedRunPathSegment>,
     walk: &mut TextWalk,
-) {
+    work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     if !matches!(
         revision.kind(),
         RevisionKind::Insertion | RevisionKind::MoveTo
     ) || revision.content_paragraph().is_none()
     {
-        return;
+        return Ok(());
     }
     prefix.push(segment);
     walk.stretch += 1;
     if let Some(inserted) = revision.editable_accepted_paragraph() {
-        paragraph_text_runs(inserted, prefix, walk);
+        paragraph_text_runs(inserted, prefix, walk, None, work)?;
     }
     walk.stretch += 1;
     prefix.pop();
+    Ok(())
 }
 
 /// Apply `edit` to the run that `run` addresses.
@@ -509,8 +1523,14 @@ fn edit_run(
     para: &mut CT_P,
     wrappers: &mut [Wrapper],
     run: &TextRun,
+    work: Option<&mut WordOperationWork>,
     edit: impl FnOnce(&mut CT_R),
-) {
+) -> crate::Result<()> {
+    let checked = work.is_some();
+    let emission = work
+        .as_deref()
+        .filter(|_| run.wrapper.is_some_and(|index| wrappers[index].in_field))
+        .map(WordOperationWork::field_xml_emission);
     let paragraph = match run.wrapper {
         Some(index) => {
             wrappers[index].changed = true;
@@ -520,9 +1540,24 @@ fn edit_run(
     };
     if let Some(mut edited) = paragraph.accepted_run(&run.path).cloned() {
         edit(&mut edited);
-        let replaced = paragraph.replace_accepted_run(&run.path, edited);
-        debug_assert!(matches!(replaced, Ok(true)), "text run path is stale");
+        let replaced = paragraph.replace_accepted_run_segments_in(
+            run.path.segments(),
+            edited,
+            work,
+            emission.as_ref(),
+            false,
+        );
+        if checked {
+            if !replaced? {
+                return Err(crate::OxmlError::InvalidValue(
+                    "text run path is stale".into(),
+                ));
+            }
+        } else {
+            debug_assert!(matches!(replaced, Ok(true)), "text run path is stale");
+        }
     }
+    Ok(())
 }
 
 /// A mapping from character position in the concatenated text to its source run and content item.
@@ -605,88 +1640,163 @@ fn replace_across_runs(
     wrappers: &mut [Wrapper],
     runs: &[TextRun],
     char_map: &[CharMapping],
-    match_start: usize,
-    match_end: usize,
+    range: std::ops::Range<usize>,
     replacement: &str,
-) {
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
+    let (match_start, match_end) = (range.start, range.end);
     // Handle the first run: replace from match start to end of text in that content item.
     let first_mapping = &char_map[match_start];
-    edit_run(para, wrappers, &runs[first_mapping.run_index], |run| {
-        if let RunContent::Text(t) = &mut run.content[first_mapping.content_index] {
-            let mut new_text = String::new();
-            new_text.push_str(&t.text[..first_mapping.byte_offset]);
-            new_text.push_str(replacement);
-            t.text = new_text;
-            t.preserve_space = t.preserve_space || t.text.starts_with(' ') || t.text.ends_with(' ');
-        }
-    });
+    edit_run(
+        para,
+        wrappers,
+        &runs[first_mapping.run_index],
+        work.as_deref_mut(),
+        |run| {
+            if let RunContent::Text(t) = &mut run.content[first_mapping.content_index] {
+                let mut new_text = String::new();
+                new_text.push_str(&t.text[..first_mapping.byte_offset]);
+                new_text.push_str(replacement);
+                t.text = new_text;
+                t.preserve_space =
+                    t.preserve_space || t.text.starts_with(' ') || t.text.ends_with(' ');
+            }
+        },
+    )?;
 
     // Handle the last run: replace from start to match end within that content item.
     let last_mapping = &char_map[match_end - 1];
-    edit_run(para, wrappers, &runs[last_mapping.run_index], |run| {
-        if let RunContent::Text(t) = &mut run.content[last_mapping.content_index] {
-            let remaining = &t.text[last_mapping.byte_offset..];
-            let ch_len = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-            let byte_end = last_mapping.byte_offset + ch_len;
-            t.text = t.text[byte_end..].to_string();
-            t.preserve_space = t.preserve_space || t.text.starts_with(' ') || t.text.ends_with(' ');
-        }
-
-        // If the last run's text is now empty, remove its text content too.
-        run.content.retain(|c| {
-            if let RunContent::Text(t) = c {
-                !t.text.is_empty()
-            } else {
-                true
+    edit_run(
+        para,
+        wrappers,
+        &runs[last_mapping.run_index],
+        work.as_deref_mut(),
+        |run| {
+            if let RunContent::Text(t) = &mut run.content[last_mapping.content_index] {
+                let remaining = &t.text[last_mapping.byte_offset..];
+                let ch_len = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                let byte_end = last_mapping.byte_offset + ch_len;
+                t.text = t.text[byte_end..].to_string();
+                t.preserve_space =
+                    t.preserve_space || t.text.starts_with(' ') || t.text.ends_with(' ');
             }
-        });
-    });
+
+            // If the last run's text is now empty, remove its text content too.
+            run.content.retain(|c| {
+                if let RunContent::Text(t) = c {
+                    !t.text.is_empty()
+                } else {
+                    true
+                }
+            });
+        },
+    )?;
 
     // Clear text content from runs strictly between first and last.
     for text in &runs[first_mapping.run_index + 1..last_mapping.run_index] {
-        edit_run(para, wrappers, text, |run| {
+        edit_run(para, wrappers, text, work.as_deref_mut(), |run| {
             run.content.retain(|c| !matches!(c, RunContent::Text(_)));
-        });
+        })?;
     }
+    Ok(())
 }
 
 /// Remove the runs at `candidates` (indices into `runs`) that the replacement
 /// left without any content, keeping every anchor of the paragraph and of
 /// its content controls on the boundary that remains, and write each changed
 /// wrapper back into the paragraph that holds it.
-fn remove_emptied_runs(
+fn remove_emptied_runs_in(
     para: &mut CT_P,
     mut wrappers: Vec<Wrapper>,
     runs: &[TextRun],
     mut candidates: Vec<usize>,
-) {
+    mut extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+) -> crate::Result<()> {
     candidates.sort_unstable();
     candidates.dedup();
+    // Capture each actual immutable wrapper consumer before reverse writeback
+    // changes its parent's content. Raw wrapper parsing uses the existing
+    // canonical-w entry convention; fields expose their own original scope.
+    let contexts = wrappers
+        .iter()
+        .map(|wrapper| {
+            let parent = wrapper
+                .parent
+                .map_or(&*para, |index| &wrappers[index].content);
+            let (raw, inherited) = match wrapper.source {
+                WrapperSource::Raw(index) => {
+                    let raw = parent.extra_xml.get(index)?.1.as_slice();
+                    (raw, vec!["w".to_owned()])
+                }
+                WrapperSource::Field(index) => {
+                    let (raw, prefixes) = simple_field_source(parent.runs.get(index)?)?;
+                    (raw, prefixes.to_vec())
+                }
+            };
+            let mut reader = quick_xml::Reader::from_reader(raw);
+            let quick_xml::events::Event::Start(root) = reader.read_event().ok()? else {
+                return None;
+            };
+            word_prefixes_at(&root, &inherited).ok()
+        })
+        .collect::<Vec<_>>();
     // A wrapper holds only wrappers read after it, so writing them back in
     // reverse order writes each one into its parent before the parent loses
     // its emptied runs, which would move the run of a simple field.
     while let Some(wrapper) = wrappers.pop() {
         let index = wrappers.len();
         let mut content = wrapper.content;
+        let mut content_maps = wrapper.extra_maps;
+        let emission = work
+            .as_deref()
+            .filter(|_| wrapper.in_field)
+            .map(WordOperationWork::field_xml_emission);
+        // Recovered before this removal, not only at write-back.
+        let context = contexts[index]
+            .as_deref()
+            .map(crate::text::field_scope_bindings);
         remove_paragraph_emptied_runs(
             &mut content,
             candidates
                 .iter()
                 .filter(|candidate| runs[**candidate].wrapper == Some(index))
                 .map(|candidate| &runs[*candidate].path),
-        );
+            context.as_deref(),
+            content_maps.as_mut(),
+            work.as_deref_mut(),
+            emission.as_ref(),
+        )?;
         if !wrapper.changed {
             continue;
         }
-        let parent = match wrapper.parent {
+        let (parent, parent_maps) = match wrapper.parent {
             Some(parent) => {
                 wrappers[parent].changed = true;
-                &mut wrappers[parent].content
+                let parent = &mut wrappers[parent];
+                (&mut parent.content, parent.extra_maps.as_mut())
             }
-            None => &mut *para,
+            None => (&mut *para, extra_maps.as_deref_mut()),
         };
-        let written = write_wrapper_back(parent, &wrapper.source, &content);
-        debug_assert!(written, "wrapper source is stale");
+        let written = match context.as_deref() {
+            Some(context) => write_wrapper_back(
+                parent,
+                &wrapper.source,
+                &content,
+                content_maps.as_ref(),
+                Some(context),
+                wrapper.source_map.as_ref(),
+                parent_maps,
+                work.as_deref_mut(),
+                emission.as_ref(),
+            )?,
+            None => false,
+        };
+        if !written {
+            return Err(crate::OxmlError::InvalidValue(
+                "wrapper source write-back was refused".into(),
+            ));
+        }
     }
     remove_paragraph_emptied_runs(
         para,
@@ -694,33 +1804,147 @@ fn remove_emptied_runs(
             .iter()
             .filter(|candidate| runs[**candidate].wrapper.is_none())
             .map(|candidate| &runs[*candidate].path),
-    );
+        None,
+        extra_maps,
+        work,
+        None,
+    )?;
+    Ok(())
 }
 
 /// Write `content` back as the content of the wrapper at `source` in
 /// `paragraph`. Returns false when the source cannot take it.
-fn write_wrapper_back(paragraph: &mut CT_P, source: &WrapperSource, content: &CT_P) -> bool {
+#[allow(clippy::too_many_arguments)] // Actual source/map companions and inherited Field role are independent inputs.
+fn write_wrapper_back(
+    paragraph: &mut CT_P,
+    source: &WrapperSource,
+    content: &CT_P,
+    content_maps: Option<&WordExtraSourceMaps>,
+    source_context: Option<&[(&str, &str)]>,
+    source_map: Option<&crate::document::WordSourceMap>,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+    emission: Option<&FieldXmlEmission>,
+) -> crate::Result<bool> {
+    if work.is_none() {
+        return Ok(match *source {
+            WrapperSource::Raw(index) => {
+                let Some((_, raw)) = paragraph.extra_xml.get_mut(index) else {
+                    return Ok(false);
+                };
+                let Ok(updated) =
+                    crate::text::with_run_wrapper_content(raw, content, source_context)
+                else {
+                    return Ok(false);
+                };
+                *raw = updated;
+                true
+            }
+            WrapperSource::Field(index) => {
+                let Some(run) = paragraph.runs.get_mut(index) else {
+                    return Ok(false);
+                };
+                let Some(Ok(updated)) = simple_field_source(run).map(|(raw, _)| {
+                    crate::text::with_run_wrapper_content(raw, content, source_context)
+                }) else {
+                    return Ok(false);
+                };
+                crate::text::set_simple_field_source(run, &updated).unwrap_or(false)
+            }
+        });
+    }
+    let raw = match *source {
+        WrapperSource::Raw(index) => paragraph
+            .extra_xml
+            .get(index)
+            .map(|(_, raw)| raw.as_slice()),
+        WrapperSource::Field(index) => paragraph
+            .runs
+            .get(index)
+            .and_then(simple_field_source)
+            .map(|(raw, _)| raw),
+    };
+    let Some(raw) = raw else {
+        return Ok(false);
+    };
+    let mapped = work.as_deref().map(|work| {
+        crate::document::WordFieldInput::produced(
+            source_map
+                .cloned()
+                .unwrap_or_else(|| crate::document::WordSourceMap::generated(raw.len())),
+            std::sync::Arc::clone(&work.field_origins),
+        )
+    });
+    let result = crate::text::with_run_wrapper_content_in(
+        raw,
+        content,
+        source_context,
+        mapped.as_ref(),
+        work.as_deref_mut(),
+        emission,
+        content_maps,
+    );
+    let (updated, updated_map) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            if mapped
+                .as_ref()
+                .and_then(crate::document::WordFieldInput::resource_failure)
+                .is_some()
+                || work
+                    .as_deref()
+                    .is_some_and(WordOperationWork::resource_refused)
+            {
+                return Err(error);
+            }
+            return Ok(false);
+        }
+    };
     match *source {
         WrapperSource::Raw(index) => {
-            let Some((_, raw)) = paragraph.extra_xml.get_mut(index) else {
-                return false;
-            };
-            let Ok(updated) = with_run_wrapper_content(raw, content) else {
-                return false;
-            };
-            *raw = updated;
-            true
+            if extra_maps
+                .as_ref()
+                .is_some_and(|maps| maps.len() != paragraph.extra_xml.len())
+            {
+                return Err(crate::OxmlError::InvalidValue(
+                    "paragraph extra source map alignment changed".into(),
+                ));
+            }
+            paragraph.extra_xml[index].1 = updated;
+            if let Some(maps) = extra_maps {
+                maps[index] = Some(std::sync::Arc::new(updated_map));
+            }
+            Ok(true)
         }
         WrapperSource::Field(index) => {
-            let Some(run) = paragraph.runs.get_mut(index) else {
-                return false;
-            };
-            let Some(Ok(updated)) =
-                simple_field_source(run).map(|(raw, _)| with_run_wrapper_content(raw, content))
-            else {
-                return false;
-            };
-            set_simple_field_source(run, &updated).unwrap_or(false)
+            let next = work.as_deref().map(|work| {
+                crate::document::WordFieldInput::produced(
+                    updated_map,
+                    std::sync::Arc::clone(&work.field_origins),
+                )
+            });
+            match crate::text::set_simple_field_source_in(
+                &mut paragraph.runs[index],
+                &updated,
+                next.as_ref(),
+                work.as_deref_mut(),
+            ) {
+                Ok(written) => Ok(written),
+                Err(error) => {
+                    if next
+                        .as_ref()
+                        .and_then(crate::document::WordFieldInput::resource_failure)
+                        .is_some()
+                        || work
+                            .as_deref()
+                            .is_some_and(WordOperationWork::resource_refused)
+                    {
+                        Err(error)
+                    } else {
+                        Ok(false)
+                    }
+                }
+            }
         }
     }
 }
@@ -730,7 +1954,11 @@ fn write_wrapper_back(paragraph: &mut CT_P, source: &WrapperSource, content: &CT
 fn remove_paragraph_emptied_runs<'a>(
     para: &mut CT_P,
     paths: impl DoubleEndedIterator<Item = &'a AcceptedRunPath>,
-) {
+    context: Option<&[(&str, &str)]>,
+    extra_maps: Option<&mut WordExtraSourceMaps>,
+    mut work: Option<&mut WordOperationWork>,
+    emission: Option<&FieldXmlEmission>,
+) -> crate::Result<()> {
     let mut direct = vec![false; para.runs.len()];
     // Later runs first, so that removing one inside a control leaves the
     // addresses of the others valid.
@@ -751,60 +1979,85 @@ fn remove_paragraph_emptied_runs<'a>(
         }
         match path.segments() {
             [AcceptedRunPathSegment::Run(run)] => direct[*run] = true,
-            nested => remove_paragraph_run(para, nested),
+            nested => remove_paragraph_run(para, nested, context, work.as_deref_mut(), emission)?,
         }
     }
     if direct.contains(&true) {
-        para.remove_runs(&direct);
+        let mut candidate = para.clone();
+        candidate.remove_runs_core_in(&direct, context, extra_maps, work, emission)?;
+        *para = candidate;
     }
+    Ok(())
 }
 
-fn remove_paragraph_run(para: &mut CT_P, path: &[AcceptedRunPathSegment]) {
+fn remove_paragraph_run(
+    para: &mut CT_P,
+    path: &[AcceptedRunPathSegment],
+    context: Option<&[(&str, &str)]>,
+    work: Option<&mut WordOperationWork>,
+    emission: Option<&FieldXmlEmission>,
+) -> crate::Result<()> {
     match path {
         [AcceptedRunPathSegment::Run(index)] if *index < para.runs.len() => {
             let mut removed = vec![false; para.runs.len()];
             removed[*index] = true;
-            para.remove_runs(&removed);
+            let mut candidate = para.clone();
+            candidate.remove_runs_core_in(&removed, context, None, work, emission)?;
+            *para = candidate;
         }
         [AcceptedRunPathSegment::ContentControl(control), rest @ ..] => {
             if let Some((_, _, _, sdt)) = para.content_controls.get_mut(*control) {
-                remove_control_run(sdt, rest);
+                remove_control_run(sdt, rest, context, work, emission)?;
             }
         }
         [AcceptedRunPathSegment::Revision(revision), rest @ ..] => {
             if let Some((_, _, revision)) = para.revisions.get_mut(*revision) {
-                remove_revision_run(revision, rest);
+                remove_revision_run(revision, rest, context, work, emission)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn remove_control_run(sdt: &mut CT_Sdt, path: &[AcceptedRunPathSegment]) {
+fn remove_control_run(
+    sdt: &mut CT_Sdt,
+    path: &[AcceptedRunPathSegment],
+    context: Option<&[(&str, &str)]>,
+    work: Option<&mut WordOperationWork>,
+    emission: Option<&FieldXmlEmission>,
+) -> crate::Result<()> {
     match path {
         [AcceptedRunPathSegment::Run(index)] => sdt.remove_content(*index),
         [AcceptedRunPathSegment::ContentControl(index), rest @ ..] => {
             if let Some(SdtContent::ContentControl(nested)) = sdt.content.get_mut(*index) {
-                remove_control_run(nested, rest);
+                remove_control_run(nested, rest, context, work, emission)?;
             }
         }
         [AcceptedRunPathSegment::Revision(index), rest @ ..] => {
             if let Some((_, revision)) = sdt.revisions.get_mut(*index) {
-                remove_revision_run(revision, rest);
+                remove_revision_run(revision, rest, context, work, emission)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Remove a run of a tracked insertion or move destination, which keeps
 /// the wrapper and the other runs in it.
-fn remove_revision_run(revision: &mut CT_Revision, path: &[AcceptedRunPathSegment]) {
-    let removed = revision.edit_accepted_paragraph(|inserted| {
-        remove_paragraph_run(inserted, path);
+fn remove_revision_run(
+    revision: &mut CT_Revision,
+    path: &[AcceptedRunPathSegment],
+    context: Option<&[(&str, &str)]>,
+    work: Option<&mut WordOperationWork>,
+    emission: Option<&FieldXmlEmission>,
+) -> crate::Result<()> {
+    revision.edit_accepted_paragraph_in(work, emission, |inserted, work| {
+        remove_paragraph_run(inserted, path, context, work, emission)?;
         Ok(true)
-    });
-    debug_assert!(matches!(removed, Ok(true)), "revision run path is stale");
+    })?;
+    Ok(())
 }
 
 /// Replace all occurrences of `placeholder` in all paragraphs of a slice.
@@ -818,59 +2071,152 @@ pub fn replace_in_paragraphs(paras: &mut [CT_P], placeholder: &str, replacement:
 /// Replace all occurrences of `placeholder` in a table (recursively handles
 /// nested tables and content controls).
 pub fn replace_in_table(table: &mut CT_Tbl, placeholder: &str, replacement: &str) -> usize {
-    edit_table(table, &mut |paragraph| {
-        replace_in_paragraph(paragraph, placeholder, replacement)
+    edit_paragraph_owners(ParagraphEditOwner::Table(table), &mut |paragraph| {
+        Ok(replace_in_paragraph(paragraph, placeholder, replacement))
     })
+    .unwrap_or(0)
 }
 
-/// Hand every paragraph of a table to `edit` and sum what it counts.
-fn edit_table(table: &mut CT_Tbl, edit: &mut dyn FnMut(&mut CT_P) -> usize) -> usize {
-    let mut count = 0;
-    for (_, _, sdt) in &mut table.content_controls {
-        count += edit_control(sdt, edit);
-    }
-    for row in &mut table.rows {
-        count += edit_row(row, edit);
-    }
-    count
+enum ParagraphEditOwner<'a> {
+    Paragraph(&'a mut CT_P),
+    Table(&'a mut CT_Tbl),
+    Row(&'a mut CT_Row),
+    Cell(&'a mut CT_Tc),
+    Control(&'a mut CT_Sdt),
 }
 
-fn edit_control(sdt: &mut CT_Sdt, edit: &mut dyn FnMut(&mut CT_P) -> usize) -> usize {
-    let mut count = 0;
-    for content in &mut sdt.content {
-        count += match content {
-            SdtContent::Paragraph(paragraph) => edit(paragraph),
-            SdtContent::Table(table) => edit_table(table, edit),
-            SdtContent::Row(row) => edit_row(row, edit),
-            SdtContent::Cell(cell) => edit_cell(cell, edit),
-            SdtContent::ContentControl(nested) => edit_control(nested, edit),
-            SdtContent::Run(_) | SdtContent::RawXml(_) => 0,
-        };
-    }
-    count
+/// Preserve the existing physical edit order while forwarding each refusal.
+fn edit_paragraph_owners(
+    root: ParagraphEditOwner<'_>,
+    edit: &mut dyn FnMut(&mut CT_P) -> crate::Result<usize>,
+) -> crate::Result<usize> {
+    edit_paragraph_owners_with_maps(root, None, &mut |paragraph, _, _| edit(paragraph))
 }
 
-fn edit_row(row: &mut CT_Row, edit: &mut dyn FnMut(&mut CT_P) -> usize) -> usize {
+#[allow(clippy::type_complexity)] // Existing callback with its two actual parser-return companions.
+fn edit_paragraph_owners_with_maps(
+    root: ParagraphEditOwner<'_>,
+    mut source_maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    edit: &mut dyn FnMut(
+        &mut CT_P,
+        Option<&mut WordExtraSourceMaps>,
+        Option<&crate::text::WordParagraphReadFacts>,
+    ) -> crate::Result<usize>,
+) -> crate::Result<usize> {
+    use crate::text::WordBlockComponent as C;
+    if let Some(maps) = source_maps.as_deref_mut() {
+        maps.paragraphs.sort_by(|left, right| left.0.cmp(&right.0));
+        maps.word_texts.sort_by(|left, right| left.0.cmp(&right.0));
+    }
+    // These component coordinates consume the companion emitted by this
+    // immediately preceding constructor. They never discover source identity.
+    let mapped = source_maps.is_some();
+    let mut pending = vec![(root, Vec::new())];
     let mut count = 0;
-    for (_, _, sdt) in &mut row.content_controls {
-        count += edit_control(sdt, edit);
+    while let Some((owner, path)) = pending.pop() {
+        match owner {
+            ParagraphEditOwner::Paragraph(paragraph) => {
+                let companions = source_maps
+                    .as_deref_mut()
+                    .map(|maps| {
+                        let index = maps
+                            .paragraphs
+                            .binary_search_by(|(known, _)| known.cmp(&path))
+                            .map_err(|_| {
+                                crate::OxmlError::InvalidValue(
+                                    "missing constructed paragraph source companion".into(),
+                                )
+                            })?;
+                        let facts = maps
+                            .word_texts
+                            .binary_search_by(|(known, _)| known.cmp(&path))
+                            .ok()
+                            .and_then(|index| maps.word_texts[index].1.as_ref());
+                        Ok::<_, crate::OxmlError>((&mut maps.paragraphs[index].1, facts))
+                    })
+                    .transpose()?;
+                let (maps, facts) =
+                    companions.map_or((None, None), |(maps, facts)| (Some(maps), facts));
+                count += edit(paragraph, maps, facts)?;
+            }
+            ParagraphEditOwner::Table(table) => {
+                pending.extend(table.rows.iter_mut().enumerate().rev().map(|(index, row)| {
+                    let mut path = path.clone();
+                    if mapped {
+                        path.push(C::TableRow(index));
+                    }
+                    (ParagraphEditOwner::Row(row), path)
+                }));
+                pending.extend(table.content_controls.iter_mut().enumerate().rev().map(
+                    |(index, (_, _, control))| {
+                        let mut path = path.clone();
+                        if mapped {
+                            path.push(C::TableControl(index));
+                        }
+                        (ParagraphEditOwner::Control(control), path)
+                    },
+                ));
+            }
+            ParagraphEditOwner::Row(row) => {
+                pending.extend(row.cells.iter_mut().enumerate().rev().map(|(index, cell)| {
+                    let mut path = path.clone();
+                    if mapped {
+                        path.push(C::RowCell(index));
+                    }
+                    (ParagraphEditOwner::Cell(cell), path)
+                }));
+                pending.extend(row.content_controls.iter_mut().enumerate().rev().map(
+                    |(index, (_, _, control))| {
+                        let mut path = path.clone();
+                        if mapped {
+                            path.push(C::RowControl(index));
+                        }
+                        (ParagraphEditOwner::Control(control), path)
+                    },
+                ));
+            }
+            ParagraphEditOwner::Cell(cell) => {
+                pending.extend(cell.content.iter_mut().enumerate().rev().map(
+                    |(index, content)| {
+                        let mut path = path.clone();
+                        if mapped {
+                            path.push(C::CellContent(index));
+                        }
+                        (
+                            match content {
+                                CellContent::Paragraph(p) => ParagraphEditOwner::Paragraph(p),
+                                CellContent::Table(table) => ParagraphEditOwner::Table(table),
+                                CellContent::ContentControl(sdt) => {
+                                    ParagraphEditOwner::Control(sdt)
+                                }
+                            },
+                            path,
+                        )
+                    },
+                ));
+            }
+            ParagraphEditOwner::Control(sdt) => {
+                pending.extend(sdt.content.iter_mut().enumerate().rev().filter_map(
+                    |(index, content)| {
+                        let owner = match content {
+                            SdtContent::Paragraph(p) => ParagraphEditOwner::Paragraph(p),
+                            SdtContent::Table(table) => ParagraphEditOwner::Table(table),
+                            SdtContent::Row(row) => ParagraphEditOwner::Row(row),
+                            SdtContent::Cell(cell) => ParagraphEditOwner::Cell(cell),
+                            SdtContent::ContentControl(sdt) => ParagraphEditOwner::Control(sdt),
+                            SdtContent::Run(_) | SdtContent::RawXml(_) => return None,
+                        };
+                        let mut path = path.clone();
+                        if mapped {
+                            path.push(C::SdtContent(index));
+                        }
+                        Some((owner, path))
+                    },
+                ));
+            }
+        }
     }
-    for cell in &mut row.cells {
-        count += edit_cell(cell, edit);
-    }
-    count
-}
-
-fn edit_cell(cell: &mut CT_Tc, edit: &mut dyn FnMut(&mut CT_P) -> usize) -> usize {
-    let mut count = 0;
-    for content in &mut cell.content {
-        count += match content {
-            CellContent::Paragraph(paragraph) => edit(paragraph),
-            CellContent::Table(table) => edit_table(table, edit),
-            CellContent::ContentControl(sdt) => edit_control(sdt, edit),
-        };
-    }
-    count
+    Ok(count)
 }
 
 /// Hand a paragraph kept as raw XML, or the paragraphs of a table or a block
@@ -881,66 +2227,274 @@ fn edit_cell(cell: &mut CT_Tc, edit: &mut dyn FnMut(&mut CT_P) -> usize) -> usiz
 fn edit_raw_block(
     raw: &mut Vec<u8>,
     word_prefixes: &[String],
-    edit: &mut dyn FnMut(&mut CT_P) -> usize,
-) -> usize {
+    edit: &mut dyn FnMut(&mut CT_P) -> crate::Result<usize>,
+) -> crate::Result<usize> {
+    Ok(edit_text_box_block(raw, word_prefixes, &mut TextBoxEditor::Ordinary(edit), None)?.0)
+}
+
+fn edit_text_box_block(
+    raw: &mut Vec<u8>,
+    word_prefixes: &[String],
+    edit: &mut TextBoxEditor<'_, '_>,
+    input: Option<&crate::document::WordFieldInput>,
+) -> crate::Result<(usize, Option<crate::document::WordSourceMap>)> {
     use quick_xml::events::Event;
     use quick_xml::{Reader, Writer};
-
+    let (record_input, _record_publication) = match input {
+        Some(input) => {
+            let (input, publication) = input.record_publication(raw)?;
+            (Some(input), Some(publication))
+        }
+        None => (None, None),
+    };
+    let input = record_input.as_ref();
+    let unchanged = || {
+        let map = input.map(|input| {
+            let mut map = input.projection_parts().0.clone();
+            map.freeze_publication();
+            map
+        });
+        (0, map)
+    };
     let mut reader = Reader::from_reader(raw.as_slice());
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let Ok(Event::Start(start)) = reader.read_event_into(&mut buffer) else {
-        return 0;
+        return Ok(unchanged());
     };
     let Ok(prefixes) = word_prefixes_at(&start, word_prefixes) else {
-        return 0;
+        return Ok(unchanged());
     };
-    // The namespaces the start tag declares other than the part does.
     let Ok(bindings) = local_namespace_overrides(&start, word_prefixes) else {
-        return 0;
+        return Ok(unchanged());
     };
+    let paragraph_root = is_word_element(start.name().as_ref(), b"p", &prefixes);
+    let table_root = is_word_element(start.name().as_ref(), b"tbl", &prefixes);
+    let control_root = is_word_element(start.name().as_ref(), b"sdt", &prefixes);
+    if !paragraph_root && !table_root && !control_root {
+        return Ok(unchanged());
+    }
+    let admitted = crate::document::admit_raw_word_source(
+        raw,
+        word_prefixes,
+        control_root.then_some(crate::content_control::SdtOwner::Body),
+    )?;
+    let mut controls = admitted
+        .as_ref()
+        .map(crate::document::AdmittedWordSource::controls);
+    controls = match (controls, input) {
+        (Some(control), Some(input)) => {
+            let (map, registry, initial) = input.projection_parts();
+            Some(
+                control
+                    .with_field_origins(registry, initial)
+                    .bind_capture(raw, std::sync::Arc::new(map.clone())),
+            )
+        }
+        (controls, _) => controls,
+    };
+    let collect = matches!(edit, TextBoxEditor::Template(_));
     let mut writer = Writer::new(Vec::new());
-    let count = if is_word_element(start.name().as_ref(), b"p", &prefixes) {
-        let Ok(mut paragraph) =
-            CT_P::from_xml_with_prefixes_and_root(&mut reader, &prefixes, Some(&start))
-        else {
-            return 0;
+    let mut produced_map = None;
+    let count = if paragraph_root {
+        let mut extras = Vec::new();
+        let mut texts = Vec::new();
+        let mut nested = crate::text::WordBlockSourceMaps::default();
+        let result = CT_P::from_xml_with_read_output(
+            &mut reader,
+            &prefixes,
+            Some(&start),
+            controls.as_mut(),
+            crate::text::WordParagraphReadOutput {
+                extra_maps: collect.then_some(&mut extras),
+                text_facts: collect.then_some(&mut texts),
+                nested_maps: collect.then_some(&mut nested),
+                ..Default::default()
+            },
+        );
+        if let TextBoxEditor::Template(context) = edit {
+            check_source_failure(Some(context.work))?;
+        }
+        let Ok(mut paragraph) = result else {
+            return Ok(unchanged());
         };
-        let count = edit(&mut paragraph);
-        if count == 0 || paragraph.to_xml(&mut writer).is_err() {
-            return 0;
+        if let (Some(input), TextBoxEditor::Template(context)) = (input, &mut *edit) {
+            context
+                .work
+                .field_origins
+                .lock()
+                .expect("field origin registry poisoned")
+                .commit_publication_owner(
+                    crate::document::WordOwner::Paragraph(&paragraph),
+                    input.projection_parts().0,
+                );
+        }
+        let facts = controls
+            .as_ref()
+            .and_then(|cursor| cursor.paragraph_word_facts(&reader, texts))
+            .map(|mut facts| {
+                facts.nested = nested;
+                facts
+            });
+        let count = edit.paragraph(
+            &mut paragraph,
+            collect.then_some(&mut extras),
+            facts.as_ref(),
+        )?;
+        if count == 0 {
+            return Ok(unchanged());
+        }
+        match edit {
+            TextBoxEditor::Ordinary(_) => paragraph.to_xml(&mut writer)?,
+            TextBoxEditor::Template(context) => {
+                let (bytes, mut map, events) = crate::text::final_word_source(
+                    crate::text::FinalWordBlock::Paragraph(&paragraph),
+                    context.work,
+                )?;
+                for event in events {
+                    map.push_word_event(event)?;
+                }
+                writer.get_mut().extend_from_slice(&bytes);
+                produced_map = Some(map);
+            }
         }
         count
-    } else if is_word_element(start.name().as_ref(), b"tbl", &prefixes) {
-        let Ok(mut table) =
-            CT_Tbl::from_xml_with_prefixes_and_owner_bindings(&mut reader, &prefixes, &bindings)
-        else {
-            return 0;
+    } else if table_root {
+        let mut maps = crate::text::WordBlockSourceMaps {
+            collect_word_texts: collect,
+            ..Default::default()
         };
-        let count = edit_table(&mut table, edit);
-        if count == 0 || table.to_xml(&mut writer).is_err() {
-            return 0;
+        let result = CT_Tbl::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            &mut reader,
+            &prefixes,
+            &bindings,
+            0,
+            None,
+            controls.as_mut(),
+            collect.then_some(&mut maps),
+        );
+        if let TextBoxEditor::Template(context) = edit {
+            check_source_failure(Some(context.work))?;
         }
-        count
-    } else if is_word_element(start.name().as_ref(), b"sdt", &prefixes) {
-        let Some(mut control) = CT_Sdt::from_body_raw(raw, word_prefixes) else {
-            return 0;
+        let Ok(mut table) = result else {
+            return Ok(unchanged());
         };
-        let count = edit_control(&mut control, edit);
-        if count == 0 || control.to_xml(&mut writer).is_err() {
-            return 0;
+        if let (Some(input), TextBoxEditor::Template(context)) = (input, &mut *edit) {
+            context
+                .work
+                .field_origins
+                .lock()
+                .expect("field origin registry poisoned")
+                .commit_publication_owner(
+                    crate::document::WordOwner::Table(&table),
+                    input.projection_parts().0,
+                );
+        }
+        let count = edit_paragraph_owners_with_maps(
+            ParagraphEditOwner::Table(&mut table),
+            collect.then_some(&mut maps),
+            &mut |paragraph, maps, facts| edit.paragraph(paragraph, maps, facts),
+        )?;
+        if count == 0 {
+            return Ok(unchanged());
+        }
+        match edit {
+            TextBoxEditor::Ordinary(_) => table.to_xml(&mut writer)?,
+            TextBoxEditor::Template(context) => {
+                let (bytes, mut map, events) = crate::text::final_word_source(
+                    crate::text::FinalWordBlock::Table(&table),
+                    context.work,
+                )?;
+                for event in events {
+                    map.push_word_event(event)?;
+                }
+                writer.get_mut().extend_from_slice(&bytes);
+                produced_map = Some(map);
+            }
         }
         count
     } else {
-        return 0;
+        let mut maps = crate::text::WordBlockSourceMaps {
+            collect_word_texts: collect,
+            ..Default::default()
+        };
+        let result = CT_Sdt::from_raw_with_mapped_context_and_maps(
+            raw,
+            word_prefixes,
+            crate::content_control::SdtOwner::Body,
+            controls.as_mut(),
+            input.map(|input| std::sync::Arc::new(input.projection_parts().0.clone())),
+            collect.then_some(&mut maps),
+        );
+        if let TextBoxEditor::Template(context) = edit {
+            check_source_failure(Some(context.work))?;
+        }
+        let Some(mut control) = result else {
+            return Ok(unchanged());
+        };
+        if let (Some(input), TextBoxEditor::Template(context)) = (input, &mut *edit) {
+            context
+                .work
+                .field_origins
+                .lock()
+                .expect("field origin registry poisoned")
+                .commit_publication_owner(
+                    crate::document::WordOwner::Control(&control),
+                    input.projection_parts().0,
+                );
+        }
+        let count = edit_paragraph_owners_with_maps(
+            ParagraphEditOwner::Control(&mut control),
+            collect.then_some(&mut maps),
+            &mut |paragraph, maps, facts| edit.paragraph(paragraph, maps, facts),
+        )?;
+        if count == 0 {
+            return Ok(unchanged());
+        }
+        match edit {
+            TextBoxEditor::Ordinary(_) => control.to_xml(&mut writer)?,
+            TextBoxEditor::Template(context) => {
+                let (bytes, mut map, events) = crate::text::final_word_source(
+                    crate::text::FinalWordBlock::Control(&control),
+                    context.work,
+                )?;
+                for event in events {
+                    map.push_word_event(event)?;
+                }
+                writer.get_mut().extend_from_slice(&bytes);
+                produced_map = Some(map);
+            }
+        }
+        count
     };
-    let Some(rewritten) =
-        with_source_namespaces(raw, &writer.into_inner(), &bindings, word_prefixes)
-    else {
-        return 0;
+    let bytes = writer.into_inner();
+    let (rewritten, mut map) = if let Some(map) = produced_map {
+        let Ok((bytes, map)) = crate::text::raw_with_external_bindings_and_map(
+            &bytes,
+            &bindings,
+            None,
+            Some(std::sync::Arc::new(map)),
+        ) else {
+            if let TextBoxEditor::Template(context) = edit {
+                check_source_failure(Some(context.work))?;
+            }
+            return Ok(unchanged());
+        };
+        if source_namespaces_compatible(raw, &bytes, word_prefixes) != Some(true) {
+            return Ok(unchanged());
+        }
+        (bytes, map.map(|map| (*map).clone()))
+    } else {
+        let Some(bytes) = with_source_namespaces(raw, &bytes, &bindings, word_prefixes) else {
+            return Ok(unchanged());
+        };
+        (bytes, None)
     };
+    if let Some(map) = &mut map {
+        map.freeze_publication();
+    }
     *raw = rewritten;
-    count
+    Ok((count, map))
 }
 
 /// Run the literal matcher on one namespace-closed paragraph, table, control or cell.
@@ -951,6 +2505,94 @@ pub fn try_replace_in_block(
     paragraph: Option<usize>,
     placeholder: &str,
     replacement: &str,
+) -> crate::Result<usize> {
+    try_replace_in_block_with_constructors(raw, paragraph, placeholder, replacement, None)
+}
+
+// Standalone callers admit their own source. Scoped operations supply outcomes
+// from the same original source without granting a new expanded-byte allowance.
+pub(crate) fn try_replace_in_block_with_constructors(
+    raw: &mut Vec<u8>,
+    paragraph: Option<usize>,
+    placeholder: &str,
+    replacement: &str,
+    constructors: Option<(
+        crate::document::ConstructorFailures,
+        crate::document::WordSourceMap,
+    )>,
+) -> crate::Result<usize> {
+    try_replace_in_block_with_constructors_in(
+        raw,
+        paragraph,
+        placeholder,
+        replacement,
+        constructors,
+        None,
+    )
+}
+
+pub(crate) struct ScopedLiteralContext<'a> {
+    pub(crate) work: &'a mut WordOperationWork,
+    pub(crate) delivered: &'a std::cell::Cell<bool>,
+    pub(crate) initial_delivery: bool,
+}
+
+fn replace_literal_block_owners(
+    root: ParagraphEditOwner<'_>,
+    maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    selected: Option<*const CT_P>,
+    placeholder: &str,
+    replacement: &str,
+    mut context: Option<&mut ScopedLiteralContext<'_>>,
+) -> crate::Result<usize> {
+    edit_paragraph_owners_with_maps(root, maps, &mut |paragraph, maps, _| {
+        if selected.is_some_and(|target| !std::ptr::eq(target, paragraph)) {
+            return Ok(0);
+        }
+        if let Some(context) = context.as_deref_mut() {
+            try_replace_in_paragraph_with_literal(
+                paragraph,
+                placeholder,
+                replacement,
+                maps,
+                context.work,
+                context.delivered,
+            )
+        } else {
+            try_replace_in_paragraph(paragraph, placeholder, replacement)
+        }
+    })
+}
+
+fn check_source_failure(work: Option<&WordOperationWork>) -> crate::Result<()> {
+    if let Some(work) = work {
+        if let Some(error) = work
+            .field_origins
+            .lock()
+            .expect("field origin registry poisoned")
+            .source_resource_failure()
+        {
+            return Err(error);
+        }
+        if work.resource_refused() {
+            return Err(work.writer_error(crate::OxmlError::InvalidValue(
+                "mapped source resource admission refused".into(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn try_replace_in_block_with_constructors_in(
+    raw: &mut Vec<u8>,
+    paragraph: Option<usize>,
+    placeholder: &str,
+    replacement: &str,
+    constructors: Option<(
+        crate::document::ConstructorFailures,
+        crate::document::WordSourceMap,
+    )>,
+    mut context: Option<ScopedLiteralContext<'_>>,
 ) -> crate::Result<usize> {
     use crate::OxmlError;
     use quick_xml::events::Event;
@@ -1027,35 +2669,159 @@ pub fn try_replace_in_block(
     };
     let prefixes = word_prefixes_at(&start, &[])?;
     let bindings = local_namespace_overrides(&start, &[])?;
+    let root_kind = [
+        b"p".as_slice(),
+        b"tbl".as_slice(),
+        b"sdt".as_slice(),
+        b"tc".as_slice(),
+    ]
+    .into_iter()
+    .find(|local| {
+        is_word_element(start.name().as_ref(), local, &prefixes)
+            && (paragraph.is_none() || *local == b"tc")
+    })
+    .ok_or_else(|| OxmlError::InvalidValue("unsupported scoped replacement block".into()))?;
+    let root_owner = (root_kind == b"sdt").then_some(crate::content_control::SdtOwner::Body);
+    let captured_block_map = context.as_ref().and_then(|_| {
+        constructors
+            .as_ref()
+            .map(|(_, map)| std::sync::Arc::new(map.clone()))
+    });
+    let admitted = if let Some((constructors, source_map)) = constructors {
+        crate::document::admit_word_input_with_constructors(
+            crate::document::WordXmlInput::Contiguous(raw),
+            &[],
+            None,
+            root_owner,
+            constructors,
+        )?
+        .with_source_map(source_map)?
+    } else {
+        crate::document::admit_word_source(raw, &[], None, root_owner)?
+    };
+    let mut control_facts = admitted.controls_for(raw);
+    if let Some(context) = context.as_ref() {
+        control_facts = control_facts.with_field_origins(
+            std::sync::Arc::clone(&context.work.field_origins),
+            context.initial_delivery,
+        );
+    }
     let mut writer = Writer::new(Vec::new());
-    let mut edit = |p: &mut CT_P| replace_in_paragraph(p, placeholder, replacement);
-    let count = if is_word_element(start.name().as_ref(), b"p", &prefixes) && paragraph.is_none() {
-        let mut value =
-            CT_P::from_xml_with_prefixes_and_root(&mut reader, &prefixes, Some(&start))?;
-        let count = edit(&mut value);
+    let mut maps = context
+        .as_ref()
+        .map(|_| crate::text::WordBlockSourceMaps::default());
+    let count = if root_kind == b"p" {
+        let mut paragraph_maps = maps.as_ref().map(|_| Vec::new());
+        let mut value = CT_P::from_xml_with_revision_facts(
+            &mut reader,
+            &prefixes,
+            Some(&start),
+            None,
+            Some(&mut control_facts),
+            paragraph_maps.as_mut(),
+            None,
+        )?;
+        if let (Some(maps), Some(paragraph_maps)) = (maps.as_mut(), paragraph_maps) {
+            maps.paragraph(paragraph_maps);
+        }
+        check_source_failure(context.as_ref().map(|context| &*context.work))?;
+        let count = replace_literal_block_owners(
+            ParagraphEditOwner::Paragraph(&mut value),
+            maps.as_mut(),
+            None,
+            placeholder,
+            replacement,
+            context.as_mut(),
+        )?;
         if count > 0 {
-            value.to_xml(&mut writer)?;
+            let _publication_scope = crate::text::raw_root_binding_scope(raw, true)?;
+            if let Some(context) = context.as_mut() {
+                crate::text::write_final_word_block(
+                    crate::text::FinalWordBlock::Paragraph(&value),
+                    &mut writer,
+                    context.work,
+                )?;
+            } else {
+                value.to_xml(&mut writer)?;
+            }
         }
         count
-    } else if is_word_element(start.name().as_ref(), b"tbl", &prefixes) && paragraph.is_none() {
-        let mut value =
-            CT_Tbl::from_xml_with_prefixes_and_owner_bindings(&mut reader, &prefixes, &bindings)?;
-        let count = edit_table(&mut value, &mut edit);
+    } else if root_kind == b"tbl" {
+        let mut value = CT_Tbl::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            &mut reader,
+            &prefixes,
+            &bindings,
+            0,
+            Some(&start),
+            Some(&mut control_facts),
+            maps.as_mut(),
+        )?;
+        check_source_failure(context.as_ref().map(|context| &*context.work))?;
+        let count = replace_literal_block_owners(
+            ParagraphEditOwner::Table(&mut value),
+            maps.as_mut(),
+            None,
+            placeholder,
+            replacement,
+            context.as_mut(),
+        )?;
         if count > 0 {
-            value.to_xml(&mut writer)?;
+            let _publication_scope = crate::text::raw_root_binding_scope(raw, true)?;
+            if let Some(context) = context.as_mut() {
+                crate::text::write_final_word_block(
+                    crate::text::FinalWordBlock::Table(&value),
+                    &mut writer,
+                    context.work,
+                )?;
+            } else {
+                value.to_xml(&mut writer)?;
+            }
         }
         count
-    } else if is_word_element(start.name().as_ref(), b"sdt", &prefixes) && paragraph.is_none() {
-        let mut value = CT_Sdt::from_body_raw(raw, &prefixes)
+    } else if root_kind == b"sdt" {
+        let value = CT_Sdt::from_raw_with_mapped_context_and_maps(
+            raw,
+            &prefixes,
+            crate::content_control::SdtOwner::Body,
+            Some(&mut control_facts),
+            captured_block_map,
+            maps.as_mut(),
+        );
+        check_source_failure(context.as_ref().map(|context| &*context.work))?;
+        let mut value = value
             .ok_or_else(|| OxmlError::InvalidValue("unsupported scoped content control".into()))?;
-        let count = edit_control(&mut value, &mut edit);
+        let count = replace_literal_block_owners(
+            ParagraphEditOwner::Control(&mut value),
+            maps.as_mut(),
+            None,
+            placeholder,
+            replacement,
+            context.as_mut(),
+        )?;
         if count > 0 {
-            value.to_xml(&mut writer)?;
+            let _publication_scope = crate::text::raw_root_binding_scope(raw, true)?;
+            if let Some(context) = context.as_mut() {
+                crate::text::write_final_word_block(
+                    crate::text::FinalWordBlock::Control(&value),
+                    &mut writer,
+                    context.work,
+                )?;
+            } else {
+                value.to_xml(&mut writer)?;
+            }
         }
         count
-    } else if is_word_element(start.name().as_ref(), b"tc", &prefixes) {
-        let mut value =
-            CT_Tc::from_xml_with_prefixes_and_owner_bindings(&mut reader, &prefixes, &bindings)?;
+    } else if root_kind == b"tc" {
+        let mut value = CT_Tc::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            &mut reader,
+            &prefixes,
+            &bindings,
+            0,
+            Some(&start),
+            Some(&mut control_facts),
+            maps.as_mut(),
+        )?;
+        check_source_failure(context.as_ref().map(|context| &*context.work))?;
         let selected = paragraph
             .map(|index| {
                 value
@@ -1067,29 +2833,46 @@ pub fn try_replace_in_block(
                     })
             })
             .transpose()?;
-        let count = edit_cell(&mut value, &mut |p| {
-            if selected.is_none_or(|target| std::ptr::eq(target, p)) {
-                edit(p)
-            } else {
-                0
-            }
-        });
+        let count = replace_literal_block_owners(
+            ParagraphEditOwner::Cell(&mut value),
+            maps.as_mut(),
+            selected,
+            placeholder,
+            replacement,
+            context.as_mut(),
+        )?;
         if count > 0 {
-            value.to_xml(&mut writer)?;
+            let _publication_scope = crate::text::raw_root_binding_scope(raw, true)?;
+            if let Some(context) = context.as_mut() {
+                crate::text::write_final_word_block(
+                    crate::text::FinalWordBlock::Cell(&value),
+                    &mut writer,
+                    context.work,
+                )?;
+            } else {
+                value.to_xml(&mut writer)?;
+            }
         }
         count
     } else {
-        return Err(OxmlError::InvalidValue(
-            "unsupported scoped replacement block".into(),
-        ));
+        unreachable!("root ownership validated above")
     };
     if count > 0 {
-        let rewritten = with_source_namespaces(raw, &writer.into_inner(), &bindings, &[])
-            .ok_or_else(|| {
-                OxmlError::InvalidValue(
-                    "scoped replacement cannot preserve namespace bindings".into(),
-                )
-            })?;
+        // These concrete typed publishers generate canonical Word names when
+        // the source has no w binding. The snapshot's conventional fallback
+        // is not a physical declaration in a standalone fragment. Close that
+        // generated binding explicitly, while an actual foreign w still wins.
+        let mut publication_bindings = bindings;
+        if !publication_bindings.iter().any(|(prefix, _)| prefix == "w") {
+            publication_bindings.push(("w".into(), W_NS.into()));
+        }
+        let rewritten =
+            with_source_namespaces(raw, &writer.into_inner(), &publication_bindings, &[])
+                .ok_or_else(|| {
+                    OxmlError::InvalidValue(
+                        "scoped replacement cannot preserve namespace bindings".into(),
+                    )
+                })?;
         *raw = restore_scoped_container_attributes(raw, &rewritten)?;
     }
     Ok(count)
@@ -1197,7 +2980,12 @@ fn restore_scoped_container_attributes(source: &[u8], rewritten: &[u8]) -> crate
         } else {
             return Err(refuse());
         }
-        crate::text::push_root_attribute_record(&mut retained.start, &attributes, None)?;
+        crate::text::push_root_attribute_record(
+            &mut retained.start,
+            &attributes,
+            None,
+            crate::text::XmlWriteRole::Publication,
+        )?;
         let mut writer = quick_xml::Writer::new(Vec::new());
         writer.write_event(if retained.empty {
             Event::Empty(retained.start)
@@ -1223,8 +3011,16 @@ fn with_source_namespaces(
     word_prefixes: &[String],
 ) -> Option<Vec<u8>> {
     let rewritten = raw_with_external_bindings(rewritten, start_bindings).ok()?;
+    source_namespaces_compatible(source, &rewritten, word_prefixes)?.then_some(rewritten)
+}
+
+fn source_namespaces_compatible(
+    source: &[u8],
+    rewritten: &[u8],
+    word_prefixes: &[String],
+) -> Option<bool> {
     let (_, declared) = namespace_use(source)?;
-    let (left_to_part, _) = namespace_use(&rewritten)?;
+    let (left_to_part, _) = namespace_use(rewritten)?;
     let part = namespace_bindings(word_prefixes);
     let part_namespace = |prefix: &str| {
         part.iter()
@@ -1232,15 +3028,12 @@ fn with_source_namespaces(
             .map(|(_, namespace)| namespace.as_str())
             .or_else(|| word_prefixes.iter().any(|p| p == prefix).then_some(W_NS))
     };
-    left_to_part
-        .iter()
-        .all(|prefix| {
-            declared
-                .iter()
-                .filter(|(candidate, _)| candidate == prefix)
-                .all(|(_, namespace)| part_namespace(prefix) == Some(namespace.as_str()))
-        })
-        .then_some(rewritten)
+    Some(left_to_part.iter().all(|prefix| {
+        declared
+            .iter()
+            .filter(|(candidate, _)| candidate == prefix)
+            .all(|(_, namespace)| part_namespace(prefix) == Some(namespace.as_str()))
+    }))
 }
 
 /// The prefixes an element uses outside every declaration it makes, and
@@ -1316,6 +3109,26 @@ pub fn replace_in_header_footer(hf: &mut CT_HdrFtr, placeholder: &str, replaceme
     })
 }
 
+/// Fallible header/footer replacement for checked document operations.
+#[doc(hidden)]
+pub fn try_replace_in_header_footer(
+    hf: &mut CT_HdrFtr,
+    placeholder: &str,
+    replacement: &str,
+) -> crate::Result<usize> {
+    for paragraph in &hf.paragraphs {
+        crate::document::admit_word_model(crate::document::WordOwner::Paragraph(paragraph))?;
+    }
+    let mut candidate = hf.clone();
+    let count = try_edit_header_footer(&mut candidate, &mut |p| {
+        try_replace_in_paragraph(p, placeholder, replacement)
+    })?;
+    if count > 0 {
+        *hf = candidate;
+    }
+    Ok(count)
+}
+
 /// The texts a replacement in `hf` matches against, see [`replaceable_texts`].
 #[doc(hidden)]
 pub fn header_footer_replaceable_texts(hf: &CT_HdrFtr) -> Vec<String> {
@@ -1333,9 +3146,23 @@ fn edit_header_footer(hf: &mut CT_HdrFtr, edit: &mut dyn FnMut(&mut CT_P) -> usi
         count += edit(paragraph);
     }
     for raw in &mut hf.extra_xml {
-        count += edit_raw_block(raw, &hf.word_prefixes, edit);
+        count += edit_raw_block(raw, &hf.word_prefixes, &mut |p| Ok(edit(p))).unwrap_or(0);
     }
     count
+}
+
+fn try_edit_header_footer(
+    hf: &mut CT_HdrFtr,
+    edit: &mut dyn FnMut(&mut CT_P) -> crate::Result<usize>,
+) -> crate::Result<usize> {
+    let mut count = 0;
+    for paragraph in &mut hf.paragraphs {
+        count += edit(paragraph)?;
+    }
+    for raw in &mut hf.extra_xml {
+        count += edit_raw_block(raw, &hf.word_prefixes, edit)?;
+    }
+    Ok(count)
 }
 
 /// Replace placeholders in text boxes and shapes within a raw XML part.
@@ -1371,10 +3198,9 @@ pub fn replace_many_in_xml_part(
     rewrite_text_boxes(xml, true, &mut |paragraph| {
         replacements
             .iter()
-            .map(|(placeholder, replacement)| {
-                replace_in_paragraph(paragraph, placeholder, replacement)
+            .try_fold(0, |count, (placeholder, replacement)| {
+                Ok(count + try_replace_in_paragraph(paragraph, placeholder, replacement)?)
             })
-            .sum()
     })
 }
 
@@ -1388,7 +3214,7 @@ pub fn replace_regex_in_xml_part(
     replacement: &str,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     rewrite_text_boxes(xml, true, &mut |paragraph| {
-        replace_regex_in_paragraph(paragraph, re, replacement)
+        try_replace_regex_in_paragraph(paragraph, re, replacement)
     })
 }
 
@@ -1400,9 +3226,234 @@ pub fn xml_part_replaceable_texts(xml: &[u8]) -> crate::error::Result<Vec<String
     let mut texts = Vec::new();
     rewrite_text_boxes(xml, false, &mut |paragraph| {
         texts.extend(replaceable_texts(paragraph));
-        0
+        Ok(0)
     })?;
     Ok(texts)
+}
+
+struct TextBoxOutput {
+    bytes: Vec<u8>,
+    count: usize,
+    map: Option<crate::document::WordSourceMap>,
+}
+
+fn textbox_transport(
+    map: &mut Option<crate::document::WordSourceMap>,
+    input: Option<&crate::document::WordFieldInput>,
+    source: &[u8],
+    range: std::ops::Range<usize>,
+    output: &[u8],
+    produced: Option<crate::document::WordSourceMap>,
+) -> crate::Result<()> {
+    let Some(map) = map else {
+        return Ok(());
+    };
+    if let Some(produced) = produced {
+        if produced.len() != output.len() {
+            return Err(crate::OxmlError::InvalidValue(
+                "textbox producer map length differs".into(),
+            ));
+        }
+        map.extend(&produced)?;
+    } else if let Some(input) = input
+        && source.get(range.clone()) == Some(output)
+    {
+        map.extend(&input.projection_parts().0.slice(range)?)?;
+    } else {
+        map.extend(&crate::document::WordSourceMap::generated(output.len()))?;
+    }
+    Ok(())
+}
+
+// The ordinary callback and checked template callback share the actual
+// textbox walker and its capture/branch decisions.
+enum TextBoxEditor<'e, 'v> {
+    Ordinary(&'e mut dyn FnMut(&mut CT_P) -> crate::Result<usize>),
+    Template(TemplateTextboxEdit<'e, 'v>),
+}
+
+struct TemplateTextboxEdit<'e, 'v> {
+    work: &'e mut WordOperationWork,
+    copies: &'e mut crate::document::TemplateCopyWork,
+    datums: &'e std::collections::HashMap<usize, &'v serde_json::Value>,
+    operands: std::collections::BTreeMap<&'e str, (&'e str, &'e [&'v serde_json::Value])>,
+    matcher: Option<regex::Regex>,
+    sources: Vec<String>,
+}
+
+impl TextBoxEditor<'_, '_> {
+    fn paragraph(
+        &mut self,
+        paragraph: &mut CT_P,
+        mut extra_maps: Option<&mut WordExtraSourceMaps>,
+        facts: Option<&crate::text::WordParagraphReadFacts>,
+    ) -> crate::Result<usize> {
+        let context = match self {
+            Self::Ordinary(edit) => return edit(paragraph),
+            Self::Template(context) => context,
+        };
+        let nested = facts
+            .map(|facts| {
+                crate::document::returned_block_inputs(
+                    crate::document::WordOwner::Paragraph(paragraph),
+                    &facts.nested,
+                )
+            })
+            .transpose()?
+            .map(|(texts, _)| {
+                texts
+                    .into_iter()
+                    .map(|(text, event)| (std::ptr::from_ref(text) as usize, event))
+                    .collect::<std::collections::HashMap<_, _>>()
+            });
+        let empty = crate::document::WordSourceMap::generated(0);
+        let texts = Vec::new();
+        let mut read = crate::document::TemplateWordRead {
+            map: facts.map_or(&empty, |facts| facts.source_map.as_ref()),
+            texts: facts.map_or(&texts, |facts| &facts.texts),
+            work: context.copies,
+            nested: nested.as_ref(),
+        };
+        if context.matcher.is_none() {
+            let empty_extras = Vec::new();
+            context.sources.extend(template_replaceable_texts_in(
+                paragraph,
+                extra_maps.as_deref().unwrap_or(&empty_extras),
+                context.work,
+                &mut read,
+            )?);
+            return Ok(0);
+        }
+        let mut walk = text_runs_in(paragraph, extra_maps.as_deref(), Some(context.work))?;
+        select_walk_words(paragraph, &walk, &mut read)?;
+        let mut moved = Vec::new();
+        let mut stretches =
+            owned_walk_stretches(paragraph, &mut walk, &mut read, Some(&mut moved))?;
+        let matcher = context
+            .matcher
+            .as_ref()
+            .expect("selected nonempty operands");
+        let mut occurrences = Vec::new();
+        let mut operands = Vec::new();
+        for (stretch, text) in stretches.iter().enumerate() {
+            for matched in matcher.find_iter(text) {
+                let (replacement, dependencies) = context.operands[matched.as_str()];
+                occurrences.push((stretch, matched.range(), replacement, None));
+                operands.push((None, dependencies));
+            }
+        }
+        let count = occurrences.len();
+        let edits = prepared_walk_edits(&occurrences, &stretches);
+        restore_walk_texts(paragraph, &mut walk, &mut stretches, &moved);
+        replace_prepared_walk(
+            paragraph,
+            edits?,
+            count,
+            extra_maps.take(),
+            Some(context.work),
+            Some(PreparedTemplateInputs {
+                datums: context.datums,
+                operands: &operands,
+            }),
+            walk,
+        )?;
+        Ok(count)
+    }
+}
+
+fn validate_original_textbox_exclusions(
+    xml: &[u8],
+    excluded: &[std::ops::Range<usize>],
+) -> crate::Result<()> {
+    if excluded
+        .iter()
+        .any(|range| range.start >= range.end || range.end > xml.len())
+        || excluded.windows(2).any(|pair| pair[0].end > pair[1].start)
+    {
+        return Err(crate::OxmlError::InvalidValue(
+            "invalid original textbox exclusions".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // Actual existing operation inputs and exact carrier return.
+pub(crate) fn replace_original_template_literals_in<'e, 'v>(
+    xml: &[u8],
+    excluded: &[std::ops::Range<usize>],
+    replacements: &'e [(&'e str, &'e str, &'e [&'v serde_json::Value])],
+    input: &crate::document::WordFieldInput,
+    work: &'e mut WordOperationWork,
+    copies: &'e mut crate::document::TemplateCopyWork,
+    datums: &'e std::collections::HashMap<usize, &'v serde_json::Value>,
+) -> crate::Result<(Vec<u8>, usize, Vec<String>, crate::document::WordSourceMap)> {
+    validate_original_textbox_exclusions(xml, excluded)?;
+    check_source_failure(Some(work))?;
+    let mut operands = std::collections::BTreeMap::new();
+    for &(literal, value, dependencies) in replacements {
+        if literal.is_empty()
+            || operands
+                .insert(literal, (value, dependencies))
+                .is_some_and(|old: (&str, &[&serde_json::Value])| old.0 != value)
+        {
+            return Err(crate::OxmlError::InvalidValue(
+                "ambiguous original textbox literal operands".into(),
+            ));
+        }
+    }
+    let matcher = if replacements.is_empty() {
+        None
+    } else {
+        let mut alternatives = operands.keys().copied().collect::<Vec<_>>();
+        alternatives.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
+        Some(
+            regex::Regex::new(
+                &alternatives
+                    .into_iter()
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            )
+            .map_err(|error| crate::OxmlError::InvalidValue(error.to_string()))?,
+        )
+    };
+    let mut editor = TextBoxEditor::Template(TemplateTextboxEdit {
+        work,
+        copies,
+        datums,
+        operands,
+        matcher,
+        sources: Vec::new(),
+    });
+    let prefixes = [
+        "w".to_owned(),
+        format!("\0r\0{}", crate::namespace::R_NS),
+        format!("\0mc\0{}", crate::namespace::MC_NS),
+    ];
+    let output = rewrite_text_boxes_within(
+        xml,
+        &prefixes,
+        !replacements.is_empty(),
+        &mut editor,
+        excluded,
+        0,
+        &mut false,
+        Some(input),
+    )?;
+    let sources = match editor {
+        TextBoxEditor::Template(context) => context.sources,
+        TextBoxEditor::Ordinary(_) => Vec::new(),
+    };
+    if replacements.is_empty() {
+        Ok((xml.to_vec(), 0, sources, input.projection_parts().0.clone()))
+    } else {
+        Ok((
+            output.bytes,
+            output.count,
+            sources,
+            output.map.expect("mapped textbox walk"),
+        ))
+    }
 }
 
 /// Stage original literal matches in the established raw textbox boundary.
@@ -1415,15 +3466,7 @@ pub fn replace_original_literals_in_xml_part(
     replacements: &[(&str, &str)],
 ) -> crate::Result<(Vec<u8>, usize, Vec<String>)> {
     use crate::OxmlError;
-    if excluded
-        .iter()
-        .any(|range| range.start >= range.end || range.end > xml.len())
-        || excluded.windows(2).any(|pair| pair[0].end > pair[1].start)
-    {
-        return Err(OxmlError::InvalidValue(
-            "invalid original textbox exclusions".into(),
-        ));
-    }
+    validate_original_textbox_exclusions(xml, excluded)?;
     let prefixes = [
         "w".to_owned(),
         format!("\0r\0{}", crate::namespace::R_NS),
@@ -1434,13 +3477,14 @@ pub fn replace_original_literals_in_xml_part(
         xml,
         &prefixes,
         false,
-        &mut |paragraph| {
+        &mut TextBoxEditor::Ordinary(&mut |paragraph| {
             texts.extend(replaceable_texts(paragraph));
-            0
-        },
+            Ok(0)
+        }),
         excluded,
         0,
         &mut false,
+        None,
     )?;
     if replacements.is_empty() {
         return Ok((xml.to_vec(), 0, texts));
@@ -1467,15 +3511,11 @@ pub fn replace_original_literals_in_xml_part(
             .join("|"),
     )
     .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
-    let mut failure = None;
-    let (rewritten, count) = rewrite_text_boxes_within(
+    let rewritten = rewrite_text_boxes_within(
         xml,
         &prefixes,
         true,
-        &mut |paragraph| {
-            if failure.is_some() {
-                return 0;
-            }
+        &mut TextBoxEditor::Ordinary(&mut |paragraph| {
             let occurrences = replaceable_texts(paragraph)
                 .iter()
                 .enumerate()
@@ -1493,22 +3533,15 @@ pub fn replace_original_literals_in_xml_part(
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
-            match replace_prepared_occurrences(paragraph, &occurrences) {
-                Ok(()) => occurrences.len(),
-                Err(error) => {
-                    failure = Some(error);
-                    0
-                }
-            }
-        },
+            replace_prepared_occurrences(paragraph, &occurrences)?;
+            Ok(occurrences.len())
+        }),
         excluded,
         0,
         &mut false,
+        None,
     )?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    Ok((rewritten, count, texts))
+    Ok((rewritten.bytes, rewritten.count, texts))
 }
 
 /// Walk `xml`, handing each paragraph of a `w:txbxContent` element to `edit`,
@@ -1523,7 +3556,7 @@ pub fn replace_original_literals_in_xml_part(
 fn rewrite_text_boxes(
     xml: &[u8],
     edit_copies: bool,
-    edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    edit: &mut dyn FnMut(&mut CT_P) -> crate::Result<usize>,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     use crate::namespace::{MC_NS, R_NS};
 
@@ -1533,20 +3566,32 @@ fn rewrite_text_boxes(
         format!("\0r\0{R_NS}"),
         format!("\0mc\0{MC_NS}"),
     ];
-    rewrite_text_boxes_within(xml, &part_prefixes, edit_copies, edit, &[], 0, &mut false)
+    let output = rewrite_text_boxes_within(
+        xml,
+        &part_prefixes,
+        edit_copies,
+        &mut TextBoxEditor::Ordinary(edit),
+        &[],
+        0,
+        &mut false,
+        None,
+    )?;
+    Ok((output.bytes, output.count))
 }
 
 /// [`rewrite_text_boxes`] over `xml`, an element cut out of a part where the
 /// bindings `inherited` are in scope.
+#[allow(clippy::too_many_arguments)] // Existing physical walker plus optional same-input transport.
 fn rewrite_text_boxes_within(
     xml: &[u8],
     inherited: &[String],
     edit_copies: bool,
-    edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    edit: &mut TextBoxEditor<'_, '_>,
     excluded: &[std::ops::Range<usize>],
     source_offset: usize,
     found_text_box: &mut bool,
-) -> crate::error::Result<(Vec<u8>, usize)> {
+    input: Option<&crate::document::WordFieldInput>,
+) -> crate::error::Result<TextBoxOutput> {
     use crate::error::OxmlError;
     use crate::namespace::matches_local_name;
     use crate::raw_xml::capture_element;
@@ -1559,11 +3604,15 @@ fn rewrite_text_boxes_within(
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
     let mut total_count = 0;
+    let cursor = input.map(|input| input.cursor(xml)).transpose()?;
+    let mut output_map = input.map(|_| crate::document::WordSourceMap::generated(0));
     // The bindings the elements open around the current position declare.
     let mut scopes: Vec<Vec<String>> = Vec::new();
 
     loop {
         let before = reader.buffer_position() as usize;
+        let physical_before = xml.len() - reader.get_ref().len();
+        let output_before = writer.get_ref().len();
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"txbxContent") => {
@@ -1571,13 +3620,25 @@ fn rewrite_text_boxes_within(
                 if let Ok(index) =
                     excluded.binary_search_by_key(&(source_offset + before), |range| range.start)
                 {
-                    let raw = capture_element(&mut reader, e)?;
+                    let (raw, captured_input) = if let Some(cursor) = &cursor {
+                        cursor.capture_element(&mut reader, e, before as u64)?
+                    } else {
+                        (capture_element(&mut reader, e)?, None)
+                    };
                     if source_offset + reader.buffer_position() as usize != excluded[index].end {
                         return Err(OxmlError::InvalidValue(
                             "stale original textbox exclusion".into(),
                         ));
                     }
                     writer.get_mut().extend_from_slice(&raw);
+                    textbox_transport(
+                        &mut output_map,
+                        input,
+                        xml,
+                        physical_before..xml.len() - reader.get_ref().len(),
+                        &writer.get_ref()[output_before..],
+                        captured_input.map(|input| input.projection_parts().0.clone()),
+                    )?;
                     buf.clear();
                     continue;
                 }
@@ -1589,12 +3650,38 @@ fn rewrite_text_boxes_within(
 
                 let mut inner_buf = Vec::new();
 
+                // The start is emitted before child capture/parse, exactly as
+                // in the ordinary walker. Track this actual write separately.
+                textbox_transport(
+                    &mut output_map,
+                    input,
+                    xml,
+                    physical_before..xml.len() - reader.get_ref().len(),
+                    &writer.get_ref()[output_before..],
+                    None,
+                )?;
                 loop {
+                    let inner_before = reader.buffer_position() as usize;
+                    let inner_physical = xml.len() - reader.get_ref().len();
+                    let inner_output = writer.get_ref().len();
+                    let mut produced_map = None;
                     match reader.read_event_into(&mut inner_buf) {
                         Ok(Event::Start(ref ie)) => {
                             if matches_local_name(ie.name().as_ref(), b"p") {
                                 // Parse this paragraph: collect its XML, then parse via CT_P
-                                let para_xml = capture_element(&mut reader, ie)?;
+                                let (para_xml, paragraph_input) = if let Some(cursor) = &cursor {
+                                    cursor.capture_element(&mut reader, ie, inner_before as u64)?
+                                } else {
+                                    (capture_element(&mut reader, ie)?, None)
+                                };
+                                let (paragraph_input, _record_publication) = match paragraph_input {
+                                    Some(input) => {
+                                        let (input, publication) =
+                                            input.record_publication(&para_xml)?;
+                                        (Some(input), Some(publication))
+                                    }
+                                    None => (None, None),
+                                };
                                 let mut para_reader = Reader::from_reader(para_xml.as_slice());
                                 para_reader.config_mut().trim_text(true);
                                 let mut prbuf = Vec::new();
@@ -1611,29 +3698,107 @@ fn rewrite_text_boxes_within(
                                     }
                                     prbuf.clear();
                                 }
-                                let mut para = CT_P::from_xml(&mut para_reader)?;
-                                let count = edit(&mut para);
+                                let collect = matches!(edit, TextBoxEditor::Template(_));
+                                let mut extras = Vec::new();
+                                let mut texts = Vec::new();
+                                let mut nested = crate::text::WordBlockSourceMaps::default();
+                                let mut para = CT_P::from_xml_with_word_input(
+                                    &mut para_reader,
+                                    paragraph_input
+                                        .as_ref()
+                                        .map(|input| (input, para_xml.as_slice())),
+                                    collect.then_some(&mut extras),
+                                    collect.then_some(&mut texts),
+                                    collect.then_some(&mut nested),
+                                )?;
+                                let facts = paragraph_input
+                                    .as_ref()
+                                    .map(|input| input.cursor(&para_xml))
+                                    .transpose()?
+                                    .and_then(|cursor| {
+                                        cursor.paragraph_word_facts(&para_reader, texts)
+                                    })
+                                    .map(|mut facts| {
+                                        facts.nested = nested;
+                                        facts
+                                    });
+                                if let (Some(input), TextBoxEditor::Template(context)) =
+                                    (paragraph_input.as_ref(), &mut *edit)
+                                {
+                                    context
+                                        .work
+                                        .field_origins
+                                        .lock()
+                                        .expect("field origin registry poisoned")
+                                        .commit_publication_owner(
+                                            crate::document::WordOwner::Paragraph(&para),
+                                            input.projection_parts().0,
+                                        );
+                                }
+                                let count = edit.paragraph(
+                                    &mut para,
+                                    collect.then_some(&mut extras),
+                                    facts.as_ref(),
+                                )?;
                                 if count == 0 {
                                     // Nothing changed, so the paragraph keeps its
                                     // bytes, start-tag attributes included.
                                     writer.get_mut().extend_from_slice(&para_xml);
+                                    produced_map = paragraph_input
+                                        .as_ref()
+                                        .map(|input| input.projection_parts().0.clone());
                                 } else {
-                                    write_text_box_paragraph(&mut writer, &para, ie)?;
+                                    match edit {
+                                        TextBoxEditor::Ordinary(_) => {
+                                            write_text_box_paragraph(&mut writer, &para, ie)?
+                                        }
+                                        TextBoxEditor::Template(context) => {
+                                            let (bytes, map) = write_template_text_box_paragraph(
+                                                &para,
+                                                ie,
+                                                context.work,
+                                            )?;
+                                            writer.get_mut().extend_from_slice(&bytes);
+                                            produced_map = Some(map);
+                                        }
+                                    }
+                                }
+                                if let Some(map) = &mut produced_map {
+                                    map.freeze_publication();
                                 }
                                 total_count += count;
                             } else {
                                 // A table or a content control is edited through
                                 // the typed model, and any other element the edit
                                 // does not reach stays as it was.
-                                let mut raw = capture_element(&mut reader, ie)?;
-                                total_count += edit_raw_block(&mut raw, &word_prefixes, edit);
+                                let (mut raw, child_input) = if let Some(cursor) = &cursor {
+                                    cursor.capture_element(&mut reader, ie, inner_before as u64)?
+                                } else {
+                                    (capture_element(&mut reader, ie)?, None)
+                                };
+                                let (count, map) = edit_text_box_block(
+                                    &mut raw,
+                                    &word_prefixes,
+                                    edit,
+                                    child_input.as_ref(),
+                                )?;
+                                total_count += count;
                                 writer.get_mut().extend_from_slice(&raw);
+                                produced_map = map;
                             }
                         }
                         // Every child element is consumed whole, so the first end
                         // tag at this level closes the txbxContent element.
                         Ok(Event::End(ie)) => {
                             writer.write_event(Event::End(ie))?;
+                            textbox_transport(
+                                &mut output_map,
+                                input,
+                                xml,
+                                inner_physical..xml.len() - reader.get_ref().len(),
+                                &writer.get_ref()[inner_output..],
+                                None,
+                            )?;
                             break;
                         }
                         Ok(Event::Eof) => {
@@ -1644,6 +3809,14 @@ fn rewrite_text_boxes_within(
                         Ok(ev) => writer.write_event(ev)?,
                         Err(e) => return Err(e.into()),
                     }
+                    textbox_transport(
+                        &mut output_map,
+                        input,
+                        xml,
+                        inner_physical..xml.len() - reader.get_ref().len(),
+                        &writer.get_ref()[inner_output..],
+                        produced_map,
+                    )?;
                     inner_buf.clear();
                 }
             }
@@ -1651,8 +3824,12 @@ fn rewrite_text_boxes_within(
                 if matches_local_name(e.name().as_ref(), b"AlternateContent") =>
             {
                 let scope = scopes.last().map_or(inherited, Vec::as_slice);
-                let raw = capture_element(&mut reader, e)?;
-                let (rewritten, count) = rewrite_alternate_content(
+                let (raw, captured_input) = if let Some(cursor) = &cursor {
+                    cursor.capture_element(&mut reader, e, before as u64)?
+                } else {
+                    (capture_element(&mut reader, e)?, None)
+                };
+                let rewritten = rewrite_alternate_content(
                     &raw,
                     scope,
                     edit_copies,
@@ -1660,9 +3837,18 @@ fn rewrite_text_boxes_within(
                     excluded,
                     source_offset + before,
                     found_text_box,
+                    captured_input.as_ref(),
                 )?;
-                writer.get_mut().extend_from_slice(&rewritten);
-                total_count += count;
+                writer.get_mut().extend_from_slice(&rewritten.bytes);
+                total_count += rewritten.count;
+                textbox_transport(
+                    &mut output_map,
+                    input,
+                    xml,
+                    physical_before..xml.len() - reader.get_ref().len(),
+                    &writer.get_ref()[output_before..],
+                    rewritten.map,
+                )?;
             }
             Ok(Event::Start(e)) => {
                 scopes.push(word_prefixes_at(
@@ -1680,10 +3866,27 @@ fn rewrite_text_boxes_within(
             }
             Err(e) => return Err(e.into()),
         }
+        if output_map
+            .as_ref()
+            .is_some_and(|map| map.len() == output_before)
+        {
+            textbox_transport(
+                &mut output_map,
+                input,
+                xml,
+                physical_before..xml.len() - reader.get_ref().len(),
+                &writer.get_ref()[output_before..],
+                None,
+            )?;
+        }
         buf.clear();
     }
 
-    Ok((writer.into_inner(), total_count))
+    Ok(TextBoxOutput {
+        bytes: writer.into_inner(),
+        count: total_count,
+        map: output_map,
+    })
 }
 
 /// Apply several placeholder replacements to the notes of a footnotes or
@@ -1704,10 +3907,9 @@ pub fn replace_many_in_notes_part(
     rewrite_notes(xml, &mut |paragraph| {
         replacements
             .iter()
-            .map(|(placeholder, replacement)| {
-                replace_in_paragraph(paragraph, placeholder, replacement)
+            .try_fold(0, |count, (placeholder, replacement)| {
+                Ok(count + try_replace_in_paragraph(paragraph, placeholder, replacement)?)
             })
-            .sum()
     })
 }
 
@@ -1719,7 +3921,7 @@ pub fn replace_regex_in_notes_part(
     replacement: &str,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     rewrite_notes(xml, &mut |paragraph| {
-        replace_regex_in_paragraph(paragraph, re, replacement)
+        try_replace_regex_in_paragraph(paragraph, re, replacement)
     })
 }
 
@@ -1730,7 +3932,7 @@ pub fn notes_part_replaceable_texts(xml: &[u8]) -> crate::error::Result<Vec<Stri
     let mut texts = Vec::new();
     rewrite_notes(xml, &mut |paragraph| {
         texts.extend(replaceable_texts(paragraph));
-        0
+        Ok(0)
     })?;
     Ok(texts)
 }
@@ -1743,7 +3945,7 @@ pub fn notes_part_replaceable_texts(xml: &[u8]) -> crate::error::Result<Vec<Stri
 /// copied through verbatim. Returns the rewritten XML and the summed count.
 fn rewrite_notes(
     xml: &[u8],
-    edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    edit: &mut dyn FnMut(&mut CT_P) -> crate::Result<usize>,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     use crate::error::OxmlError;
     use crate::raw_xml::capture_element;
@@ -1775,7 +3977,7 @@ fn rewrite_notes(
                         match reader.read_event_into(&mut inner_buffer)? {
                             Event::Start(child) => {
                                 let mut raw = capture_element(&mut reader, &child)?;
-                                total_count += edit_raw_block(&mut raw, &prefixes, edit);
+                                total_count += edit_raw_block(&mut raw, &prefixes, edit)?;
                                 writer.get_mut().extend_from_slice(&raw);
                             }
                             // Every child element is consumed whole, so the
@@ -1836,42 +4038,63 @@ fn is_note_a_reader_writes(start: &quick_xml::events::BytesStart<'_>, prefixes: 
 /// it is never counted. Without it, a copy keeps its bytes. When no Choice
 /// holds a text box, a picture for example, every branch is walked and
 /// counted as any other markup.
+#[allow(clippy::too_many_arguments)] // Existing branch walker plus same-capture input.
 fn rewrite_alternate_content(
     raw: &[u8],
     inherited: &[String],
     edit_copies: bool,
-    edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    edit: &mut TextBoxEditor<'_, '_>,
     excluded: &[std::ops::Range<usize>],
     source_offset: usize,
     found_text_box: &mut bool,
-) -> crate::error::Result<(Vec<u8>, usize)> {
+    input: Option<&crate::document::WordFieldInput>,
+) -> crate::Result<TextBoxOutput> {
     use crate::namespace::matches_local_name;
     use crate::raw_xml::capture_element;
     use quick_xml::events::Event;
     use quick_xml::{Reader, Writer};
-
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::new());
     let mut buf = Vec::new();
+    let mut map = input.map(|_| crate::document::WordSourceMap::generated(0));
+    let cursor = input.map(|input| input.cursor(raw)).transpose()?;
     let Event::Start(start) = reader.read_event_into(&mut buf)? else {
-        return Ok((raw.to_vec(), 0));
+        return Ok(TextBoxOutput {
+            bytes: raw.to_vec(),
+            count: 0,
+            map: input.map(|input| input.projection_parts().0.clone()),
+        });
     };
     let prefixes = word_prefixes_at(&start, inherited)?;
     writer.write_event(Event::Start(start.into_owned()))?;
+    textbox_transport(
+        &mut map,
+        input,
+        raw,
+        0..raw.len() - reader.get_ref().len(),
+        writer.get_ref(),
+        None,
+    )?;
     buf.clear();
-    // Whether a Choice that holds a text box, the counted one, was read.
     let mut counted_choice = false;
     let mut total_count = 0;
     loop {
         let before = reader.buffer_position() as usize;
+        let physical = raw.len() - reader.get_ref().len();
+        let produced = writer.get_ref().len();
+        let mut branch_map = None;
         match reader.read_event_into(&mut buf)? {
             Event::Eof => break,
             Event::Start(ref branch_start) => {
-                let branch = capture_element(&mut reader, branch_start)?;
+                let (branch, branch_input) = if let Some(cursor) = &cursor {
+                    cursor.capture_element(&mut reader, branch_start, before as u64)?
+                } else {
+                    (capture_element(&mut reader, branch_start)?, None)
+                };
                 if counted_choice {
-                    let copy = if edit_copies {
-                        rewrite_text_boxes_within(
+                    if edit_copies {
+                        let output = rewrite_text_boxes_within(
                             &branch,
                             &prefixes,
                             edit_copies,
@@ -1879,18 +4102,17 @@ fn rewrite_alternate_content(
                             excluded,
                             source_offset + before,
                             found_text_box,
-                        )?
-                        .0
+                            branch_input.as_ref(),
+                        )?;
+                        writer.get_mut().extend_from_slice(&output.bytes);
+                        branch_map = output.map;
                     } else {
-                        branch
-                    };
-                    writer.get_mut().extend_from_slice(&copy);
+                        writer.get_mut().extend_from_slice(&branch);
+                        branch_map = branch_input.map(|input| input.projection_parts().0.clone());
+                    }
                 } else {
-                    // The walk hands the edit only the paragraphs of text
-                    // boxes, so any paragraph it hands over tells that the
-                    // branch holds one.
                     let mut holds_text_box = false;
-                    let (rewritten, count) = rewrite_text_boxes_within(
+                    let output = rewrite_text_boxes_within(
                         &branch,
                         &prefixes,
                         edit_copies,
@@ -1898,19 +4120,33 @@ fn rewrite_alternate_content(
                         excluded,
                         source_offset + before,
                         &mut holds_text_box,
+                        branch_input.as_ref(),
                     )?;
                     *found_text_box |= holds_text_box;
                     counted_choice = holds_text_box
                         && matches_local_name(branch_start.name().as_ref(), b"Choice");
-                    writer.get_mut().extend_from_slice(&rewritten);
-                    total_count += count;
+                    writer.get_mut().extend_from_slice(&output.bytes);
+                    total_count += output.count;
+                    branch_map = output.map;
                 }
             }
             event => writer.write_event(event)?,
         }
+        textbox_transport(
+            &mut map,
+            input,
+            raw,
+            physical..raw.len() - reader.get_ref().len(),
+            &writer.get_ref()[produced..],
+            branch_map,
+        )?;
         buf.clear();
     }
-    Ok((writer.into_inner(), total_count))
+    Ok(TextBoxOutput {
+        bytes: writer.into_inner(),
+        count: total_count,
+        map,
+    })
 }
 
 /// Write a text-box paragraph that was parsed without its start tag.
@@ -1943,6 +4179,38 @@ fn write_text_box_paragraph<W: std::io::Write>(
         writer.get_mut().write_all(&xml)?;
     }
     Ok(())
+}
+
+fn write_template_text_box_paragraph(
+    paragraph: &CT_P,
+    source: &quick_xml::events::BytesStart<'_>,
+    work: &mut WordOperationWork,
+) -> crate::Result<(Vec<u8>, crate::document::WordSourceMap)> {
+    use quick_xml::events::{BytesStart, Event};
+    let (xml, mut map, events) =
+        crate::text::final_word_source(crate::text::FinalWordBlock::Paragraph(paragraph), work)?;
+    for event in events {
+        map.push_word_event(event)?;
+    }
+    let mut start = BytesStart::new("w:p");
+    for attribute in source.attributes() {
+        start.push_attribute(attribute?);
+    }
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    if xml == b"<w:p/>" {
+        writer.write_event(Event::Empty(start))?;
+        let bytes = writer.into_inner();
+        let map = crate::document::WordSourceMap::generated(bytes.len());
+        Ok((bytes, map))
+    } else if let Some(content) = xml.strip_prefix(b"<w:p>") {
+        writer.write_event(Event::Start(start))?;
+        let mut selected = crate::document::WordSourceMap::generated(writer.get_ref().len());
+        selected.extend(&map.slice(5..xml.len())?)?;
+        writer.get_mut().extend_from_slice(content);
+        Ok((writer.into_inner(), selected))
+    } else {
+        Ok((xml, map))
+    }
 }
 
 /// Replace placeholders in chart XML parts.
@@ -2022,15 +4290,27 @@ pub fn replace_many_in_chart_xml(
 /// that straddles one of their boundaries as it is.
 /// Returns the number of replacements made.
 pub fn replace_regex_in_paragraph(para: &mut CT_P, re: &regex::Regex, replacement: &str) -> usize {
+    try_replace_regex_in_paragraph(para, re, replacement).unwrap_or(0)
+}
+
+/// Fallible regex paragraph replacement for checked document operations.
+#[doc(hidden)]
+pub fn try_replace_regex_in_paragraph(
+    para: &mut CT_P,
+    re: &regex::Regex,
+    replacement: &str,
+) -> crate::Result<usize> {
     // `captures_at` (rather than slicing) keeps anchors and look-around
     // evaluating against the full paragraph text.
-    replace_matches(para, &mut |text, from| {
-        let captures = re.captures_at(text, from)?;
-        let matched = captures.get(0)?;
-        // Expand capture groups in replacement
-        let mut expanded = String::new();
-        captures.expand(replacement, &mut expanded);
-        Some((matched.start(), matched.end(), expanded))
+    install_paragraph_replacement(para, |candidate| {
+        replace_matches(candidate, &mut |text, from| {
+            let captures = re.captures_at(text, from)?;
+            let matched = captures.get(0)?;
+            // Expand capture groups in replacement
+            let mut expanded = String::new();
+            captures.expand(replacement, &mut expanded);
+            Some((matched.start(), matched.end(), expanded))
+        })
     })
 }
 
@@ -2049,9 +4329,10 @@ pub fn replace_regex_in_paragraphs(
 /// Replace regex matches in a table (recursively handles nested tables and
 /// content controls).
 pub fn replace_regex_in_table(table: &mut CT_Tbl, re: &regex::Regex, replacement: &str) -> usize {
-    edit_table(table, &mut |paragraph| {
-        replace_regex_in_paragraph(paragraph, re, replacement)
+    edit_paragraph_owners(ParagraphEditOwner::Table(table), &mut |paragraph| {
+        Ok(replace_regex_in_paragraph(paragraph, re, replacement))
     })
+    .unwrap_or(0)
 }
 
 /// Replace regex matches in a header or footer, see
@@ -2066,6 +4347,26 @@ pub fn replace_regex_in_header_footer(
     })
 }
 
+/// Fallible regex header/footer replacement for checked document operations.
+#[doc(hidden)]
+pub fn try_replace_regex_in_header_footer(
+    hf: &mut CT_HdrFtr,
+    re: &regex::Regex,
+    replacement: &str,
+) -> crate::Result<usize> {
+    for paragraph in &hf.paragraphs {
+        crate::document::admit_word_model(crate::document::WordOwner::Paragraph(paragraph))?;
+    }
+    let mut candidate = hf.clone();
+    let count = try_edit_header_footer(&mut candidate, &mut |p| {
+        try_replace_regex_in_paragraph(p, re, replacement)
+    })?;
+    if count > 0 {
+        *hf = candidate;
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2078,6 +4379,193 @@ mod tests {
             p.add_run(text);
         }
         p
+    }
+
+    fn owning_prepared_probe(replacement: &str, properties: Option<&CT_RPr>) -> crate::Result<()> {
+        let mut paragraph = CT_P::new();
+        let mut run = CT_R::new(replacement);
+        run.properties = properties.cloned();
+        paragraph.runs.push(run);
+        validate_prepared_paragraph(&paragraph)
+    }
+
+    #[test]
+    fn prepared_borrowed_probe_preserves_property_validation_and_namespace_frames() {
+        let parsed = CT_P::from_xml_fragment(
+            br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:rPr><w:b/><f:opaque f:val="kept&#32;exact"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        )
+        .unwrap();
+        let cases = [
+            None,
+            Some(CT_RPr::default()),
+            Some(CT_RPr {
+                font_ascii: Some("A&é".into()),
+                style_id: Some("quoted\"style".into()),
+                ..Default::default()
+            }),
+            parsed.runs[0].properties.clone(),
+            Some(CT_RPr {
+                font_ascii: Some("bad\0font".into()),
+                ..Default::default()
+            }),
+            Some(CT_RPr {
+                revision_xml: vec![b"<w:b></w:i>".to_vec()],
+                ..Default::default()
+            }),
+        ];
+        for root in [
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+            r#"<q:p xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:foreign"/>"#,
+            r#"<p xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:foreign"/>"#,
+        ] {
+            let _scope = crate::text::raw_root_binding_scope(root.as_bytes(), false).unwrap();
+            for replacement in ["", "plain", " &<>\"'é\r ", "\ttext\n"] {
+                for properties in &cases {
+                    let expected = owning_prepared_probe(replacement, properties.as_ref())
+                        .map_err(|error| error.to_string());
+                    let actual =
+                        validate_borrowed_prepared_properties(replacement, properties.as_ref())
+                            .map_err(|error| error.to_string());
+                    assert_eq!(actual, expected, "{root}, replacement={replacement:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_borrowed_probe_keeps_large_literal_output_and_property_bytes() {
+        let replacement = format!(" {}é ", "A&<>\"'".repeat(10_923));
+        let properties = CT_RPr {
+            font_ascii: Some("font&".repeat(13_108)),
+            italic: Some(true),
+            ..Default::default()
+        };
+        let mut paragraph = make_para(&["{{x}}"]);
+        replace_prepared_occurrences(
+            &mut paragraph,
+            &[(0, 0..5, replacement.clone(), Some(properties.clone()))],
+        )
+        .unwrap();
+        let mut expected = make_para(&[&replacement]);
+        expected.runs[0].properties = Some(properties);
+        let mut actual_xml = quick_xml::Writer::new(Vec::new());
+        paragraph.to_xml(&mut actual_xml).unwrap();
+        let mut expected_xml = quick_xml::Writer::new(Vec::new());
+        expected.to_xml(&mut expected_xml).unwrap();
+        assert_eq!(actual_xml.into_inner(), expected_xml.into_inner());
+        assert_eq!(paragraph.text(), replacement);
+        assert!(
+            matches!(&paragraph.runs[0].content[0], RunContent::Text(text) if text.preserve_space)
+        );
+    }
+
+    #[test]
+    fn prepared_borrowed_probe_keeps_validation_error_order_and_atomicity() {
+        let original = make_para(&["{{x}} {{y}}"]);
+        let invalid_properties = CT_RPr {
+            font_ascii: Some("invalid\0font".into()),
+            ..Default::default()
+        };
+        let expected = owning_prepared_probe("valid", Some(&invalid_properties))
+            .unwrap_err()
+            .to_string();
+        let mut paragraph = original.clone();
+        let error = replace_prepared_occurrences(
+            &mut paragraph,
+            &[
+                (0, 0..5, "valid".into(), Some(invalid_properties.clone())),
+                (0, 0..5, "overlap".into(), None),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(paragraph, original);
+        let error = replace_prepared_occurrences(
+            &mut paragraph,
+            &[(0, 0..5, "invalid\0text".into(), Some(invalid_properties))],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prepared template occurrence")
+        );
+        assert_eq!(paragraph, original);
+    }
+
+    #[test]
+    fn prepared_borrowed_kernel_matches_owned_adapter_and_keeps_inputs() {
+        let original = make_para(&["pre{{", "x}}mid{{y}}suf"]);
+        let replacement = " {{x}}é&<>\"' ";
+        let properties = CT_RPr {
+            italic: Some(true),
+            font_ascii: Some("font&é".into()),
+            ..Default::default()
+        };
+        let before = properties.clone();
+        let mut borrowed = original.clone();
+        replace_prepared_occurrences_borrowed(
+            &mut borrowed,
+            &[
+                (0, 3..8, replacement, Some(&properties)),
+                (0, 11..16, "Y", None),
+            ],
+        )
+        .unwrap();
+        let mut owned = original;
+        replace_prepared_occurrences(
+            &mut owned,
+            &[
+                (0, 3..8, replacement.to_owned(), Some(properties.clone())),
+                (0, 11..16, "Y".into(), None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(borrowed, owned);
+        assert_eq!(borrowed.text(), format!("pre{replacement}midYsuf"));
+        assert_eq!(properties, before);
+    }
+
+    #[test]
+    fn prepared_borrowed_kernel_refuses_invalid_ranges_and_properties_atomically() {
+        let original = make_para(&["é{{x}} suffix"]);
+        let invalid = CT_RPr {
+            font_ascii: Some("invalid\0font".into()),
+            ..Default::default()
+        };
+        let before = invalid.clone();
+        let cases = [
+            vec![(0, 1..6, "bad boundary", None)],
+            vec![(0, 2..7, "one", None), (0, 2..7, "overlap", None)],
+            vec![(0, 2..7, "valid", Some(&invalid))],
+            vec![(0, 2..7, "invalid\0text", None)],
+            vec![(1, 0..1, "missing stretch", None)],
+        ];
+        for edits in cases {
+            let mut borrowed = original.clone();
+            let error = replace_prepared_occurrences_borrowed(&mut borrowed, &edits)
+                .unwrap_err()
+                .to_string();
+            let owned_edits = edits
+                .iter()
+                .map(|(stretch, range, text, properties)| {
+                    (
+                        *stretch,
+                        range.clone(),
+                        (*text).to_owned(),
+                        properties.cloned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut owned = original.clone();
+            let expected = replace_prepared_occurrences(&mut owned, &owned_edits)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, expected);
+            assert_eq!(borrowed, original);
+            assert_eq!(owned, original);
+        }
+        assert_eq!(invalid, before);
     }
 
     #[test]
@@ -2546,6 +5034,150 @@ mod tests {
         }
     }
 
+    /// Nested field publication is one candidate. A refused removal inside the
+    /// field leaves the paragraph that was already installed. The successful
+    /// counterpart publishes the same nested edit.
+    #[test]
+    fn checked_candidate_disposal_keeps_zero_weight_field_chains_off_stack() {
+        const CHILD: &str = "RDOCX_C1_CANDIDATE_DISPOSAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "placeholder::tests::checked_candidate_disposal_keeps_zero_weight_field_chains_off_stack", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "finite isolated worker failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        std::thread::Builder::new().stack_size(512 * 1024).spawn(|| {
+            for mode in 0..3 {
+                let source = format!("<w:p xmlns:w=\"{W_NS}\"><w:smartTag w:element=\"place\"><w:r><w:t>AA</w:t></w:r><w:hyperlink xmlns:x=\"urn:producer\" w:anchor=\"target\"><w:r><w:t>NEEDLE</w:t></w:r><x:kept/></w:hyperlink></w:smartTag></w:p>");
+                let mut para = CT_P::from_xml_fragment(source.as_bytes()).unwrap();
+                let mut field = crate::text::Field::new("LEAF", "cache");
+                for _ in 0..4096 {
+                    let mut parent = crate::text::Field::new("OWNER", "cache");
+                    parent.instruction.arguments.push(crate::text::FieldArgument::Nested(Box::new(field)));
+                    field = parent;
+                }
+                let mut run = CT_R::new("");
+                run.content.push(RunContent::Field(field));
+                para.runs.push(run);
+                crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(mode == 2);
+                let result = match mode {
+                    0 => try_replace_in_paragraph(&mut para, "ABSENT", "X"),
+                    1 => try_replace_in_paragraph(&mut para, "NEEDLE", "X"),
+                    _ => try_replace_in_paragraph(&mut para, "AANEEDLE", ""),
+                };
+                crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(false);
+                match mode { 0 => assert_eq!(result.unwrap(), 0), 1 => assert_eq!(result.unwrap(), 1), _ => assert!(result.is_err()) }
+                // Isolate product candidate/displaced-owner destruction from
+                // the fixture's own final destruction, using only its owned slots.
+                let mut pending = Vec::new();
+                for run in std::mem::take(&mut para.runs) {
+                    for content in run.content { if let RunContent::Field(field) = content { pending.push(field); } }
+                }
+                while let Some(mut field) = pending.pop() {
+                    for argument in field.instruction.arguments.drain(..) {
+                        if let crate::text::FieldArgument::Nested(child) = argument { pending.push(*child); }
+                    }
+                }
+            }
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn checked_mutators_propagate_nested_publication_refusal_atomically() {
+        // Existing fault injection exercises an actual nested write-back refusal,
+        // rather than claiming an old-source resource failure.
+        let p = "<w:p><w:smartTag w:element=\"place\"><w:r><w:t>AA</w:t></w:r><w:hyperlink xmlns:x=\"urn:producer\" w:anchor=\"target\"><w:r><w:t>NEEDLE</w:t></w:r><x:kept/></w:hyperlink></w:smartTag></w:p>";
+        for root in [
+            p.to_owned(),
+            format!("<w:tbl><w:tr><w:tc>{p}</w:tc></w:tr></w:tbl>"),
+            format!("<w:sdt><w:sdtContent>{p}</w:sdtContent></w:sdt>"),
+            format!("<w:tc>{p}</w:tc>"),
+        ] {
+            let at = root.find('>').unwrap();
+            let mut raw = format!("{} xmlns:w=\"{W_NS}\"{}", &root[..at], &root[at..]).into_bytes();
+            let before = raw.clone();
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(true);
+            let result = try_replace_in_block(&mut raw, None, "AANEEDLE", "");
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(false);
+            assert!(result.is_err());
+            assert_eq!(raw, before);
+            assert_eq!(
+                try_replace_in_block(&mut raw, None, "AANEEDLE", "").unwrap(),
+                1
+            );
+        }
+        let para_source = format!("<w:p xmlns:w=\"{W_NS}\">{}</w:p>", &p[5..p.len() - 6]);
+        let regex = regex::Regex::new("AANEEDLE").unwrap();
+        for regex_mode in [false, true] {
+            let mut para = CT_P::from_xml_fragment(para_source.as_bytes()).unwrap();
+            let before = para.clone();
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(true);
+            let result = if regex_mode {
+                try_replace_regex_in_paragraph(&mut para, &regex, "")
+            } else {
+                try_replace_in_paragraph(&mut para, "AANEEDLE", "")
+            };
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(false);
+            assert!(result.is_err());
+            assert_eq!(para, before);
+            let mut hf = CT_HdrFtr::new();
+            hf.paragraphs.push(para);
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(true);
+            let result = if regex_mode {
+                try_replace_regex_in_header_footer(&mut hf, &regex, "")
+            } else {
+                try_replace_in_header_footer(&mut hf, "AANEEDLE", "")
+            };
+            crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(false);
+            assert!(result.is_err());
+            assert_eq!(hf.paragraphs, vec![before]);
+        }
+        let textbox =
+            format!("<w:root xmlns:w=\"{W_NS}\"><w:txbxContent>{p}</w:txbxContent></w:root>");
+        let notes = format!(
+            "<w:footnotes xmlns:w=\"{W_NS}\"><w:footnote w:id=\"1\">{p}</w:footnote></w:footnotes>"
+        );
+        crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(true);
+        let textbox_result = replace_in_xml_part(textbox.as_bytes(), "AANEEDLE", "");
+        let notes_result = replace_many_in_notes_part(notes.as_bytes(), &[("AANEEDLE", "")]);
+        crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.set(false);
+        assert!(textbox_result.is_err());
+        assert!(notes_result.is_err());
+    }
+
+    #[test]
+    fn nested_wrapper_publication_is_one_candidate() {
+        let source = format!(
+            r#"<w:p xmlns:w="{W_NS}"><w:smartTag w:element="place"><w:r><w:t>AA</w:t></w:r><w:hyperlink xmlns:x="urn:producer" w:anchor="target"><w:r><w:t>NEEDLE</w:t></w:r><x:kept/></w:hyperlink></w:smartTag></w:p>"#
+        );
+        let mut published = CT_P::from_xml_fragment(source.as_bytes()).unwrap();
+        assert_eq!(replace_in_paragraph(&mut published, "NEEDLE", "X"), 1);
+        let xml = paragraph_xml(&published);
+        assert!(xml.contains(">X<"), "{xml}");
+        assert!(xml.contains(r#"w:element="place""#), "{xml}");
+        assert!(xml.contains(r#"w:anchor="target""#), "{xml}");
+
+        let mut refused = CT_P::from_xml_fragment(source.as_bytes()).unwrap();
+        let before = refused.clone();
+        // Fault injection, not an old-source RED. The collapsed hyperlink
+        // fill is refused after the nested text edit, and the outer candidate
+        // must stay uninstalled.
+        crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.with(|flag| flag.set(true));
+        let count = replace_in_paragraph(&mut refused, "AANEEDLE", "");
+        crate::text::FORCE_COLLAPSED_REMOVAL_REFUSAL.with(|flag| flag.set(false));
+        assert_eq!(count, 0, "{}", paragraph_xml(&refused));
+        assert_eq!(refused, before);
+
+        assert_eq!(replace_in_paragraph(&mut refused, "AANEEDLE", ""), 1);
+        assert!(!paragraph_xml(&refused).contains("NEEDLE"));
+        assert!(paragraph_xml(&refused).contains(r#"w:element="place""#));
+    }
+
     /// A paragraph whose wrappers hold no match keeps their bytes, and so
     /// does a wrapper that `w` does not name WordprocessingML inside, which
     /// is not read.
@@ -2779,22 +5411,30 @@ mod tests {
 
     /// A header rewrites its raw tables as a text box does, see
     /// `replace_in_textbox_keeps_the_namespaces_its_tables_declare`. A cell
-    /// that declares a namespace the root binds the same way is replaced.
+    /// that declares a namespace the root binds the same way is replaced. The
+    /// current cell writer retains that local declaration, so both tables are
+    /// replaceable and every prefix stays bound.
     #[test]
     fn replace_in_header_footer_keeps_the_namespaces_its_tables_declare() {
         let on_cell = table_declaring_w14(false, "cell {{x}}");
         let tables = [table_declaring_w14(true, "table {{x}}"), on_cell.clone()].concat();
         let w14 = r#" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
-        for (root, expected) in [("", 1), (w14, 2)] {
+        for root in ["", w14] {
             let xml = format!(r#"<w:hdr xmlns:w="{W_NS}"{root}>{tables}</w:hdr>"#);
             let mut hf = CT_HdrFtr::from_xml(xml.as_bytes()).unwrap();
 
-            assert_eq!(replace_in_header_footer(&mut hf, "{{x}}", "Y"), expected);
+            assert_eq!(replace_in_header_footer(&mut hf, "{{x}}", "Y"), 2);
 
             let written = String::from_utf8(hf.to_xml_header().unwrap()).unwrap();
             assert_every_prefix_is_bound(&written);
             assert!(written.contains(">table Y<"), "{written}");
-            assert_eq!(written.contains(&on_cell), expected == 1, "{written}");
+            assert!(written.contains(">cell Y<"), "{written}");
+            assert!(
+                written.contains(
+                    r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
+                ),
+                "{written}"
+            );
         }
     }
 
@@ -3146,11 +5786,15 @@ mod tests {
 
         let (result, count) = replace_in_xml_part(xml.as_bytes(), "{{name}}", "Ada").unwrap();
 
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
         let result = String::from_utf8(result).unwrap();
         assert_every_prefix_is_bound(&result);
         assert!(result.contains(">table Ada<"), "{result}");
-        assert!(result.contains(&on_cell), "{result}");
+        assert!(result.contains(">cell Ada<"), "{result}");
+        assert!(
+            result.contains(r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#),
+            "{result}"
+        );
     }
 
     /// Word declares `w14` on the root and writes `w14:paraId` on every
@@ -3411,6 +6055,193 @@ mod tests {
         };
         assert_eq!(para.text(), "Value: [item]");
     }
+    #[test]
+    fn raw_block_admission_preserves_ordinary_opaque_input_fallback() {
+        for source in [
+            format!(
+                r#"<w:p xmlns:w="{W_NS}" xmlns:x="urn:x"><x:opaque><x:leaf xmlns:xml="urn:wrong"/></x:opaque></w:p>"#
+            ),
+            format!(
+                r#"<w:p xmlns:w="{W_NS}"><w:r duplicate="a" duplicate="b"><w:t>text</w:t></w:r></w:p>"#
+            ),
+        ] {
+            let mut raw = source.as_bytes().to_vec();
+            let result = edit_raw_block(&mut raw, &[], &mut |_| Ok(0));
+            assert_eq!(result.unwrap(), 0);
+            assert_eq!(raw, source.as_bytes());
+        }
+    }
+
+    #[test]
+    fn raw_block_admission_respects_raw_constructor_and_weighted_refusal() {
+        let mut nested = "<w:p><w:r><w:t>NEEDLE</w:t></w:r></w:p>".to_owned();
+        for _ in 0..257 {
+            nested = format!("<w:sdt><w:sdtContent>{nested}</w:sdtContent></w:sdt>");
+        }
+        let typed = nested.replacen("<w:sdt>", &format!(r#"<w:sdt xmlns:w="{W_NS}">"#), 1);
+        let mut raw = typed.as_bytes().to_vec();
+        crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+        let result = edit_raw_block(&mut raw, &[], &mut |_| Ok(0));
+        assert!(
+            result.is_err(),
+            "weighted refusal must escape the raw reader"
+        );
+        assert_eq!(raw, typed.as_bytes());
+        assert_eq!(crate::text::PARSED_RUN_CONSTRUCTIONS.get(), 0);
+        // A real invalid property makes this complete control raw. Its later
+        // over-depth descendants must not acquire a typed-resource refusal.
+        let source = format!(
+            r#"<w:sdt xmlns:w="{W_NS}"><w:sdtContent><w:p><w:pPr><w:spacing w:before="bad"/></w:pPr></w:p>{nested}</w:sdtContent></w:sdt>"#
+        );
+        let mut raw = source.as_bytes().to_vec();
+        assert_eq!(
+            edit_raw_block(&mut raw, &[], &mut |_| panic!("raw owner is not editable")).unwrap(),
+            0
+        );
+        assert_eq!(raw, source.as_bytes());
+        let uri = format!("urn:{}", "u".repeat(400));
+        let source = format!(
+            r#"<w:sdt xmlns:w="{W_NS}" xmlns:x="{uri}"><w:sdtContent><w:p><w:pPr><w:spacing w:before="bad"/></w:pPr>{}</w:p></w:sdtContent></w:sdt>"#,
+            "<w:r><x:opaque/></w:r>".repeat(200)
+        );
+        let mut raw = source.as_bytes().to_vec();
+        assert_eq!(
+            edit_raw_block(&mut raw, &[], &mut |_| panic!("raw owner is not editable")).unwrap(),
+            0
+        );
+        assert_eq!(raw, source.as_bytes());
+    }
+
+    #[test]
+    fn raw_block_resource_admission_uses_actual_inherited_aliases() {
+        let uri = format!("urn:{}", "u".repeat(400));
+        let source = format!("<q:p>{}</q:p>", "<q:r><x:opaque/></q:r>".repeat(200));
+        let prefixes = vec![
+            "q".to_owned(),
+            format!("\0q\0{W_NS}"),
+            format!("\0x\0{uri}"),
+        ];
+        let mut raw = source.as_bytes().to_vec();
+        crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+        let error = edit_raw_block(&mut raw, &prefixes, &mut |_| Ok(0)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("original source capture exceeds admitted source work"),
+            "{error}"
+        );
+        assert_eq!(raw, source.as_bytes());
+        assert_eq!(crate::text::PARSED_RUN_CONSTRUCTIONS.get(), 0);
+        let mut small = b"<q:p><q:r><q:t>text</q:t></q:r></q:p>".to_vec();
+        let before = small.clone();
+        let mut visited = 0;
+        assert_eq!(
+            edit_raw_block(&mut small, &prefixes, &mut |paragraph| {
+                visited += 1;
+                assert_eq!(paragraph.accepted_text(), "text");
+                Ok(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(visited, 1);
+        assert_eq!(small, before);
+    }
+
+    #[test]
+    fn raw_block_resource_refusal_precedes_construction_and_header_publication() {
+        let regex = regex::Regex::new("NEEDLE").unwrap();
+        let uri = format!("urn:{}", "u".repeat(400));
+        let paragraph = format!(r#"<w:p>{}</w:p>"#, "<w:r><x:opaque/></w:r>".repeat(200));
+        for body in [
+            paragraph.clone(),
+            format!("<w:tbl><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>"),
+            format!("<w:sdt><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"),
+        ] {
+            let at = body.find('>').unwrap();
+            let source = format!(
+                r#"{} xmlns:w="{W_NS}" xmlns:x="{uri}"{}"#,
+                &body[..at],
+                &body[at..]
+            );
+            for regex_mode in [false, true] {
+                let mut hf = CT_HdrFtr::new();
+                let mut first = CT_P::new();
+                first.add_run("NEEDLE");
+                hf.paragraphs.push(first);
+                hf.extra_xml.push(source.as_bytes().to_vec());
+                let before = hf.clone();
+                crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+                let result = if regex_mode {
+                    try_replace_regex_in_header_footer(&mut hf, &regex, "X")
+                } else {
+                    try_replace_in_header_footer(&mut hf, "NEEDLE", "X")
+                };
+                let error = result.expect_err("raw source resource refusal must propagate");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("original source capture exceeds admitted source work"),
+                    "{error}"
+                );
+                assert_eq!(hf.paragraphs, before.paragraphs);
+                assert_eq!(hf.extra_xml, before.extra_xml);
+                assert_eq!(crate::text::PARSED_RUN_CONSTRUCTIONS.get(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_raw_replacement_admits_original_input_before_model_construction() {
+        let uri = format!("urn:{}", "u".repeat(400));
+        let source = format!(
+            "<w:p xmlns:w=\"{W_NS}\" xmlns:x=\"{uri}\">{}</w:p>",
+            "<w:r><x:opaque/></w:r>".repeat(200)
+        );
+        let mut raw = source.as_bytes().to_vec();
+        crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+        let error = try_replace_in_block(&mut raw, None, "absent", "x").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("original source capture exceeds admitted source work"),
+            "{error}"
+        );
+        assert_eq!(raw, source.as_bytes());
+        assert_eq!(crate::text::PARSED_RUN_CONSTRUCTIONS.get(), 0);
+        let invalid = source.replace("</w:p>", "<unbound:opaque/></w:p>");
+        let mut raw = invalid.as_bytes().to_vec();
+        let error = try_replace_in_block(&mut raw, None, "absent", "x").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unbound scoped replacement element")
+        );
+        assert_eq!(raw, invalid.as_bytes());
+    }
+
+    #[test]
+    fn scoped_raw_replacement_uses_body_control_facts_and_preserves_atomic_refusal() {
+        let mut nested = "<w:p/>".to_owned();
+        for _ in 0..257 {
+            nested = format!("<w:sdt><w:sdtContent>{nested}</w:sdtContent></w:sdt>");
+        }
+        let source = format!(
+            "<w:sdt xmlns:w=\"{W_NS}\"><w:sdtContent><w:p><w:r><w:rPr><w:sz w:val=\"bad\"/></w:rPr></w:r></w:p>{nested}</w:sdtContent></w:sdt>"
+        );
+        let mut raw = source.as_bytes().to_vec();
+        crate::text::PARSED_RUN_CONSTRUCTIONS.set(0);
+        let error = try_replace_in_block(&mut raw, None, "absent", "x").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported scoped content control"),
+            "{error}"
+        );
+        assert_eq!(raw, source.as_bytes());
+        assert_eq!(crate::text::PARSED_RUN_CONSTRUCTIONS.get(), 0);
+    }
+
     #[test]
     fn scoped_raw_replacement_distinguishes_refusal_from_no_match() {
         for source in [
