@@ -1073,7 +1073,7 @@ fn eocd_entry_count(tail: &[u8], tail_start: u64, file_len: u64, offset: usize) 
     if absolute_offset
         .checked_add(EOCD_LEN)?
         .checked_add(comment_len)?
-        != file_len
+        > file_len
     {
         return None;
     }
@@ -1485,6 +1485,69 @@ fn part_name_to_rels_path(part_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue435_trailing_newline_keeps_provider_accepted_packages_readable() {
+        let mut bytes = package_zip(&[
+            ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+            ("word/document.xml", b"<document/>"),
+        ])
+        .into_inner();
+        bytes.push(b'\n');
+        let original = bytes.clone();
+        assert_eq!(
+            ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap().len(),
+            2
+        );
+        for limits in [
+            PackageReadLimits::UNBOUNDED,
+            PackageReadLimits {
+                max_entries: 8,
+                max_part_uncompressed_bytes: 4096,
+                max_total_uncompressed_bytes: 8192,
+            },
+        ] {
+            let package = OpcPackage::from_reader_with_limits(std::io::Cursor::new(&bytes), limits)
+                .expect("provider-accepted trailing newline must remain readable");
+            assert_eq!(
+                package.get_part("/word/document.xml"),
+                Some(b"<document/>".as_slice())
+            );
+        }
+        assert_eq!(bytes, original);
+    }
+
+    #[test]
+    fn issue435_trailing_newline_cannot_hide_a_physical_duplicate_name() {
+        let mut bytes = package_zip(&[
+            ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+            ("word/document.xml", b"<first/>"),
+            ("word/documenx.xml", b"<second/>"),
+        ])
+        .into_inner();
+        replace_zip_name(&mut bytes, b"word/documenx.xml", b"word/document.xml", true);
+        bytes.push(b'\n');
+        let original = bytes.clone();
+        assert_eq!(
+            ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap().len(),
+            2
+        );
+        for limits in [
+            PackageReadLimits::UNBOUNDED,
+            PackageReadLimits {
+                max_entries: 8,
+                max_part_uncompressed_bytes: 4096,
+                max_total_uncompressed_bytes: 8192,
+            },
+        ] {
+            let result = OpcPackage::from_reader_with_limits(std::io::Cursor::new(&bytes), limits);
+            assert!(
+                matches!(&result, Err(OpcError::DuplicatePartName(part)) if part == "word/document.xml"),
+                "{result:?}"
+            );
+        }
+        assert_eq!(bytes, original);
+    }
 
     #[test]
     fn issue435_exact_physical_duplicate_parts_are_named_on_every_read_route() {
