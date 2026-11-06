@@ -12870,6 +12870,7 @@ def test_issue435_add_textbox_and_add_shape_refuse_a_negative_size(tmp_path):
 @pytest.mark.parametrize("duplicate", [False, True])
 def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
     import rpptx
+    import copy
 
     owner = rpptx.Presentation()
     slide = owner.slides.add_slide(owner.slide_layouts[6])
@@ -12882,7 +12883,7 @@ def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
             data = source.read(info)
             if info.filename == "ppt/slides/slide1.xml" and not duplicate:
                 data = data.replace(b"Issue435 seed", b"Issue435 \x01seed")
-            target.writestr(info, data)
+            target.writestr(copy.copy(info), data)
         if duplicate:
             with pytest.warns(UserWarning, match="Duplicate name"):
                 target.writestr("ppt/slides/slide1.xml", source.read("ppt/slides/slide1.xml"))

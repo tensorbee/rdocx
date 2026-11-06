@@ -8,6 +8,16 @@
 
 ## Operative Root adoption
 
+The final integrated Python gate at a78eba3c exposed an existing root-move
+consumer rejecting the crossing replies this story authors. The bounded
+correction reuses qualified comment ownership and selected marker projection,
+retaining actual source ordinals and generic paired-range nesting checks.
+The existing reference-restoration helper in Native document.rs may call that
+crate-private proof. This narrow lease extension preserves root-only moves,
+thread metadata, unrelated reply anchors and atomic refusal. The existing
+Python failure and the one/three-reply Native regression decide the repair.
+No review counter, public signature or acceptance requirement changes.
+
 Root adopts the exact authoring split after independent Root final1, which
 reviewed draft2e06c7a2e620fc9653c33f35e69522677179ace10d53b9f8b30c43c262527d13.
 This approval changes status and ownership only. All retained draft/proposed

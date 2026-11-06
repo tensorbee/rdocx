@@ -795,28 +795,27 @@ def test_fx195_word_caller_precedes_real_embedded_font():
 
 
 def test_fx195_word_empty_fonts_preserve_bundled_measurement_fallback(tmp_path):
-    import base64
     from rdocx import Document
 
+    family, first, second = _fx195_font_inputs()
     document = Document()
-    document.add_paragraph("The quick brown fox jumps over the lazy dog. " * 150)
-    document.paragraphs[0].runs[0].font.name = "Helvetica Neue"
+    document.add_paragraph("iiii " * 960)
+    document.paragraphs[0].runs[0].font.name = family
     document.paragraphs[0].runs[0].font.size = 36 * 12700
     before = document.to_bytes()
-    # Normal SVG discovery exposes the actual selected face for this fixture.
-    # The selected physical face must change page availability before empty-input checks.
-    svg = document.render_page_to_svg(0).svg
-    selected = re.findall(r"data:font/[^;]+;base64,([^')]+)", svg)
-    assert len(selected) == 1, "the normal fixture must select exactly one real face"
-    normal_face = base64.b64decode(selected[0])
     ordinary = document.layout()
-    normal = document.layout(fonts=[("Helvetica Neue", normal_face)])
     ordinary_count = max(fragment.physical_page for fragment in ordinary)
+    configured = [(face, document.layout(fonts=[(family, face)]))
+                  for face in (first, second)]
+    counts = [max(fragment.physical_page for fragment in layout)
+              for _, layout in configured]
+    assert counts[0] != counts[1], "distinct bundled faces must discriminate physical pagination"
+    caller_face, normal = next((face, layout) for face, layout in configured
+                              if max(fragment.physical_page for fragment in layout) != ordinary_count)
     normal_count = max(fragment.physical_page for fragment in normal)
-    assert ordinary_count != normal_count, "selected normal face must discriminate physical pagination"
     boundary = min(ordinary_count, normal_count)
     assert (document.layout_page(boundary) is None) == (boundary >= ordinary_count)
-    assert (document.layout_page(boundary, fonts=[("Helvetica Neue", normal_face)]) is None) == (boundary >= normal_count)
+    assert (document.layout_page(boundary, fonts=[(family, caller_face)]) is None) == (boundary >= normal_count)
     ordinary_page = document.layout_page(0)
     # Page-zero metadata is font-independent. Actual font-sensitive page availability
     # is tested in the entrypoint matrix above; this control checks empty-input equality.

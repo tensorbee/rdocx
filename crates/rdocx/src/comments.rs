@@ -785,7 +785,7 @@ impl Document {
         Ok(())
     }
 
-    fn checked_movable_comment(&self, id: i32) -> Result<StoryRangeRef> {
+    pub(crate) fn checked_movable_comment(&self, id: i32) -> Result<StoryRangeRef> {
         let mut proof = self.clone_for_staging();
         proof.flush_to_package()?;
         let ownership = proof.comment_ownership_at(&proof.doc_part_name)?;
@@ -815,9 +815,18 @@ impl Document {
                 "comment {id} range runs across story owners and cannot be moved"
             )));
         }
-        let mut selected = self.story_ranges()?.into_iter().filter(
-            |entry| matches!(entry.kind(), StoryRangeKind::Comment { id: found } if *found == id),
-        );
+        let paragraphs = proof.story_range_located_paragraphs()?;
+        let (mut located, identity_counts) = located_story_markers(&paragraphs)?;
+        located.retain(|(_, _, _, marker)| {
+            matches!(marker.kind, StoryRangeKind::Comment { id: found } if found == id)
+        });
+        let (ranges, across) = pair_located_story_markers(&located, &identity_counts)?;
+        if !across.is_empty() {
+            return Err(Error::Other(format!(
+                "comment {id} range runs across story owners and cannot be moved"
+            )));
+        }
+        let mut selected = ranges.into_iter();
         let entry = selected
             .next()
             .ok_or_else(|| Error::Other(format!("comment {id} has no selected source range")))?;
@@ -834,9 +843,6 @@ impl Document {
         selected: &StoryRangeRef,
         range: StoryRunRange,
     ) -> Result<()> {
-        if !self.story_ranges()?.contains(selected) {
-            return Err(Error::Other("selected story range is stale".to_owned()));
-        }
         if let StoryRangeKind::Comment { id } = selected.kind() {
             let checked = self.checked_movable_comment(*id)?;
             if &checked != selected {
@@ -848,10 +854,13 @@ impl Document {
             candidate.move_comment_story_range(selected, &range, *id)?;
             candidate.flush_to_package()?;
             candidate.comment_ownership_at(&candidate.doc_part_name)?;
-            candidate.story_ranges()?;
+            candidate.checked_movable_comment(*id)?;
             let reopened = candidate.prepare_and_reopen_staged()?;
             self.commit_staged_mutation(reopened);
             return Ok(());
+        }
+        if !self.story_ranges()?.contains(selected) {
+            return Err(Error::Other("selected story range is stale".to_owned()));
         }
         let mut candidate = self.clone_for_staging();
         candidate.remove_story_range_markers(selected, true)?;
@@ -4333,6 +4342,93 @@ mod tests {
             .into_iter()
             .map(|marker| (marker.family, marker.id))
             .collect()
+    }
+
+    #[test]
+    fn issue434_root_moves_keep_crossing_replies_and_generic_pairing_strict() {
+        for reply_count in [1, 3] {
+            let mut document = Document::new();
+            document.add_paragraph("SOURCE");
+            document.add_paragraph("TARGET TARGET");
+            let root = document
+                .add_comment_on_text("SOURCE", 0, "Ada", Some("A"), "root", None)
+                .unwrap();
+            let mut replies = Vec::new();
+            for _ in 0..reply_count {
+                replies.push(
+                    document
+                        .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+                        .unwrap(),
+                );
+            }
+            document.resolve_comment(root, true).unwrap();
+            assert!(document.story_ranges().is_err());
+            document.flush_to_package().unwrap();
+            let comments_part = document.comments_part_name.clone().unwrap();
+            let extended_part = document.comments_extended_part_name.clone().unwrap();
+            let original_comments = document.package.get_part(&comments_part).unwrap().to_vec();
+            let original_extended = document.package.get_part(&extended_part).unwrap().to_vec();
+            let location = document.paragraph_story_location(1).unwrap().unwrap();
+            let target = StoryRunRange {
+                start: StoryRunPosition {
+                    location: location.clone(),
+                    run_index: 0,
+                },
+                end: StoryRunPosition {
+                    location,
+                    run_index: 1,
+                },
+            };
+            document.move_comment(root, target.clone()).unwrap();
+            assert_eq!(
+                document.comment_anchor_text(root).unwrap().as_deref(),
+                Some("TARGET TARGET")
+            );
+            for reply in &replies {
+                assert_eq!(
+                    document.comment_anchor_text(*reply).unwrap().as_deref(),
+                    Some("SOURCE")
+                );
+            }
+            document.move_comment_to_text(root, "TARGET", 1).unwrap();
+            assert_eq!(
+                document.comment_anchor_text(root).unwrap().as_deref(),
+                Some("TARGET")
+            );
+            let before = document.to_bytes().unwrap();
+            assert_eq!(
+                document.package.get_part(&comments_part).unwrap(),
+                original_comments
+            );
+            assert_eq!(
+                document.package.get_part(&extended_part).unwrap(),
+                original_extended
+            );
+            for id in [999, replies[0]] {
+                assert!(document.move_comment(id, target.clone()).is_err());
+                assert_eq!(document.to_bytes().unwrap(), before);
+            }
+            assert!(document.move_comment_to_text(root, "absent", 0).is_err());
+            assert_eq!(document.to_bytes().unwrap(), before);
+            let mut invalid = document.comment_anchor(root).unwrap().unwrap();
+            invalid.end.run_index = usize::MAX;
+            assert!(document.move_comment(root, invalid).is_err());
+            assert_eq!(document.to_bytes().unwrap(), before);
+            if reply_count > 1 {
+                assert!(document.story_ranges().is_err());
+            }
+            let reopened = Document::from_bytes(&before).unwrap();
+            assert_eq!(
+                reopened.comment_anchor_text(root).unwrap().as_deref(),
+                Some("TARGET")
+            );
+            for reply in replies {
+                assert_eq!(
+                    reopened.comment_anchor_text(reply).unwrap().as_deref(),
+                    Some("SOURCE")
+                );
+            }
+        }
     }
 
     #[test]

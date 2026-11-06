@@ -30823,21 +30823,8 @@ impl Document {
         id: i32,
         reference: Vec<u8>,
     ) -> Result<()> {
-        let ranges = self.story_ranges()?;
-        let matching = ranges
-            .iter()
-            .filter(|entry| {
-                matches!(entry.kind(),
-            crate::comments::StoryRangeKind::Comment { id: found } if *found == id)
-            })
-            .collect::<Vec<_>>();
-        if matching.len() != 1 {
-            return Err(Error::Other(
-                "moved comment has no unique destination range".into(),
-            ));
-        }
-        let (source, owner) =
-            self.story_source_and_owner(matching[0].range().end.location.story())?;
+        let selected = self.checked_movable_comment(id)?;
+        let (source, owner) = self.story_source_and_owner(selected.range().end.location.story())?;
         let part = source.part_name.clone();
         let span = comment_reference_run_span(source.xml.as_ref(), &owner.full, id)?;
         let mut xml = source.xml.into_owned();

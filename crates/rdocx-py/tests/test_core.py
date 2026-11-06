@@ -10464,7 +10464,7 @@ def test_form_protection_and_permission_composition():
     note = _story_paragraph(document, "footnote")
     note_run = next(run for run in note.runs if run.text == "note held")
     comment = _story_paragraph(document, "comment")
-    comment_run = comment.runs[0]
+    comment_run = next(run for run in comment.runs if run.text == "comment held")
     text_box = _story_paragraph(document, "text_box")
     text_box_run = text_box.runs[0]
     held = (
@@ -13579,24 +13579,11 @@ def test_part_xml_keeps_slash_case_and_binary_errors():
         pictured.part_xml(media)
     with pytest.raises(rdocx.RdocxError, match="missing"):
         pictured.part_xml("/word/_rels/absent.xml.rels")
-    bad = _fx261_add_part(
-        rdocx.Document(),
-        "word/bad.xml",
-        b"<bad>\x01</bad>",
-        "application/xml",
-    )
-    try:
-        bad.part_names()
-        names_failed = False
-    except rdocx.RdocxError:
-        names_failed = True
-    try:
-        bad.to_bytes()
-        save_failed = False
-    except rdocx.RdocxError:
-        save_failed = True
-    assert names_failed == save_failed
-    assert names_failed is False and save_failed is False
+    pristine = rdocx.Document()
+    before = pristine.to_bytes()
+    with pytest.raises(rdocx.PackageError, match=r"word/bad.xml.*U\+0001"):
+        _fx261_add_part(pristine, "word/bad.xml", b"<bad>\x01</bad>", "application/xml")
+    assert pristine.to_bytes() == before
 
     refused = rdocx.Document()
     before = refused.to_bytes()
@@ -15914,6 +15901,7 @@ def _issue423_page_source(numbering, instruction="PAGE", body=None):
     import rdocx
 
     source = rdocx.Document()
+    source.default_font_name = "Carlito"
     source.add_paragraph("source")
     if body is None:
         body = ('<w:p><w:fldSimple w:instr="' + html.escape(instruction, quote=True)
@@ -16603,6 +16591,7 @@ def test_issue430_normalized_element_ids_require_complete_custody_selection():
 @pytest.mark.parametrize("text", ("", "Source note", " text"))
 def test_issue432_note_defaults_and_space(family, text):
     import rdocx
+    import xml.etree.ElementTree as ET
 
     document = rdocx.Document()
     document.add_paragraph("reference")
@@ -16617,13 +16606,14 @@ def test_issue432_note_defaults_and_space(family, text):
         "continuationSeparator", "normal", "separator"
     ]
     for item in notes:
-        if item.get(w + "type") != "normal":
+        if item.get(w + "type", "normal") != "normal":
             assert not list(item.iter(w + "t"))
     assert b"footnotePr" not in settings and b"endnotePr" not in settings
 
 
 def test_issue432_hyperlink_style_and_numbering_survive_real_publishers():
     import rdocx
+    import xml.etree.ElementTree as ET
 
     document = rdocx.Document()
     decimal = document.add_numbering_definition([rdocx.ListLevel(format="decimal")])
@@ -16652,6 +16642,7 @@ def test_issue432_hyperlink_style_and_numbering_survive_real_publishers():
 @pytest.mark.parametrize("duplicate", [False, True])
 def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
     import rdocx
+    import copy
 
     owner = rdocx.Document()
     owner.add_paragraph("Issue435 seed")
@@ -16662,7 +16653,7 @@ def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
             data = source.read(info)
             if info.filename == "word/document.xml" and not duplicate:
                 data = data.replace(b"Issue435 seed", b"Issue435 \x01seed")
-            target.writestr(info, data)
+            target.writestr(copy.copy(info), data)
         if duplicate:
             with pytest.warns(UserWarning, match="Duplicate name"):
                 target.writestr("word/document.xml", source.read("word/document.xml"))
