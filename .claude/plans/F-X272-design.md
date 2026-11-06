@@ -6355,3 +6355,35 @@ accessors expose existing retained runs without copying, new mutable authority
 or a new ownership policy. Include all six additions in the external callable
 inventory and affected local checks. This is functional handoff closure. The
 deferred security assessment and final union gates remain pending.
+
+## Actual selected-note writer handback
+
+The existing Native serialized_note_fragment emits a selected note under a
+one-note part root. A returned note at physical index greater than0 cannot use
+the whole returned-vector receipt as index0. Adopt this additive doc-hidden
+method, preserving all40 existing carrier signatures and seven accessors:
+
+```rust,ignore
+pub fn source_model_note_from_read(
+    &mut self,
+    note: &CT_Footnote,
+    endnotes: bool,
+    source: &ScopedWordSource,
+    note_index: usize,
+) -> Result<ScopedWordSource>;
+```
+
+The carrier inventory becomes41. The actual selecting producer supplies the
+physical index from the successful note-family reader, together with its
+selected note or actual clone. Use only that note's returned paragraph/raw facts
+and existing Field receipts. Emit the same one-note part root through the same
+concrete note-family writer, then use existing checked selection and namespace
+closure for the actual fragment. Do not serialize unrelated notes, rediscover
+the owner by id/value/address or run an extra parser to qualify its origin.
+
+Reuse the existing note writer with a borrowed one-note slice where practical,
+avoiding another typed clone solely for serialization. Add a selected later-note
+control with distinguishable preceding content in both families. Keep whole-note
+flush and initial frozen-clone writers on their existing methods. Include the
+additive call in external caller inventory. No new public type, quota, input
+allowance or broader note-editing contract is introduced.
