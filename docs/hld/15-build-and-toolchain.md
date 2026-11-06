@@ -97,7 +97,10 @@ The M23 authoring gate is owned by
 `scripts/docx_authoring_conformance.py`. CI invokes its public mode before the
 workspace test suite. That mode builds an offline temporary consumer with only
 the public `rdocx` dependency and uses the same deterministic 150 DPI render
-path twice. The public Cargo child keeps its300second timeout, original argv,
+path twice. The same validated temporary project is first compiled with
+`cargo build --quiet --offline`, using the ordinary job build budget. Build
+failure stops the gate before execution and retains its exact child diagnostics.
+The following public Cargo run keeps its300second timeout, original argv,
 working directory, environment and target fallback. A timeout or nonzero exit
 retains the call-site phase, exact command and typed stdout/stderr in the deciding
 failure before temporary source cleanup. Bytes use reconstructable escapes,

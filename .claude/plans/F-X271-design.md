@@ -221,6 +221,27 @@ Implement diagnostics in the existing script and its existing HarnessSelfTests. 
 
 ### Actual cause and completion gate
 
+#### Observed compiler-active correction, 2026-11-06
+
+Actual normal H3 CI42306259639 Test job128196508048 exhausted the300second
+public Cargo run while its compiler remained active, with no client-entry
+checkpoint captured. H1 retained the same failure class. H2 CI42300837178
+passed the unchanged public command in264seconds. These observations identify
+compilation inside the bounded child, without attributing a dominant crate or
+claiming a product deadlock. Exact logs and source diagnosis are retained in
+`/private/tmp/rdocx-s96-prepared-integration-readiness/normal-ci-dispatch-f4e9e5bd/failure-triage-20261106T233005Z`.
+
+Root authorizes one preparatory `cargo build --quiet --offline` on the same
+fresh validated invocation-owned public consumer, in the same directory and
+environment. It uses the ordinary CI job build budget. A failed build is a
+deciding failure with its own phase and exact captured child diagnostics, and
+the run does not start. The existing public `cargo run` keeps its exact argv,
+environment, target, capture behavior and300second deadline. No retry, skipped
+stage, target relocation, workflow timeout change or source-boundary relaxation
+is authorized. Existing HarnessSelfTests must distinguish build failure from
+run failure and prove both children use the same actual producer inputs. Final
+normal hosted CI and the MSRV public integration carrier remain required.
+
 A local synthetic diagnostic GREEN proves retention only. It neither repairs nor qualifies the old300second MSRV failure. The actual source-qualified MSRV host run must retain enough child output/phase evidence to establish build, lock or program waiting and drive the concrete final repair. Root then records the bounded observed-cause correction in this same F-ID before its source change. If the new run passes, preserve its exact source/toolchain/profile/child result and verify all required public conformance evidence rather than relabelling the old failure as success.
 
 A7 closes only with a clean actual final-source MSRV public-conformance result and the required clean final CI union. Existing F271 native retrieval, F272 comparison/installed, F273 native/hash/full and new F275 compatibility/consumer gates remain separately deciding. Independent microscope, applicable scoped script policies/prose/adapters/diff checks and final integrated verification remain required. No source push, skipped old failure, old .5 wheel, build-only rehearsal or diagnostic-only GREEN substitutes for clean final-source CI before publication.
@@ -298,3 +319,32 @@ are required. Final actual source-qualified hosted Word fidelity must execute al
 five amended pages and the unchanged complete harness. The final S96 union still
 requires native Word, all F-X273 riders and successful complete CI before wheels.
 No dispatch, push, completion or publication follows from this design adoption.
+
+
+## H4 reviewed source availability renewal, 2026-11-06
+
+Root prepares a successor to actual failed H3 CI42306259639. Bounded repairs
+pass24unique focused Word controls by applicable21+3runs, strict all-targets/
+all-features Clippy, formatting and two default-feature cache controls. Actual
+new Native outputs pass50SDK cases, and four actual sole-ReviewerB Word
+Accept All/Reject All saved results pass SDK and semantic checks. Six passive
+Word copies and all50originals remain unchanged, with all15prior generated
+windows retained. Root repair audit and affected archive support5 have zero
+defects and smells. F271A7 separately prepares the exact same fresh public
+consumer before its unchanged300second run, with15passing harness self-tests.
+
+Actual H3 hosted PowerPoint passed1041tests with zero skips. Its unchanged
+local release artifacts have1039applicable cases plus two debug-inapplicable
+cases per runtime, with actual hosted coverage of both counters. Earlier full
+commands remain failed, and source-qualified composite applicability is
+retained. Word's old bytecode-containing wheel authentication failures remain
+failed. Ignored bytecode is quarantined and fresh clean release packaging,
+both runtime suites and typing remain pending.
+
+The one affected Word archive was measured and independently authenticated.
+Final native/performance/source-diagnostic/full riders, current normal CI,
+verified publication dry-run, current CLI hash/pixel checks and build-only
+26payload rehearsal remain pending. Source availability permits only the
+reviewed clean sprint/s96 ref push and normal CI routing. No ledger completion,
+dependency unblocking, main merge, sprint/release tag or publication follows.
+Actual upcoming SHA, push and CI run identity will be appended after observation.

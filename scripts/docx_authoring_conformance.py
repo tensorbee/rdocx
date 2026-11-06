@@ -605,6 +605,8 @@ def public_consumer_failure(
     arguments: tuple[str, ...],
     cwd: Path,
     environment: dict[str, str],
+    *,
+    phase: str = "public consumer cargo run",
 ) -> str:
     """Keep exact public child diagnostics before its temporary project is removed."""
     timed_out = isinstance(result, subprocess.TimeoutExpired)
@@ -644,7 +646,7 @@ def public_consumer_failure(
         (
             "public rdocx-only consumer timed out"
             if timed_out else "public rdocx-only consumer failed",
-            "phase='public consumer cargo run'",
+            f"phase={phase!r}",
             f"cwd={str(cwd)!r}",
             f"host_platform={sys.platform!r}",
             "command_profile='dev'",
@@ -674,6 +676,21 @@ def run_public() -> None:
             "CARGO_TARGET_DIR",
             str(REPO_ROOT / "target" / "docx-authoring-conformance"),
         )
+        build_arguments = ("cargo", "build", "--quiet", "--offline")
+        built = subprocess.run(
+            build_arguments,
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        if built.returncode != 0:
+            raise ConformanceError(
+                public_consumer_failure(
+                    built, build_arguments, root, environment,
+                    phase="public consumer cargo build",
+                )
+            )
         arguments = ("cargo", "run", "--quiet", "--offline", "--", str(output))
         try:
             completed = subprocess.run(
@@ -1158,7 +1175,10 @@ class HarnessSelfTests(unittest.TestCase):
                     command, timeout, output=stdout, stderr=stderr
                 )
                 with mock.patch.dict(os.environ, inherited, clear=True), mock.patch(
-                    f"{__name__}.subprocess.run", side_effect=error
+                    f"{__name__}.subprocess.run", side_effect=[
+                        subprocess.CompletedProcess(("cargo", "build"), 0, "", ""),
+                        error,
+                    ]
                 ) as child:
                     with self.assertRaises(
                         (ConformanceError, subprocess.TimeoutExpired)
@@ -1168,7 +1188,8 @@ class HarnessSelfTests(unittest.TestCase):
                 diagnostic = str(caught.exception)
                 arguments = child.call_args.args[0]
                 options = child.call_args.kwargs
-                self.assertEqual(child.call_count, 1)
+                self.assertEqual(child.call_count, 2)
+                self.assertEqual(child.call_args_list[0].args[0], ("cargo", "build", "--quiet", "--offline"))
                 self.assertEqual(
                     arguments[:-1], ("cargo", "run", "--quiet", "--offline", "--")
                 )
@@ -1212,6 +1233,8 @@ class HarnessSelfTests(unittest.TestCase):
 
     def test_public_nonzero_child_retains_streams_and_stays_failure(self) -> None:
         def fail(arguments: tuple[str, ...], **_: object):
+            if arguments == ("cargo", "build", "--quiet", "--offline"):
+                return subprocess.CompletedProcess(arguments, 0, "", "")
             return subprocess.CompletedProcess(arguments, 17, "stdout\n", "stderr\n")
 
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
@@ -1222,7 +1245,7 @@ class HarnessSelfTests(unittest.TestCase):
         options = child.call_args.kwargs
         arguments = child.call_args.args[0]
         diagnostic = str(caught.exception)
-        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_count, 2)
         self.assertEqual(options["timeout"], 300)
         self.assertEqual(
             options["env"],
@@ -1282,8 +1305,74 @@ class HarnessSelfTests(unittest.TestCase):
                 ConformanceError, "public consumer evidence is incomplete"
             ):
                 run_public()
-        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_count, 2)
         self.assertEqual(child.call_args.kwargs["timeout"], 300)
+
+    def test_public_prebuild_and_run_share_exact_public_producer(self) -> None:
+        observed = []
+        inherited = {
+            "CARGO_TARGET_DIR": "relative-target",
+            "CARGO_PROFILE_DEV_OPT_LEVEL": "1",
+            "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS": "true",
+        }
+
+        def child(arguments: tuple[str, ...], **options: object):
+            root = options["cwd"]
+            manifest = (root / "Cargo.toml").read_text(encoding="utf-8")
+            source = (root / "src" / "main.rs").read_text(encoding="utf-8")
+            validate_public_boundary(manifest, source)
+            self.assertEqual(manifest, public_consumer_manifest())
+            self.assertEqual(source, PUBLIC_CONSUMER_SOURCE)
+            observed.append((arguments, options, manifest, source))
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+
+        with mock.patch.dict(os.environ, inherited, clear=True), mock.patch(
+            f"{__name__}.subprocess.run", side_effect=child
+        ):
+            with self.assertRaisesRegex(ConformanceError, "public consumer evidence is incomplete"):
+                run_public()
+        self.assertEqual(len(observed), 2)
+        build, run = observed
+        self.assertEqual(build[0], ("cargo", "build", "--quiet", "--offline"))
+        self.assertEqual(run[0], ("cargo", "run", "--quiet", "--offline", "--", str(run[1]["cwd"] / "output")))
+        self.assertEqual(build[1]["cwd"], run[1]["cwd"])
+        self.assertIs(build[1]["env"], run[1]["env"])
+        self.assertEqual(build[1]["env"], inherited)
+        self.assertEqual(build[2:], run[2:])
+        self.assertNotIn("timeout", build[1])
+        self.assertEqual(run[1]["timeout"], 300)
+        for record in observed:
+            self.assertIs(record[1]["capture_output"], True)
+            self.assertIs(record[1]["text"], True)
+        self.assertFalse(run[1]["cwd"].exists())
+
+    def test_public_failed_prebuild_retains_diagnostics_and_never_runs(self) -> None:
+        def fail(arguments: tuple[str, ...], **_: object):
+            return subprocess.CompletedProcess(arguments, 17, "build stdout\n", "build stderr\n")
+
+        with mock.patch(f"{__name__}.subprocess.run", side_effect=fail) as child:
+            with self.assertRaises(ConformanceError) as caught:
+                run_public()
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_args.args[0], ("cargo", "build", "--quiet", "--offline"))
+        diagnostic = str(caught.exception)
+        for fragment in (
+            "phase='public consumer cargo build'", "returncode(int)=17",
+            "stdout(str)='build stdout\\n'", "stderr(str)='build stderr\\n'",
+        ):
+            self.assertIn(fragment, diagnostic)
+        self.assertNotIn("public authoring conformance: pass", diagnostic)
+        self.assertFalse(child.call_args.kwargs["cwd"].exists())
+
+    def test_public_prebuild_launch_failure_never_runs(self) -> None:
+        with mock.patch(
+            f"{__name__}.subprocess.run", side_effect=OSError("producer unavailable")
+        ) as child:
+            with self.assertRaisesRegex(OSError, "producer unavailable"):
+                run_public()
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_args.args[0], ("cargo", "build", "--quiet", "--offline"))
+        self.assertFalse(child.call_args.kwargs["cwd"].exists())
 
     def test_public_boundary_rejects_private_dependencies_and_raw_bypasses(self) -> None:
         manifest = public_consumer_manifest()
