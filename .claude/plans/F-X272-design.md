@@ -6421,3 +6421,21 @@ source_model_notes. This is an amendment to the unreleased C1 bridge, not a
 change to a published signature. Preserve earlier external compile observations
 as historical and update the final external caller to the amended signature.
 No new output delta or user-visible policy change is approved here.
+
+## Scoped cache decline and authoritative reader
+
+A pre-operation MainPartBlocks parsed-child cache has no successful-reader
+companion for this operation. In the scoped path, decline that optional model
+reconstruction and use the existing authoritative whole-document factory once
+with its actual Source. This replaces the chosen reader path. It is not an
+additional parser that qualifies a cached model after the fact. Keep the
+separate qualified kept.main_document reuse and ordinary None-context cache
+paths unchanged. No value/address origin inference, renewed input, conservative
+valid-input refusal or extra baseline is permitted. Performance riders remain
+mandatory and may expose an optimization need, without blocking the initial
+correct functional path on an unproved cache-origin mechanism.
+
+Actual whole-reader output supplies its ordinary Text/raw companion to the
+next substantive writer. Field-bearing and replacement-child factories may
+retain their existing optimized route only when an actual same-operation
+companion is available. Ordinary optimized Some controls remain unchanged.
