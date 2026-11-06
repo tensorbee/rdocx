@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 13 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 25 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 55 | 32 | 0 | 22 |
-| X, Cross-cutting | 309 | 278 | 16 | 10 |
-| **Total** | **664** | **560** | **16** | **59** |
+| X, Cross-cutting | 309 | 278 | 17 | 9 |
+| **Total** | **664** | **560** | **17** | **58** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -853,7 +853,7 @@ HLD14 contract before adopting contributor changes.
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
 | F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | pending |
 | F-X279a | Expose owned revision text and one kind vocabulary | S96 | M | in-progress |
-| F-X279b | Complete comments, comparison and insert_document | S96 | L | pending |
+| F-X279b | Complete comments, comparison and insert_document | S96 | L | in-progress |
 | F-X279c | Author comment markup and styles without changing reply ranges | S96 | M | in-progress |
 | F-X279d | Author crossing comment replies with initials | S96 | M | in-progress |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | S96 | L | pending |
