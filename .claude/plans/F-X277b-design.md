@@ -539,6 +539,12 @@ Not matched, and left unmatched on purpose: a new getter, a cached read projecti
 
 ## Hash harness
 
+### Actual integrated measurement disposition
+
+Root measured the integrated producer15424ace and accepted exactly two additional XML keys, feature_showcase:word/document.xml and report:word/document.xml. The historical five-key donor forecast is superseded as a count, with no fabricated fifth identity. F-X278 owns the other fourteen keys. The complete actual sixteen-key union and two golden changes are reviewed in S96-final-output-delta-codex-pass-1.
+
+### Retained earlier expectations
+
 The story may move the baseline on the exclusive implementation hash wave and the final integrated result. That move is one reviewed labelled intentional delta commit. It must not share a wave with F-X278, which intake line 438 assigns 14 automatic-colour entries. Canonical draft transfer does not run the harness and does not edit the baseline.
 
 Historical `54e535` diff replaces four digests: `feature_showcase:pdf/bytes`, `feature_showcase:word/document.xml`, `report:pdf/bytes`, and `report:word/document.xml`. Its reason string cites case 7. The same hunk leaves `page1.png`, `pdf/pages`, `pdf/resources`, `numbering.xml`, and `styles.xml` unchanged for those samples. Those digests were computed against `24af95d3`, not against `e2a31e58`. They are proposed behavior evidence, not an accepted baseline.

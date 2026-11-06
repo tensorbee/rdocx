@@ -528,6 +528,12 @@ Matched rows of `.claude/skills/risk-routing.md` and the extra check each one ad
 
 ## Hash harness
 
+### Actual integrated measurement disposition
+
+Root measured producer15424ace in deterministic bundled mode. All fourteen declared keys changed with the automatic-contrast rule, and the integrated union adds only the two F-X277b XML keys. Pinned source-built Poppler26.01.0 yields five unchanged golden samples and two colour changes, invoice and quote, at unchanged dimensions. S96-final-output-delta-codex-pass-1 accepts these exact values. Actual final-source harness commands remain due.
+
+### Retained earlier expectations
+
 The donor delta names 14 keys. Those donor values are not acceptance. Re-record only after the integrated union, in deterministic font mode, with a reviewed expected-output account for each key. The hash effect remains pending.
 
 - `contract:pdf/bytes`, `contract:pdf/pages`

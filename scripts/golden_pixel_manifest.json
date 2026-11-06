@@ -4,7 +4,7 @@
     "command": "pdftoppm",
     "version": "pdftoppm version 26.01.0"
   },
-  "reason": "F-X273 intentional selected header/footer clearance and explicit Word kerning policy. All seven page1 decoded RGBA buffers change at unchanged1275x1650 and150DPI using pinned Poppler26.01.0. Reviewed text placement, quote table movement and invoice Tax-row pagination explain all changed pixels. Final PDFs are byte-identical to inspected raster inputs. Native Word and final hosted qualification remain pending.",
+  "reason": "S96 F-X278 automatic text contrast on shaded invoice and quote headers. Actual source-built pinned Poppler26.01.0 at150DPI, five unchanged samples and two reviewed colour changes, producer15424ace.",
   "samples": {
     "contract": {
       "height": 1650,
@@ -18,7 +18,7 @@
     },
     "invoice": {
       "height": 1650,
-      "rgba_sha256": "d987d18532d94a398f075de36c213c33e0a3f44c7e7170ae84c238905e57c425",
+      "rgba_sha256": "9f10422c4b3d695a0e43051de97e32c6ac32b8ff3478cf0a956743203f1200aa",
       "width": 1275
     },
     "letter": {
@@ -33,7 +33,7 @@
     },
     "quote": {
       "height": 1650,
-      "rgba_sha256": "6a03f85012bfe25684d14ac0098562799ec16b75f84415a53605f4730b9c8e15",
+      "rgba_sha256": "4056128be6e0e069d468b23957cc21774c5e8a361548981cf76866c2ed9f2a22",
       "width": 1275
     },
     "report": {
