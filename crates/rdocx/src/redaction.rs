@@ -2198,7 +2198,13 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(document.paragraphs()[0].text(), "secret");
 
-        document.layout().expect("normal layout cache primes");
+        #[cfg(feature = "system-fonts")]
+        document
+            .layout_with_options(crate::RenderOptions {
+                use_system_fonts: true,
+                ..crate::RenderOptions::default()
+            })
+            .expect("normal layout cache primes");
         document
             .to_pdf_deterministic()
             .expect("deterministic layout cache primes");
@@ -2206,8 +2212,8 @@ mod tests {
             .layout_with_fonts_and_bundled_fallback(&[])
             .expect("bundled fallback engine primes");
         let cache_identity = document.redaction_cache_identity();
-        assert!(cache_identity.0.is_some());
-        assert!(cache_identity.1.is_some());
+        assert_eq!(cache_identity.0.is_some(), cfg!(feature = "system-fonts"));
+        assert_eq!(cache_identity.1.is_some(), cfg!(feature = "system-fonts"));
         assert!(cache_identity.2.is_some());
         assert!(cache_identity.3.is_some());
 

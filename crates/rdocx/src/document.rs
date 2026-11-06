@@ -4249,7 +4249,7 @@ fn replay_nested_namespace_declarations_with_spans(
     owners: &[NestedNamespaceOwner],
     spans: Option<&[ModeledOwnerSpan]>,
 ) -> Result<Vec<u8>> {
-    replay_nested_namespace_declarations_in(xml, owners, spans, None)
+    replay_nested_namespace_declarations_in(xml, owners, spans, None).map(|(bytes, _)| bytes)
 }
 
 fn namespace_replay_copy(
@@ -4366,9 +4366,9 @@ fn replay_nested_namespace_declarations_in(
     owners: &[NestedNamespaceOwner],
     spans: Option<&[ModeledOwnerSpan]>,
     mut template: Option<&mut TemplateMainWriter<'_, '_>>,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, bool)> {
     if owners.is_empty() {
-        return namespace_replay_copy(xml, template);
+        return namespace_replay_copy(xml, template).map(|bytes| (bytes, false));
     }
     let scanned;
     let spans = match spans {
@@ -4379,6 +4379,7 @@ fn replay_nested_namespace_declarations_in(
         }
     };
     let mut targets: Vec<(usize, &NestedNamespaceOwner)> = Vec::new();
+    let mut output_has_retained_namespace_owner = false;
     for owner in owners {
         let mut candidates = Vec::new();
         for span in spans
@@ -4453,6 +4454,27 @@ fn replay_nested_namespace_declarations_in(
                 candidate.0
             }
         };
+        // This is the selected live serialized span from the candidate scan
+        // above. Its marker facts include the prospective owner declarations,
+        // while nested shadows still take precedence. The fact is published
+        // only if the full replay/copy succeeds, so it proves a nonempty output
+        // owner, never a complete empty output inventory.
+        let selected = candidates.iter().find(|(span, _, _)| {
+            span.start == target.start
+                && span.end == target.end
+                && span.local_name == target.local_name
+        });
+        output_has_retained_namespace_owner |= selected.is_some_and(|(_, _, markers)| {
+            owner.declarations.iter().any(|(name, value)| {
+                !value.is_empty()
+                    && markers.iter().any(|marker| {
+                        marker.namespace_facts.iter().any(|(prefix, namespace)| {
+                            *prefix == namespace_prefix(name)
+                                && namespace.as_deref() == Some(value.as_str())
+                        })
+                    })
+            })
+        });
         if owner.declarations.iter().all(|declaration| {
             target
                 .declarations
@@ -4464,7 +4486,8 @@ fn replay_nested_namespace_declarations_in(
         targets.push((target.start, owner));
     }
     if targets.is_empty() {
-        return namespace_replay_copy(xml, template);
+        return namespace_replay_copy(xml, template)
+            .map(|bytes| (bytes, output_has_retained_namespace_owner));
     }
 
     let source = template
@@ -4584,7 +4607,9 @@ fn replay_nested_namespace_declarations_in(
                     ));
                 }
                 return match writer.into_inner() {
-                    NamespaceReplayOutput::Bytes(bytes) => Ok(bytes),
+                    NamespaceReplayOutput::Bytes(bytes) => {
+                        Ok((bytes, output_has_retained_namespace_owner))
+                    }
                     NamespaceReplayOutput::Recipe { pieces, .. } => {
                         let source = source.as_ref().expect("actual scoped replay input");
                         let chunks = pieces
@@ -4606,7 +4631,7 @@ fn replay_nested_namespace_declarations_in(
                         let legacy = template.operation.repeat_source(&emitted)?;
                         let bytes = template.operation.finish_source(legacy)?;
                         template.sources.source = Some(Arc::new(emitted));
-                        Ok(bytes)
+                        Ok((bytes, output_has_retained_namespace_owner))
                     }
                 };
             }
@@ -29055,6 +29080,7 @@ impl Document {
         )
         .or_else(|| unsafe_nested_namespace_prefix(nested_namespace_owners));
         let kept_xml = existing_document_xml.map(<[u8]>::to_vec);
+        let mut replayed_output_has_retained_namespace_owner = false;
         let doc_xml = if typed_document_is_unchanged {
             None
         } else {
@@ -29075,12 +29101,14 @@ impl Document {
                 .main_part_blocks
                 .as_ref()
                 .and_then(|blocks| blocks.proved_namespace_spans(&serialized));
-            Some(replay_nested_namespace_declarations_in(
+            let (replayed, has_retained_owner) = replay_nested_namespace_declarations_in(
                 &serialized,
                 nested_namespace_owners,
                 spans.as_deref(),
                 template.as_deref_mut(),
-            )?)
+            )?;
+            replayed_output_has_retained_namespace_owner = has_retained_owner;
+            Some(replayed)
         };
         let namespace_scopes = document_namespace_scopes(
             doc_xml
@@ -29091,7 +29119,11 @@ impl Document {
         // The replay classification above belongs to the old source. A newly
         // serialized owner can introduce its own namespace scope. Certify the
         // exact output, reusing only facts qualified for those output bytes.
-        let local_cell_owner_free = if let Some(xml) = &doc_xml {
+        let local_cell_owner_free = if replayed_output_has_retained_namespace_owner {
+            // A successful actual selected output owner is enough to block
+            // direct edits. Unknown output still needs its existing scan.
+            false
+        } else if let Some(xml) = &doc_xml {
             let owners = OnceLock::new();
             if let Some(classified) = self
                 .main_part_blocks
@@ -48851,9 +48883,9 @@ impl Document {
 
         let mut count = 0;
         for (rel_id, is_header) in self.header_footer_rel_ids() {
-            let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
-                Error::Other(format!("required header/footer {rel_id} cannot be read"))
-            })?;
+            let Some(mut hf) = self.load_header_footer(&rel_id, is_header) else {
+                continue;
+            };
             let mut part_count = 0;
             for (placeholder, replacement) in pairs {
                 part_count +=
@@ -49021,9 +49053,9 @@ impl Document {
             return Err(error.into());
         }
         for (rel_id, is_header) in self.header_footer_rel_ids() {
-            let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
-                Error::Other(format!("required header/footer {rel_id} cannot be read"))
-            })?;
+            let Some(mut hf) = self.load_header_footer(&rel_id, is_header) else {
+                continue;
+            };
             let n = placeholder::try_replace_regex_in_header_footer(&mut hf, re, replacement)?;
             if n > 0 {
                 self.save_header_footer(&rel_id, &hf, is_header)?;
@@ -49086,9 +49118,9 @@ impl Document {
 
         // Replace in headers and footers
         for (rel_id, is_header) in self.header_footer_rel_ids() {
-            let mut hf = self.load_header_footer(&rel_id, is_header).ok_or_else(|| {
-                Error::Other(format!("required header/footer {rel_id} cannot be read"))
-            })?;
+            let Some(mut hf) = self.load_header_footer(&rel_id, is_header) else {
+                continue;
+            };
             let n = placeholder::try_replace_regex_in_header_footer(&mut hf, re, replacement)?;
             if n > 0 {
                 self.save_header_footer(&rel_id, &hf, is_header)?;
@@ -53458,6 +53490,24 @@ mod tests {
 
     #[test]
     fn fx281_number_format_diagnostics_follow_successful_paint() {
+        let mut refused = Document::new();
+        let empty_format = oxml_chart::ChartData {
+            categories: vec!["Q1".into()],
+            series: vec![("Zeta region".into(), vec![1820.0])],
+            number_format: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            refused
+                .add_chart(
+                    oxml_chart::ChartKind::Bar,
+                    Length::inches(5.0),
+                    Length::inches(3.0),
+                    &empty_format
+                )
+                .is_err()
+        );
+        assert_eq!(refused.content_count(), 0);
         for (code, refused) in [
             ("General", false),
             ("0", false),
@@ -53471,7 +53521,6 @@ mod tests {
             ("yyyy", true),
             ("0.0E+00", true),
             ("0;General", true),
-            ("", true),
         ] {
             let data = oxml_chart::ChartData {
                 categories: vec!["Q1".into()],
@@ -56451,21 +56500,67 @@ mod tests {
         let body = a9_lookup_body(document);
         let needle = format!("w:val=\"{tag}\"");
         document
-            .story_items(&body)
+            .story_item_snapshots()
             .unwrap()
             .into_iter()
             .find(|item| {
-                if item.kind() != StoryItemKind::ContentControl {
+                if item.location().story != body
+                    || item.location().item_kind != StoryItemKind::ContentControl
+                {
                     return false;
                 }
-                let raw = item.xml().unwrap();
-                let raw = String::from_utf8_lossy(&raw);
+                let raw = String::from_utf8_lossy(item.xml());
                 raw.find(&needle)
                     .is_some_and(|at| at < raw.find("<w:sdtContent").unwrap_or(raw.len()))
             })
             .unwrap_or_else(|| panic!("missing control {tag}"))
             .location()
             .clone()
+    }
+
+    #[test]
+    fn a9_owned_control_selector_matches_live_locations_before_and_after_moves() {
+        fn live_control(document: &Document, tag: &str) -> ContentLocation {
+            let body = a9_lookup_body(document);
+            let needle = format!("w:val=\"{tag}\"");
+            document
+                .story_items(&body)
+                .unwrap()
+                .into_iter()
+                .find(|item| {
+                    if item.kind() != StoryItemKind::ContentControl {
+                        return false;
+                    }
+                    let raw = item.xml().unwrap();
+                    let raw = String::from_utf8_lossy(&raw);
+                    raw.find(&needle)
+                        .is_some_and(|at| at < raw.find("<w:sdtContent").unwrap_or(raw.len()))
+                })
+                .unwrap_or_else(|| panic!("missing control {tag}"))
+                .location()
+                .clone()
+        }
+
+        for tag in ["block-0000", "inline-0000"] {
+            let mut document = a9_lookup_fixture(25);
+            let source = a9_lookup_control(&document, tag);
+            assert_eq!(source, live_control(&document, tag));
+            let original = document.content_controls_by_tag(tag)[0].inner.clone();
+            let destination = if tag.starts_with("inline") {
+                a9_lookup_paragraph(&document, "destination 0000")
+            } else {
+                ContentLocation::end(a9_lookup_body(&document))
+            };
+            document
+                .move_content_control(&source, &destination)
+                .unwrap();
+            let moved = a9_lookup_control(&document, tag);
+            assert_eq!(moved, live_control(&document, tag));
+            assert_ne!(moved, source);
+            let controls = document.content_controls_by_tag(tag);
+            assert_eq!(controls.len(), 1);
+            assert_eq!(controls[0].inner, &original);
+        }
     }
 
     // Every target acquisition precedes the measured closure. The actual
@@ -65580,10 +65675,9 @@ mod tests {
             global: Option<&str>,
             duplicate: bool,
         ) -> std::result::Result<(), String> {
-            let root = std::path::Path::new(
-                "/private/tmp/rdocx-s96-run-refresh/fx272-writer-context-successor-v1/ancestor-cases",
-            )
-            .join(label);
+            let root = std::env::temp_dir()
+                .join(format!("rdocx-fx272-ancestor-cases-{}", std::process::id()))
+                .join(label);
             std::fs::create_dir_all(&root).unwrap();
             let record = |name: &str, bytes: &[u8]| std::fs::write(root.join(name), bytes).unwrap();
             let mut document = Document::new();
@@ -65792,7 +65886,10 @@ mod tests {
             ("duplicate-paragraphs", "table", None, true),
         ] {
             let result = run_case(label, owner, global, duplicate);
-            std::fs::write(format!("/private/tmp/rdocx-s96-run-refresh/fx272-writer-context-successor-v1/ancestor-cases/{label}-result.txt"), format!("{result:?}")).unwrap();
+            let result_path = std::env::temp_dir()
+                .join(format!("rdocx-fx272-ancestor-cases-{}", std::process::id()))
+                .join(format!("{label}-result.txt"));
+            std::fs::write(result_path, format!("{result:?}")).unwrap();
             if let Err(error) = result {
                 failed.push(format!("{label}: {error}"));
             }
@@ -69882,8 +69979,25 @@ mod tests {
             document.to_bytes().unwrap()
         }
 
-        assert_eq!(build(false), build(true));
-        let package = OpcPackage::from_reader(Cursor::new(build(false))).unwrap();
+        let left = build(false);
+        let right = build(true);
+        let mut left_package = OpcPackage::from_reader(Cursor::new(&left)).unwrap();
+        let mut right_package = OpcPackage::from_reader(Cursor::new(&right)).unwrap();
+        let mut left_styles =
+            CT_Styles::from_xml(left_package.get_part(DEFAULT_STYLES_PART).unwrap()).unwrap();
+        let mut right_styles =
+            CT_Styles::from_xml(right_package.get_part(DEFAULT_STYLES_PART).unwrap()).unwrap();
+        left_styles
+            .styles
+            .sort_by(|a, b| a.style_id.cmp(&b.style_id));
+        right_styles
+            .styles
+            .sort_by(|a, b| a.style_id.cmp(&b.style_id));
+        assert_eq!(left_styles, right_styles);
+        left_package.parts.remove(DEFAULT_STYLES_PART);
+        right_package.parts.remove(DEFAULT_STYLES_PART);
+        assert!(left_package.same_package_as(&right_package));
+        let package = OpcPackage::from_reader(Cursor::new(left)).unwrap();
         let relationships = package.get_part_rels("/word/document.xml").unwrap();
         assert_eq!(
             relationships.get_by_id("rId40").unwrap().rel_type,
@@ -72504,7 +72618,9 @@ mod tests {
         let mut source = Document::new();
         source.add_paragraph("unchanged paragraph");
         source.add_paragraph("old second paragraph");
-        source.layout().expect("prime source engine");
+        source
+            .cached_layout()
+            .expect("prime transferable normal engine");
 
         let mut warm = source.clone_for_staging();
         warm.paragraph_mut(1)
@@ -72513,8 +72629,8 @@ mod tests {
         let fresh = warm.clone_for_staging();
         assert!(warm.transfer_reusable_layout_from(&mut source));
 
-        let warm_result = warm.layout().expect("transferred warm layout");
-        let fresh_result = fresh.layout().expect("fresh cold layout");
+        let warm_result = warm.cached_layout().expect("transferred warm layout");
+        let fresh_result = fresh.cached_layout().expect("fresh cold layout");
         assert_eq!(format!("{warm_result:?}"), format!("{fresh_result:?}"));
         assert_eq!(
             oxml_pdf::render_to_pdf(&warm_result.layout),
@@ -73327,7 +73443,11 @@ mod tests {
         anchor.dist_l = Length::pt(12.0).as_emu();
         anchor.dist_r = Length::pt(12.0).as_emu();
         drawing.anchor = Some(anchor);
-        paragraph.add_run("Foreground text");
+        paragraph.add_run("Foreground text").properties = Some(CT_RPr {
+            font_ascii: Some("Carlito".into()),
+            font_hansi: Some("Carlito".into()),
+            ..Default::default()
+        });
 
         let layout = deterministic_chart_layout(&document);
         assert!(layout.diagnostics.is_empty());
@@ -76290,6 +76410,30 @@ mod tests {
         );
     }
 
+    fn f165_opening_offsets(xml: &[u8], namespace: &[u8], local: &[u8]) -> Vec<usize> {
+        let mut reader = quick_xml::reader::NsReader::from_reader(xml);
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        let mut offsets = Vec::new();
+        loop {
+            let at = reader.buffer_position() as usize;
+            let (resolved, event) = reader.read_resolved_event_into(&mut buffer).unwrap();
+            match event {
+                quick_xml::events::Event::Start(start) | quick_xml::events::Event::Empty(start) => {
+                    if matches!(resolved, quick_xml::name::ResolveResult::Bound(found) if found.as_ref() == namespace)
+                        && start.local_name().as_ref() == local
+                    {
+                        offsets.push(at);
+                    }
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        offsets
+    }
+
     #[test]
     fn structural_generation_preserves_schema_order_and_raw_xml() {
         let mut document = Document::new();
@@ -76376,7 +76520,14 @@ mod tests {
         );
         let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
         let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
-        assert!(xml.rfind("<w:p>").unwrap() < xml.rfind("<w:sectPr>").unwrap());
+        assert!(
+            f165_opening_offsets(xml.as_bytes(), W_NS.as_bytes(), b"p")
+                .last()
+                .unwrap()
+                < f165_opening_offsets(xml.as_bytes(), W_NS.as_bytes(), b"sectPr")
+                    .last()
+                    .unwrap()
+        );
     }
 
     #[test]
@@ -76544,10 +76695,20 @@ mod tests {
 
         let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
         let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
-        assert!(xml.find("<w:trPr>").unwrap() < xml.find("<q:rowData").unwrap());
-        assert!(xml.find("<w:gridSpan").unwrap() < xml.find("<q:cellProperty").unwrap());
-        assert!(xml.find("<q:cellProperty").unwrap() < xml.find("<w:vMerge").unwrap());
-        assert!(xml.rfind("<w:tr>").unwrap() < xml.rfind("<q:tableData").unwrap());
+        let first = |namespace: &[u8], local: &[u8]| {
+            f165_opening_offsets(xml.as_bytes(), namespace, local)[0]
+        };
+        assert!(first(W_NS.as_bytes(), b"trPr") < first(b"urn:rdocx:f165", b"rowData"));
+        assert!(first(W_NS.as_bytes(), b"gridSpan") < first(b"urn:rdocx:f165", b"cellProperty"));
+        assert!(first(b"urn:rdocx:f165", b"cellProperty") < first(W_NS.as_bytes(), b"vMerge"));
+        assert!(
+            f165_opening_offsets(xml.as_bytes(), W_NS.as_bytes(), b"tr")
+                .last()
+                .unwrap()
+                < f165_opening_offsets(xml.as_bytes(), b"urn:rdocx:f165", b"tableData")
+                    .last()
+                    .unwrap()
+        );
         assert!(xml.rfind("<q:tableData").unwrap() < xml.rfind("</w:tbl>").unwrap());
     }
 
@@ -77661,7 +77822,6 @@ mod tests {
             (|document: &mut Document, other: &Document| document.append(other))
                 as fn(&mut Document, &Document),
             |document, other| document.append_with_break(other, crate::SectionBreak::NextPage),
-            |document, other| document.insert_document(0, other),
         ] {
             let mut document = destination.clone_for_staging();
             let before = document.to_bytes().unwrap();
@@ -77690,6 +77850,18 @@ mod tests {
             .add_paragraph("source default")
             .style("SourceDefault");
         assert_style_graph_merge_failure_is_atomic(&destination, &conflicting_default);
+        let mut inserted_default = destination.clone_for_staging();
+        inserted_default.insert_document(0, &conflicting_default);
+        inserted_default.validate_style_graph().unwrap();
+        assert_eq!(inserted_default.paragraphs()[0].text(), "source default");
+        assert_eq!(
+            inserted_default.paragraphs()[0].style_id(),
+            Some("SourceDefault")
+        );
+        assert_eq!(
+            inserted_default.styles.get_default(StyleType::Paragraph),
+            destination.styles.get_default(StyleType::Paragraph)
+        );
 
         destination
             .add_style(StyleBuilder::paragraph(
@@ -77714,6 +77886,33 @@ mod tests {
             .add_paragraph("source link")
             .style("CollisionParagraph");
         assert_style_graph_merge_failure_is_atomic(&destination, &conflicting_link);
+        let mut inserted_link = destination.clone_for_staging();
+        inserted_link.insert_document(0, &conflicting_link);
+        inserted_link.validate_style_graph().unwrap();
+        let inserted_id = inserted_link.paragraphs()[0].style_id().unwrap().to_owned();
+        assert_ne!(inserted_id, "CollisionParagraph");
+        let inserted_style = inserted_link
+            .styles
+            .styles
+            .iter()
+            .find(|style| style.style_id == inserted_id)
+            .unwrap();
+        assert_eq!(
+            inserted_style.linked_style.as_deref(),
+            Some("CollisionCharacter")
+        );
+        assert_eq!(
+            inserted_link
+                .styles
+                .styles
+                .iter()
+                .find(|style| style.style_id == "CollisionParagraph"),
+            destination
+                .styles
+                .styles
+                .iter()
+                .find(|style| style.style_id == "CollisionParagraph")
+        );
     }
 
     #[test]
@@ -82699,11 +82898,11 @@ mod tests {
         };
         assert_eq!(fast_error.to_string(), slow_error.to_string());
         assert!(
-            fast_error.to_string().contains("duplicate bookmark id 1"),
+            fast_error.to_string().contains("invalid bookmark id x"),
             "{fast_error}"
         );
         assert!(
-            !fast_error.to_string().contains("invalid bookmark id"),
+            !fast_error.to_string().contains("duplicate bookmark id"),
             "{fast_error}"
         );
     }
@@ -82766,11 +82965,10 @@ mod tests {
             r#"<w:bookmarkStart w:id="1"/><w:bookmarkStart w:id="1"/><w:bookmarkStart w:id="x"/>"#;
         let invalid_then_duplicate =
             r#"<w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="1"/><w:bookmarkStart w:id="1"/>"#;
-        let duplicate_message = "cannot scan identifiers in XML part /word/header1.xml: duplicate bookmark id 1 in imported or preserved XML";
         let invalid_message =
             "cannot scan identifiers in XML part /word/header1.xml: invalid bookmark id x";
         for (header, message) in [
-            (duplicate_then_invalid, duplicate_message),
+            (duplicate_then_invalid, invalid_message),
             (invalid_then_duplicate, invalid_message),
         ] {
             let mut edited = package.clone();
@@ -82795,10 +82993,11 @@ mod tests {
 
         let mut second = package.clone();
         second.set_part("/word/header2.xml", story(r#"<w:bookmarkStart w:id="2"/>"#));
-        let error = DocumentIdentifiers::scan(&second).unwrap_err();
-        assert!(
-            matches!(error, Error::Other(ref text) if text == "cannot scan identifiers in XML part /word/header2.xml: duplicate bookmark id 2 in imported or preserved XML"),
-            "{error}"
+        let second_ids = DocumentIdentifiers::scan(&second).unwrap();
+        assert!(second_ids.bookmark_ids.contains(&2));
+        assert_eq!(
+            DocumentIdentifiers::scan_reusing(&second, Some(&earlier), None).unwrap(),
+            second_ids
         );
 
         let mut retyped = package.clone();
@@ -86440,13 +86639,38 @@ mod odttf_tests {
             .layout
             .diagnostics
             .iter()
-            .filter(|d| d.message.contains("Aptos"))
+            .filter(|d| d.message.contains("Aptos") && d.message.contains("is approximate:"))
             .map(|d| d.message.clone())
             .collect();
         assert_eq!(
             messages.len(),
             2,
             "F-X210 Word owned layout must report both Aptos requests once"
+        );
+        let substitutions: Vec<_> = cold
+            .layout
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message.contains("Aptos") && diagnostic.message.contains("substituted:")
+            })
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(substitutions.len(), 2);
+        assert!(
+            substitutions
+                .iter()
+                .any(|message| message.contains("'Aptos'"))
+        );
+        assert!(
+            substitutions
+                .iter()
+                .any(|message| message.contains("'Aptos Display'"))
+        );
+        assert!(
+            substitutions
+                .iter()
+                .all(|message| message.contains("'Carlito'") && message.contains("bundled"))
         );
         assert!(messages[0].contains("Aptos") && !messages[0].contains("Aptos Display"));
         assert!(messages[1].contains("Aptos Display"));
@@ -88504,7 +88728,9 @@ fn fx283_flush_certificate_classifies_newly_serialized_namespace_owners() {
 #[test]
 fn scoped_template_initial_writer_namespace_replay_keeps_exact_no_target_copies() {
     let xml = b"\xef\xbb\xbf \nnot parsed when there are no owners";
-    let actual = replay_nested_namespace_declarations_in(xml, &[], None, None).unwrap();
+    let (actual, has_retained_owner) =
+        replay_nested_namespace_declarations_in(xml, &[], None, None).unwrap();
+    assert!(!has_retained_owner);
     assert_eq!(actual, xml);
 }
 
@@ -88571,7 +88797,8 @@ fn scoped_template_namespace_target_replay_uses_actual_writer_source_and_copy_le
                 "copy refusal stays sticky"
             );
         } else {
-            let actual = actual.unwrap();
+            let (actual, has_retained_owner) = actual.unwrap();
+            assert!(has_retained_owner);
             assert_eq!(actual, expected);
             assert_eq!(context.sources.source.as_ref().unwrap().as_bytes(), actual);
             let repeated = context
@@ -88639,9 +88866,10 @@ fn scoped_template_namespace_replay_preserves_real_text_events_across_entities()
             lineage: &lineage,
             sources: &mut sources,
         };
-        let actual =
+        let (actual, has_retained_owner) =
             replay_nested_namespace_declarations_in(&input, &owners, None, Some(&mut context))
                 .unwrap();
+        assert!(has_retained_owner);
         assert_eq!(actual, expected);
         let source = context.sources.source.as_ref().unwrap();
         let xml = std::str::from_utf8(source.as_bytes()).unwrap();
