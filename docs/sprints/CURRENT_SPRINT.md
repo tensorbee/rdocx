@@ -724,6 +724,8 @@ must remain. P1/P2/C6 comparison/resolution composition and F272 readiness stay
 B. Parent then waits F272 plus A/B/C/D. Exhausted peers, implementation cap and
 fresh Word/final union remain. No state transition, claim or completion recorded.
 
-Root adopts and approves F-X279d after independent split final1. Its authoring
-source is independent of C1. P1/P2/C6 remain with B and its F272 dependency.
-Normal claim is next. No final native or provider acceptance is implied.
+F-X279d is integrated as reviewed at f89a8c9f after independent pass2, Root
+final review and exact-source integration reconciliation. Its authoring source
+is independent of C1. Scoped Native31, Python30, public Rust and actual CLI
+controls pass. P1/P2/C6 remain B with its F272 dependency. Fresh Word, installed
+bindings and the final union remain pending. No provider acceptance is implied.

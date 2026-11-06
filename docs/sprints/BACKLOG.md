@@ -934,5 +934,6 @@ B retains P1/P2/C6 composition and actual F272 implementation readiness. Parent
 requires D only after adoption, alongside F272/A/B/C and all final/native riders.
 No claim, approval, provider completion or review-cap reset is recorded here.
 
-Root approves the exact F-X279d authoring split after final1. Pending delivery
-status remains until normal claim. B retains comparison composition and F272.
+F-X279d is integrated as reviewed at f89a8c9f after clean independent pass2,
+Root final review and source reconciliation. Delivery stays in-progress pending
+fresh Word and final union acceptance. B retains comparison composition and F272.
