@@ -277,6 +277,35 @@ jobs:
           -- --exact
       - name: Run golden-PNG gate
         run: python3 scripts/golden_png_harness.py --check
+      - name: Retain deterministic sample diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deterministic-sample-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            samples/feature_showcase.docx
+            samples/feature_showcase.pdf
+            samples/feature_showcase.png
+            samples/proposal.docx
+            samples/proposal.pdf
+            samples/proposal.png
+            samples/quote.docx
+            samples/quote.pdf
+            samples/quote.png
+            samples/invoice.docx
+            samples/invoice.pdf
+            samples/invoice.png
+            samples/report.docx
+            samples/report.pdf
+            samples/report.png
+            samples/letter.docx
+            samples/letter.pdf
+            samples/letter.png
+            samples/contract.docx
+            samples/contract.pdf
+            samples/contract.png
 
   python-bindings:
     needs: changes
@@ -978,6 +1007,8 @@ jobs:
           from pathlib import Path
           from scripts import sprint_workflow as w
           target='aarch64-apple-darwin'
+          rustc=Path(subprocess.check_output(['rustup','which','--toolchain','1.97.1','rustc'],text=True).strip())
+          os.environ['PATH']=str(rustc.parent)+os.pathsep+os.environ['PATH']
           root=Path(os.environ['RUNNER_TEMP'])
           reuse=w._prepare_release_semver_reuse('all',target,root/'semver-reuse')
           tool=root/'semver-tools'/('cargo-semver-checks.exe' if target.endswith('msvc') else 'cargo-semver-checks')

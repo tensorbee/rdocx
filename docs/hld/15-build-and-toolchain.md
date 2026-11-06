@@ -1363,7 +1363,15 @@ an `rdocx` development dependency for the 150 dpi SSIM oracle only. It receives
 explicit layout fonts, never system fonts, and does not enter the runtime graph
 or generated `rdocx` archive.
 
-`pulldown-cmark` is pinned to `=0.13.5` in the existing `rdocx` facade.
+The normal CI Test job retains only the seven named deterministic sample
+DOCX, PDF and PNG files as diagnostic artifacts, including on failure when
+those outputs exist. Final baseline reviewers consume these exact hosted
+outputs alongside the actual source, rasterizer and comparison logs. Missing
+files are not acceptance, and uploading diagnostics does not change a failed
+job or qualify a baseline. No arbitrary workspace, credentials or user documents
+are included.
+
+`pulldown-cmark` is pinned to `=0.13.6` in the existing `rdocx` facade.
 Default features are disabled and only the HTML renderer feature is enabled.
 Runtime parser options enable tables and strikethrough. Its optional pinned
 `pulldown-cmark-escape` renderer edge stays inside that facade graph. Python and

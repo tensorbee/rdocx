@@ -167,7 +167,7 @@ Do not publish a Vec OPC0.14.5 in isolation, overwrite .4 bytes/tags or claim th
 
 Prepare an exact, reviewable optional yank packet for ONLY oxml-opc0.14.4, with fresh registry state, the faithful hypothetical-only-yank results, affected exact/minimum-.4 consumers and explicit existing-lock limitations. A real yank requires separate exact-action approval and is outside /run-sprint publication authority. No maintained .14 backport is promised or implemented by this plan. If no safe old-line package can satisfy both conflicting contracts, document that evidence and the narrow verified workaround rather than inventing a universal patch. This mitigation packet is a held candidate, not executed registry remediation.
 
-Retain the original release-note security constraint: describe pulldown-cmark0.13.5 and the advisory relevance accurately, without claiming that the disabled wikilink path was exploitable through the public importer. The current dependency and local layout changes require their genuinely affected fresh checks. Do not import donor archive measurements or classify an adapted PR as an unchanged merge. Preserve the established compression tolerance in archive qualification, the exact source/helper measurement identities and independent applicability assessment for any retained native/render proof.
+Retain the original release-note security constraint: describe pulldown-cmark0.13.6 and the RUSTSEC-2026-0414/0433 advisory relevance accurately, without claiming that the disabled wikilink path was exploitable through the public importer. The current dependency and local layout changes require their genuinely affected fresh checks. Do not import donor archive measurements or classify an adapted PR as an unchanged merge. Preserve the established compression tolerance in archive qualification, the exact source/helper measurement identities and independent applicability assessment for any retained native/render proof.
 
 Rebuild contribution inventories from previous published family .4 tags through the final reviewed S96 source. Retain423 reporter set2374,424/425/426 reporter hadim and427/428 contributor hadim with their qualified outcomes. Add429 reporter arthrod to the affected migration/release-policy inventory and430 reporter lawrenceakka to Word notes only after actual qualified fixes. The earlier423to430 candidate set is not the final sprint inventory. The shared/PowerPoint429 outcome must describe the actual minor/API-policy consequence and honest limits, without relabelling old S95.4 COW work as a new performance feature.
 
@@ -570,6 +570,20 @@ root policy, required certificate field or host is failed/pending proof, not a g
 waiver. Existing native/product/hash/installed/WASM/hosted riders and separate final
 release approval remain unchanged.
 
+
+## Actual final-union CI repair, 2026-11-06
+
+Actual source a78eba3c CI42293933089 exposes a macOS inherited Homebrew wrapper
+mismatch, the new RUSTSEC-2026-0433 parser advisory and output baseline deltas.
+Select the already-installed pinned compiler directory before macOS native
+execution, retaining the strict identity guard and genuine hosted requirement.
+Pin pulldown-cmark0.13.6 with its actual registry lock checksum, keep wikilinks
+disabled and retain the deny policy without an advisory exception. The existing
+normal Test job retains only the seven named synthetic sample DOCX/PDF/PNG files
+for final deterministic-baseline reviewers. These diagnostics supply actual
+hosted outputs, never acceptance or a new product payload. Other jobs, signing,
+source bindings and normal-CI-before-wheels order remain unchanged. Actual
+successor hosted execution and reviewed baseline qualification remain mandatory.
 
 ## Renewed canonical source availability preparation
 
