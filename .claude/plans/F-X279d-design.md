@@ -262,3 +262,20 @@ No new product choice is proposed. Technical split adoption and source lease
 await Root's independent review. If the baseline authoring helpers prove
 insufficient, report the concrete dependency before expanding scope. This draft
 is not approved, claimed, implemented, provider-complete or a review-cap reset.
+
+## D1 projectable reference endpoint clarification
+
+The supported crossing authoring endpoint is the selected parent's actual end
+boundary followed by its reference run in the same location. The parent end
+must physically precede that reference. The reference run may retain formatting,
+root-attribute records and empty Text, but no unrelated text, Field, Drawing or
+opaque payload may be absorbed into the reply range.
+
+A reference inside the parent's covered text or a mixed reference run without
+an exact supported endpoint is nonprojectable for this authoring operation.
+Refuse atomically with the existing no-range error while preserving its imported
+read/save shape. Do not truncate the parent, expand the reply into unrelated
+text, reorder parent anchors or introduce a new splitting grammar. Validate
+projectability before reserving the new id. This closes the concrete D1 finding
+within the approved supported-endpoint/refusal contract, not a security check
+or a new marker policy.

@@ -6262,3 +6262,96 @@ on failed preparation. Compare ordinary/scoped output through the actual
 shared helper, and require a real generated w14 main program with its Source
 handback. No extra parser solely to qualify origin is permitted. HLD03/04/10
 remain the existing impact list. Whole C1 and every final rider remain pending.
+
+## Returned model Text companion for actual reparses
+
+The actual canonicalization/optimized reparse consumers cannot pass ordinary
+returned CT_Text through the original frozen-model reference arguments. Close
+that callable gap with these two additive doc-hidden operation methods. Existing
+36 signatures remain unchanged. The carrier method inventory becomes38, and
+there is no new public type or constructor.
+
+```rust,ignore
+pub fn source_model_document_from_read(
+    &mut self,
+    document: &CT_Document,
+    source: &ScopedWordSource,
+) -> Result<ScopedWordSource>;
+pub fn source_model_body_item_from_read(
+    &mut self,
+    frame: &CT_Document,
+    item: &BodyContent,
+    source: &ScopedWordSource,
+    body_index: usize,
+    ancestors: &[&[(String, String)]],
+) -> Result<ScopedWordSource>;
+```
+
+Successful source_document retains an operation-bound private reader companion
+on the existing opaque Source. Capture the actual retained Text paths and
+Word origins through the same substantive factory. Discarded temporary owners
+and raw fallbacks contribute no returned-model facts. No extra parser, copied
+value lookup, candidate-address catalog or fresh frozen baseline is allowed.
+
+The actual Native producer explicitly pairs the returned document or selected
+body item with that Source. Whole-document consumers are bookmark/TOC and
+drawing/relationship reparses. Body-item consumers are parse_one_child and
+read_source_child followed by the actual MainPartBlocks writer. The wrapper
+body_index is0 for a one-child parse. Real assembly remaps selected positions
+at its handback, not by guessing later ordinals. Old/current and updated Sources
+remain distinct throughout optimized qualification.
+
+The new writers validate operation identity and successful read facts, then
+bind actual borrowed model selections to the retained origins for the lifetime
+of the substantive writer. Reuse existing Field registry/minted receipts and
+retained-reader raw maps. They do not enroll returned Text as another input.
+Real edits invalidate or remap facts at their producer. A payload Source copy
+does not establish that its model was read. No-op transport may preserve the
+same actual receipt without granting input credit.
+
+Retain old signatures for initial frozen-model writers. The new methods are
+only for their actual paired reader result and surviving producer paths. Source
+and model mutation outside that pairing cannot recover authority by equality.
+No new quota, source policy or deep security investigation is added. Final
+SemVer/external caller inventory includes both additive calls.
+
+## Related-reader and linear control accessor closure
+
+Adopt the same returned-model companion for the actual note-family reader and
+writer. The full additive operation inventory becomes40, preserving the prior
+36 signatures and the two document/body methods above.
+
+```rust,ignore
+pub fn source_notes(&mut self, source: &ScopedWordSource) -> Result<CT_Footnotes>;
+pub fn source_model_notes_from_read(
+    &mut self,
+    notes: &CT_Footnotes,
+    endnotes: bool,
+    source: &ScopedWordSource,
+) -> Result<ScopedWordSource>;
+```
+
+Use the existing substantive CT_Footnotes factory for both note families. Its
+successful actual read captures the same private Source companion. Native note
+cache refresh and allocated-note discovery supply the actual paired result to
+whole-note and selected-note writers. The existing source_paragraph factory also
+captures its actual returned paragraph facts. Its selected body writer uses
+index0. No wrapper reparse, new public type, new input credit or equality-based
+origin recovery is introduced. Partial, discarded and raw-fallback owners do
+not become returned typed facts.
+
+Publish these existing borrowed CT_Sdt methods as doc-hidden public methods,
+with unchanged signatures and bodies:
+
+```rust,ignore
+pub fn retained_resource_run_xml(&self) -> impl Iterator<Item = (usize, &[u8])>;
+pub fn original_resource_runs(&self) -> impl Iterator<Item = &CT_R>;
+```
+
+The borrowed accessor inventory becomes7. Both the existing lower freezer and
+the actual Native clone/prepared-writer traversal consume the linear iterators.
+Repeated per-index retained_run_xml searches are not a replacement. These
+accessors expose existing retained runs without copying, new mutable authority
+or a new ownership policy. Include all six additions in the external callable
+inventory and affected local checks. This is functional handoff closure. The
+deferred security assessment and final union gates remain pending.
