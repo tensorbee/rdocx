@@ -5593,7 +5593,7 @@ fn compare_footnote_parts(
             let marked =
                 marked_cell_xml(&envelope, if addition { "ins" } else { "del" }, metadata)?;
             let mut tracked = marked[element_inner_range_any_prefix(&marked, "tc")?].to_owned();
-            tracked = unify_note_revision_ids(&tracked, &owner.bindings, token)?;
+            tracked = close_note_revision_headers(&tracked, &owner.bindings)?;
             let note_mark = note_bookmark(token, left.is_some(), right.is_some(), 'N', note_id);
             tracked = insert_note_marker(&tracked, &owner.bindings, &note_mark, addition)?;
             let mut owner_xml = source.xml[owner.span.clone()].to_owned();
@@ -5621,7 +5621,7 @@ fn compare_footnote_parts(
                 replacements.push((owner.span.clone(), owner_xml));
             }
             let body_mark = note_bookmark(token, left.is_some(), right.is_some(), 'B', body_id);
-            bind_note_reference_revisions(candidate, id, addition, token, &body_mark, metadata)?;
+            bind_note_reference_revisions(candidate, id, addition, &body_mark, metadata)?;
             emitted = true;
         }
     }
@@ -5651,63 +5651,19 @@ fn compare_footnote_parts(
     Ok(())
 }
 
-fn unify_note_revision_ids(xml: &str, bindings: &NamespaceBindings, token: i32) -> Result<String> {
+fn close_note_revision_headers(xml: &str, bindings: &NamespaceBindings) -> Result<String> {
     let wrapped = note_fragment_envelope(xml, bindings, true)?;
     let mut tree = crate::revision::XmlTree::parse(wrapped.as_bytes())?;
     tree.qualify_note_revisions()?;
     let root = &tree.elements[tree.elements[tree.root].children[0]];
     let mut edits = Vec::new();
-    for (index, node) in tree
-        .elements
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.revision.is_some())
-    {
-        let mut reader = Reader::from_str(&wrapped[node.start..node.open_end]);
-        let event = reader
-            .read_event()
-            .map_err(|error| Error::Other(error.to_string()))?;
-        let start = match event {
-            Event::Start(start) | Event::Empty(start) => start,
-            _ => continue,
-        };
-        let mut out = BytesStart::new(node.name.clone());
-        let mut chain = Vec::new();
-        let mut parent = Some(index);
-        while let Some(at) = parent {
-            chain.push(at);
-            parent = tree.elements[at].parent;
+    for (index, node) in tree.elements.iter().enumerate() {
+        if let Some(revision) = &node.revision {
+            edits.push((
+                node.start..node.open_end,
+                note_revision_opening(&wrapped, &tree, index, revision.id)?,
+            ));
         }
-        let mut scope = BTreeMap::new();
-        for at in chain.into_iter().rev() {
-            scope.extend(tree.elements[at].namespace_declarations.iter().cloned());
-        }
-        for attribute in start.attributes().with_checks(false) {
-            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
-            let key = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
-            if key == "xmlns:w"
-                || key.split_once(':').is_some_and(|(prefix, local)| {
-                    local == "id" && scope.get(prefix).is_some_and(|uri| uri == W_NS)
-                })
-            {
-                continue;
-            }
-            out.push_attribute((key.as_bytes(), attribute.value.as_ref()));
-        }
-        out.push_attribute(("w:id", token.to_string().as_str()));
-        out.push_attribute(("xmlns:w", W_NS));
-        let mut writer = Writer::new(Vec::new());
-        writer
-            .write_event(if node.empty {
-                Event::Empty(out)
-            } else {
-                Event::Start(out)
-            })
-            .map_err(|error| Error::Other(error.to_string()))?;
-        edits.push((
-            node.start..node.open_end,
-            String::from_utf8(writer.into_inner()).map_err(utf8_error)?,
-        ));
     }
     let mut output = wrapped[root.open_end..root.close_start].to_owned();
     for (range, value) in edits.into_iter().rev() {
@@ -5717,6 +5673,57 @@ fn unify_note_revision_ids(xml: &str, bindings: &NamespaceBindings, token: i32) 
         );
     }
     Ok(output)
+}
+
+fn note_revision_opening(
+    xml: &str,
+    tree: &crate::revision::XmlTree,
+    index: usize,
+    id: i32,
+) -> Result<String> {
+    let node = &tree.elements[index];
+    let mut reader = Reader::from_str(&xml[node.start..node.open_end]);
+    let event = reader
+        .read_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let start = match event {
+        Event::Start(start) | Event::Empty(start) => start,
+        _ => return Err(Error::Other("revision header has no opening".into())),
+    };
+    let mut out = BytesStart::new(node.name.clone());
+    let mut chain = Vec::new();
+    let mut parent = Some(index);
+    while let Some(at) = parent {
+        chain.push(at);
+        parent = tree.elements[at].parent;
+    }
+    let mut scope = BTreeMap::new();
+    for at in chain.into_iter().rev() {
+        scope.extend(tree.elements[at].namespace_declarations.iter().cloned());
+    }
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        let key = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+        if key == "xmlns:w"
+            || key.split_once(':').is_some_and(|(prefix, local)| {
+                local == "id" && scope.get(prefix).is_some_and(|uri| uri == W_NS)
+            })
+        {
+            continue;
+        }
+        out.push_attribute((key.as_bytes(), attribute.value.as_ref()));
+    }
+    out.push_attribute(("w:id", id.to_string().as_str()));
+    out.push_attribute(("xmlns:w", W_NS));
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(if node.empty {
+            Event::Empty(out)
+        } else {
+            Event::Start(out)
+        })
+        .map_err(|error| Error::Other(error.to_string()))?;
+    String::from_utf8(writer.into_inner()).map_err(utf8_error)
 }
 
 fn insert_note_marker(
@@ -5790,9 +5797,8 @@ fn bind_note_reference_revisions(
     document: &mut Document,
     id: i32,
     addition: bool,
-    token: i32,
     marker: &str,
-    metadata: &Metadata<'_>,
+    metadata: &mut Metadata<'_>,
 ) -> Result<()> {
     let sites = footnote_reference_sites(document)?
         .into_iter()
@@ -5842,11 +5848,12 @@ fn bind_note_reference_revisions(
                 .push(site.run);
         }
         for (at, (revision, mut runs)) in grouped {
-            let node = tree
+            let node_index = tree
                 .elements
                 .iter()
-                .find(|node| node.start == at)
+                .position(|node| node.start == at)
                 .expect("grouped revision");
+            let node = &tree.elements[node_index];
             let expected = if addition { "ins" } else { "del" };
             runs.sort_by_key(|range| range.start);
             runs.dedup();
@@ -5854,9 +5861,17 @@ fn bind_note_reference_revisions(
             let close = &source[node.close_start..node.end];
             let mut replacement = String::new();
             let mut cursor = node.open_end;
+            let mut retained_old_open = false;
             for run in runs {
                 if cursor < run.start {
-                    replacement.push_str(old_open);
+                    if retained_old_open {
+                        let fresh = metadata.ids.allocate()?;
+                        replacement
+                            .push_str(&note_revision_opening(&source, &tree, node_index, fresh)?);
+                    } else {
+                        replacement.push_str(old_open);
+                        retained_old_open = true;
+                    }
                     replacement.push_str(&source[cursor..run.start]);
                     replacement.push_str(close);
                 }
@@ -5864,13 +5879,20 @@ fn bind_note_reference_revisions(
                     replacement.push_str(marker);
                     first = false;
                 }
-                replacement.push_str(&format!("<w:{expected} xmlns:w=\"{W_NS}\" w:id=\"{token}\" w:author=\"{}\" w:date=\"{}\">",quick_xml::escape::escape(metadata.author),quick_xml::escape::escape(metadata.timestamp)));
+                let reference_id = metadata.ids.allocate()?;
+                replacement.push_str(&format!("<w:{expected} xmlns:w=\"{W_NS}\" w:id=\"{reference_id}\" w:author=\"{}\" w:date=\"{}\">",quick_xml::escape::escape(metadata.author),quick_xml::escape::escape(metadata.timestamp)));
                 replacement.push_str(&source[run.clone()]);
                 replacement.push_str(&format!("</w:{expected}>"));
                 cursor = run.end;
             }
             if cursor < node.close_start {
-                replacement.push_str(old_open);
+                if retained_old_open {
+                    let fresh = metadata.ids.allocate()?;
+                    replacement
+                        .push_str(&note_revision_opening(&source, &tree, node_index, fresh)?);
+                } else {
+                    replacement.push_str(old_open);
+                }
                 replacement.push_str(&source[cursor..node.close_start]);
                 replacement.push_str(close);
             }
@@ -24010,6 +24032,284 @@ mod tests {
                 .iter()
                 .all(|marker| marker.pair_id != 80 && marker.pair_id != 81)
         );
+    }
+
+    #[test]
+    fn issue430_new_whole_note_preserves_allocated_physical_ids_and_selected_custody() {
+        fn with_note(mut document: Document, shape: &str, text: &str) -> Document {
+            let id = document.add_footnote(text);
+            document.paragraph_mut(0).unwrap().add_footnote_ref(id);
+            document.flush_to_package().unwrap();
+            let mut part = super::FootnotePart::of(&document).unwrap().unwrap();
+            let range = part.normal()[&id].inner.clone();
+            let mut inner = part.xml[range.clone()].to_owned();
+            if shape == "multi" {
+                inner.push_str("<w:p><w:r><w:t>second paragraph</w:t></w:r></w:p>");
+            } else if shape == "barrier" {
+                let at = inner.find("</w:r>").unwrap() + "</w:r>".len();
+                inner.insert_str(at, r#"<w:bookmarkStart w:id="70" w:name="producerBarrier"/><w:bookmarkEnd w:id="70"/>"#);
+            }
+            part.xml.replace_range(range, &inner);
+            crate::document::set_story_source_xml(&mut document, &part.name, part.xml.into_bytes())
+                .unwrap();
+            if shape == "shared-inline" || shape == "shared-paragraph" {
+                let reference = format!("<w:r><w:footnoteReference w:id=\"{id}\"/></w:r>");
+                let middle = if shape == "shared-inline" {
+                    "<w:r><w:t>between</w:t></w:r>"
+                } else {
+                    "</w:p><w:p><w:r><w:t>second</w:t></w:r>"
+                };
+                let mut body = format!(
+                    "<w:p><w:r><w:t>seller</w:t></w:r>{reference}{middle}{reference}</w:p><w:p><w:r><w:t>payment</w:t></w:r></w:p>"
+                );
+                let mut section = quick_xml::Writer::new(Vec::new());
+                document
+                    .document
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .unwrap()
+                    .to_xml(&mut section)
+                    .unwrap();
+                body.push_str(std::str::from_utf8(section.get_ref()).unwrap());
+                let main = super::replace_body_inner(
+                    document.package.get_part(&document.doc_part_name).unwrap(),
+                    &body,
+                )
+                .unwrap();
+                let name = document.doc_part_name.clone();
+                crate::document::set_story_source_xml(&mut document, &name, main.into_bytes())
+                    .unwrap();
+            }
+            super::reopen_staged(document).unwrap()
+        }
+        for shape in [
+            "single",
+            "multi",
+            "barrier",
+            "shared-inline",
+            "shared-paragraph",
+        ] {
+            for addition in [true, false] {
+                let mut original = Document::new();
+                original.add_paragraph("seller");
+                original.add_paragraph("payment");
+                if !addition {
+                    original = with_note(original, shape, "original note");
+                }
+                let before = original.to_bytes().unwrap();
+                let mut edited = Document::from_bytes(&before).unwrap();
+                if addition {
+                    edited = with_note(edited, shape, "new note");
+                } else {
+                    let id = edited.footnotes()[0].0;
+                    edited.remove_footnote(id).unwrap();
+                }
+                original
+                    .compare(&edited, "ReviewerB", "2026-11-06T10:00:00Z")
+                    .unwrap();
+                let pending = original.to_bytes().unwrap();
+                let fixture_dir =
+                    std::env::var_os("RDOCX_ISSUE430_SDK_FIXTURES").map(std::path::PathBuf::from);
+                if let Some(dir) = &fixture_dir {
+                    std::fs::create_dir_all(dir).unwrap();
+                    let stem = format!("{shape}-{}", if addition { "create" } else { "remove" });
+                    for (state, bytes) in [
+                        ("original", before.clone()),
+                        ("edited", edited.to_bytes().unwrap()),
+                        ("pending", pending.clone()),
+                    ] {
+                        std::fs::write(dir.join(format!("{stem}-{state}.docx")), bytes).unwrap();
+                    }
+                }
+                let part = original.footnotes_part_name.clone().unwrap();
+                let xml = original.package.get_part(&part).unwrap().to_vec();
+                let mut tree = crate::revision::XmlTree::parse(&xml).unwrap();
+                tree.qualify_note_revisions().unwrap();
+                let note_ids = tree
+                    .elements
+                    .iter()
+                    .filter_map(|node| node.revision.as_ref().map(|revision| revision.id))
+                    .collect::<Vec<_>>();
+                assert!(
+                    note_ids.len() >= 4,
+                    "paragraph mark plus reference/space/text"
+                );
+                assert_eq!(
+                    note_ids
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len(),
+                    note_ids.len()
+                );
+                let units = super::validate_footnote_custody(
+                    &original,
+                    &crate::revision::RevisionScope::All,
+                )
+                .unwrap();
+                assert_eq!(units.len(), 1);
+                assert!(note_ids.iter().all(|id| *id != units[0].token));
+                let inventory = original.story_revisions().unwrap();
+                assert!(
+                    inventory
+                        .iter()
+                        .all(|revision| revision.author() == "ReviewerB")
+                );
+                for owned in &units[0].revisions {
+                    assert!(inventory.iter().any(|revision| revision.id() == owned.id
+                        && revision.author() == owned.author
+                        && revision.kind() == owned.kind
+                        && revision.timestamp() == owned.timestamp.as_deref()));
+                }
+                let mut partial = Document::from_bytes(&pending).unwrap();
+                assert!(
+                    partial
+                        .accept_revision_id(note_ids[0])
+                        .unwrap_err()
+                        .to_string()
+                        .contains("partial footnote custody")
+                );
+                assert_eq!(partial.to_bytes().unwrap(), pending);
+                // Equal imported pending notes retain the exact original XML.
+                let mut untouched = Document::from_bytes(&pending).unwrap();
+                let same = Document::from_bytes(&pending).unwrap();
+                untouched
+                    .compare(&same, "Other", "2026-11-06T11:00:00Z")
+                    .unwrap();
+                untouched.flush_to_package().unwrap();
+                assert_eq!(untouched.package.get_part(&part).unwrap(), xml);
+                for accept in [true, false] {
+                    let mut resolved = Document::from_bytes(&pending).unwrap();
+                    assert_eq!(resolved.accept_revisions_by_author("Other").unwrap(), 0);
+                    assert_eq!(resolved.to_bytes().unwrap(), pending);
+                    let count = if accept {
+                        resolved.accept_revisions_by_author("ReviewerB").unwrap()
+                    } else {
+                        resolved.reject_revisions_by_author("ReviewerB").unwrap()
+                    };
+                    assert_eq!(count, inventory.len());
+                    assert_eq!(resolved.footnotes().len(), usize::from(addition == accept));
+                    assert!(resolved.story_revisions().unwrap().is_empty());
+                    assert_eq!(resolved.paragraphs().last().unwrap().text(), "payment");
+                    if addition == accept {
+                        let text = &resolved.footnotes()[0].1;
+                        assert!(text.contains(if addition {
+                            "new note"
+                        } else {
+                            "original note"
+                        }));
+                        if shape == "multi" {
+                            assert!(text.contains("second paragraph"));
+                        }
+                        let notes = resolved.package.get_part(&part).unwrap();
+                        if shape == "barrier" {
+                            assert!(notes.windows(15).any(|raw| raw == b"producerBarrier"));
+                        }
+                    }
+                    let saved = resolved.to_bytes().unwrap();
+                    if let Some(dir) = &fixture_dir {
+                        std::fs::write(
+                            dir.join(format!(
+                                "{shape}-{}-{}.docx",
+                                if addition { "create" } else { "remove" },
+                                if accept { "acceptB" } else { "rejectB" }
+                            )),
+                            &saved,
+                        )
+                        .unwrap();
+                    }
+                    let reopened = Document::from_bytes(&saved).unwrap();
+                    assert_eq!(reopened.footnotes(), resolved.footnotes());
+                    for name in reopened
+                        .package
+                        .parts
+                        .keys()
+                        .filter(|name| name.ends_with(".xml"))
+                    {
+                        assert!(
+                            !reopened
+                                .package
+                                .get_part(name)
+                                .unwrap()
+                                .windows(14)
+                                .any(|raw| raw == b"_rdocxCmpNoteF")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue430_body_reference_split_keeps_unique_ids_and_exact_surrounding_payload() {
+        let mut document = Document::new();
+        document.add_paragraph("seed");
+        let id = document.add_footnote("note");
+        let body = format!(
+            r#"<w:p><w:ins w:id="12" w:author="ReviewerB" w:date="2026-11-06T10:00:00Z" xmlns:p="urn:producer" p:keep="yes"><w:r><w:t>left changed</w:t></w:r><w:r><w:footnoteReference w:id="{id}"/></w:r><w:r><w:t>right changed</w:t></w:r></w:ins></w:p>"#
+        );
+        let main = super::replace_body_inner(
+            document.package.get_part(&document.doc_part_name).unwrap(),
+            &body,
+        )
+        .unwrap();
+        let part = document.doc_part_name.clone();
+        crate::document::set_story_source_xml(&mut document, &part, main.into_bytes()).unwrap();
+        let options = ComparisonOptions::default();
+        let mut metadata = super::Metadata {
+            author: "ReviewerB",
+            timestamp: "2026-11-06T10:00:00Z",
+            options: &options,
+            ids: super::IdAllocator::new(std::collections::HashSet::from([12])),
+            existing_revisions: false,
+            source_frames: Vec::new(),
+            projected_textbox_noop: false,
+            leaf_capture: false,
+            paired_field_story: None,
+            leaf_publications: Vec::new(),
+            field_conversions: Vec::new(),
+        };
+        super::bind_note_reference_revisions(&mut document, id, true, "", &mut metadata).unwrap();
+        let xml = document.package.get_part(&part).unwrap();
+        let tree = crate::revision::XmlTree::parse(xml).unwrap();
+        let revisions = tree
+            .elements
+            .iter()
+            .filter_map(|node| node.revision.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|revision| revision.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            revisions[0].id, 12,
+            "first surviving original segment keeps its identity"
+        );
+        assert!(
+            revisions
+                .iter()
+                .all(|revision| revision.author == "ReviewerB")
+        );
+        let xml = std::str::from_utf8(xml).unwrap();
+        assert_eq!(xml.matches("p:keep=\"yes\"").count(), 2);
+        assert!(xml.contains("left changed") && xml.contains("right changed"));
+    }
+
+    #[test]
+    fn issue430_note_header_closure_preserves_alias_identity_and_physical_ids() {
+        let xml = r#"<q:p><q:ins xmlns:w="urn:shadow" xmlns:producer="urn:producer" q:id="91" q:author="A" producer:keep="yes"><q:r><q:t>note</q:t></q:r></q:ins></q:p>"#;
+        let bindings = vec![("xmlns:q".to_owned(), W_NS.to_owned())];
+        let closed = super::close_note_revision_headers(xml, &bindings).unwrap();
+        assert!(closed.contains("w:id=\"91\""));
+        assert!(closed.contains(&format!("xmlns:w=\"{W_NS}\"")));
+        assert!(closed.contains("producer:keep=\"yes\""));
+        assert!(!closed.contains("q:id="));
     }
 
     #[test]
