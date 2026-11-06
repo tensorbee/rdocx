@@ -629,3 +629,32 @@ provides the cause and shared-caller closure. A repeated same-invariant failure
 requires reassessment before a third patch. Existing HLD15 impact records
 this clarification, with every other plan/public/budget/gate boundary unchanged.
 Actual fresh source-qualified Mac and complete CI/signing acceptance remain due.
+
+
+## H4 reviewed source availability renewal, 2026-11-06
+
+Root prepares a successor to actual failed H3 CI42306259639. Bounded repairs
+pass24unique focused Word controls by applicable21+3runs, strict all-targets/
+all-features Clippy, formatting and two default-feature cache controls. Actual
+new Native outputs pass50SDK cases, and four actual sole-ReviewerB Word
+Accept All/Reject All saved results pass SDK and semantic checks. Six passive
+Word copies and all50originals remain unchanged, with all15prior generated
+windows retained. Root repair audit and affected archive support5 have zero
+defects and smells. F271A7 separately prepares the exact same fresh public
+consumer before its unchanged300second run, with15passing harness self-tests.
+
+Actual H3 hosted PowerPoint passed1041tests with zero skips. Its unchanged
+local release artifacts have1039applicable cases plus two debug-inapplicable
+cases per runtime, with actual hosted coverage of both counters. Earlier full
+commands remain failed, and source-qualified composite applicability is
+retained. Word's old bytecode-containing wheel authentication failures remain
+failed. Ignored bytecode is quarantined and fresh clean release packaging,
+both runtime suites and typing remain pending.
+
+The one affected Word archive was measured and independently authenticated.
+Final native/performance/source-diagnostic/full riders, current normal CI,
+verified publication dry-run, current CLI hash/pixel checks and build-only
+26payload rehearsal remain pending. Source availability permits only the
+reviewed clean sprint/s96 ref push and normal CI routing. No ledger completion,
+dependency unblocking, main merge, sprint/release tag or publication follows.
+Actual upcoming SHA, push and CI run identity will be appended after observation.
