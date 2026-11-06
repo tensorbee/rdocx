@@ -546,6 +546,40 @@ jobs:
               assert hashlib.sha256(original.read_bytes()).hexdigest() == original_hash
               print(json.dumps({"family":family, "source_sha256":original_hash, "signed_sha256":hashlib.sha256(before).hexdigest(), "valid":True, "partial_refused":True, "tamper_refused":True, "pem":True, "material_bound_atomic":True}))
           PY
+      - name: Select final benchmark observation interpreter
+        if: github.event_name == 'workflow_dispatch' && matrix.family == 'rdocx' && matrix.platform.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12.13'
+          architecture: x64
+          check-latest: false
+      - name: Record final benchmark interpreter identity
+        if: github.event_name == 'workflow_dispatch' && matrix.family == 'rdocx' && matrix.platform.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          python -I -B - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          import platform
+          import sys
+          import sysconfig
+          from pathlib import Path
+
+          executable = Path(sys.executable).resolve()
+          print(json.dumps({
+              "observation": "f283-benchmark-interpreter",
+              "system": platform.system(),
+              "machine": platform.machine(),
+              "implementation": platform.python_implementation(),
+              "version": list(sys.version_info[:3]),
+              "sysconfig_platform": sysconfig.get_platform(),
+              "executable": str(executable),
+              "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+              "source_root": os.environ["GITHUB_WORKSPACE"],
+              "source_commit": os.environ["GITHUB_SHA"],
+          }, sort_keys=True))
+          PYTHON
       - name: Package selected CLI
         shell: bash
         run: |

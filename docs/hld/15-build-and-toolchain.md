@@ -924,6 +924,11 @@ is not inferred from artifact names or a future producer assertion. Missing
 proof or transfer admission remains pending. The job builds, signs, publishes
 and tags nothing.
 
+The same-source manual rdocx Linux GNU CLI rehearsal logs the identically
+pinned CPython3.12.13 interpreter identity after its tests, supplying the
+ordinary observation used by the later reviewed transfer. The benchmark
+independently verifies its actual interpreter digest.
+
 An offline `--prepare-dispatch` mode of the local benchmark runner packages an
 already Root-approved transfer into a GitHub workflow dispatch request file. It
 authenticates the transfer bytes against a supplied lowercase SHA-256,

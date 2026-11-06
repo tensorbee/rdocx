@@ -1094,3 +1094,16 @@ handoff and pending evidence. Do not commit, push, tag or publish. Root reviews,
 requests up to three focused repair cycles if needed, then takes all work back.
 The previous runner9d944b03 predates this extension. Its workload semantics stay
 pinned, while the new runner identity awaits Root review and final qualification.
+
+## Hosted benchmark interpreter observation acquisition
+
+Root approves this ordinary execution-preparation clarification. The existing
+manual rdocx Linux GNU CLI rehearsal selects the benchmark job's identical
+pinned CPython3.12.13 setup after all CLI tests, then logs platform, executable
+SHA256, version and actual source root/commit. Existing builds and tests keep
+their original interpreter and configuration. The retained job log supplies an
+observation for the separately reviewed transfer. It emits no approval or
+acceptance boolean. The later benchmark still checks its actual runtime digest.
+No new job, public contract, threshold, authority or review-cycle reset is added.
+HLD15 records the acquisition method. Hosted execution and actual transfer
+approval remain pending, with all prior final gates unchanged.
