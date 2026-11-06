@@ -5246,6 +5246,146 @@ struct FragmentNoteCopy {
     replace_id: Option<i32>,
 }
 
+/// Materialize only document-default font components on the imported body.
+fn prepare_fragment_body_effective_defaults(fragment: &mut Document) -> Result<()> {
+    fn paragraph(
+        paragraph: &mut CT_P,
+        styles: &CT_Styles,
+        style_only: &CT_Styles,
+        table: Option<&str>,
+    ) {
+        let default = styles
+            .get_default(StyleType::Paragraph)
+            .map(|style| style.style_id.as_str());
+        let properties = paragraph.properties.get_or_insert_with(Default::default);
+        if properties.style_id.is_none() {
+            properties.style_id = default.map(str::to_owned);
+        }
+        let mut table_properties = CT_RPr::default();
+        if let Some(id) = table {
+            for style in style::collect_style_chain(id, styles).into_iter().rev() {
+                if let Some(properties) = &style.rpr {
+                    table_properties.merge_from(properties);
+                }
+            }
+        }
+        for run in &mut paragraph.runs {
+            let run_style = run
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.style_id.as_deref());
+            let inherited = style::resolve_run_properties(
+                properties.style_id.as_deref(),
+                run_style,
+                style_only,
+            );
+            let mut without_defaults = table_properties.clone();
+            without_defaults.merge_from(&inherited);
+            let mut resolved = styles
+                .doc_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.rpr.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            resolved.merge_from(&without_defaults);
+            let direct = run.properties.get_or_insert_with(Default::default);
+            if direct.font_ascii.is_none() && resolved.font_ascii != without_defaults.font_ascii {
+                direct.font_ascii = resolved.font_ascii;
+            }
+            if direct.font_hansi.is_none() && resolved.font_hansi != without_defaults.font_hansi {
+                direct.font_hansi = resolved.font_hansi;
+            }
+            if direct.sz.is_none() && resolved.sz != without_defaults.sz {
+                direct.sz = resolved.sz;
+            }
+            if *direct == CT_RPr::default() {
+                run.properties = None;
+            }
+        }
+    }
+    fn prepare_table(table: &mut CT_Tbl, styles: &CT_Styles, style_only: &CT_Styles) {
+        let table_style = table
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.style_id.as_deref());
+        for row in &mut table.rows {
+            prepare_row(row, styles, style_only, table_style);
+        }
+        for (_, _, control) in &mut table.content_controls {
+            prepare_control(control, styles, style_only, table_style);
+        }
+    }
+    fn prepare_row(
+        row: &mut CT_Row,
+        styles: &CT_Styles,
+        style_only: &CT_Styles,
+        table_style: Option<&str>,
+    ) {
+        for cell in &mut row.cells {
+            prepare_cell(cell, styles, style_only, table_style);
+        }
+        for (_, _, control) in &mut row.content_controls {
+            prepare_control(control, styles, style_only, table_style);
+        }
+    }
+    fn prepare_cell(
+        cell: &mut CT_Tc,
+        styles: &CT_Styles,
+        style_only: &CT_Styles,
+        table_style: Option<&str>,
+    ) {
+        for child in &mut cell.content {
+            match child {
+                CellContent::Paragraph(p) => paragraph(p, styles, style_only, table_style),
+                CellContent::Table(t) => prepare_table(t, styles, style_only),
+                CellContent::ContentControl(c) => {
+                    prepare_control(c, styles, style_only, table_style)
+                }
+            }
+        }
+    }
+    fn prepare_control(
+        control: &mut CT_Sdt,
+        styles: &CT_Styles,
+        style_only: &CT_Styles,
+        table_style: Option<&str>,
+    ) {
+        for item in &mut control.content {
+            match item {
+                SdtContent::Paragraph(p) => paragraph(p, styles, style_only, table_style),
+                SdtContent::Table(t) => prepare_table(t, styles, style_only),
+                SdtContent::ContentControl(c) => {
+                    prepare_control(c, styles, style_only, table_style)
+                }
+                SdtContent::Row(row) => prepare_row(row, styles, style_only, table_style),
+                SdtContent::Cell(cell) => prepare_cell(cell, styles, style_only, table_style),
+                SdtContent::Run(_) | SdtContent::RawXml(_) => {}
+            }
+        }
+    }
+    let styles = &fragment.styles;
+    let mut style_only = CT_Styles::clone(styles);
+    style_only.doc_defaults = None;
+    for item in &mut fragment.document.body.content {
+        match item {
+            BodyContent::Paragraph(p) => paragraph(p, styles, &style_only, None),
+            BodyContent::Table(t) => prepare_table(t, styles, &style_only),
+            BodyContent::ContentControl(control) => {
+                prepare_control(control, styles, &style_only, None)
+            }
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    // Every prepared paragraph now names its source default explicitly. It
+    // must not become a second destination default or restyle existing text.
+    for style in &mut Arc::make_mut(&mut fragment.styles).styles {
+        if style.style_type == StyleType::Paragraph {
+            style.is_default = false;
+        }
+    }
+    Ok(())
+}
+
 fn import_fragment_content_with_state(
     document: &mut Document,
     bytes: &[u8],
@@ -5310,6 +5450,13 @@ fn import_fragment_content_with_state(
     } else {
         fragment.prepare_staged_package()?;
     }
+    if policy.preserves_source_effective_defaults() {
+        prepare_fragment_body_effective_defaults(&mut fragment)?;
+        fragment_xml = fragment.document.to_xml()?;
+        fragment
+            .package
+            .set_part(&fragment.doc_part_name, fragment_xml.clone());
+    }
     if let Some((evaluation, _)) = template.as_mut() {
         let retained = evaluation.operation.repeat_source(
             fragment_xml_source
@@ -5351,7 +5498,9 @@ fn import_fragment_content_with_state(
             .content
             .push(BodyContent::Paragraph(Box::new(paragraph)));
     }
-    let model_xml = if let Some((evaluation, _)) = template.as_mut() {
+    let model_xml = if policy.preserves_source_effective_defaults() {
+        fragment_xml.clone()
+    } else if let Some((evaluation, _)) = template.as_mut() {
         let mut writer = crate::document::TemplateMainWriter {
             operation: &mut evaluation.operation,
             lineage: &evaluation.lineage,
@@ -5371,9 +5520,17 @@ fn import_fragment_content_with_state(
     } else {
         model_xml
     };
-    prune_document_fragment_dependencies(&mut fragment, &dependency_source)?;
+    prune_document_fragment_dependencies(
+        &mut fragment,
+        &dependency_source,
+        !policy.native_body_only(),
+    )?;
     let mut fragment_identity_values = body_identity_values(&fragment_xml)?;
-    for companion in fragment_dependency_companions(&fragment, &dependency_source)? {
+    for companion in if policy.native_body_only() {
+        Vec::new()
+    } else {
+        fragment_dependency_companions(&fragment, &dependency_source)?
+    } {
         for id in body_identity_values(&wrap_fragment_companion(&companion))?.comment_ids {
             if !fragment_identity_values.comment_ids.contains(&id) {
                 fragment_identity_values.comment_ids.push(id);
@@ -5381,6 +5538,11 @@ fn import_fragment_content_with_state(
         }
     }
     validate_fragment_identity_ownership(&fragment_identity_values)?;
+    let companion_comment_ids = if policy.native_body_only() {
+        &[][..]
+    } else {
+        &fragment_identity_values.comment_ids[..]
+    };
     if source_owned_numbering {
         document.source_owned_numbering_remap(&fragment)?;
     }
@@ -5418,7 +5580,11 @@ fn import_fragment_content_with_state(
     let mut part_map = BTreeMap::new();
     let mut imports = Vec::new();
     let mut external_imports = Vec::new();
-    for relationship_id in used_relationships.clone() {
+    for relationship_id in used_relationships
+        .iter()
+        .filter(|_| !policy.native_body_only())
+        .cloned()
+    {
         let relationship = source_rels.get_by_id(&relationship_id).ok_or_else(|| {
             Error::Other(format!(
                 "rich mail merge fragment relationship {relationship_id} is missing"
@@ -5449,7 +5615,10 @@ fn import_fragment_content_with_state(
         ));
     }
     let mut binding_stores = Vec::new();
-    for store_item_id in fragment_store_item_ids(&dependency_xml)? {
+    for store_item_id in fragment_store_item_ids(&dependency_xml)?
+        .into_iter()
+        .filter(|_| !policy.native_body_only())
+    {
         let source_part = crate::content_control::resolve_custom_xml_part(
             &fragment.package,
             &fragment.doc_part_name,
@@ -5478,9 +5647,12 @@ fn import_fragment_content_with_state(
         binding_stores.push((store_item_id, source_part));
     }
     if let Some(comment_xml) = Document::fragment_comment_dependency_xml(
-        fragment.comments.as_ref(),
+        fragment
+            .comments
+            .as_ref()
+            .filter(|_| !policy.native_body_only()),
         fragment.comments_extended.as_ref(),
-        &fragment_identity_values.comment_ids,
+        companion_comment_ids,
     )? {
         for store_item_id in fragment_store_item_ids(&comment_xml)? {
             let source_item_part = crate::content_control::resolve_custom_xml_part(
@@ -5534,12 +5706,16 @@ fn import_fragment_content_with_state(
     let mut note_copies: Vec<FragmentNoteCopy> = Vec::new();
     let mut note_relationship_imports = Vec::new();
     let mut note_external_imports = Vec::new();
-    let mut pending_notes = fragment_note_references(&dependency_xml)?;
+    let mut pending_notes = if policy.native_body_only() {
+        Vec::new()
+    } else {
+        fragment_note_references(&dependency_xml)?
+    };
     if let Some(comments) = fragment.comments.as_ref()
         && let Some(xml) = Document::fragment_comment_dependency_xml(
             Some(comments),
             fragment.comments_extended.as_ref(),
-            &fragment_identity_values.comment_ids,
+            companion_comment_ids,
         )?
     {
         pending_notes.extend(fragment_note_references(&xml)?);
@@ -6096,9 +6272,12 @@ fn import_fragment_content_with_state(
         identity_xml.extend_from_slice(&note.xml);
     }
     if let Some(comments) = Document::fragment_comment_dependency_xml(
-        fragment.comments.as_ref(),
+        fragment
+            .comments
+            .as_ref()
+            .filter(|_| !policy.native_body_only()),
         fragment.comments_extended.as_ref(),
-        &fragment_identity_values.comment_ids,
+        companion_comment_ids,
     )? {
         identity_xml.extend(comments);
     }
@@ -6109,9 +6288,12 @@ fn import_fragment_content_with_state(
         false,
     )?;
     let patched_comments = Document::fragment_comment_dependency_xml(
-        fragment.comments.as_ref(),
+        fragment
+            .comments
+            .as_ref()
+            .filter(|_| !policy.native_body_only()),
         fragment.comments_extended.as_ref(),
-        &fragment_identity_values.comment_ids,
+        companion_comment_ids,
     )?
     .map(|xml| -> Result<CT_Comments> {
         let xml = patch_relationship_ids(&xml, &comment_relationship_map)?;
@@ -6123,11 +6305,15 @@ fn import_fragment_content_with_state(
         )?)?)
     })
     .transpose()?;
-    let comment_ids = document.import_fragment_comments_staged(
-        patched_comments.as_ref().or(fragment.comments.as_ref()),
-        fragment.comments_extended.as_ref(),
-        &fragment_identity_values.comment_ids,
-    )?;
+    let comment_ids = if policy.native_body_only() {
+        BTreeMap::new()
+    } else {
+        document.import_fragment_comments_staged(
+            patched_comments.as_ref().or(fragment.comments.as_ref()),
+            fragment.comments_extended.as_ref(),
+            companion_comment_ids,
+        )?
+    };
     if !comment_ids.is_empty() {
         let comment_remap = BodyIdentityRemap {
             comment_ids: comment_ids.clone(),
@@ -6362,7 +6548,11 @@ fn equivalent_fragment_leaf_part(
         })
 }
 
-fn prune_document_fragment_dependencies(fragment: &mut Document, selected: &[u8]) -> Result<()> {
+fn prune_document_fragment_dependencies(
+    fragment: &mut Document,
+    selected: &[u8],
+    include_companions: bool,
+) -> Result<()> {
     // A repeated style ID resolves to its first definition before the
     // dependency closure. A later definition is neither a dependency nor
     // compared with the destination style.
@@ -6371,7 +6561,11 @@ fn prune_document_fragment_dependencies(fragment: &mut Document, selected: &[u8]
         .styles
         .retain(|style| defined.insert(style.style_id.clone()));
     let mut body_xml = selected.to_vec();
-    for companion in fragment_dependency_companions(fragment, selected)? {
+    for companion in if include_companions {
+        fragment_dependency_companions(fragment, selected)?
+    } else {
+        Vec::new()
+    } {
         body_xml.extend(companion);
     }
     let mut used_numbering = word_value_attributes(&body_xml, &[b"numId"])?

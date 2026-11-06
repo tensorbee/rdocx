@@ -3237,6 +3237,20 @@ document changes, and a duplicated story keeps the native rejection.
 `ignore_comments` also leaves comment anchors to the original, while ignoring
 the `comment` story excludes only the comments part. Python and WASM preserve
 comparison output when they save their owned document.
+Equal adjacent plain text with equal run properties gives zero revisions despite
+run splits at every granularity. Structural tokens remain barriers. Word
+substitution emits the changed word without revising a split unchanged neighbor.
+A graph-only added crossing reply creates one comment-package revision, with no
+body text revision. Selective acceptance retains its range, reference, initials
+and parent link. Rejection restores the original graph. Existing crossing replies
+remain in place during selective text resolution, subject to unchanged protected
+owner and revised-comment refusal contracts.
+Protected-owner coalescing requires actual equal content and formatting under
+every ignore policy, together with the existing source-residual check. Ordinary
+ignore policies and paired Field publication keep their existing semantics.
+A newly added reply receives the same complete containing-owner check before
+comparison publishes the authored replay.
+
 
 Native Word rendering exposes `rdocx::RevisionView`, `rdocx::RevisionStyle`
 and the concrete `rdocx::RenderOptions`, whose default selects accepted view
@@ -4734,7 +4748,7 @@ boundary refusals retain their existing policy and error text.
 
 PictureOptions exposes checked metadata, crop and the supported inline and floating placement vocabulary. Document.add_picture, Run.add_picture and Cell.add_picture import path or bytes and return frozen factory-created Picture snapshots. Document.pictures returns physical source order across admitted stories. Snapshots carry document origin, revision, physical owner and unchanged source identity. Document.set_picture_size accepts one snapshot and resizes that occurrence only. The former relationship-wide Python operation is explicitly named set_picture_sizes_for_relationship. Native relationship-wide sizing and replace_image retain their separate compatibility contracts. Foreign, stale, malformed and unsupported inputs refuse before publication.
 
-Python Document.insert_document(other, at=..., policy=...) publishes through native import_fragment. Native Document.insert_document(index, other) is the existing body, style and numbering route and does not take that policy. It does not import source media relationships. Its unchanged control uses a source and a destination that already share the intended media graph. Inserted picture bytes stay with their drawings for both orders, the default policy and related-part reuse turned off, through save and reopen. Unused relationship bytes are not a preservation promise.
+Python Document.insert_document(other, at=..., policy=...) publishes through native import_fragment and preserves its companion and complete relationship closure. Native Document.insert_document(index, other) uses the same importer with a body-only policy for body, style and numbering, without source media or companions. Both preserve source-effective ASCII and high-ANSI fonts and half-point size on ordinary body and table-cell paragraphs, including typed row and cell content controls and modeled hyperlink runs. Source defaults precede bounded nonconditional table, paragraph and character styles, with direct components strongest. Inline run controls, revised raw payload and conditional table formatting are outside this font-materialization contract. Prepared body bytes remain authoritative through import and save/reopen. Destination paragraphs keep their existing default style. Omitted Python policy and the native default allocate distinct numbering instances, while explicit reuse_equivalent and direct import_fragment keep reuse. Native FragmentConflictPolicy::for_insert_document selects this behavior without changing Default. Boolean at values raise TypeError. Empty-source insertion is a no-op. Success publishes once and stales prior handles, while refusal retains bytes and handles. Native insertion keeps its infallible signature and panics on a staged preflight failure before publication. Its media control uses a source and destination that already share the intended media graph. Python inserted picture bytes stay with their drawings for both orders, default policy and related-part reuse turned off, through save and reopen.
 
 Paragraph.add_internal_hyperlink and first-character # URLs use the same checked bookmark provider. Ordinary URL fragments remain external links. Tooltips retain native hyperlink formatting. Document.add_heading_hyperlink stages a suitable existing or unique valid supported heading bookmark and its source link together. Supported related-story source paragraphs use their actual owner. Bookmark grammar, owner origin and revision are validated before mutation. No external relationship is allocated for internal links.
 

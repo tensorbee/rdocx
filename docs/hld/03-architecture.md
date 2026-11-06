@@ -1440,6 +1440,21 @@ last paragraph, whose mark remains. Resolution stages every affected package par
 selected descendants before their enclosing subtree, reparses the complete
 candidate package, and commits once only after validation succeeds.
 
+Comparison equality ignores physical partitions of adjacent text runs with equal
+run properties, including their explicit presence. Fields, drawings, markers,
+opaque children and inline shells retain their boundaries and ordering. Equal
+content retains the original paragraph source without revisions at every
+granularity. Word alignment follows logical words across those plain runs while
+retaining each scalar's actual source owner. A changed word beside a split
+unchanged word produces only that word's deletion and insertion. Actual edits
+at run and character granularity retain their existing policies.
+The protected-owner exception requires actual equal typed content and formatting
+under every caller ignore policy, including zero-width formatting facts. It also
+requires the existing source-residual equality. Only physical run partitions may
+differ when that owner is preserved byte for byte.
+The equality view follows typed table, row, cell and control children, retaining
+exact container shells and ordered child positions.
+
 The `rdocx` facade also owns deterministic comparison of those same stories. A
 source index assigns stable public story categories and private owner paths to
 modeled paragraphs, tables, fields, and nested text boxes. A concrete
@@ -2799,9 +2814,9 @@ The native Word facade owns accepted-view text presentation and advisory package
 
 Python template conversion admits explicit JSON scalar and container types before native mutation. Its existing workspace serde_json dependency edge introduces no separate converter model. Checked fragment publication and property mutation stage complete candidates, preserve the original on refusal and invalidate live handles only after changed publication. Markdown requests recursive physical-owner boundaries from the existing accepted projection. The default accepted view remains unchanged for its other consumers.
 
-Fragment import keeps a main-part relationship id stable until the main story references that id or the id leaves the relationship registry. Loss of an owner part by itself does not drop the hold. Reconciliation intersects the registry before save. An unreferenced id is not promised to survive a fresh reload. Picture bytes stay with the drawing for both insertion orders, the default policy and related-part reuse turned off. Chart, hyperlink, template, building-block and rich-merge publication use that same hold. Native typed insert_document remains the existing body, style and numbering route. It does not import source media relationships. Its unchanged control uses a source and a destination that already share the intended media graph.
+Fragment import keeps a main-part relationship id stable until the main story references that id or the id leaves the relationship registry. Loss of an owner part by itself does not drop the hold. Reconciliation intersects the registry before save. An unreferenced id is not promised to survive a fresh reload. Picture bytes stay with the drawing for both insertion orders, the default policy and related-part reuse turned off. Chart, hyperlink, template, building-block and rich-merge publication use that same hold. Native typed insert_document uses the shared fragment importer for body, style and numbering. Its policy preserves source-effective ASCII and high-ANSI fonts and half-point size on ordinary body paragraphs, including table cells and modeled hyperlinks. The source document default is materialized only where the source paragraph, character and bounded nonconditional table style chains do not supply the component. Direct formatting retains priority. Prepared paragraphs name their source paragraph style explicitly, and imported paragraph styles do not replace the destination default. The prepared body bytes remain authoritative through dependency selection, style remapping and saved publication. Omitted insertion policy allocates distinct list instances. Explicit reuse policy and ordinary import_fragment retain their numbering reuse behavior. Native insertion imports no companions or source media relationships. Its unchanged control uses a source and a destination that already share the intended media graph. Python insertion retains its full companion and relationship closure through the same importer.
 
-Style import resolves a repeated style id to its first definition before the dependency closure. Equal first definitions add no copy. A different first definition adds one renamed copy, and that renamed copy is not a default. A later shadowed definition and its dependencies are ignored. Existing target duplicate style XML stays. A source default whose id differs from the destination default still refuses as a second default.
+Style import resolves a repeated style id to its first definition before the dependency closure. Equal first definitions add no copy. A different first definition adds one renamed copy, and that renamed copy is not a default. A later shadowed definition and its dependencies are ignored. Existing target duplicate style XML stays. Outside insertion default preservation, a source default whose id differs from the destination default still refuses as a second default.
 
 ## PowerPoint checked XML ownership
 

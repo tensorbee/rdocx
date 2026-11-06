@@ -988,6 +988,22 @@ Ambiguous linkage, a surviving endpoint or reference, or unrelated anchors
 inside a removed comment definition refuse atomically. Unknown root and entry
 payload remains unchanged outside the selected owned rows.
 
+Comparison treats an otherwise unchanged document with a newly authored
+crossing reply as one comment-package revision. Existing parent text and anchors
+receive no text revisions for that graph addition. The same checked reply
+authoring owner proves required parent metadata and crossing placement. The
+qualified original-plus-reply replay supplies actual body and related-story
+models and source together, preserving ignored formatting and whitespace.
+Before copying a replay story, comparison checks its complete revision-bearing
+paragraph, table and block-control owners with actual typed content and positive
+owning-source residuals. A changed containing owner refuses, while unrelated
+held owners remain preserved. Revised comment snapshot refusal remains upstream.
+The snapshot records the added reply identities. Rejecting it removes those owned
+anchors before restoring the original related-part snapshot, and accepting it
+retains the reply graph. An existing crossing reply remains outside selected
+text revisions in an otherwise editable owner. Existing protected-owner and
+revised-comment replacement refusals remain in force.
+
 Threaded comments add a document relationship using the Microsoft
 `commentsExtended` relationship type. The facade retains its resolved target
 and writes the standard

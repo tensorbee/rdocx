@@ -16955,3 +16955,478 @@ def test_issue434_reply_reference_admission_preserves_formatted_alias_and_metada
         assert original.find(f"{{{w}}}rPr/{{{w}}}b") is not None
         assert original.find(f"{{{w}}}commentReference").get("{urn:producer}reference")=="keep"
     assert rdocx.Document.from_bytes(document.to_bytes()).comments[-1].id==reply
+
+
+@pytest.mark.parametrize("granularity", ["run", "word", "character"])
+def test_issue434_compare_equal_split_and_one_word_public(granularity):
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("invoice thirty days")
+    edited = rdocx.Document()
+    paragraph = edited.add_paragraph("invoi")
+    paragraph.add_run("ce thirty days")
+    held = original.paragraphs[0]
+    before = original.to_bytes()
+    assert original.compare(edited, "B", "2026-11-06T10:00:00Z", granularity=granularity) == ()
+    assert original.revisions == ()
+    after = original.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(before)) as old, zipfile.ZipFile(io.BytesIO(after)) as new:
+        old_parts = {name: old.read(name) for name in old.namelist()}
+        new_parts = {name: new.read(name) for name in new.namelist()}
+        paragraph = lambda data: re.search(rb"<w:p(?:\s[^>]*)?>.*?</w:p>", data, re.S).group()
+        assert paragraph(new_parts["word/document.xml"]) == paragraph(old_parts["word/document.xml"])
+        if after != before:
+            assert {name for name in old_parts.keys() | new_parts.keys() if old_parts.get(name) != new_parts.get(name)} == {"word/document.xml"}
+            main = new_parts["word/document.xml"]
+            section = re.search(rb"<w:sectPr(?:\s[^>]*)?>", main).group()
+            original_section = re.search(rb"<w:sectPr(?:\s[^>]*)?>", old_parts["word/document.xml"]).group()
+            root = re.search(rb"<w:document\s[^>]*>", main).group()
+            declarations = re.findall(rb' xmlns:[A-Za-z0-9_]+="[^"]*"', section)
+            assert declarations and all(declaration in root for declaration in declarations)
+            assert re.sub(rb' xmlns:[A-Za-z0-9_]+="[^"]*"', b"", section) == original_section
+            assert main.replace(section, original_section, 1) == old_parts["word/document.xml"]
+            with pytest.raises(rdocx.StaleElementError):
+                _ = held.text
+        else:
+            assert held.text == "invoice thirty days"
+    assert original.paragraphs[0].text == "invoice thirty days"
+    if granularity == "word":
+        edited.paragraphs[0].runs[1].text = "ce sixty days"
+        original.compare(edited, "B", "2026-11-06T10:00:00Z", granularity="word")
+        assert [(r.kind, r.text) for r in original.revisions] == [("deletion", "thirty"), ("insertion", "sixty")]
+
+
+@pytest.mark.parametrize("normal", [False, True, "distinct"])
+def test_issue434_insert_effective_font_and_saved_body(normal):
+    import rdocx
+    from rdocx.shared import Pt
+    import xml.etree.ElementTree as ET
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    source = rdocx.Document()
+    source.add_paragraph("source")
+    if normal:
+        def set_normal(data):
+            root = ET.fromstring(data)
+            ns = {"w": W_NS}
+            node = root.find("w:style[@w:styleId='Normal']", ns)
+            if normal == "distinct":
+                node.set(f"{{{W_NS}}}styleId", "SourceNormal")
+            rpr = ET.SubElement(node, f"{{{W_NS}}}rPr")
+            ET.SubElement(rpr, f"{{{W_NS}}}rFonts", {f"{{{W_NS}}}ascii": "Georgia", f"{{{W_NS}}}hAnsi": "Georgia"})
+            ET.SubElement(rpr, f"{{{W_NS}}}sz", {f"{{{W_NS}}}val": "22"})
+            return ET.tostring(root)
+        source = _fx261_replace_part(source, "word/styles.xml", set_normal)
+    else:
+        source.default_font_name = "Georgia"
+        source.default_font_size = Pt(14)
+    destination = rdocx.Document()
+    destination.add_paragraph("destination")
+    held = destination.paragraphs[0]
+    before_empty = destination.to_bytes()
+    destination.insert_document(rdocx.Document(), at=0)
+    assert held.text == "destination" and destination.to_bytes() == before_empty
+    destination.insert_document(source, at=1)
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    reopened = rdocx.Document.from_bytes(destination.to_bytes())
+    assert [p.text for p in reopened.paragraphs] == ["destination", "source"]
+    package = zipfile.ZipFile(io.BytesIO(reopened.to_bytes()))
+    styles = ET.fromstring(package.read("word/styles.xml"))
+    body = ET.fromstring(package.read("word/document.xml"))
+    ns = {"w": W_NS}
+    paragraph = body.findall("w:body/w:p", ns)[1]
+    run = paragraph.find("w:r", ns)
+    direct = run.find("w:rPr", ns)
+    pstyle = paragraph.find("w:pPr/w:pStyle", ns)
+    selected_style = styles.find(f"w:style[@w:styleId='{pstyle.get(f'{{{W_NS}}}val')}']", ns)
+    # Saved body and selected source style together carry the effective pair.
+    font = None if direct is None else direct.find("w:rFonts", ns)
+    size = None if direct is None else direct.find("w:sz", ns)
+    if font is None:
+        font = selected_style.find("w:rPr/w:rFonts", ns)
+    if size is None:
+        size = selected_style.find("w:rPr/w:sz", ns)
+    assert font.get(f"{{{W_NS}}}ascii") == "Georgia"
+    assert size.get(f"{{{W_NS}}}val") == ("22" if normal else "28")
+    with pytest.raises(TypeError):
+        destination.insert_document(source, at=True)
+
+
+def test_issue434_default_insert_lists_restart_and_explicit_reuse_stays():
+    import rdocx
+
+    source = rdocx.Document()
+    definition = source.add_numbering_definition([rdocx.ListLevel(format="decimal")])
+    instance = source.add_numbering_instance(definition)
+    for text in ("one", "two"):
+        source.add_paragraph(text).numbering = (instance, 0)
+    for policy, distinct in [(None, True), (rdocx.FragmentConflictPolicy.rename_all(), True), (rdocx.FragmentConflictPolicy.reuse_equivalent(), False)]:
+        destination = rdocx.Document()
+        for _ in range(3):
+            destination.insert_document(source, at=len(destination.paragraphs), policy=policy)
+        reopened = rdocx.Document.from_bytes(destination.to_bytes())
+        ids = [p.numbering[0] for p in reopened.paragraphs]
+        assert ids[0] == ids[1] and ids[2] == ids[3] and ids[4] == ids[5]
+        assert (len(set(ids)) == 3) if distinct else (len(set(ids)) == 1)
+
+
+def test_issue434_crossing_reply_compare_and_selected_resolution():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("thirty days")
+    root = original.add_comment_on_text("thirty", author="Ada", text="root")
+    before = original.to_bytes()
+    edited = rdocx.Document.from_bytes(before)
+    reply = edited.reply_to(root, author="Ben", initials="B", text="reply")
+    original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z")
+    assert len(original.revisions) == 1
+    tracked = original.to_bytes()
+    for accept in (False, True):
+        resolved = rdocx.Document.from_bytes(tracked)
+        getattr(resolved, "accept_revisions_by_author" if accept else "reject_revisions_by_author")("Reviewer")
+        assert len(resolved.comments) == (2 if accept else 1)
+        assert resolved.comments[0].id == root
+        if accept:
+            selected = next(c for c in resolved.comments if c.id == reply)
+            assert selected.parent_id == root and selected.initials == "B"
+
+
+def test_issue434_python_insert_preserves_companions_nested_image_and_destination_ids():
+    import xml.etree.ElementTree as ET
+    import rdocx
+
+    source = rdocx.Document()
+    source.add_paragraph("source")
+    source.add_footnote(source.paragraphs[0], "source footnote")
+    source.add_endnote(source.paragraphs[0], "source endnote")
+    root_id = source.add_comment_on_text("source", author="Source", text="root")
+    source.reply_to(root_id, author="Reply", initials="R", text="reply")
+    image = _one_pixel_png(b"\x20\x60\xa0")
+    unused_image = _one_pixel_png(b"\xa0\x20\x60")
+    drawing = ('<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="10000" cy="10000"/><wp:docPr id="99" name="CommentChart"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+               '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+               '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+               'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdChart"/>'
+               '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')
+    chart = (b'<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+             b'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+             b'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+             b'<c:chart/><c:spPr><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></c:spPr></c:chartSpace>')
+    rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(source.to_bytes())) as old, zipfile.ZipFile(output, "w") as new:
+        for entry in old.infolist():
+            data = old.read(entry.filename)
+            if entry.filename == "word/comments.xml":
+                data = data.replace(b"</w:p>", drawing.encode() + b"</w:p>", 1)
+            if entry.filename == "[Content_Types].xml":
+                root = ET.fromstring(data)
+                ET.SubElement(root, f"{{{ct_ns}}}Override", PartName="/word/charts/commentChart.xml", ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml")
+                ET.SubElement(root, f"{{{ct_ns}}}Override", PartName="/word/media/commentImage.png", ContentType="image/png")
+                ET.SubElement(root, f"{{{ct_ns}}}Override", PartName="/word/media/unusedImage.png", ContentType="image/png")
+                data = ET.tostring(root)
+            new.writestr(entry, data)
+        new.writestr("word/_rels/comments.xml.rels", f'<Relationships xmlns="{rel_ns}"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/commentChart.xml"/></Relationships>')
+        new.writestr("word/charts/commentChart.xml", chart)
+        new.writestr("word/charts/_rels/commentChart.xml.rels", f'<Relationships xmlns="{rel_ns}"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/commentImage.png"/><Relationship Id="rIdUnused" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/unusedImage.png"/></Relationships>')
+        new.writestr("word/media/commentImage.png", image)
+        new.writestr("word/media/unusedImage.png", unused_image)
+    source = rdocx.Document.from_bytes(output.getvalue())
+    with zipfile.ZipFile(io.BytesIO(source.to_bytes())) as delivered:
+        comment_source = ET.fromstring(delivered.read("word/comments.xml"))
+        chart_refs = list(comment_source.iter("{http://schemas.openxmlformats.org/drawingml/2006/chart}chart"))
+        assert len(chart_refs) == 1
+        assert chart_refs[0].get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id") == "rIdChart"
+        assert delivered.read("word/charts/commentChart.xml") == chart
+    destination = rdocx.Document()
+    destination.add_paragraph("destination")
+    destination.add_footnote(destination.paragraphs[0], "destination footnote")
+    destination.add_endnote(destination.paragraphs[0], "destination endnote")
+    destination.add_comment_on_text("destination", author="Dest", text="keep")
+    ids = b'<w16cid:commentsIds xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"/>'
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(destination.to_bytes())) as old, zipfile.ZipFile(output, "w") as new:
+        for entry in old.infolist():
+            data = old.read(entry.filename)
+            if entry.filename == "[Content_Types].xml":
+                root = ET.fromstring(data)
+                ET.SubElement(root, f"{{{ct_ns}}}Override", PartName="/word/commentsIds.xml", ContentType="application/vnd.ms-word.commentsIds+xml")
+                data = ET.tostring(root)
+            elif entry.filename == "word/_rels/document.xml.rels":
+                root = ET.fromstring(data)
+                ET.SubElement(root, f"{{{rel_ns}}}Relationship", Id="rIdIds", Type="http://schemas.microsoft.com/office/2016/09/relationships/commentsIds", Target="commentsIds.xml")
+                data = ET.tostring(root)
+            new.writestr(entry, data)
+        new.writestr("word/commentsIds.xml", ids)
+    destination = rdocx.Document.from_bytes(output.getvalue())
+    destination.insert_document(source, at=1)
+    reopened = rdocx.Document.from_bytes(destination.to_bytes())
+    assert [c.text for c in reopened.comments] == ["keep", "root", "reply"]
+    imported = next(c for c in reopened.comments if c.author == "Reply")
+    assert imported.initials == "R"
+    assert imported.parent_id == next(c.id for c in reopened.comments if c.author == "Source")
+    with zipfile.ZipFile(io.BytesIO(reopened.to_bytes())) as package:
+        assert package.read("word/commentsIds.xml") == ids
+        assert b"source footnote" in package.read("word/footnotes.xml")
+        assert b"source endnote" in package.read("word/endnotes.xml")
+        assert b"destination footnote" in package.read("word/footnotes.xml")
+        assert b"destination endnote" in package.read("word/endnotes.xml")
+        assert len([name for name in package.namelist() if name.endswith("commentsIds.xml")]) == 1
+        charts = [name for name in package.namelist() if name.endswith(".xml") and package.read(name) == chart]
+        assert len(charts) == 1
+        rel_path = posixpath.join(posixpath.dirname(charts[0]), "_rels", posixpath.basename(charts[0]) + ".rels")
+        relationships = ET.fromstring(package.read(rel_path))
+        target = next(r.attrib["Target"] for r in relationships if r.attrib["Type"].endswith("/image"))
+        image_path = posixpath.normpath(posixpath.join(posixpath.dirname(charts[0]), target)).lstrip("/")
+        assert package.read(image_path) == image
+        unused_target = next(r.attrib["Target"] for r in relationships if r.attrib["Id"] == "rIdUnused")
+        unused_path = posixpath.normpath(posixpath.join(posixpath.dirname(charts[0]), unused_target)).lstrip("/")
+        assert package.read(unused_path) == unused_image
+
+
+def test_issue434_existing_reply_survives_selected_text_compare():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("thirty days")
+    root = original.add_comment_on_text("thirty", author="Ada", text="root")
+    reply = original.reply_to(root, author="Ben", initials="B", text="reply")
+    edited = rdocx.Document.from_bytes(original.to_bytes())
+    edited.paragraphs[0].runs[0].text = "sixty"
+    original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity="word")
+    tracked = original.to_bytes()
+    for accept in (False, True):
+        resolved = rdocx.Document.from_bytes(tracked)
+        getattr(resolved, "accept_revisions_by_author" if accept else "reject_revisions_by_author")("Reviewer")
+        selected = next(c for c in resolved.comments if c.id == reply)
+        assert selected.parent_id == root and selected.initials == "B"
+        assert selected.anchor_text == ("sixty" if accept else "thirty")
+
+
+@pytest.mark.parametrize("whitespace", [False, True])
+def test_issue434_peer1_reply_keeps_ignored_body_and_header(whitespace):
+    import rdocx
+    import xml.etree.ElementTree as ET
+
+    original = rdocx.Document()
+    original.add_paragraph("thirty days")
+    original = _fx261_replace_part(original, "word/document.xml", lambda data: data.replace(b"<w:r>", b"<w:r><w:rPr><w:b/></w:rPr>", 1))
+    original.set_header("stable header")
+    root = original.add_comment_on_text("thirty", author="Ada", text="root")
+    edited = rdocx.Document.from_bytes(original.to_bytes())
+    reply = edited.reply_to(root, author="Ben", initials="B", text="reply")
+    transform = (lambda data: data.replace(b" days", b"   days")) if whitespace else (lambda data: data.replace(b"<w:b/>", b"<w:i/>"))
+    edited = _fx261_replace_part(edited, "word/document.xml", transform)
+    if whitespace:
+        edited = _fx261_replace_part(edited, "word/header1.xml", lambda data: data.replace(b"stable header", b"stable   header"))
+    original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", ignore_formatting=not whitespace, ignore_whitespace=whitespace)
+    assert len(original.revisions) == 1
+    pending = original.to_bytes()
+    for accept in (False, True):
+        resolved = rdocx.Document.from_bytes(pending)
+        getattr(resolved, "accept_revisions_by_author" if accept else "reject_revisions_by_author")("Reviewer")
+        assert resolved.paragraphs[0].text == "thirty days"
+        assert len(resolved.comments) == (2 if accept else 1)
+        assert resolved.comments[0].anchor_text == "thirty"
+        if accept:
+            assert next(comment for comment in resolved.comments if comment.id == reply).parent_id == root
+        with zipfile.ZipFile(io.BytesIO(resolved.to_bytes())) as package:
+            main = package.read("word/document.xml")
+            assert b"<w:b/>" in main and b"<w:i/>" not in main
+            header = ET.fromstring(package.read("word/header1.xml"))
+            assert "".join(header.itertext()) == "stable header"
+
+
+def test_issue434_peer1_insert_font_reaches_row_and_cell_controls():
+    import rdocx
+    import xml.etree.ElementTree as ET
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    paragraph = "<w:p><w:r><w:t>source_control</w:t></w:r></w:p>"
+    cell = f"<w:tc>{paragraph}</w:tc>"
+    control = lambda content: f"<w:sdt><w:sdtPr/><w:sdtContent>{content}</w:sdtContent></w:sdt>"
+    for rows in (control(f"<w:tr>{cell}</w:tr>"), f"<w:tr>{control(cell)}</w:tr>"):
+        for normal in (False, True):
+            source = rdocx.Document()
+            body = f'<w:document xmlns:w="{w}"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid>{rows}</w:tbl></w:body></w:document>'.encode()
+            source = _fx261_replace_part(source, "word/document.xml", lambda _: body)
+            rpr = '<w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="22"/></w:rPr>' if normal else ""
+            styles = f'<w:styles xmlns:w="{w}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="28"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{rpr}</w:style></w:styles>'.encode()
+            source = _fx261_replace_part(source, "word/styles.xml", lambda _: styles)
+            assert source.default_font_name == "Georgia"
+            destination = rdocx.Document()
+            destination.add_paragraph("destination")
+            before_name, before_size = destination.default_font_name, destination.default_font_size
+            destination.insert_document(source, at=1)
+            reopened = rdocx.Document.from_bytes(destination.to_bytes())
+            assert (reopened.default_font_name, reopened.default_font_size) == (before_name, before_size)
+            with zipfile.ZipFile(io.BytesIO(reopened.to_bytes())) as package:
+                main = ET.fromstring(package.read("word/document.xml"))
+                saved_styles = ET.fromstring(package.read("word/styles.xml"))
+                selected = next(p for p in main.iter(f"{{{w}}}p") if "".join(p.itertext()) == "source_control")
+                pstyle = selected.find(f"{{{w}}}pPr/{{{w}}}pStyle")
+                style = next(s for s in saved_styles.findall(f"{{{w}}}style") if s.get(f"{{{w}}}styleId") == pstyle.get(f"{{{w}}}val"))
+                run = selected.find(f"{{{w}}}r")
+                direct = run.find(f"{{{w}}}rPr")
+                font = None if direct is None else direct.find(f"{{{w}}}rFonts")
+                size = None if direct is None else direct.find(f"{{{w}}}sz")
+                if font is None:
+                    font = style.find(f"{{{w}}}rPr/{{{w}}}rFonts")
+                if size is None:
+                    size = style.find(f"{{{w}}}rPr/{{{w}}}sz")
+                assert font.get(f"{{{w}}}ascii") == "Georgia"
+                assert size.get(f"{{{w}}}val") == ("22" if normal else "28")
+
+
+@pytest.mark.parametrize("granularity", ["run", "word", "character"])
+@pytest.mark.parametrize("text", ["plain", "", " "])
+def test_issue434_protected_coalescing_keeps_format_admission_atomic(granularity, text):
+    import rdocx
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    revision = '<w:ins w:id="9" w:author="Old" w:date="2026-11-05T10:00:00Z"><w:r><w:t>old</w:t></w:r></w:ins>'
+    def document(runs):
+        source = rdocx.Document()
+        payload = f'<w:document xmlns:w="{w}"><w:body><w:p>{revision}{runs}</w:p></w:body></w:document>'.encode()
+        return _fx261_replace_part(source, "word/document.xml", lambda _: payload)
+    for ignore_formatting in (True, False):
+        original = document('<w:r><w:rPr><w:b/></w:rPr><w:t>invoice</w:t></w:r>')
+        split = document('<w:r><w:rPr><w:b/></w:rPr><w:t>invoi</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ce</w:t></w:r>')
+        before = original.to_bytes()
+        held, held_run = original.paragraphs[0], original.paragraphs[0].runs[0]
+        held_value, run_value = held.text, held_run.text
+        assert original.compare(split, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_formatting=ignore_formatting) == ()
+        assert original.to_bytes() == before
+        assert held.text == held_value and held_run.text == run_value
+        for left, right in (("b", "i"), ("i", "b")):
+            for ignore_whitespace in (False, True):
+                run = lambda style: f'<w:r><w:rPr><w:{style}/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>'
+                original, edited = document(run(left)), document(run(right))
+                before = original.to_bytes()
+                held, held_run = original.paragraphs[0], original.paragraphs[0].runs[0]
+                held_value, run_value = held.text, held_run.text
+                with pytest.raises(rdocx.RdocxError, match=r"body/paragraph\[0\].*existing tracked revision"):
+                    original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_formatting=ignore_formatting, ignore_whitespace=ignore_whitespace)
+                assert original.to_bytes() == before
+                assert held.text == held_value and held_run.text == run_value
+                assert len(original.revisions) == 1 and original.revisions[0].author == "Old"
+
+
+@pytest.mark.parametrize("granularity", ["run", "word", "character"])
+def test_issue434_protected_whitespace_refuses_but_ordinary_ignore_stays(granularity):
+    import rdocx
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    revision = '<w:ins w:id="9" w:author="Old" w:date="2026-11-05T10:00:00Z"><w:r><w:t>old</w:t></w:r></w:ins>'
+    def document(text, protected):
+        source = rdocx.Document()
+        prior = revision if protected else ""
+        payload = f'<w:document xmlns:w="{w}"><w:body><w:p>{prior}<w:r><w:rPr><w:b/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:body></w:document>'.encode()
+        return _fx261_replace_part(source, "word/document.xml", lambda _: payload)
+    original, edited = document("plain words", False), document("plain   words", False)
+    before = original.to_bytes()
+    held, held_run = original.paragraphs[0], original.paragraphs[0].runs[0]
+    assert original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_whitespace=True) == ()
+    assert original.to_bytes() == before
+    assert held.text == held_run.text == "plain words"
+    for reverse in (False, True):
+        left, right = ("plain   words", "plain words") if reverse else ("plain words", "plain   words")
+        original, edited = document(left, True), document(right, True)
+        before = original.to_bytes()
+        held, held_run = original.paragraphs[0], original.paragraphs[0].runs[0]
+        held_value, run_value = held.text, held_run.text
+        with pytest.raises(rdocx.RdocxError, match=r"body/paragraph\[0\].*existing tracked revision"):
+            original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_whitespace=True)
+        assert original.to_bytes() == before
+        assert held.text == held_value and held_run.text == run_value
+        assert len(original.revisions) == 1
+
+
+@pytest.mark.parametrize("owner", ["paragraph", "table", "control"])
+def test_issue434_reply_snapshot_respects_the_whole_held_owner(owner):
+    import rdocx
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    revision = '<w:ins w:id="9" w:author="Old" w:date="2026-11-05T10:00:00Z"><w:r><w:t>old</w:t></w:r></w:ins>'
+    target = '<w:p><w:r><w:t>target</w:t></w:r></w:p>'
+    held = f"<w:p>{revision}</w:p>"
+    def wrap(inner):
+        if owner == "table":
+            return f'<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid><w:tr><w:tc>{inner}</w:tc></w:tr></w:tbl>'
+        if owner == "control":
+            return f"<w:sdt><w:sdtPr/><w:sdtContent>{inner}</w:sdtContent></w:sdt>"
+        return inner
+    for unrelated in (True, False):
+        if unrelated:
+            body = target + wrap(held)
+        elif owner == "paragraph":
+            body = f"<w:p><w:r><w:t>target</w:t></w:r>{revision}</w:p>"
+        else:
+            body = wrap(target + held)
+        body += "<w:p><w:r><w:t>observer</w:t></w:r></w:p>"
+        seed = rdocx.Document()
+        payload = f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>'.encode()
+        original = _fx261_replace_part(seed, "word/document.xml", lambda _: payload)
+        root = original.add_comment_on_text("target", author="Ada", text="root")
+        before = original.to_bytes()
+        edited = rdocx.Document.from_bytes(before)
+        reply = edited.reply_to(root, author="Ben", initials="B", text="reply")
+        observer, observer_run = original.paragraphs[-1], original.paragraphs[-1].runs[0]
+        if unrelated:
+            original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z")
+            pending = original.to_bytes()
+            for accept in (False, True):
+                resolved = rdocx.Document.from_bytes(pending)
+                getattr(resolved, "accept_revisions_by_author" if accept else "reject_revisions_by_author")("Reviewer")
+                assert len(resolved.comments) == (2 if accept else 1)
+                assert len(resolved.revisions) == 1 and resolved.revisions[0].author == "Old"
+                if accept:
+                    assert next(comment for comment in resolved.comments if comment.id == reply).anchor_text == "target"
+                with zipfile.ZipFile(io.BytesIO(resolved.to_bytes())) as package:
+                    assert revision.encode() in package.read("word/document.xml")
+        else:
+            with pytest.raises(rdocx.RdocxError, match=r"body/.*existing tracked revision"):
+                original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z")
+            assert original.to_bytes() == before
+            assert observer.text == observer_run.text == "observer"
+            assert len(original.comments) == 1 and original.comments[0].anchor_text == "target"
+            assert len(original.revisions) == 1 and original.revisions[0].author == "Old"
+
+
+@pytest.mark.parametrize("owner", ["paragraph", "table", "control"])
+@pytest.mark.parametrize("granularity", ["run", "word", "character"])
+def test_issue434_coalesced_held_container_preserves_equal_partitions(owner, granularity):
+    import rdocx
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    revision = '<w:ins w:id="9" w:author="Old" w:date="2026-11-05T10:00:00Z"><w:r><w:t>old</w:t></w:r></w:ins>'
+    def document(runs):
+        if owner == "paragraph":
+            body = f"<w:p>{revision}{runs}</w:p>"
+        else:
+            children = f"<w:p>{revision}</w:p><w:p>{runs}</w:p>"
+            body = (f'<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid><w:tr><w:tc>{children}</w:tc></w:tr></w:tbl>' if owner == "table" else f"<w:sdt><w:sdtPr/><w:sdtContent>{children}</w:sdtContent></w:sdt>")
+        body += "<w:p><w:r><w:t>observer</w:t></w:r></w:p>"
+        payload = f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>'.encode()
+        return _fx261_replace_part(rdocx.Document(), "word/document.xml", lambda _: payload)
+    original_run = '<w:r><w:rPr><w:b/></w:rPr><w:t>invoice</w:t></w:r>'
+    split = '<w:r><w:rPr><w:b/></w:rPr><w:t>invoi</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ce</w:t></w:r>'
+    for ignore_formatting in (False, True):
+        original, edited = document(original_run), document(split)
+        before = original.to_bytes()
+        held, run = original.paragraphs[-1], original.paragraphs[-1].runs[0]
+        assert original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_formatting=ignore_formatting) == ()
+        assert original.to_bytes() == before
+        assert held.text == run.text == "observer"
+        assert len(original.revisions) == 1 and original.revisions[0].author == "Old"
+        for changed in (split.replace("invoi", "recei").replace(">ce<", ">pt<"), split.replace("<w:b/>", "<w:i/>")):
+            original, edited = document(original_run), document(changed)
+            before = original.to_bytes()
+            held, run = original.paragraphs[-1], original.paragraphs[-1].runs[0]
+            with pytest.raises(rdocx.RdocxError, match=r"body/.*existing tracked revision"):
+                original.compare(edited, "Reviewer", "2026-11-06T10:00:00Z", granularity=granularity, ignore_formatting=ignore_formatting)
+            assert original.to_bytes() == before and held.text == run.text == "observer"

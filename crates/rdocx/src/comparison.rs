@@ -903,6 +903,215 @@ fn pair_moves(
     Ok(pairs)
 }
 
+/// Enforce the same whole-owner law on the authored reply-copy producer.
+fn refuse_changed_reply_held_owners(
+    original: &Document,
+    replay: &Document,
+    stories: &[StoryPart],
+) -> Result<()> {
+    fn inner(
+        left: &str,
+        right: &str,
+        left_bindings: &NamespaceBindings,
+        right_bindings: &NamespaceBindings,
+        location: &str,
+    ) -> Result<()> {
+        let left_spans = story_content_spans(left, left_bindings)?;
+        let right_spans = story_content_spans(right, right_bindings)?;
+        let held_left = HeldRevisions::of(left, &left_spans, left_bindings, true)?;
+        let held_right = HeldRevisions::of(right, &right_spans, right_bindings, true)?;
+        if !held_left
+            .owners
+            .iter()
+            .chain(&held_right.owners)
+            .any(|held| *held)
+            && !held_left.section
+            && !held_right.section
+        {
+            return Ok(());
+        }
+        let left_model = story_document(left, left_bindings)?;
+        let right_model = story_document(right, right_bindings)?;
+        if left_spans.len() != left_model.body.content.len()
+            || right_spans.len() != right_model.body.content.len()
+        {
+            return Err(Error::Other(format!(
+                "comparison could not correlate held reply owners at {location}"
+            )));
+        }
+        for index in 0..held_left.owners.len().max(held_right.owners.len()) {
+            if !held_left.holds(Some(index)) && !held_right.holds(Some(index)) {
+                continue;
+            }
+            let left_owner = left_model.body.content.get(index);
+            let right_owner = right_model.body.content.get(index);
+            // The replay changes only the selected graph. Unrelated held
+            // owners must retain their actual typed content and residual.
+            if left_owner
+                .zip(right_owner)
+                .is_some_and(|(left, right)| left == right)
+                && held_left.same_owner_source(index, &held_right, index)
+            {
+                continue;
+            }
+            let owner_location = left_owner.or(right_owner).map_or_else(
+                || format!("{location}/owner[{index}]"),
+                |owner| body_location(location, owner, index),
+            );
+            return Err(Error::Other(format!(
+                "comparison cannot change {owner_location}, which holds an existing tracked revision: the reply graph changes it"
+            )));
+        }
+        if (held_left.section || held_right.section)
+            && (left_model.body.sect_pr != right_model.body.sect_pr
+                || !held_left
+                    .section_source
+                    .as_ref()
+                    .zip(held_right.section_source.as_ref())
+                    .is_some_and(|(left, right)| left == right))
+        {
+            return Err(Error::Other(format!(
+                "comparison cannot change {location}/section, which holds an existing tracked revision: the reply graph changes it"
+            )));
+        }
+        Ok(())
+    }
+    fn part(left: &[u8], right: &[u8], kind: ComparisonStoryKind, location: &str) -> Result<()> {
+        if left == right {
+            return Ok(());
+        }
+        let left = std::str::from_utf8(left).map_err(utf8_error)?;
+        let right = std::str::from_utf8(right).map_err(utf8_error)?;
+        if kind == ComparisonStoryKind::Main {
+            let (a, a_bindings) = main_body_source(left.as_bytes())?;
+            let (b, b_bindings) = main_body_source(right.as_bytes())?;
+            return inner(&left[a], &right[b], &a_bindings, &b_bindings, location);
+        }
+        let a_bindings = root_namespace_bindings(left, kind.root_local(), &[])?;
+        let b_bindings = root_namespace_bindings(right, kind.root_local(), &[])?;
+        if let Some(local) = kind.owner_local() {
+            let a = direct_word_element_spans(left, local)?;
+            let b = direct_word_element_spans(right, local)?;
+            if a.len() != b.len() {
+                return Err(Error::Other(format!(
+                    "comparison held reply story shell count changed at {location}"
+                )));
+            }
+            for (index, (a, b)) in a.iter().zip(&b).enumerate() {
+                let a = &left[a.clone()];
+                let b = &right[b.clone()];
+                let a_inner = element_inner_range_any_prefix(a, local)?;
+                let b_inner = element_inner_range_any_prefix(b, local)?;
+                let a_context = root_namespace_bindings(a, local, &a_bindings)?;
+                let b_context = root_namespace_bindings(b, local, &b_bindings)?;
+                inner(
+                    &a[a_inner],
+                    &b[b_inner],
+                    &a_context,
+                    &b_context,
+                    &format!("{location}/{local}[{index}]"),
+                )?;
+            }
+            Ok(())
+        } else {
+            let a = root_inner_range(left, kind.root_local())?;
+            let b = root_inner_range(right, kind.root_local())?;
+            inner(&left[a], &right[b], &a_bindings, &b_bindings, location)
+        }
+    }
+    let left = original
+        .package
+        .get_part(&original.doc_part_name)
+        .ok_or_else(|| Error::Other("comparison reply source has no main part".into()))?;
+    let right = replay
+        .package
+        .get_part(&replay.doc_part_name)
+        .ok_or_else(|| Error::Other("comparison reply replay has no main part".into()))?;
+    part(left, right, ComparisonStoryKind::Main, "body")?;
+    for story in stories {
+        part(
+            story_xml(original, story)?,
+            story_xml(replay, story)?,
+            story.kind,
+            &format!("{}:{}", story.kind.label(), story.part_name),
+        )?;
+    }
+    Ok(())
+}
+
+/// Prove a graph-only reply addition through the existing authoring owner.
+/// Replaying on a staged original includes its required parent paraId and MC
+/// preparation, without inventing another metadata-normalization policy.
+fn crossing_reply_additions(
+    original: &Document,
+    edited: &Document,
+    options: &ComparisonOptions,
+) -> Result<Option<(Vec<i32>, Document)>> {
+    let old = original.comments();
+    let new = edited.comments();
+    let added = new
+        .iter()
+        .filter(|comment| !old.iter().any(|old| old.id() == comment.id()))
+        .collect::<Vec<_>>();
+    if added.is_empty()
+        || old
+            .iter()
+            .any(|comment| !new.iter().any(|new| new.id() == comment.id()))
+    {
+        return Ok(None);
+    }
+    let mut replay = original.clone_for_staging();
+    for comment in &added {
+        let (Some(parent), Some(author)) = (comment.parent_id(), comment.author()) else {
+            return Ok(None);
+        };
+        let id = match replay.reply_to_with_initials(
+            parent,
+            author,
+            comment.initials(),
+            &comment.text(),
+            comment.date(),
+        ) {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+        if id != comment.id() {
+            return Ok(None);
+        }
+    }
+    let replay = comparison_input(&replay)?;
+    let replay_comments = comment_snapshot(&replay)?;
+    let edited_comments = comment_snapshot(edited)?;
+    if !comment_snapshots_match(&replay_comments, &edited_comments)?
+        || !extended_comment_snapshots_match(&replay_comments, &edited_comments)
+        || !comment_package_links_match(&replay_comments, &edited_comments)
+    {
+        return Ok(None);
+    }
+    let stories = story_parts_with_options(&replay, options)?
+        .into_iter()
+        .filter(|story| story.kind != ComparisonStoryKind::Comment)
+        .collect::<Vec<_>>();
+    let other_stories = story_parts_with_options(edited, options)?
+        .into_iter()
+        .filter(|story| story.kind != ComparisonStoryKind::Comment)
+        .collect::<Vec<_>>();
+    if stories != other_stories {
+        return Ok(None);
+    }
+    let markers = comparison_text_box_markers(&replay, edited, &stories, options)?;
+    if normalized_package(&replay, &stories, options, &markers)?
+        != normalized_package(edited, &other_stories, options, &markers)?
+    {
+        return Ok(None);
+    }
+    refuse_changed_reply_held_owners(original, &replay, &stories)?;
+    Ok(Some((
+        added.into_iter().map(|comment| comment.id()).collect(),
+        replay,
+    )))
+}
+
 impl Document {
     /// Compare every supported Word story with `edited` and record tracked changes.
     pub fn compare(
@@ -1057,6 +1266,22 @@ impl Document {
                 }
             }
         }
+        let added_reply_ids = if snapshot_comments
+            && !options.ignore_comments
+            && !story_ignored(options, ComparisonStoryKind::Main)
+        {
+            if let Some((ids, replay)) = crossing_reply_additions(&original, &edited, options)? {
+                // This is the actual original-plus-reply producer. Using its
+                // models and Sources together preserves every ignored value,
+                // while keeping the newly authored crossing graph.
+                edited = replay;
+                ids
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         if snapshot_comments {
             original_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
             edited_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
@@ -1142,7 +1367,9 @@ impl Document {
         metadata.ids.local_word_binding =
             foreign_word_binding(original_xml)? || foreign_word_binding(edited_xml)?;
         let mut diagnostics = Vec::new();
-        let tracked_body = if story_ignored(options, ComparisonStoryKind::Main) {
+        let tracked_body = if !added_reply_ids.is_empty() {
+            extract_body_inner(edited_xml)?.to_owned()
+        } else if story_ignored(options, ComparisonStoryKind::Main) {
             extract_body_inner(original_xml)?.to_owned()
         } else if story_ignored(options, ComparisonStoryKind::TextBox) {
             let original_source = std::str::from_utf8(original_xml).map_err(utf8_error)?;
@@ -1181,10 +1408,14 @@ impl Document {
                 original_body,
                 &original_spans,
                 &original_bindings,
-                &metadata,
+                metadata.existing_revisions,
             )?;
-            let held_edited =
-                HeldRevisions::of(edited_body, &edited_spans, &edited_bindings, &metadata)?;
+            let held_edited = HeldRevisions::of(
+                edited_body,
+                &edited_spans,
+                &edited_bindings,
+                metadata.existing_revisions,
+            )?;
             compare_body(
                 [&original_document, &edited_document],
                 "body",
@@ -1219,13 +1450,17 @@ impl Document {
             .package
             .set_part(&candidate.doc_part_name, tracked_xml);
         for story in &original_stories {
-            let tracked_story = compare_story_part(
-                story_xml(&original, story)?,
-                story_xml(&edited, story)?,
-                story,
-                &mut metadata,
-                &mut diagnostics,
-            )?;
+            let tracked_story = if !added_reply_ids.is_empty() {
+                story_xml(&edited, story)?.to_vec()
+            } else {
+                compare_story_part(
+                    story_xml(&original, story)?,
+                    story_xml(&edited, story)?,
+                    story,
+                    &mut metadata,
+                    &mut diagnostics,
+                )?
+            };
             candidate.package.set_part(&story.part_name, tracked_story);
         }
         compare_footnote_parts(
@@ -1246,6 +1481,7 @@ impl Document {
                 "timestamp": timestamp,
                 "id": revision_id,
                 "original": original_comments,
+                "added_reply_ids": added_reply_ids,
             }))
             .map_err(|error| Error::Other(error.to_string()))?;
             candidate.package.set_part(
@@ -2662,8 +2898,18 @@ fn compare_story_inner_impl(
             "comparison could not correlate related-story owners at {location}"
         )));
     }
-    let held_original = HeldRevisions::of(original, &original_spans, original_bindings, metadata)?;
-    let held_edited = HeldRevisions::of(edited, &edited_spans, edited_bindings, metadata)?;
+    let held_original = HeldRevisions::of(
+        original,
+        &original_spans,
+        original_bindings,
+        metadata.existing_revisions,
+    )?;
+    let held_edited = HeldRevisions::of(
+        edited,
+        &edited_spans,
+        edited_bindings,
+        metadata.existing_revisions,
+    )?;
     compare_body(
         [&original_document, &edited_document],
         location,
@@ -3090,9 +3336,9 @@ impl HeldRevisions {
         inner: &str,
         spans: &[Range<usize>],
         bindings: &[(String, String)],
-        metadata: &Metadata<'_>,
+        existing_revisions: bool,
     ) -> Result<Self> {
-        if !metadata.existing_revisions {
+        if !existing_revisions {
             return Ok(Self::default());
         }
         let (xml, offset) = story_wrapper(inner, bindings)?;
@@ -3129,6 +3375,20 @@ impl HeldRevisions {
             }
         }
         Ok(held)
+    }
+
+    /// Both actual owning residuals must exist and agree.
+    fn same_owner_source(&self, index: usize, other: &Self, other_index: usize) -> bool {
+        self.source_metadata
+            .get(index)
+            .and_then(Option::as_ref)
+            .zip(
+                other
+                    .source_metadata
+                    .get(other_index)
+                    .and_then(Option::as_ref),
+            )
+            .is_some_and(|(left, right)| left == right)
     }
 
     fn holds(&self, index: Option<usize>) -> bool {
@@ -7707,6 +7967,7 @@ fn guard_source_body_at(
     location: &str,
     coordinates: Option<SourceCoordinates>,
 ) -> Result<Vec<GuardItem>> {
+    let ordinary_part = coordinates.is_some();
     #[cfg(test)]
     let _diagnostic_scope = PolicyDiagnosticScope::enter("guard_source_body", owner);
     #[cfg(test)]
@@ -7786,7 +8047,12 @@ fn guard_source_body_at(
     if options.ignore_formatting {
         cleaned = inspection;
     }
-    let content = project_source_body(&cleaned, source, bindings, options, postcondition_body)?;
+    let projection = if ordinary_part {
+        coalesced_postcondition_body
+    } else {
+        postcondition_body
+    };
+    let content = project_source_body(&cleaned, source, bindings, options, projection)?;
     Ok(content
         .into_iter()
         .enumerate()
@@ -10312,6 +10578,12 @@ impl Metadata<'_> {
             .find_map(|frame| frame.paragraphs.get(&(paragraph as *const CT_P as usize)))
             .map(String::as_str)
     }
+    fn field_source_facts(&self, field: &rdocx_oxml::text::Field) -> Option<&Vec<String>> {
+        self.source_frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.fields.get(&(std::ptr::from_ref(field) as usize)))
+    }
     fn run_source(&self, run: &CT_R) -> Option<&RunSource> {
         self.source_frames
             .iter()
@@ -10482,6 +10754,9 @@ fn compare_body_impl(
         }
         Ok(())
     };
+    // The protected-owner exception admits only actual equal content and
+    // formatting. Caller ignore policies still govern ordinary comparison.
+    let protected_equality_options = ComparisonOptions::default();
     let mut output: Vec<(EmittedOwner, String)> = Vec::new();
     let mut trailing_merged = PropertySide::default();
     let mut owner_leaves = Vec::new();
@@ -10506,18 +10781,29 @@ fn compare_body_impl(
                 let original_content = &original.body.content[left];
                 let edited_content = &edited.body.content[right];
                 let protected = held_original.holds(Some(left)) || held_edited.holds(Some(right));
-                let same_source = held_original
-                    .source_metadata
-                    .get(left)
-                    .and_then(Option::as_ref)
-                    .zip(
-                        held_edited
-                            .source_metadata
-                            .get(right)
-                            .and_then(Option::as_ref),
-                    )
-                    .is_some_and(|(original, edited)| original == edited);
-                let equal = original_content == edited_content;
+                let same_source = held_original.same_owner_source(left, held_edited, right);
+                let equal = original_content == edited_content
+                    || !metadata.leaf_capture
+                        && if protected {
+                            coalesced_held_owner_equal(
+                                original_content,
+                                edited_content,
+                                &protected_equality_options,
+                                metadata,
+                            )
+                        } else {
+                            match (original_content, edited_content) {
+                                (BodyContent::Paragraph(left), BodyContent::Paragraph(right)) => {
+                                    coalesced_paragraphs_equal(
+                                        left,
+                                        right,
+                                        metadata.options,
+                                        metadata,
+                                    )
+                                }
+                                _ => false,
+                            }
+                        };
                 let needs_field_dispatch = equal
                     && !(protected && same_source)
                     && SourceMetadata::body(
@@ -12920,6 +13206,328 @@ fn inserted_body_content(content: &BodyContent, metadata: &mut Metadata<'_>) -> 
     }
 }
 
+fn coalescible_plain_run(run: &CT_R) -> bool {
+    !run.content.is_empty()
+        && run.extra_xml.is_empty()
+        && run.alt_drawings.is_empty()
+        && run.content.iter().all(|content| {
+            matches!(
+                content,
+                RunContent::Text(_) | RunContent::Tab | RunContent::Break(_)
+            )
+        })
+}
+
+fn coalesced_paragraph_signature(paragraph: &CT_P, options: &ComparisonOptions) -> String {
+    let scalar = ComparisonOptions {
+        granularity: ComparisonGranularity::Character,
+        ..options.clone()
+    };
+    let mut properties = Vec::<(Option<&rdocx_oxml::properties::CT_RPr>, usize)>::new();
+    if !options.ignore_formatting {
+        for run in paragraph
+            .runs
+            .iter()
+            .filter(|run| coalescible_plain_run(run))
+        {
+            let width = run
+                .content
+                .iter()
+                .map(|content| match content {
+                    RunContent::Text(text) => text
+                        .text
+                        .chars()
+                        .filter(|character| {
+                            !options.ignore_whitespace || !character.is_whitespace()
+                        })
+                        .count(),
+                    _ => 1,
+                })
+                .sum::<usize>();
+            // Empty text and ignored whitespace still carry a real format.
+            let current = run.properties.as_ref();
+            if let Some((previous, count)) = properties.last_mut()
+                && *previous == current
+            {
+                *count += width;
+            } else {
+                properties.push((current, width));
+            }
+        }
+    }
+    format!(
+        "{}:{properties:?}",
+        paragraph_signature_with_options(paragraph, &scalar)
+    )
+}
+
+/// Compare complete protected owners, coalescing only their actual paragraph
+/// leaves. Shell clones are equality-only and never become source lookups or
+/// publications, so private control state remains part of the proof.
+fn coalesced_held_owner_equal(
+    left: &BodyContent,
+    right: &BodyContent,
+    options: &ComparisonOptions,
+    metadata: &Metadata<'_>,
+) -> bool {
+    fn controls(
+        left: &[(usize, usize, CT_Sdt)],
+        right: &[(usize, usize, CT_Sdt)],
+        options: &ComparisonOptions,
+        metadata: &Metadata<'_>,
+    ) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|((a, before_a, left), (b, before_b, right))| {
+                    a == b && before_a == before_b && control(left, right, options, metadata)
+                })
+    }
+    fn table(
+        left: &CT_Tbl,
+        right: &CT_Tbl,
+        options: &ComparisonOptions,
+        metadata: &Metadata<'_>,
+    ) -> bool {
+        if left.rows.len() != right.rows.len()
+            || left.content_controls.len() != right.content_controls.len()
+        {
+            return false;
+        }
+        let mut a = left.clone();
+        let mut b = right.clone();
+        a.rows.clear();
+        b.rows.clear();
+        a.content_controls.clear();
+        b.content_controls.clear();
+        a == b
+            && left
+                .rows
+                .iter()
+                .zip(&right.rows)
+                .all(|(left, right)| row(left, right, options, metadata))
+            && controls(
+                &left.content_controls,
+                &right.content_controls,
+                options,
+                metadata,
+            )
+    }
+    fn row(
+        left: &CT_Row,
+        right: &CT_Row,
+        options: &ComparisonOptions,
+        metadata: &Metadata<'_>,
+    ) -> bool {
+        if left.cells.len() != right.cells.len()
+            || left.content_controls.len() != right.content_controls.len()
+        {
+            return false;
+        }
+        let mut a = left.clone();
+        let mut b = right.clone();
+        a.cells.clear();
+        b.cells.clear();
+        a.content_controls.clear();
+        b.content_controls.clear();
+        a == b
+            && left
+                .cells
+                .iter()
+                .zip(&right.cells)
+                .all(|(left, right)| cell(left, right, options, metadata))
+            && controls(
+                &left.content_controls,
+                &right.content_controls,
+                options,
+                metadata,
+            )
+    }
+    fn cell(
+        left: &CT_Tc,
+        right: &CT_Tc,
+        options: &ComparisonOptions,
+        metadata: &Metadata<'_>,
+    ) -> bool {
+        if left.content.len() != right.content.len() {
+            return false;
+        }
+        let mut a = left.clone();
+        let mut b = right.clone();
+        a.content.clear();
+        b.content.clear();
+        a == b
+            && left
+                .content
+                .iter()
+                .zip(&right.content)
+                .all(|(left, right)| match (left, right) {
+                    (CellContent::Paragraph(left), CellContent::Paragraph(right)) => {
+                        coalesced_paragraphs_equal(left, right, options, metadata)
+                    }
+                    (CellContent::Table(left), CellContent::Table(right)) => {
+                        table(left, right, options, metadata)
+                    }
+                    (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
+                        control(left, right, options, metadata)
+                    }
+                    _ => false,
+                })
+    }
+    fn control(
+        left: &CT_Sdt,
+        right: &CT_Sdt,
+        options: &ComparisonOptions,
+        metadata: &Metadata<'_>,
+    ) -> bool {
+        if left.content.len() != right.content.len() {
+            return false;
+        }
+        let mut a = left.clone();
+        let mut b = right.clone();
+        a.content.clear();
+        b.content.clear();
+        a == b
+            && left
+                .content
+                .iter()
+                .zip(&right.content)
+                .all(|(left, right)| match (left, right) {
+                    (SdtContent::Paragraph(left), SdtContent::Paragraph(right)) => {
+                        coalesced_paragraphs_equal(left, right, options, metadata)
+                    }
+                    (SdtContent::Table(left), SdtContent::Table(right)) => {
+                        table(left, right, options, metadata)
+                    }
+                    (SdtContent::Row(left), SdtContent::Row(right)) => {
+                        row(left, right, options, metadata)
+                    }
+                    (SdtContent::Cell(left), SdtContent::Cell(right)) => {
+                        cell(left, right, options, metadata)
+                    }
+                    (SdtContent::ContentControl(left), SdtContent::ContentControl(right)) => {
+                        control(left, right, options, metadata)
+                    }
+                    _ => left == right,
+                })
+    }
+    match (left, right) {
+        (BodyContent::Paragraph(left), BodyContent::Paragraph(right)) => {
+            coalesced_paragraphs_equal(left, right, options, metadata)
+        }
+        (BodyContent::Table(left), BodyContent::Table(right)) => {
+            table(left, right, options, metadata)
+        }
+        (BodyContent::ContentControl(left), BodyContent::ContentControl(right)) => {
+            control(left, right, options, metadata)
+        }
+        _ => left == right,
+    }
+}
+
+fn coalesced_paragraphs_equal(
+    original: &CT_P,
+    edited: &CT_P,
+    options: &ComparisonOptions,
+    metadata: &Metadata<'_>,
+) -> bool {
+    // A drawing signature deliberately omits its nested Word body. Atomic
+    // barriers must remain equal in full, so their own publishers still run.
+    if !original
+        .runs
+        .iter()
+        .filter(|run| !coalescible_plain_run(run))
+        .eq(edited.runs.iter().filter(|run| !coalescible_plain_run(run)))
+    {
+        return false;
+    }
+    let original_fields = original
+        .runs
+        .iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| {
+            if let RunContent::Field(field) = content {
+                Some(field)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let edited_fields = edited
+        .runs
+        .iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| {
+            if let RunContent::Field(field) = content {
+                Some(field)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if original_fields.len() != edited_fields.len()
+        || original_fields
+            .iter()
+            .zip(&edited_fields)
+            .any(|(left, right)| {
+                match (
+                    metadata.field_source_facts(left),
+                    metadata.field_source_facts(right),
+                ) {
+                    (Some(left), Some(right)) => left != right,
+                    _ => true,
+                }
+            })
+    {
+        return false;
+    }
+    if original.content_controls.len() != edited.content_controls.len()
+        || original
+            .content_controls
+            .iter()
+            .zip(&edited.content_controls)
+            .any(|((_, _, _, left), (_, _, _, right))| {
+                match (
+                    metadata.control_source(left),
+                    metadata.control_source(right),
+                ) {
+                    (Some(left), Some(right)) => left != right,
+                    _ => true,
+                }
+            })
+    {
+        return false;
+    }
+
+    let equal_fields = original
+        .runs
+        .iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| {
+            if let RunContent::Field(field) = content {
+                Some((field, field.is_complex()))
+            } else {
+                None
+            }
+        })
+        .eq(edited
+            .runs
+            .iter()
+            .flat_map(|run| &run.content)
+            .filter_map(|content| {
+                if let RunContent::Field(field) = content {
+                    Some((field, field.is_complex()))
+                } else {
+                    None
+                }
+            }));
+    original.properties == edited.properties
+        && equal_fields
+        && coalesced_paragraph_signature(original, options)
+            == coalesced_paragraph_signature(edited, options)
+}
+
 fn compare_paragraph(
     original: &CT_P,
     edited: &CT_P,
@@ -12929,6 +13537,12 @@ fn compare_paragraph(
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
     let leaf_mark = metadata.leaf_publications.len();
+    if !metadata.leaf_capture
+        && coalesced_paragraphs_equal(original, edited, metadata.options, metadata)
+        && let Some(source) = original_source
+    {
+        return Ok(source.to_owned());
+    }
     let output = (|| -> Result<String> {
         #[cfg(test)]
         let _destination_diagnostic_scope =
@@ -13350,27 +13964,61 @@ fn compare_granular_paragraph(
     } else {
         Vec::new()
     };
-    let original_units = attributed_run_units(&original.runs, metadata.options);
-    let edited_units = attributed_run_units(&edited.runs, metadata.options);
+    let mut coalesced_words =
+        !metadata.leaf_capture && metadata.options.granularity == ComparisonGranularity::Word;
+    let unit_options = ComparisonOptions {
+        granularity: if coalesced_words {
+            ComparisonGranularity::Character
+        } else {
+            metadata.options.granularity
+        },
+        ..metadata.options.clone()
+    };
+    let mut original_units = attributed_run_units(&original.runs, &unit_options);
+    let mut edited_units = attributed_run_units(&edited.runs, &unit_options);
     validate_raw_attribution(&original.runs, &original_units)?;
     validate_raw_attribution(&edited.runs, &edited_units)?;
-    let original_signatures = original_units
+    let mut original_signatures = original_units
         .iter()
-        .map(attributed_unit_signature)
+        .map(|unit| {
+            if coalesced_words
+                && metadata.options.ignore_formatting
+                && unit_plain_text(unit).is_some()
+            {
+                run_signature_with_options(&unit.run, metadata.options)
+            } else {
+                attributed_unit_signature(unit)
+            }
+        })
         .collect::<Vec<_>>();
-    let edited_signatures = edited_units
+    let mut edited_signatures = edited_units
         .iter()
-        .map(attributed_unit_signature)
+        .map(|unit| {
+            if coalesced_words
+                && metadata.options.ignore_formatting
+                && unit_plain_text(unit).is_some()
+            {
+                run_signature_with_options(&unit.run, metadata.options)
+            } else {
+                attributed_unit_signature(unit)
+            }
+        })
         .collect::<Vec<_>>();
 
     let properties = paragraph_properties_xml(original, edited, location, metadata, diagnostics)?;
-    let Some(cuts) = shell_unit_cuts(
+    let Some(mut cuts) = shell_unit_cuts(
         &original_units,
         &edited_units,
-        original_boundaries.into_iter().zip(edited_boundaries),
+        original_boundaries
+            .iter()
+            .copied()
+            .zip(edited_boundaries.iter().copied()),
     ) else {
         return Err(boundary_error());
     };
+    // Actual original formatting owner for a paired logical word. This is
+    // independent of every edited scalar's physical content/source owner.
+    let mut word_format_owners = vec![None; edited_units.len()];
     let (aligned, segments) = if let Some(pairs) = &projection_pairs {
         projection_unit_alignment(
             pairs,
@@ -13378,7 +14026,45 @@ fn compare_granular_paragraph(
             [&original_signatures, &edited_signatures],
         )?
     } else {
-        align_between_shells(&original_signatures, &edited_signatures, &cuts)
+        if !metadata.leaf_capture && metadata.options.granularity == ComparisonGranularity::Word {
+            if let Some(alignment) = align_words_between_shells(
+                &original_units,
+                &edited_units,
+                &original_signatures,
+                &edited_signatures,
+                &cuts,
+                metadata.options.ignore_formatting,
+                &mut word_format_owners,
+            ) {
+                alignment
+            } else {
+                coalesced_words = false;
+                word_format_owners.clear();
+                // A barrier paired with text uses the existing whole Word unit,
+                // never a newly invented scalar-to-object correspondence.
+                original_units = attributed_run_units(&original.runs, metadata.options);
+                edited_units = attributed_run_units(&edited.runs, metadata.options);
+                validate_raw_attribution(&original.runs, &original_units)?;
+                validate_raw_attribution(&edited.runs, &edited_units)?;
+                original_signatures = original_units
+                    .iter()
+                    .map(attributed_unit_signature)
+                    .collect();
+                edited_signatures = edited_units.iter().map(attributed_unit_signature).collect();
+                cuts = shell_unit_cuts(
+                    &original_units,
+                    &edited_units,
+                    original_boundaries
+                        .iter()
+                        .copied()
+                        .zip(edited_boundaries.iter().copied()),
+                )
+                .ok_or_else(boundary_error)?;
+                align_between_shells(&original_signatures, &edited_signatures, &cuts)
+            }
+        } else {
+            align_between_shells(&original_signatures, &edited_signatures, &cuts)
+        }
     };
     // The original run each shell segment starts at, before which the
     // redline copies the original bytes, shell tags included.
@@ -13447,6 +14133,24 @@ fn compare_granular_paragraph(
         &original_signatures,
         &edited_signatures,
     );
+    if coalesced_words && metadata.options.ignore_formatting {
+        grouped = grouped
+            .into_iter()
+            .flat_map(|(action, members)| {
+                let mut pieces = Vec::new();
+                let mut start = members.start;
+                let owner = |at: usize| aligned[at].1.and_then(|index| word_format_owners[index]);
+                for at in members.start + 1..members.end {
+                    if owner(at) != owner(start) {
+                        pieces.push((action, start..at));
+                        start = at;
+                    }
+                }
+                pieces.push((action, start..members.end));
+                pieces
+            })
+            .collect();
+    }
     if let Some(pairs) = &projection_pairs {
         retain_projection_separators(
             &mut grouped,
@@ -13470,6 +14174,14 @@ fn compare_granular_paragraph(
     let mut grouped_segment_runs = Vec::with_capacity(grouped.len());
     let mut replacements = Vec::with_capacity(grouped.len());
     let mut fragment_publications = Vec::with_capacity(grouped.len());
+    let mut word_revisions = Vec::<
+        Option<(
+            GranularAction,
+            usize,
+            Option<rdocx_oxml::properties::CT_RPr>,
+            i32,
+        )>,
+    >::with_capacity(grouped.len());
     for (action, members) in grouped {
         if metadata.leaf_capture {
             record_projection_actions(
@@ -13492,6 +14204,40 @@ fn compare_granular_paragraph(
         let right_indices = members
             .filter_map(|index| aligned[index].1)
             .collect::<Vec<_>>();
+        let word_key = if coalesced_words
+            && matches!(action, GranularAction::Delete | GranularAction::Insert)
+        {
+            let (indices, units) = if action == GranularAction::Delete {
+                (&left_indices, &original_units)
+            } else {
+                (&right_indices, &edited_units)
+            };
+            if indices.iter().all(|index| {
+                unit_plain_text(&units[*index]).is_some_and(|text| {
+                    !text.is_empty()
+                        && text
+                            .chars()
+                            .all(|character| character.is_alphanumeric() || character == '_')
+                })
+            }) {
+                Some((
+                    action,
+                    segments[members_start],
+                    if action == GranularAction::Insert && metadata.options.ignore_formatting {
+                        word_format_owners[indices[0]]
+                            .map(|owner| original.runs[owner].properties.clone())
+                            .unwrap_or_else(|| units[indices[0]].run.properties.clone())
+                    } else {
+                        units[indices[0]].run.properties.clone()
+                    },
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut word_revision_id = None;
         let mut left_raw = Vec::new();
         let mut left_typed = Vec::new();
         let mut right_raw = Vec::new();
@@ -13559,6 +14305,22 @@ fn compare_granular_paragraph(
                 Ok((run, source))
             })
             .transpose()?;
+        let policy_shell =
+            if policy_shell.is_none() && coalesced_words && metadata.options.ignore_formatting {
+                right_indices
+                    .first()
+                    .and_then(|index| word_format_owners[*index])
+                    .map(|owner| -> Result<_> {
+                        let run = &original.runs[owner];
+                        let source = metadata.run_source(run).cloned().ok_or_else(|| {
+                            Error::Other("logical word formatting has no actual source".into())
+                        })?;
+                        Ok((run, source))
+                    })
+                    .transpose()?
+            } else {
+                policy_shell
+            };
         let mut field_bindings = Vec::new();
         for (indices, units, originals, cloned, selected) in [
             (
@@ -13634,9 +14396,27 @@ fn compare_granular_paragraph(
                         &revision_parent,
                         metadata,
                     )?;
-                    metadata
-                        .ids
-                        .revision("del", metadata.author, metadata.timestamp, &payload)?
+                    if let Some((kind, segment, properties)) = &word_key {
+                        let id = match word_revisions.last().and_then(Option::as_ref) {
+                            Some((previous_kind, previous_segment, previous_properties, id))
+                                if previous_kind == kind
+                                    && previous_segment == segment
+                                    && previous_properties == properties =>
+                            {
+                                *id
+                            }
+                            _ => metadata.ids.allocate()?,
+                        };
+                        word_revision_id = Some(id);
+                        payload
+                    } else {
+                        metadata.ids.revision(
+                            "del",
+                            metadata.author,
+                            metadata.timestamp,
+                            &payload,
+                        )?
+                    }
                 }
                 GranularAction::Insert => {
                     let mut content = right.as_ref().unwrap().clone();
@@ -13665,15 +14445,38 @@ fn compare_granular_paragraph(
                         &revision_parent,
                         metadata,
                     )?;
-                    metadata
-                        .ids
-                        .revision("ins", metadata.author, metadata.timestamp, &payload)?
+                    if let Some((kind, segment, properties)) = &word_key {
+                        let id = match word_revisions.last().and_then(Option::as_ref) {
+                            Some((previous_kind, previous_segment, previous_properties, id))
+                                if previous_kind == kind
+                                    && previous_segment == segment
+                                    && previous_properties == properties =>
+                            {
+                                *id
+                            }
+                            _ => metadata.ids.allocate()?,
+                        };
+                        word_revision_id = Some(id);
+                        payload
+                    } else {
+                        metadata.ids.revision(
+                            "ins",
+                            metadata.author,
+                            metadata.timestamp,
+                            &payload,
+                        )?
+                    }
                 }
                 GranularAction::Drop => String::new(),
             })
         })();
         metadata.unbind_cloned_control_runs(field_bindings)?;
         replacements.push(replacement?);
+        word_revisions.push(
+            word_key
+                .zip(word_revision_id)
+                .map(|((kind, segment, properties), id)| (kind, segment, properties, id)),
+        );
         let mut leaves = Vec::new();
         if metadata.leaf_capture {
             let selected = match action {
@@ -13721,6 +14524,42 @@ fn compare_granular_paragraph(
             "actual_xml":replacements.last(),"recorded_leaves":leaves.iter().map(occurrence_leaf_diagnostic).collect::<Vec<_>>() }),
         );
         fragment_publications.push(leaves);
+    }
+    // Payloads retain their separate physical owners and source publication.
+    // Only the enclosing generated revision is shared by adjacent pieces of
+    // one ordinary word, without crossing a shell, formatting or token boundary.
+    let mut start = 0;
+    while start < replacements.len() {
+        let Some((action, _, _, id)) = &word_revisions[start] else {
+            start += 1;
+            continue;
+        };
+        let id = *id;
+        let kind = if *action == GranularAction::Delete {
+            "del"
+        } else {
+            "ins"
+        };
+        let mut end = start + 1;
+        while end < word_revisions.len()
+            && word_revisions[end]
+                .as_ref()
+                .is_some_and(|(_, _, _, other)| *other == id)
+        {
+            end += 1;
+        }
+        let mut payload = std::mem::take(&mut replacements[start]);
+        for replacement in &mut replacements[start + 1..end] {
+            payload.push_str(&std::mem::take(replacement));
+        }
+        replacements[start] = metadata.ids.generated(IdAllocator::revision_with_id(
+            kind,
+            metadata.author,
+            metadata.timestamp,
+            &payload,
+            id,
+        ))?;
+        start = end;
     }
     if metadata.leaf_capture {
         attach_projection_actions(&mut fragment_publications, &projection_ledgers)?;
@@ -13866,6 +14705,126 @@ fn align_between_shells(
         start = end;
     }
     (aligned, segments)
+}
+
+/// Align logical words across plain physical runs, retaining each scalar's real
+/// owner for source publication. Shell cuts and nontext units stay barriers.
+fn align_words_between_shells(
+    original: &[AttributedRunUnit],
+    edited: &[AttributedRunUnit],
+    original_signatures: &[String],
+    edited_signatures: &[String],
+    cuts: &[(usize, usize)],
+    ignore_formatting: bool,
+    format_owners: &mut [Option<usize>],
+) -> Option<(Alignment, Vec<usize>)> {
+    fn groups(
+        units: &[AttributedRunUnit],
+        signatures: &[String],
+        span: Range<usize>,
+    ) -> Vec<(String, Range<usize>)> {
+        let class = |unit: &AttributedRunUnit| {
+            let text = unit_plain_text(unit)?;
+            let character = text.chars().next()?;
+            Some(if character.is_alphanumeric() || character == '_' {
+                0
+            } else if character.is_whitespace() {
+                1
+            } else {
+                2
+            })
+        };
+        let mut result = Vec::new();
+        let mut at = span.start;
+        while at < span.end {
+            let mut end = at + 1;
+            if let Some(kind) = class(&units[at]) {
+                while end < span.end
+                    && class(&units[end]) == Some(kind)
+                    && units[end].run.properties == units[at].run.properties
+                {
+                    end += 1;
+                }
+            }
+            let signature = format!("{:?}", &signatures[at..end]);
+            result.push((signature, at..end));
+            at = end;
+        }
+        result
+    }
+    let mut result = Vec::new();
+    let mut segments = Vec::new();
+    let mut start = (0, 0);
+    for (segment, &end) in cuts
+        .iter()
+        .chain(std::iter::once(&(original.len(), edited.len())))
+        .enumerate()
+    {
+        let left = groups(original, original_signatures, start.0..end.0);
+        let right = groups(edited, edited_signatures, start.1..end.1);
+        let left_signatures = left
+            .iter()
+            .map(|(signature, _)| signature.clone())
+            .collect::<Vec<_>>();
+        let right_signatures = right
+            .iter()
+            .map(|(signature, _)| signature.clone())
+            .collect::<Vec<_>>();
+        for (a, b) in align(&left_signatures, &right_signatures) {
+            if !ignore_formatting
+                && let (Some(a), Some(b)) = (a, b)
+                && original[left[a].1.start].run.properties
+                    != edited[right[b].1.start].run.properties
+            {
+                // Formatting transitions retain the existing Word replacement
+                // owner and its ignore-formatting left bias.
+                return None;
+            }
+
+            if ignore_formatting
+                && let (Some(a), Some(b)) = (a, b)
+                && unit_plain_text(&original[left[a].1.start]).is_some()
+                && unit_plain_text(&edited[right[b].1.start]).is_some()
+            {
+                for index in right[b].1.clone() {
+                    format_owners[index] = Some(original[left[a].1.start].owner);
+                }
+            }
+            if let (Some(a), Some(b)) = (a, b)
+                && left[a].0 == right[b].0
+            {
+                result.extend(
+                    left[a]
+                        .1
+                        .clone()
+                        .zip(right[b].1.clone())
+                        .map(|(a, b)| (Some(a), Some(b))),
+                );
+            } else if let (Some(a), Some(b)) = (a, b)
+                && (unit_plain_text(&original[left[a].1.start]).is_none()
+                    || unit_plain_text(&edited[right[b].1.start]).is_none())
+            {
+                if unit_plain_text(&original[left[a].1.start]).is_some()
+                    || unit_plain_text(&edited[right[b].1.start]).is_some()
+                {
+                    return None;
+                }
+                // Both groups are one actual atomic unit. Retain Replace so
+                // the existing Field/textbox/token publisher owns its change.
+                result.push((Some(left[a].1.start), Some(right[b].1.start)));
+            } else {
+                if let Some(a) = a {
+                    result.extend(left[a].1.clone().map(|a| (Some(a), None)));
+                }
+                if let Some(b) = b {
+                    result.extend(right[b].1.clone().map(|b| (None, Some(b))));
+                }
+            }
+            segments.resize(result.len(), segment);
+        }
+        start = end;
+    }
+    Some((result, segments))
 }
 
 fn hyperlink_raw_boundaries(
@@ -15659,13 +16618,74 @@ fn paragraph_control_boundaries(paragraph: &CT_P) -> Vec<(usize, usize, usize)> 
 ///
 /// The word and character paths follow a hyperlink or control through the
 /// text alignment, so only the shells and their slots count there.
+/// Boundary coordinates in the comparison-only plain-run view. Source owners
+/// remain untouched, and every structural shell still terminates a group.
+fn coalesced_run_boundaries(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<usize> {
+    let cuts = shell_run_boundaries(paragraph, options)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut boundaries = vec![0];
+    for (index, run) in paragraph.runs.iter().enumerate() {
+        let joins = index > 0
+            && !cuts.contains(&index)
+            && coalescible_plain_run(run)
+            && coalescible_plain_run(&paragraph.runs[index - 1])
+            && run.properties == paragraph.runs[index - 1].properties;
+        boundaries.push(boundaries[index] + usize::from(!joins));
+    }
+    boundaries
+}
+
 fn paragraph_boundaries_differ(
     original: &CT_P,
     edited: &CT_P,
     options: &ComparisonOptions,
 ) -> bool {
-    if (!options.ignore_comments && original.comment_ranges != edited.comment_ranges)
-        || original.bookmark_markers != edited.bookmark_markers
+    let original_boundaries = coalesced_run_boundaries(original, options);
+    let edited_boundaries = coalesced_run_boundaries(edited, options);
+    let comments = |paragraph: &CT_P, boundaries: &[usize]| {
+        paragraph
+            .comment_ranges
+            .iter()
+            .cloned()
+            .map(|mut marker| {
+                let (CommentRangeMarker::Start { run_index, .. }
+                | CommentRangeMarker::End { run_index, .. }) = &mut marker;
+                *run_index = boundaries.get(*run_index).copied().unwrap_or(*run_index);
+                marker
+            })
+            .collect::<Vec<_>>()
+    };
+    let bookmarks = |paragraph: &CT_P, boundaries: &[usize]| {
+        paragraph
+            .bookmark_markers
+            .iter()
+            .map(|marker| {
+                (
+                    marker.is_start(),
+                    marker.id(),
+                    marker.name().map(str::to_owned),
+                    marker.raw_before(),
+                    marker.has_child_content(),
+                    boundaries
+                        .get(marker.run_index())
+                        .copied()
+                        .unwrap_or(marker.run_index()),
+                    boundaries
+                        .get(marker.projected_run_index())
+                        .copied()
+                        .unwrap_or(marker.projected_run_index()),
+                    boundaries
+                        .get(marker.tracked_run_index())
+                        .copied()
+                        .unwrap_or(marker.tracked_run_index()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    if (!options.ignore_comments
+        && comments(original, &original_boundaries) != comments(edited, &edited_boundaries))
+        || bookmarks(original, &original_boundaries) != bookmarks(edited, &edited_boundaries)
     {
         return true;
     }
@@ -18073,14 +19093,8 @@ fn compare_field_xml(
     let same_form = original_complex_form == edited_complex_form;
     // Representation dispatch precedes global Field equality, which deliberately
     // omits simple/complex form. Protected source facts remain independent.
-    let source_facts = |field: &rdocx_oxml::text::Field| {
-        metadata
-            .source_frames
-            .iter()
-            .rev()
-            .find_map(|frame| frame.fields.get(&(std::ptr::from_ref(field) as usize)))
-    };
-    let same_source_facts = source_facts(original) == source_facts(edited);
+    let same_source_facts =
+        metadata.field_source_facts(original) == metadata.field_source_facts(edited);
     if same_instruction && same_form && original == edited && same_source_facts {
         return Ok(original_xml);
     }
@@ -20305,6 +21319,17 @@ fn normalized_body(document: &CT_Document) -> Vec<String> {
 /// owns. The signature leaves formatting out because alignment matches changed
 /// paragraphs through it, so without the properties a resolution that loses
 /// a paragraph's alignment or mark formatting would pass.
+fn coalesced_postcondition_body(
+    document: &CT_Document,
+    options: &ComparisonOptions,
+) -> Vec<String> {
+    let scalar = ComparisonOptions {
+        granularity: ComparisonGranularity::Character,
+        ..options.clone()
+    };
+    postcondition_body(document, &scalar)
+}
+
 fn postcondition_body(document: &CT_Document, options: &ComparisonOptions) -> Vec<String> {
     let mut items = normalized_body_with_options(document, options);
     if options.ignore_formatting {
@@ -28687,5 +29712,28 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn issue434_scalar_equality_keeps_explicit_empty_model_properties() {
+    let mut original = CT_P::new();
+    original.add_run("invoice");
+    let mut edited = original.clone();
+    edited.runs[0].properties = Some(rdocx_oxml::properties::CT_RPr::default());
+    for granularity in [
+        ComparisonGranularity::Run,
+        ComparisonGranularity::Word,
+        ComparisonGranularity::Character,
+    ] {
+        let options = ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        assert_ne!(
+            coalesced_paragraph_signature(&original, &options),
+            coalesced_paragraph_signature(&edited, &options)
+        );
     }
 }

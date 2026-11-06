@@ -9018,3 +9018,56 @@ fn issue435_cli_subset_and_repeated_bookmarks_match_library_validation() {
         assert_eq!(fs::read(&input).unwrap(), before);
     }
 }
+
+#[test]
+fn issue434_compare_equal_splits_and_word_revision_text() {
+    let temp = TempWorkspace::new("issue434-splits");
+    let original = temp.path.join("original.docx");
+    let edited = temp.path.join("edited.docx");
+    write_document(&original, &["invoice thirty days"]);
+    let mut split = rdocx::Document::new();
+    let mut paragraph = split.add_paragraph("invoi");
+    paragraph.add_run("ce thirty days");
+    split.save(&edited).unwrap();
+    for granularity in ["run", "word", "character"] {
+        let redline = temp.path.join(format!("equal-{granularity}.docx"));
+        let record = compare_record(
+            &original,
+            &edited,
+            &redline,
+            &["--granularity", granularity],
+        );
+        assert_eq!(record["main_story_revisions"], 0);
+    }
+    split
+        .paragraph_mut(0)
+        .unwrap()
+        .run_mut(1)
+        .unwrap()
+        .set_text("ce sixty days");
+    split.save(&edited).unwrap();
+    let redline = temp.path.join("changed.docx");
+    let record = compare_record(&original, &edited, &redline, &["--granularity", "word"]);
+    assert_eq!(record["main_story_revisions"], 2);
+    let output = cli(&["revision", "list", path_text(&redline), "--json"]);
+    assert_success(&output, "revision list --json");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let revisions = value
+        .as_array()
+        .or_else(|| value.get("revisions").and_then(Value::as_array))
+        .unwrap();
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["deletion", "insertion"]
+    );
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty"]
+    );
+}

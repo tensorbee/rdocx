@@ -14097,7 +14097,7 @@ impl PyDocument {
             .import_fragment(
                 &destination,
                 &fragment,
-                policy.map(|p| p.inner).unwrap_or_default(),
+                rdocx::FragmentConflictPolicy::for_insert_document(policy.map(|p| p.inner)),
             )
             .map_err(|e| rdocx_to_pyerr(py, e))?;
         self.publish_api_candidate(py, candidate, "Document.insert_document")

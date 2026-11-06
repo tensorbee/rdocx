@@ -607,6 +607,20 @@ impl Document {
             && scope.matches(&metadata)
         {
             if matches!(resolution, Resolution::Reject) {
+                if let Some(ids) = record
+                    .get("added_reply_ids")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for id in ids.iter().rev() {
+                        let id = id
+                            .as_i64()
+                            .and_then(|id| i32::try_from(id).ok())
+                            .ok_or_else(|| {
+                                Error::Other("invalid comparison reply identity".into())
+                            })?;
+                        candidate.remove_comment(id)?;
+                    }
+                }
                 crate::comparison::apply_comment_snapshot(
                     &mut candidate,
                     record.get("original").ok_or_else(|| {

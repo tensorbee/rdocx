@@ -1407,6 +1407,8 @@ pub struct FragmentConflictPolicy {
     reuse_equivalent_styles: bool,
     reuse_equivalent_numbering: bool,
     reuse_equivalent_related_parts: bool,
+    preserve_source_effective_defaults: bool,
+    native_body_only: bool,
 }
 
 impl FragmentConflictPolicy {
@@ -1416,6 +1418,8 @@ impl FragmentConflictPolicy {
             reuse_equivalent_styles: true,
             reuse_equivalent_numbering: true,
             reuse_equivalent_related_parts: true,
+            preserve_source_effective_defaults: false,
+            native_body_only: false,
         }
     }
 
@@ -1425,7 +1429,34 @@ impl FragmentConflictPolicy {
             reuse_equivalent_styles: false,
             reuse_equivalent_numbering: false,
             reuse_equivalent_related_parts: false,
+            preserve_source_effective_defaults: false,
+            native_body_only: false,
         }
+    }
+
+    /// Preserve body effective fonts, restarting list instances when policy is omitted.
+    pub const fn for_insert_document(policy: Option<Self>) -> Self {
+        let mut policy = match policy {
+            Some(policy) => policy,
+            None => Self::reuse_equivalent().with_numbering_reuse(false),
+        };
+        policy.preserve_source_effective_defaults = true;
+        policy.native_body_only = false;
+        policy
+    }
+
+    pub(crate) const fn for_native_insert_document(policy: Option<Self>) -> Self {
+        let mut policy = Self::for_insert_document(policy);
+        policy.native_body_only = true;
+        policy
+    }
+
+    pub(crate) const fn preserves_source_effective_defaults(self) -> bool {
+        self.preserve_source_effective_defaults
+    }
+
+    pub(crate) const fn native_body_only(self) -> bool {
+        self.native_body_only
     }
 
     /// Select whether equivalent style definitions are reused.
@@ -46690,21 +46721,35 @@ impl Document {
     ///
     /// An `index` past the end is clamped to the end rather than panicking.
     pub fn insert_document(&mut self, index: usize, other: &Document) {
-        let mut candidate = self.clone_for_staging();
-        candidate
-            .insert_document_content_staged(index, other)
-            .expect("document insertion preflight failed");
-        self.commit_staged_mutation(candidate);
-    }
-
-    /// Insert into a caller-owned staged candidate and return any preflight failure.
-    pub(crate) fn insert_document_content_staged(
-        &mut self,
-        index: usize,
-        other: &Document,
-    ) -> Result<()> {
-        self.insert_document_content_staged_with_numbering_policy(index, other, false, false)
-            .map(|_| ())
+        if other.content_count() == 0 {
+            return;
+        }
+        let start = other
+            .direct_body_item_location(0)
+            .expect("document insertion source preflight failed")
+            .expect("nonempty source body");
+        let end = ContentLocation::end(start.story().clone());
+        let fragment = DocumentFragment::from_range(other, &start, &end, false)
+            .expect("document insertion source preflight failed");
+        let index = index.min(self.content_count());
+        let destination = self
+            .direct_body_item_location(index)
+            .expect("document insertion destination preflight failed")
+            .unwrap_or_else(|| {
+                ContentLocation::end(
+                    self.stories()
+                        .expect("document insertion destination stories")
+                        .into_iter()
+                        .find(|story| story.kind() == StoryKind::Body)
+                        .expect("body story"),
+                )
+            });
+        self.import_fragment(
+            &destination,
+            &fragment,
+            FragmentConflictPolicy::for_native_insert_document(None),
+        )
+        .expect("document insertion preflight failed");
     }
 
     pub(crate) fn insert_document_fragment_content_staged(
@@ -89951,5 +89996,60 @@ fn scoped_template_comments_authored_drawing_preparation_matches_inline_and_anch
         assert!(actual.contains("A&B"));
 
         operation.reserve_template_text_copy(actual.len()).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn issue434_insert_document_keeps_effective_font() {
+    for source_normal in [false, true] {
+        let mut source = Document::new();
+        source.add_paragraph("source");
+        let styles = Arc::make_mut(&mut source.styles);
+        let rpr = if source_normal {
+            styles
+                .styles
+                .iter_mut()
+                .find(|style| style.style_id == "Normal")
+                .unwrap()
+                .rpr
+                .get_or_insert_with(Default::default)
+        } else {
+            styles.doc_defaults.as_mut().unwrap().rpr.as_mut().unwrap()
+        };
+        rpr.font_ascii = Some("Georgia".into());
+        rpr.font_hansi = Some("Georgia".into());
+        rpr.sz = Some(rdocx_oxml::units::HalfPoint(if source_normal {
+            22
+        } else {
+            28
+        }));
+        let mut destination = Document::new();
+        destination.add_paragraph("destination");
+        destination.insert_document(1, &source);
+        let bytes = destination.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        let BodyContent::Paragraph(p) = &reopened.document.body.content[1] else {
+            panic!("paragraph")
+        };
+        let para_style = p.properties.as_ref().and_then(|p| p.style_id.as_deref());
+        let run = &p.runs[0];
+        let mut effective = crate::style::resolve_run_properties(
+            para_style,
+            run.properties.as_ref().and_then(|p| p.style_id.as_deref()),
+            &reopened.styles,
+        );
+        if let Some(direct) = &run.properties {
+            effective.merge_from(direct);
+        }
+        assert_eq!(effective.font_ascii.as_deref(), Some("Georgia"));
+        assert_eq!(
+            effective.sz,
+            Some(rdocx_oxml::units::HalfPoint(if source_normal {
+                22
+            } else {
+                28
+            }))
+        );
     }
 }

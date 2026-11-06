@@ -1067,7 +1067,7 @@ fn character_style_id<'a>(style_id: &'a str, styles: &'a CT_Styles) -> Option<&'
 }
 
 /// Collect the chain of styles from the given style up through basedOn ancestors.
-fn collect_style_chain<'a>(style_id: &str, styles: &'a CT_Styles) -> Vec<&'a CT_Style> {
+pub(crate) fn collect_style_chain<'a>(style_id: &str, styles: &'a CT_Styles) -> Vec<&'a CT_Style> {
     let mut chain = Vec::new();
     let mut current_id = Some(style_id.to_string());
     let mut seen = std::collections::HashSet::new();

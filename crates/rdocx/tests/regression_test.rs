@@ -412338,3 +412338,1224 @@ fn issue430_reported_word_granularity_note_cases_and_payment_control() {
         );
     }
 }
+
+#[test]
+fn issue434_compare_ignores_equal_run_splits() {
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut original = Document::new();
+        original.add_paragraph("invoice thirty days");
+        let mut edited = Document::new();
+        let mut p = edited.add_paragraph("invoi");
+        p.add_run("ce thirty days");
+        let options = rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+            .unwrap();
+        assert!(
+            original.story_revisions().unwrap().is_empty(),
+            "{granularity:?}"
+        );
+    }
+}
+
+#[test]
+fn issue434_compare_one_word_beside_split_invoice() {
+    for pieces in [
+        vec!["invoi", "ce sixty days"],
+        vec!["invoi", "ce si", "xty days"],
+    ] {
+        let mut original = Document::new();
+        original.add_paragraph("invoice thirty days");
+        let mut edited = Document::new();
+        let mut p = edited.add_paragraph(pieces[0]);
+        for piece in &pieces[1..] {
+            p.add_run(piece);
+        }
+        let options = rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+            .unwrap();
+        let revisions = original.story_revisions().unwrap();
+        assert_eq!(revisions.len(), 2, "{pieces:?}: {revisions:?}");
+        assert_eq!(
+            revisions.iter().map(|r| r.text()).collect::<Vec<_>>(),
+            ["thirty", "sixty"]
+        );
+    }
+}
+
+#[test]
+fn issue434_comparison_crossing_reply_composition() {
+    let mut original = Document::new();
+    original.add_paragraph("thirty days");
+    let root = original
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    let baseline = original.to_bytes().unwrap();
+    let mut edited = Document::from_bytes(&baseline).unwrap();
+    let reply = edited
+        .reply_to_with_initials(
+            root,
+            "Ben",
+            Some("B"),
+            "reply",
+            Some("2026-11-06T10:00:00Z"),
+        )
+        .unwrap();
+    original
+        .compare(&edited, "Reviewer", "2026-11-06T10:00:00Z")
+        .unwrap();
+    assert_eq!(
+        original.story_revisions().unwrap().len(),
+        1,
+        "graph snapshot only"
+    );
+    assert_eq!(
+        original.comment_anchor_text(reply).unwrap().as_deref(),
+        Some("thirty")
+    );
+    let tracked = original.to_bytes().unwrap();
+    let mut accepted = Document::from_bytes(&tracked).unwrap();
+    accepted.accept_revisions_by_author("Reviewer").unwrap();
+    assert_eq!(
+        accepted
+            .comments()
+            .iter()
+            .find(|c| c.id() == reply)
+            .unwrap()
+            .parent_id(),
+        Some(root)
+    );
+    let mut rejected = Document::from_bytes(&tracked).unwrap();
+    rejected.reject_revisions_by_author("Reviewer").unwrap();
+    assert_eq!(rejected.comments().len(), 1);
+    assert_eq!(
+        rejected.comment_anchor_text(root).unwrap().as_deref(),
+        Some("thirty")
+    );
+}
+
+#[test]
+fn issue434_existing_crossing_reply_survives_selected_text_resolution() {
+    let mut baseline = Document::new();
+    baseline.add_paragraph("thirty days");
+    let root = baseline
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    let reply = baseline
+        .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+        .unwrap();
+    let original_bytes = baseline.to_bytes().unwrap();
+    let mut edited = Document::from_bytes(&original_bytes).unwrap();
+    edited
+        .paragraph_mut(0)
+        .unwrap()
+        .run_mut(0)
+        .unwrap()
+        .set_text("sixty");
+    let options = rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ..Default::default()
+    };
+    baseline
+        .compare_with_options(&edited, "Reviewer", "2026-11-06T10:00:00Z", &options)
+        .unwrap();
+    let tracked = baseline.to_bytes().unwrap();
+    for accept in [false, true] {
+        let mut resolved = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            resolved.accept_revisions_by_author("Reviewer").unwrap();
+        } else {
+            resolved.reject_revisions_by_author("Reviewer").unwrap();
+        }
+        assert_eq!(resolved.comments().len(), 2);
+        assert_eq!(
+            resolved
+                .comments()
+                .iter()
+                .find(|c| c.id() == reply)
+                .unwrap()
+                .parent_id(),
+            Some(root)
+        );
+        assert_eq!(
+            resolved.comment_anchor_text(reply).unwrap().as_deref(),
+            Some(if accept { "sixty" } else { "thirty" })
+        );
+    }
+}
+
+fn issue434_paragraph_document(content: &str) -> Document {
+    let mut document = Document::new();
+    let bytes = document.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = format!(
+        "<w:document xmlns:w=\"{}\"><w:body><w:p>{content}</w:p></w:body></w:document>",
+        W_NS
+    );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn issue434_equal_splits_keep_nontext_barriers_and_property_presence() {
+    for neighbor in [
+        "<w:r><w:tab/></w:r>",
+        "<w:r><w:br/></w:r>",
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>kept</w:t></w:r></w:sdtContent></w:sdt>",
+        "<w:r><w:pict xmlns:v=\"urn:schemas-microsoft-com:vml\"><v:shape id=\"kept\"/></w:pict></w:r>",
+        "<w:fldSimple w:instr=\"PAGE\"><w:r><w:t>1</w:t></w:r></w:fldSimple>",
+        "<w:bookmarkStart w:id=\"7\" w:name=\"spot\"/><w:r><w:t>kept</w:t></w:r><w:bookmarkEnd w:id=\"7\"/>",
+        "<w:hyperlink w:anchor=\"spot\"><w:r><w:t>kept</w:t></w:r></w:hyperlink>",
+        "<w:producer xmlns:w=\"urn:producer\" value=\"keep\"/>",
+    ] {
+        for granularity in [
+            rdocx::ComparisonGranularity::Run,
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            let mut original =
+                issue434_paragraph_document(&format!("{neighbor}<w:r><w:t>invoice</w:t></w:r>"));
+            let edited = issue434_paragraph_document(&format!(
+                "{neighbor}<w:r><w:t>invoi</w:t></w:r><w:r><w:t>ce</w:t></w:r>"
+            ));
+            let before = original.to_bytes().unwrap();
+            let options = rdocx::ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            original
+                .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+                .unwrap();
+            assert!(
+                original.story_revisions().unwrap().is_empty(),
+                "{neighbor} {granularity:?}"
+            );
+            assert_eq!(
+                original.to_bytes().unwrap(),
+                before,
+                "byte-identical no-op {neighbor} {granularity:?}"
+            );
+            if granularity == rdocx::ComparisonGranularity::Word {
+                let mut original = issue434_paragraph_document(&format!(
+                    "{neighbor}<w:r><w:t>invoice thirty days</w:t></w:r>"
+                ));
+                let edited = issue434_paragraph_document(&format!(
+                    "{neighbor}<w:r><w:t>invoi</w:t></w:r><w:r><w:t>ce sixty days</w:t></w:r>"
+                ));
+                original
+                    .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+                    .unwrap();
+                assert_eq!(
+                    original
+                        .story_revisions()
+                        .unwrap()
+                        .iter()
+                        .map(|r| r.text().to_owned())
+                        .collect::<Vec<_>>(),
+                    ["thirty", "sixty"],
+                    "{neighbor}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue434_word_substitution_stays_inside_hyperlink() {
+    let mut original = issue434_paragraph_document(
+        "<w:hyperlink w:anchor=\"spot\"><w:r><w:t>invoice thirty days</w:t></w:r></w:hyperlink>",
+    );
+    let edited = issue434_paragraph_document(
+        "<w:hyperlink w:anchor=\"spot\"><w:r><w:t>invoi</w:t></w:r><w:r><w:t>ce sixty days</w:t></w:r></w:hyperlink>",
+    );
+    let options = rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ..Default::default()
+    };
+    original
+        .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+        .unwrap();
+    assert_eq!(
+        original
+            .story_revisions()
+            .unwrap()
+            .iter()
+            .map(|r| r.text().to_owned())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty"]
+    );
+    let bytes = original.to_bytes().unwrap();
+    let BodyContent::Paragraph(p) =
+        &body_from_document(&mut Document::from_bytes(&bytes).unwrap()).content[0]
+    else {
+        panic!("paragraph")
+    };
+    assert_eq!(p.hyperlinks.len(), 1);
+    assert_eq!(p.hyperlinks[0].anchor.as_deref(), Some("spot"));
+}
+
+#[test]
+fn issue434_insert_document_list_instances_stay_distinct() {
+    let mut source = Document::new();
+    let definition = source
+        .add_numbering_definition(&[ListLevel::decimal()])
+        .unwrap();
+    let instance = source.add_numbering_instance(definition, &[]).unwrap();
+    source.add_paragraph("one").numbering(instance, 0);
+    source.add_paragraph("two").numbering(instance, 0);
+    let mut destination = Document::new();
+    for _ in 0..3 {
+        destination.insert_document(destination.content_count(), &source);
+    }
+    let ids = body_from_document(&mut destination)
+        .content
+        .iter()
+        .map(|item| {
+            let BodyContent::Paragraph(p) = item else {
+                panic!("paragraph")
+            };
+            p.properties.as_ref().unwrap().num_id.unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 6);
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(ids[2], ids[3]);
+    assert_eq!(ids[4], ids[5]);
+    assert_ne!(ids[0], ids[2]);
+    assert_ne!(ids[2], ids[4]);
+    let rendered = destination
+        .render_page_to_svg_deterministic(0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rendered.svg.matches(">1.</text>").count(), 3);
+    assert_eq!(rendered.svg.matches(">2.</text>").count(), 3);
+    let source_start = source.direct_body_item_location(0).unwrap().unwrap();
+    let source_end = ContentLocation::end(source_start.story().clone());
+    let fragment =
+        DocumentFragment::from_range(&source, &source_start, &source_end, false).unwrap();
+    for policy in [
+        FragmentConflictPolicy::reuse_equivalent(),
+        FragmentConflictPolicy::for_insert_document(Some(
+            FragmentConflictPolicy::reuse_equivalent(),
+        )),
+    ] {
+        let mut reused = Document::new();
+        for _ in 0..2 {
+            let story = reused
+                .stories()
+                .unwrap()
+                .into_iter()
+                .find(|s| s.kind() == StoryKind::Body)
+                .unwrap();
+            reused
+                .import_fragment(&ContentLocation::end(story), &fragment, policy)
+                .unwrap();
+        }
+        let ids = body_from_document(&mut reused)
+            .content
+            .iter()
+            .map(|item| {
+                let BodyContent::Paragraph(p) = item else {
+                    panic!("paragraph")
+                };
+                p.properties.as_ref().unwrap().num_id.unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids[0], ids[2],
+            "explicit reuse and direct import keep old policy"
+        );
+    }
+}
+
+#[test]
+fn issue434_insert_document_saved_body_keeps_source_effective_font() {
+    for case in 0..3 {
+        let mut source = Document::new();
+        source.add_paragraph("source");
+        if case == 0 {
+            source.set_default_font_name_value(Some("Georgia")).unwrap();
+            source
+                .set_default_font_size_value(Some(Length::pt(14.0)))
+                .unwrap();
+        } else {
+            let bytes = source.to_bytes().unwrap();
+            let mut package =
+                oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+            let mut styles = rdocx_oxml::styles::CT_Styles::from_xml(
+                package.get_part("/word/styles.xml").unwrap(),
+            )
+            .unwrap();
+            let normal = styles
+                .styles
+                .iter_mut()
+                .find(|s| s.style_id == "Normal")
+                .unwrap();
+            if case == 2 {
+                normal.style_id = "SourceNormal".into();
+            }
+            normal.rpr = Some(CT_RPr {
+                font_ascii: Some("Georgia".into()),
+                font_hansi: Some("Georgia".into()),
+                sz: Some(HalfPoint(22)),
+                ..Default::default()
+            });
+            package.set_part("/word/styles.xml", styles.to_xml().unwrap());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            source = Document::from_bytes(bytes.get_ref()).unwrap();
+        }
+        let mut destination = Document::new();
+        destination.add_paragraph("destination");
+        let old_first = body_from_document(&mut destination).content[0].clone();
+        destination.insert_document(1, &source);
+        let saved = destination.to_bytes().unwrap();
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let styles =
+            rdocx_oxml::styles::CT_Styles::from_xml(package.get_part("/word/styles.xml").unwrap())
+                .unwrap();
+        let body = CT_Document::from_xml(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .body;
+        assert_eq!(body.content[0], old_first);
+        let BodyContent::Paragraph(p) = &body.content[1] else {
+            panic!("paragraph")
+        };
+        let mut effective = rdocx::style::resolve_run_properties(
+            p.properties.as_ref().and_then(|p| p.style_id.as_deref()),
+            p.runs[0]
+                .properties
+                .as_ref()
+                .and_then(|r| r.style_id.as_deref()),
+            &styles,
+        );
+        if let Some(properties) = &p.runs[0].properties {
+            effective.merge_from(properties);
+        }
+        assert_eq!(
+            effective.font_ascii.as_deref(),
+            Some("Georgia"),
+            "case{case}"
+        );
+        assert_eq!(effective.font_hansi.as_deref(), Some("Georgia"));
+        assert_eq!(
+            effective.sz,
+            Some(HalfPoint(if case == 0 { 28 } else { 22 }))
+        );
+        let mut reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(body_from_document(&mut reopened).content, body.content);
+    }
+}
+
+#[test]
+fn issue434_equal_revised_owner_splits_preserve_source_and_changed_owner_refuses() {
+    let revision = "<w:ins w:id=\"7\" w:author=\"First\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>kept</w:t></w:r></w:ins>";
+    let old = format!("{revision}<w:r><w:t>invoice</w:t></w:r>");
+    let split = format!("{revision}<w:r><w:t>invoi</w:t></w:r><w:r><w:t>ce</w:t></w:r>");
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut original = issue434_paragraph_document(&old);
+        let edited = issue434_paragraph_document(&split);
+        let before = original.to_bytes().unwrap();
+        let options = rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+            .unwrap();
+        assert_eq!(original.to_bytes().unwrap(), before);
+        assert_eq!(original.story_revisions().unwrap().len(), 1);
+        let changed =
+            issue434_paragraph_document(&split.replace("invoi", "recei").replace(">ce<", ">pt<"));
+        assert!(
+            original
+                .compare_with_options(&changed, "B", "2026-11-06T10:00:00Z", &options)
+                .is_err()
+        );
+        assert_eq!(original.to_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn issue434_native_insert_document_keeps_body_only_and_destination_comments_ids() {
+    let mut source = Document::new();
+    source.add_paragraph("source");
+    source.add_footnote("unreferenced source note");
+    source
+        .add_comment_on_text(
+            "source",
+            0,
+            "Source",
+            None,
+            "orphan after body selection",
+            None,
+        )
+        .unwrap();
+    let bytes = source.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let main = format!(
+        "<w:document xmlns:w=\"{W_NS}\"><w:body><w:p><w:r><w:t>source</w:t></w:r></w:p></w:body></w:document>"
+    );
+    package.set_part("/word/document.xml", main.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let source = Document::from_bytes(bytes.get_ref()).unwrap();
+    let mut destination = Document::new();
+    destination.add_paragraph("destination");
+    destination
+        .add_comment_on_text("destination", 0, "Dest", None, "keep", None)
+        .unwrap();
+    let bytes = destination.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let ids = b"<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\"/>";
+    package.set_part("/word/commentsIds.xml", ids.to_vec());
+    package.content_types.add_override(
+        "/word/commentsIds.xml",
+        "application/vnd.ms-word.commentsIds+xml",
+    );
+    package.get_or_create_part_rels("/word/document.xml").add(
+        "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds",
+        "commentsIds.xml",
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    destination = Document::from_bytes(bytes.get_ref()).unwrap();
+    destination.insert_document(1, &source);
+    let saved = destination.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+    assert!(!package.contains_part("/word/footnotes.xml"));
+    assert_eq!(destination.comments().len(), 1);
+    assert_eq!(destination.comments()[0].author(), Some("Dest"));
+    assert_eq!(package.get_part("/word/commentsIds.xml").unwrap(), ids);
+    assert_eq!(destination.text(), "destination\nsource\n");
+}
+
+#[test]
+fn issue434_crossing_reply_on_imported_parent_preserves_unrelated_redline() {
+    let revision = "<w:ins w:id=\"17\" w:author=\"First\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>protected</w:t></w:r></w:ins>";
+    let mut original = issue434_paragraph_document(&format!(
+        "<w:r><w:t>thirty</w:t></w:r></w:p><w:p>{revision}"
+    ));
+    let root = original
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    let bytes = original.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let mut comments = rdocx_oxml::comments::CT_Comments::from_xml(
+        package.get_part("/word/comments.xml").unwrap(),
+    )
+    .unwrap();
+    comments.comments[0].paragraph_ids.clear();
+    package.set_part("/word/comments.xml", comments.to_xml().unwrap());
+    package.remove_part("/word/commentsExtended.xml");
+    package
+        .content_types
+        .remove_override("/word/commentsExtended.xml");
+    package
+        .get_part_rels_mut("/word/document.xml")
+        .unwrap()
+        .items
+        .retain(|r| !r.rel_type.ends_with("/commentsExtended"));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    original = Document::from_bytes(bytes.get_ref()).unwrap();
+    let mut edited = Document::from_bytes(bytes.get_ref()).unwrap();
+    let reply = edited
+        .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+        .unwrap();
+    original
+        .compare(&edited, "Reviewer", "2026-11-06T10:00:00Z")
+        .unwrap();
+    let tracked = original.to_bytes().unwrap();
+    for accept in [false, true] {
+        let mut resolved = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            resolved.accept_revisions_by_author("Reviewer").unwrap();
+        } else {
+            resolved.reject_revisions_by_author("Reviewer").unwrap();
+        }
+        let xml = document_xml(&mut resolved);
+        assert!(
+            xml.contains(revision),
+            "protected source remains exact {xml}"
+        );
+        assert_eq!(resolved.comments().len(), if accept { 2 } else { 1 });
+        if accept {
+            assert_eq!(
+                resolved.comment_anchor_text(reply).unwrap().as_deref(),
+                Some("thirty")
+            );
+        }
+    }
+}
+
+#[test]
+fn issue434_insert_document_preserves_table_character_and_direct_font_priority() {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let bytes = seed.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W_NS}">
+      <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="28"/></w:rPr></w:rPrDefault></w:docDefaults>
+      <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+      <w:style w:type="table" w:styleId="TableBase"><w:name w:val="TableBase"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="30"/></w:rPr></w:style>
+      <w:style w:type="table" w:styleId="TableChild"><w:name w:val="TableChild"/><w:basedOn w:val="TableBase"/></w:style>
+      <w:style w:type="paragraph" w:styleId="ParaBase"><w:name w:val="ParaBase"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="34"/></w:rPr></w:style>
+      <w:style w:type="paragraph" w:styleId="ParaChild"><w:name w:val="ParaChild"/><w:basedOn w:val="ParaBase"/><w:rPr><w:sz w:val="36"/></w:rPr></w:style>
+      <w:style w:type="character" w:styleId="CharBase"><w:name w:val="CharBase"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="38"/></w:rPr></w:style>
+      <w:style w:type="character" w:styleId="CharChild"><w:name w:val="CharChild"/><w:basedOn w:val="CharBase"/><w:rPr><w:sz w:val="40"/></w:rPr></w:style>
+    </w:styles>"#
+    );
+    let main = format!(
+        r#"<w:document xmlns:w="{W_NS}"><w:body>
+      <w:p><w:r><w:t>source_body</w:t></w:r></w:p>
+      <w:tbl><w:tblPr><w:tblStyle w:val="TableChild"/></w:tblPr><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid><w:tr><w:tc>
+      <w:p><w:r><w:t>source_table</w:t></w:r></w:p>
+      <w:p><w:pPr><w:pStyle w:val="ParaChild"/></w:pPr><w:r><w:t>source_para</w:t></w:r></w:p>
+      <w:p><w:pPr><w:pStyle w:val="ParaChild"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CharChild"/></w:rPr><w:t>source_character</w:t></w:r></w:p>
+      <w:p><w:pPr><w:pStyle w:val="ParaChild"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CharChild"/><w:rFonts w:ascii="Tahoma" w:hAnsi="Tahoma"/><w:sz w:val="42"/></w:rPr><w:t>source_direct</w:t></w:r></w:p>
+      </w:tc></w:tr></w:tbl></w:body></w:document>"#
+    );
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    package.set_part("/word/document.xml", main.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let source = Document::from_bytes(bytes.get_ref()).unwrap();
+    fn fonts(document: &Document) -> BTreeMap<String, (String, f64)> {
+        let result = document.layout_deterministic().unwrap();
+        let mut fonts = BTreeMap::new();
+        for page in &result.layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let oxml_layout::PositionedElement::Text(run) = element
+                    && (run.text.starts_with("source_") || run.text == "destination")
+                {
+                    let font = result
+                        .layout
+                        .fonts
+                        .iter()
+                        .find(|font| font.id == run.font_id)
+                        .unwrap();
+                    fonts.insert(run.text.clone(), (font.family.clone(), run.font_size));
+                }
+            });
+        }
+        fonts
+    }
+    let expected = fonts(&source);
+    assert_eq!(expected.len(), 5);
+    let mut destination = Document::new();
+    destination.add_paragraph("destination");
+    let original_destination = fonts(&destination)["destination"].clone();
+    destination.insert_document(1, &source);
+    let mut actual = fonts(&destination);
+    assert_eq!(actual.remove("destination"), Some(original_destination));
+    assert_eq!(actual, expected);
+    let reopened = Document::from_bytes(&destination.to_bytes().unwrap()).unwrap();
+    let mut saved = fonts(&reopened);
+    saved.remove("destination");
+    assert_eq!(saved, expected);
+}
+
+#[test]
+fn issue434_existing_crossing_reply_keeps_shell_when_plain_runs_split() {
+    let mut original = Document::new();
+    original.add_paragraph("invoice thirty days");
+    let root = original
+        .add_comment_on_text("invoice thirty days", 0, "Ada", None, "root", None)
+        .unwrap();
+    let reply = original.reply_to(root, "Ben", "reply").unwrap();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(original.to_bytes().unwrap()))
+            .unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let edited_xml = xml.replace(
+        "<w:t>invoice thirty days</w:t>",
+        "<w:t xml:space=\"preserve\">invoice </w:t></w:r><w:r><w:t>sixty days</w:t>",
+    );
+    assert_ne!(xml, edited_xml);
+    package.set_part("/word/document.xml", edited_xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let edited = Document::from_bytes(bytes.get_ref()).unwrap();
+    let options = rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ..Default::default()
+    };
+    original
+        .compare_with_options(&edited, "Reviewer", "2026-11-06T10:00:00Z", &options)
+        .unwrap();
+    assert_eq!(
+        original
+            .story_revisions()
+            .unwrap()
+            .iter()
+            .map(|r| r.text().to_owned())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty"]
+    );
+    let tracked = original.to_bytes().unwrap();
+    for accept in [false, true] {
+        let mut resolved = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            resolved.accept_revisions_by_author("Reviewer").unwrap();
+        } else {
+            resolved.reject_revisions_by_author("Reviewer").unwrap();
+        }
+        assert_eq!(
+            resolved.comment_anchor_text(reply).unwrap().as_deref(),
+            Some(if accept {
+                "invoice sixty days"
+            } else {
+                "invoice thirty days"
+            })
+        );
+        assert_eq!(
+            resolved
+                .comments()
+                .iter()
+                .find(|c| c.id() == reply)
+                .unwrap()
+                .parent_id(),
+            Some(root)
+        );
+    }
+}
+
+#[test]
+fn issue434_coalesced_equality_keeps_formatting_policy() {
+    for ignore_formatting in [false, true] {
+        let mut original = issue434_paragraph_document(
+            "<w:r><w:rPr><w:b/></w:rPr><w:t>invoice thirty days</w:t></w:r>",
+        );
+        let edited = issue434_paragraph_document(
+            "<w:r><w:rPr><w:i/></w:rPr><w:t>invoice thirty days</w:t></w:r>",
+        );
+        let before = original.to_bytes().unwrap();
+        let options = rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ignore_formatting,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "B", "2026-11-06T10:00:00Z", &options)
+            .unwrap();
+        if ignore_formatting {
+            assert!(original.story_revisions().unwrap().is_empty());
+            assert_eq!(original.to_bytes().unwrap(), before);
+        } else {
+            assert!(!original.story_revisions().unwrap().is_empty());
+            original.accept_all().unwrap();
+            let xml = comparison_part_xml(&mut original, "/word/document.xml");
+            assert!(xml.contains("<w:i"), "{xml}");
+        }
+    }
+    for source in [
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>invoice thirty days</w:t></w:r>",
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>invoice thir</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ty days</w:t></w:r>",
+    ] {
+        for pieces in [
+            vec!["invoi", "ce sixty days"],
+            vec!["invoi", "ce si", "xty days"],
+        ] {
+            let mut original = issue434_paragraph_document(source);
+            let edited = issue434_paragraph_document(
+                &pieces
+                    .iter()
+                    .map(|text| format!("<w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r>"))
+                    .collect::<String>(),
+            );
+            original
+                .compare_with_options(
+                    &edited,
+                    "B",
+                    "2026-11-06T10:00:00Z",
+                    &rdocx::ComparisonOptions {
+                        granularity: rdocx::ComparisonGranularity::Word,
+                        ignore_formatting: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let revisions = original.story_revisions().unwrap();
+            assert_eq!(
+                revisions
+                    .iter()
+                    .map(|revision| revision.text())
+                    .collect::<Vec<_>>(),
+                ["thirty", "sixty"],
+                "{pieces:?}"
+            );
+            original.accept_all().unwrap();
+            assert_eq!(original.paragraphs()[0].text(), "invoice sixty days");
+            let xml = comparison_part_xml(&mut original, "/word/document.xml");
+            assert!(xml.contains("<w:b") && !xml.contains("<w:i/"), "{xml}");
+        }
+    }
+}
+
+#[test]
+fn issue434_ignore_comments_does_not_install_reply_anchors() {
+    let mut original = Document::new();
+    original.add_paragraph("thirty days");
+    let root = original
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    let before = original.to_bytes().unwrap();
+    let mut edited = Document::from_bytes(&before).unwrap();
+    edited
+        .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+        .unwrap();
+    original
+        .compare_with_options(
+            &edited,
+            "B",
+            "2026-11-06T10:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_comments: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(original.story_revisions().unwrap().is_empty());
+    assert_eq!(original.comments().len(), 1);
+    let mut baseline = Document::from_bytes(&before).unwrap();
+    let old_main = comparison_part_xml(&mut baseline, "/word/document.xml");
+    let new_main = comparison_part_xml(&mut original, "/word/document.xml");
+    let paragraph =
+        |xml: &str| xml[xml.find("<w:p>").unwrap()..xml.find("</w:p>").unwrap() + 6].to_owned();
+    assert_eq!(paragraph(&new_main), paragraph(&old_main));
+    let original_package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(original.to_bytes().unwrap()))
+            .unwrap();
+    let baseline_package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(before)).unwrap();
+    for part in [
+        "/word/comments.xml",
+        "/word/commentsExtended.xml",
+        "/word/_rels/document.xml.rels",
+    ] {
+        assert_eq!(
+            original_package.get_part(part),
+            baseline_package.get_part(part),
+            "{part}"
+        );
+    }
+    assert_eq!(
+        original.comment_anchor_text(root).unwrap().as_deref(),
+        Some("thirty")
+    );
+}
+
+#[test]
+fn issue434_peer1_reply_keeps_ignored_body_and_related_values() {
+    let protected = "<w:ins w:id=\"70\" w:author=\"First\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>kept</w:t></w:r></w:ins>";
+    for has_protected in [false, true] {
+        for whitespace in [false, true] {
+            let tail = if has_protected {
+                format!("<w:p>{protected}</w:p>")
+            } else {
+                String::new()
+            };
+            let mut original = document_with_content_controls(&wrap_word_body(&format!(
+                "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>thirty days</w:t></w:r></w:p>{tail}"
+            )));
+            original.set_header("stable header");
+            let root = original
+                .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+                .unwrap();
+            let mut edited = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+            let reply = edited
+                .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+                .unwrap();
+            let mut package =
+                oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(edited.to_bytes().unwrap()))
+                    .unwrap();
+            let old_main =
+                String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+                    .unwrap();
+            let new_main = if whitespace {
+                old_main.replace(" days", "   days")
+            } else {
+                old_main.replace("<w:b/>", "<w:i/>")
+            };
+            assert_ne!(old_main, new_main);
+            package.set_part("/word/document.xml", new_main.into_bytes());
+            if whitespace {
+                let header =
+                    String::from_utf8(package.get_part("/word/header1.xml").unwrap().to_vec())
+                        .unwrap();
+                let changed = header.replace("stable header", "stable   header");
+                assert_ne!(header, changed);
+                package.set_part("/word/header1.xml", changed.into_bytes());
+            }
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let edited = Document::from_bytes(bytes.get_ref()).unwrap();
+            let options = rdocx::ComparisonOptions {
+                ignore_formatting: !whitespace,
+                ignore_whitespace: whitespace,
+                ..Default::default()
+            };
+            original
+                .compare_with_options(&edited, "Reviewer", "2026-11-06T10:00:00Z", &options)
+                .unwrap();
+            assert_eq!(
+                original
+                    .story_revisions()
+                    .unwrap()
+                    .iter()
+                    .filter(|revision| revision.author() == "Reviewer")
+                    .count(),
+                1
+            );
+            let pending = original.to_bytes().unwrap();
+            for accept in [false, true] {
+                let mut resolved = Document::from_bytes(&pending).unwrap();
+                if accept {
+                    resolved.accept_revisions_by_author("Reviewer").unwrap();
+                } else {
+                    resolved.reject_revisions_by_author("Reviewer").unwrap();
+                }
+                assert_eq!(resolved.paragraphs()[0].text(), "thirty days");
+                let xml = document_xml(&mut resolved);
+                assert!(xml.contains("<w:b/>") && !xml.contains("<w:i/>"), "{xml}");
+                let header = comparison_part_xml(&mut resolved, "/word/header1.xml");
+                assert!(header.contains(">stable header</w:t>"), "{header}");
+                if has_protected {
+                    assert!(xml.contains(protected), "{xml}");
+                }
+                assert_eq!(resolved.comments().len(), if accept { 2 } else { 1 });
+                assert_eq!(
+                    resolved.comment_anchor_text(root).unwrap().as_deref(),
+                    Some("thirty")
+                );
+                if accept {
+                    assert_eq!(
+                        resolved.comment_anchor_text(reply).unwrap().as_deref(),
+                        Some("thirty")
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn issue434_peer1_insert_fonts_reach_typed_row_and_cell_controls() {
+    fn fonts(document: &Document) -> BTreeMap<String, (String, f64)> {
+        let result = document.layout_deterministic().unwrap();
+        let mut fonts = BTreeMap::new();
+        for page in &result.layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let oxml_layout::PositionedElement::Text(run) = element
+                    && (run.text == "source_control" || run.text == "destination")
+                {
+                    let font = result
+                        .layout
+                        .fonts
+                        .iter()
+                        .find(|font| font.id == run.font_id)
+                        .unwrap();
+                    fonts.insert(run.text.clone(), (font.family.clone(), run.font_size));
+                }
+            });
+        }
+        fonts
+    }
+    let paragraph = "<w:p><w:r><w:t>source_control</w:t></w:r></w:p>";
+    let cell = format!("<w:tc>{paragraph}</w:tc>");
+    let row = format!("<w:tr>{cell}</w:tr>");
+    let control =
+        |content: &str| format!("<w:sdt><w:sdtPr/><w:sdtContent>{content}</w:sdtContent></w:sdt>");
+    let rows = [
+        control(&row),
+        format!("<w:tr>{}</w:tr>", control(&cell)),
+        control(&format!(
+            "<w:tr>{}</w:tr>",
+            control(&format!("<w:tc>{}</w:tc>", control(paragraph)))
+        )),
+    ];
+    for (shape, rows) in rows.iter().enumerate() {
+        for normal in [false, true] {
+            let mut source = document_with_content_controls(&wrap_word_body(&format!(
+                "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"7000\"/></w:tblGrid>{rows}</w:tbl>"
+            )));
+            let mut package =
+                oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(source.to_bytes().unwrap()))
+                    .unwrap();
+            let rpr = if normal {
+                "<w:rPr><w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/><w:sz w:val=\"22\"/></w:rPr>"
+            } else {
+                ""
+            };
+            let styles = format!(
+                "<w:styles xmlns:w=\"{W_NS}\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Georgia\" w:hAnsi=\"Georgia\"/><w:sz w:val=\"28\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/>{rpr}</w:style></w:styles>"
+            );
+            package.set_part("/word/styles.xml", styles.into_bytes());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut source = Document::from_bytes(bytes.get_ref()).unwrap();
+            let body = body_from_document(&mut source);
+            let BodyContent::Table(table) = &body.content[0] else {
+                panic!("typed table")
+            };
+            if shape == 1 {
+                assert_eq!(table.rows[0].content_controls.len(), 1);
+            } else {
+                assert_eq!(table.content_controls.len(), 1);
+                assert!(matches!(
+                    table.content_controls[0].2.content[0],
+                    SdtContent::Row(_)
+                ));
+            }
+            let expected = fonts(&source)["source_control"].clone();
+            assert_eq!(expected.1, if normal { 11.0 } else { 14.0 });
+            assert_eq!(source.default_font_name(), Some("Georgia"));
+            let mut destination = Document::new();
+            destination.add_paragraph("destination");
+            let before = fonts(&destination)["destination"].clone();
+            destination.insert_document(1, &source);
+            let reopened = Document::from_bytes(&destination.to_bytes().unwrap()).unwrap();
+            let actual = fonts(&reopened);
+            assert_eq!(actual["destination"], before);
+            assert_eq!(
+                actual["source_control"], expected,
+                "shape{shape} normal{normal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue434_protected_coalescing_requires_actual_equal_properties() {
+    let revision = "<w:ins w:id=\"9\" w:author=\"Old\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>old</w:t></w:r></w:ins>";
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        for ignore_formatting in [true, false] {
+            let options = rdocx::ComparisonOptions {
+                granularity,
+                ignore_formatting,
+                ignore_whitespace: true,
+                ..Default::default()
+            };
+            let mut same = issue434_paragraph_document(&format!(
+                "{revision}<w:r><w:rPr><w:b/></w:rPr><w:t>invoice</w:t></w:r>"
+            ));
+            let split = issue434_paragraph_document(&format!(
+                "{revision}<w:r><w:rPr><w:b/></w:rPr><w:t>invoi</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ce</w:t></w:r>"
+            ));
+            let same_before = same.to_bytes().unwrap();
+            same.compare_with_options(&split, "Reviewer", "2026-11-06T10:00:00Z", &options)
+                .unwrap();
+            assert_eq!(same.to_bytes().unwrap(), same_before);
+            assert_eq!(same.story_revisions().unwrap().len(), 1);
+            let mut ordinary = issue434_paragraph_document(
+                "<w:r><w:rPr><w:b/></w:rPr><w:t>plain words</w:t></w:r>",
+            );
+            let ordinary_edit = issue434_paragraph_document(
+                "<w:r><w:rPr><w:b/></w:rPr><w:t>plain   words</w:t></w:r>",
+            );
+            let ordinary_before = ordinary.to_bytes().unwrap();
+            ordinary
+                .compare_with_options(&ordinary_edit, "Reviewer", "2026-11-06T10:00:00Z", &options)
+                .unwrap();
+            assert_eq!(ordinary.to_bytes().unwrap(), ordinary_before);
+            assert!(ordinary.story_revisions().unwrap().is_empty());
+            let mut protected = issue434_paragraph_document(&format!(
+                "{revision}<w:r><w:rPr><w:b/></w:rPr><w:t>plain words</w:t></w:r>"
+            ));
+            let protected_edit = issue434_paragraph_document(&format!(
+                "{revision}<w:r><w:rPr><w:b/></w:rPr><w:t>plain   words</w:t></w:r>"
+            ));
+            let protected_before = protected.to_bytes().unwrap();
+            let error = protected
+                .compare_with_options(
+                    &protected_edit,
+                    "Reviewer",
+                    "2026-11-06T10:00:00Z",
+                    &options,
+                )
+                .expect_err("changed protected text must refuse despite ignore policy");
+            assert!(error.to_string().contains("body/paragraph[0]"), "{error}");
+            assert_eq!(protected.to_bytes().unwrap(), protected_before);
+            for (left, right) in [("b", "i"), ("i", "b")] {
+                for text in ["plain", "", " "] {
+                    let make = |style| {
+                        issue434_paragraph_document(&format!(
+                            "{revision}<w:r><w:rPr><w:{style}/></w:rPr><w:t xml:space=\"preserve\">{text}</w:t></w:r>"
+                        ))
+                    };
+                    let mut original = make(left);
+                    let edited = make(right);
+                    let before = original.to_bytes().unwrap();
+                    let error = original
+                        .compare_with_options(&edited, "Reviewer", "2026-11-06T10:00:00Z", &options)
+                        .expect_err("changed protected properties must refuse");
+                    assert!(error.to_string().contains("body/paragraph[0]"), "{error}");
+                    assert_eq!(original.to_bytes().unwrap(), before);
+                    assert_eq!(original.story_revisions().unwrap().len(), 1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn issue434_reply_snapshot_cannot_change_a_whole_held_owner() {
+    let revision = "<w:ins w:id=\"9\" w:author=\"Old\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>old</w:t></w:r></w:ins>";
+    let target = "<w:p><w:r><w:t>target</w:t></w:r></w:p>";
+    let held = format!("<w:p>{revision}</w:p>");
+    for owner in ["paragraph", "table", "control"] {
+        let wrap = |inner: &str| match owner {
+            "table" => format!(
+                "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"7000\"/></w:tblGrid><w:tr><w:tc>{inner}</w:tc></w:tr></w:tbl>"
+            ),
+            "control" => format!("<w:sdt><w:sdtPr/><w:sdtContent>{inner}</w:sdtContent></w:sdt>"),
+            _ => inner.to_owned(),
+        };
+        for unrelated in [true, false] {
+            let body = if unrelated {
+                format!("{target}{}", wrap(&held))
+            } else if owner == "paragraph" {
+                format!("<w:p><w:r><w:t>target</w:t></w:r>{revision}</w:p>")
+            } else {
+                wrap(&format!("{target}{held}"))
+            };
+            let mut original = document_with_content_controls(&wrap_word_body(&body));
+            let root = original
+                .add_comment_on_text("target", 0, "Ada", None, "root", None)
+                .unwrap();
+            let before = original.to_bytes().unwrap();
+            let mut edited = Document::from_bytes(&before).unwrap();
+            let reply = edited
+                .reply_to_with_initials(root, "Ben", Some("B"), "reply", None)
+                .unwrap();
+            let result = original.compare(&edited, "Reviewer", "2026-11-06T10:00:00Z");
+            if unrelated {
+                result.unwrap();
+                let pending = original.to_bytes().unwrap();
+                for accept in [false, true] {
+                    let mut resolved = Document::from_bytes(&pending).unwrap();
+                    if accept {
+                        resolved.accept_revisions_by_author("Reviewer").unwrap();
+                    } else {
+                        resolved.reject_revisions_by_author("Reviewer").unwrap();
+                    }
+                    assert_eq!(resolved.comments().len(), if accept { 2 } else { 1 });
+                    assert_eq!(resolved.story_revisions().unwrap().len(), 1);
+                    assert!(document_xml(&mut resolved).contains(revision));
+                    if accept {
+                        assert_eq!(
+                            resolved.comment_anchor_text(reply).unwrap().as_deref(),
+                            Some("target")
+                        );
+                    }
+                }
+            } else {
+                let error = result.expect_err("reply graph cannot change a held whole owner");
+                assert!(
+                    error.to_string().contains("body/")
+                        && error.to_string().contains("existing tracked revision"),
+                    "{owner}: {error}"
+                );
+                assert_eq!(original.to_bytes().unwrap(), before);
+                assert_eq!(original.comments().len(), 1);
+                assert_eq!(original.story_revisions().unwrap().len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue434_coalesced_held_containers_keep_equal_partitions_only() {
+    let revision = "<w:ins w:id=\"9\" w:author=\"Old\" w:date=\"2026-11-05T10:00:00Z\"><w:r><w:t>old</w:t></w:r></w:ins>";
+    let run = "<w:r><w:rPr><w:b/></w:rPr><w:t>invoice</w:t></w:r>";
+    let split = "<w:r><w:rPr><w:b/></w:rPr><w:t>invoi</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>ce</w:t></w:r>";
+    for owner in ["paragraph", "table", "control"] {
+        let document = |runs: &str| {
+            let content = if owner == "paragraph" {
+                format!("<w:p>{revision}{runs}</w:p>")
+            } else {
+                let children = format!("<w:p>{revision}</w:p><w:p>{runs}</w:p>");
+                if owner == "table" {
+                    format!(
+                        "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"7000\"/></w:tblGrid><w:tr><w:tc>{children}</w:tc></w:tr></w:tbl>"
+                    )
+                } else {
+                    format!("<w:sdt><w:sdtPr/><w:sdtContent>{children}</w:sdtContent></w:sdt>")
+                }
+            };
+            document_with_content_controls(&wrap_word_body(&content))
+        };
+        for granularity in [
+            rdocx::ComparisonGranularity::Run,
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            for ignore_formatting in [false, true] {
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ignore_formatting,
+                    ..Default::default()
+                };
+                let mut original = document(run);
+                let before = original.to_bytes().unwrap();
+                original
+                    .compare_with_options(
+                        &document(split),
+                        "Reviewer",
+                        "2026-11-06T10:00:00Z",
+                        &options,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    original.to_bytes().unwrap(),
+                    before,
+                    "{owner} {granularity:?}"
+                );
+                assert_eq!(original.story_revisions().unwrap().len(), 1);
+                for changed in [
+                    split.replace("invoi", "recei").replace(">ce<", ">pt<"),
+                    split.replace("<w:b/>", "<w:i/>"),
+                ] {
+                    let mut original = document(run);
+                    let before = original.to_bytes().unwrap();
+                    let error = original
+                        .compare_with_options(
+                            &document(&changed),
+                            "Reviewer",
+                            "2026-11-06T10:00:00Z",
+                            &options,
+                        )
+                        .expect_err("a real nested owner change must refuse");
+                    assert!(
+                        error.to_string().contains("body/")
+                            && error.to_string().contains("existing tracked revision"),
+                        "{error}"
+                    );
+                    assert_eq!(original.to_bytes().unwrap(), before);
+                }
+            }
+        }
+    }
+}

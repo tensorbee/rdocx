@@ -6,6 +6,46 @@
 **Depends on**: F-X272. Design approval uses its bounded revised-owner preservation and refusal contract. Implementation needs actual provider completion. P1 and P2 below are F-X279 implementation and composition obligations, not additional F-X272 prerequisites. Three design peers are used. No fourth design peer. Root final follows this file. The implementation cap of three is separate and is not reset.
 **Test gate**: regression
 
+## Current local implementation readiness, 2026-11-06
+
+The actual claim Base is `391280577110c9b7b92ace0420a4a1d98c707889`.
+The completed local F272 provider `5a4c5c0b` is an ancestor. B implements
+A279-3/5/6 and P1/P2/C6. Integrated A/C/D own the excluded revision vocabulary,
+comment markup and reply authoring contracts. Earlier draft readiness and
+provider statements below remain historical and do not override this state.
+
+The reviewed R2 producer passed 18 public Rust cases, 29 Native controls,
+CLI 4 plus 9 comparison controls, all-target checks, strict scoped Clippy and
+17 fresh installed Python nodes. Independent pass 2 returned zero defects and
+smells after closing both pass 1 defects. Root final 1 then found D3: caller
+ignore masks had widened protected-owner admission. Actual R2 public probes
+accept changed formatting and whitespace where the preserved provider refuses.
+Those old successful observations do not cover D3.
+
+The complete D3 producer passed 20 public Rust cases, 29 Native controls,
+CLI 4 plus 9 cases, scoped all-target compilation, strict Clippy, formatting
+and 32 fresh installed Python nodes. Independent implementation pass 3 was
+clean. Root's later C5 supplement identified D4 over-refusal: the coalesced
+equality exception reached paragraph owners but not nested paragraphs inside
+held tables and block controls. Actual predecessor execution fails six such
+cases while the three paragraph controls pass.
+
+The bounded D4 repair compares borrowed actual paragraph leaves with the same
+strict source-aware predicate. Exact container shells, private control state,
+child variants, multiplicity and positions remain part of derived equality.
+The positive whole-owner residual is still required. The P1 replay guard remains
+exact. Actual repaired checks pass 21 public Rust cases, 29 Native controls,
+CLI 4 plus 9 cases, scoped all-target compilation, strict Clippy, formatting
+and 41 fresh installed Python nodes with exact native/stub authentication.
+Root affected final 3 reports zero defects and smells. Local implementation is
+ready for reviewed integration, with all named final sprint riders pending. All three
+original independent implementation peers are used, with no cap reset or
+confirmation peer.
+
+No final installed matrix, native candidate, full suite, hash or oracle result
+is claimed. This plan remains approved and the feature stays in progress until
+actual integrated final acceptance.
+
 ## Prepared A279-1 authoring child split, pending Root adoption
 
 F-X279d is a draft for complete A279-1 crossing-reply AUTHORING and initials,
@@ -482,17 +522,17 @@ The historical manifest has 49 entries and 7 pixel cases. F-X279 must declare th
 
 ## Implementation checklist
 
-- [ ] Revalidate onto the clean Base after actual F-X272 provider completion. Implement P1 and P2 in F-X279 while preserving F-X272 A4 and A5.
-- [ ] Implement crossing replies, initials, comment markup and absent `basedOn` without fabricating ranges or rewriting untouched parts.
-- [ ] Coalesce equal text at all three granularities. At word granularity keep exactly one deletion and one insertion beside each token, with real-edit run/character policy unchanged. Preserve bytes, expose revision `text` and one snake_case kind vocabulary.
-- [ ] Add the two private policy bits and both constructors.
-- [ ] Route Rust `insert_document` through `Document::import_fragment` with the whole-body fragment and native body-only policy.
-- [ ] Implement body effective-default preparation, including character and bounded table style chains, and publish one authoritative prepared body byte source.
-- [ ] Keep Python on its single `import_fragment` route with `for_insert_document` and its existing companion import unchanged.
-- [ ] Do not introduce V5's rejected media predicate or companion-carry bit. They are proposal history, not current Base symbols to remove. Preserve Python's existing complete nested relationship closure and the accepted native body-only exclusion.
-- [ ] Leave direct `import_fragment` numbering reuse and its preservation bit off, and leave Q-S96-04 bookmarks unchanged.
-- [ ] Add the named regressions in existing carriers, including saved inserted body bytes and nested chart image, and show old-source RED then GREEN.
-- [ ] Update only the three HLD files above and keep the fresh native comment open and hash measurement for the final union.
+- [x] Revalidate onto the clean Base after actual F-X272 provider completion. Implement P1 and P2 in F-X279 while preserving F-X272 A4 and A5.
+- [x] Preserve integrated A/C/D reply authoring, initials, comment markup, absent `basedOn` and revision vocabulary while implementing B comparison composition. Those implementation leases remain excluded from B.
+- [x] Coalesce equal text at all three granularities. At word granularity keep exactly one deletion and one insertion beside each token, with real-edit run/character policy unchanged. Preserve bytes, expose revision `text` and one snake_case kind vocabulary.
+- [x] Add the two private policy bits and both constructors.
+- [x] Route Rust `insert_document` through `Document::import_fragment` with the whole-body fragment and native body-only policy.
+- [x] Implement body effective-default preparation, including character and bounded table style chains, and publish one authoritative prepared body byte source.
+- [x] Keep Python on its single `import_fragment` route with `for_insert_document` and its existing companion import unchanged.
+- [x] Do not introduce V5's rejected media predicate or companion-carry bit. They are proposal history, not current Base symbols to remove. Preserve Python's existing complete nested relationship closure and the accepted native body-only exclusion.
+- [x] Leave direct `import_fragment` numbering reuse and its preservation bit off, and leave Q-S96-04 bookmarks unchanged.
+- [x] Add the named regressions in existing carriers, including saved inserted body bytes and nested chart image, and retain actual applicable predecessor RED and repaired GREEN.
+- [x] Update only the three HLD files above and keep the fresh native comment open and hash measurement for the final union.
 
 ## Open questions
 
