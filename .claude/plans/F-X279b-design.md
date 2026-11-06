@@ -46,6 +46,18 @@ No final installed matrix, native candidate, full suite, hash or oracle result
 is claimed. This plan remains approved and the feature stays in progress until
 actual integrated final acceptance.
 
+## Integrated native composition observations, 2026-11-06
+
+At actual integrated source a78eba3c, six exact P1/P2 pending and selected
+accept/reject outputs passed SDK validation and CUA Word16.114.1(26102031) open
+without repair. Root observed thread, body and selected ranges as recorded in
+.claude/reviews/S96-comment-comparison-native-observations.md. All six original
+and work-copy hashes remain unchanged after close, with prior document custody
+preserved. This supersedes earlier pending-at-writing native composition text
+for those exact observed inputs only. Final-source applicability after later
+ZIP/dependency repairs and all other final riders remain pending. No Word save
+or complete installed, performance, corpus or publication result follows.
+
 ## Prepared A279-1 authoring child split, pending Root adoption
 
 F-X279d is a draft for complete A279-1 crossing-reply AUTHORING and initials,
