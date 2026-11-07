@@ -691,3 +691,15 @@ fragment. It adds no public mode, quota, API, gate or review allowance. The
 F272 HLD impact and focused integration controls own this private composition
 repair. This child's prefix and final evidence keep their actual source
 identities, with final integrated qualification still pending.
+
+
+## Integrated untouched endnote preservation repair checkpoint
+
+Optional Hyperlink-style discovery skips ambiguous endnote ownership instead
+of refusing an unrelated untouched save. The strict note lookup and actual
+legacy-form readers and setters still refuse ambiguity atomically. The existing
+duplicate footnote/endnote relationship regression passes in the guarded
+17case native-host batch. Authored note read text retains its approved explicit
+space run. The bounded independent review and Root adoption are in
+.claude/reviews/S96-root-final-union-repair-pass-2.md. No imported-input contract,
+public API or resource budget is changed. Remaining final riders stay pending.

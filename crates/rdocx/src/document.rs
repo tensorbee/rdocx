@@ -27294,7 +27294,7 @@ impl Document {
             );
         }
         if !referenced
-            && let Some(part) = self.note_part_name(StoryKind::Endnote)?
+            && let Ok(Some(part)) = self.note_part_name(StoryKind::Endnote)
             && let Some(source) = self.package.get_part(&part)
             && let Ok(notes) = rdocx_oxml::footnotes::CT_Footnotes::from_xml(source)
         {
