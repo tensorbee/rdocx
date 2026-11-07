@@ -749,3 +749,38 @@ updated CLI archive measured and post-adoption checked. All final native,
 performance, hosted, verification/review and close debt remains pending. No
 completion ledger, dependency unblock, main merge, tag, registry publication,
 yank or reporter comment is authorized by this checkpoint.
+
+
+## H8 integrated repair source availability renewal
+
+The H7 run42341613212 passes the117CLI cases and its Word library, integration
+and regression suites. Its MSRV job fails15later layout cases. Historical
+producer, signer, Python and fidelity successes keep their exact H7 identity.
+The failed whole job and any unperformed final decider remain unqualified.
+
+The current repair restores stored Field display hyphenation policy, neutral
+pre-laid body wrapping compatibility, instruction events before stored Field
+cache display, and checked Engine preparation of deferred revision Fields.
+Actual producer paint and multilingual metadata replace stale synthetic
+fixture assumptions. The complete current layout library passes419cases with
+zero failures and one unchanged ignored case. All49hashes match the unchanged
+baseline, and full workspace Clippy passes with warnings denied.
+
+The exact original Issue437 counter workload also exposed unnecessary story
+refreshes in both run-font and run-collection view capture. The repaired
+current-owner capture records zero body scans in all11batches. Both exact
+new-document and reopened lifecycle regressions pass. Instrumented clocks do
+not establish the ordinary release ratios. Earlier partial repairs and failed
+count observations remain preserved. Public signatures, version carriers,
+resource limits, numeric acceptance thresholds and the baseline are unchanged.
+
+The consumed source-availability checkpoint is renewed only for reviewed clean
+canonical sprint source and complete normal CI. Bind actual source, tree,
+origin, ancestry, actor, request, run and outcomes after observation. H7
+signed subjects and its decider cannot be relabeled at the successor source.
+Current-source installed artifacts, full runtime and typing, verified changed
+package dry runs, remaining native, quiet performance and memory acceptance,
+build-only26payloads, full verification, sprint review and close remain due
+where not actually performed. The named native exception remains unproved.
+No feature completion, dependency unblock, main merge, tag, publication, yank
+or reporter comment is authorized by this checkpoint.

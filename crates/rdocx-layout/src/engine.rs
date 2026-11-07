@@ -17754,6 +17754,11 @@ mod tests {
                         {
                             Some(text)
                         }
+                        InlineItem::MultilingualText(span)
+                            if span.base().field_kind == Some(FieldKind::SequenceRepeat) =>
+                        {
+                            Some(span.base())
+                        }
                         _ => None,
                     })
                     .expect("empty source cache retains its actual pending repeat placement");
@@ -18507,12 +18512,26 @@ mod tests {
         let items = &block.reflow.expect("reflow items retained").items;
         let revision_index = items
             .iter()
-            .position(|item| matches!(item, InlineItem::Text(text) if text.text == "before"))
+            .position(|item| match item {
+                InlineItem::Text(text) => text.text == "before",
+                InlineItem::MultilingualText(span) => span.text() == "before",
+                _ => false,
+            })
             .expect("revision text");
         let target_index = items
             .iter()
             .position(|item| {
-                matches!(item, InlineItem::Text(text) if matches!(text.field_kind, Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))))
+                let text = match item {
+                    InlineItem::Text(text) | InlineItem::Marker(text) => Some(text),
+                    InlineItem::MultilingualText(span) => Some(span.base()),
+                    _ => None,
+                };
+                text.is_some_and(|text| {
+                    matches!(
+                        text.field_kind,
+                        Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))
+                    )
+                })
             })
             .expect("PAGEREF target");
         assert!(revision_index < target_index);
@@ -18837,6 +18856,7 @@ mod tests {
             .flat_map(|line| &line.items)
             .filter_map(|item| match item {
                 oxml_layout::LineItem::Text(segment) => Some(segment),
+                oxml_layout::LineItem::MultilingualText(span) => Some(span.base()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -18895,6 +18915,9 @@ mod tests {
             .flat_map(|line| &line.items)
             .filter_map(|item| match item {
                 oxml_layout::LineItem::Text(segment) if segment.text == "11" => Some(segment),
+                oxml_layout::LineItem::MultilingualText(span) if span.text() == "11" => {
+                    Some(span.base())
+                }
                 _ => None,
             })
             .next()
@@ -19768,6 +19791,11 @@ mod tests {
             .find_map(|item| match item {
                 LineItem::Text(segment) if segment.field_kind == Some(FieldKind::Page) => {
                     Some(segment)
+                }
+                LineItem::MultilingualText(segment)
+                    if segment.base().field_kind == Some(FieldKind::Page) =>
+                {
+                    Some(segment.base())
                 }
                 _ => None,
             })
@@ -20778,21 +20806,63 @@ mod tests {
             SourceNodeId::new(1),
         )
         .expect("paragraph lays out");
-        let text_items = block
-            .reflow
-            .expect("line-breaking inputs retained")
-            .items
+        let items = block.reflow.expect("line-breaking inputs retained").items;
+        let item_count = items.len();
+        let text_items = items
             .into_iter()
             .filter_map(|item| match item {
                 InlineItem::Text(segment) => Some(segment),
+                InlineItem::MultilingualText(segment) => Some(segment.base().clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(text_items.len(), 1);
-        assert_eq!(text_items[0].text, "financial planning");
-        assert_eq!(text_items[0].source.expect("source span").char_start, 0);
-        assert_eq!(text_items[0].source.expect("source span").char_end, 18);
+        assert!(!text_items.is_empty());
+        assert_eq!(
+            text_items.len(),
+            item_count,
+            "no explicit break/control item was added"
+        );
+        assert_eq!(
+            text_items
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<String>(),
+            "financial planning"
+        );
+        let mut next = 0;
+        for segment in &text_items {
+            let source = segment.source.expect("source span");
+            assert_eq!(source.node, SourceNodeId::new(1).unwrap());
+            assert_eq!(source.char_start, next);
+            next += segment.text.chars().count() as u32;
+            assert_eq!(source.char_end, next);
+        }
+        assert_eq!(next, 18);
+        // The approved legacy factory selects Unicode shaping cuts before
+        // shared line breaking. Compare those actual cuts, not one old Text carrier.
+        let mut whole = text_items[0].clone();
+        whole.text = "financial planning".to_owned();
+        whole.source.as_mut().unwrap().char_end = 18;
+        let shared = fonts
+            .shape_paragraph_with_kerning(
+                vec![(whole, None)],
+                TextDirection::LeftToRight,
+                false,
+                &[false],
+                true,
+            )
+            .expect("shared legacy Unicode shaping cuts");
+        assert_eq!(
+            text_items
+                .iter()
+                .map(|segment| (segment.text.as_str(), segment.source))
+                .collect::<Vec<_>>(),
+            shared
+                .iter()
+                .map(|segment| (segment.text(), segment.base().source))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -21376,7 +21446,7 @@ mod tests {
                     .resolve_font(Some(&family), run.bold, run.italic)
                     .expect("bundled run font resolves");
                 let independently_shaped = fonts
-                    .shape_text(font_id, &run.text, run.font_size)
+                    .shape_text_with_kerning(font_id, &run.text, run.font_size, false)
                     .expect("emitted chunk reshapes");
                 assert_eq!(run.glyph_ids, independently_shaped.glyph_ids, "{text}");
                 assert_eq!(run.advances, independently_shaped.advances, "{text}");
@@ -22502,8 +22572,22 @@ mod tests {
                 .expect("header retains reflow inputs")
                 .items
                 .iter()
-                .any(|item| matches!(item, InlineItem::HyphenatedText { .. }))
+                .any(|item| matches!(item, InlineItem::MultilingualText(span)
+                    if span.uses_legacy_shaping()
+                        && span.text() == "representation"))
         );
+
+        let visible = block
+            .lines
+            .iter()
+            .flat_map(|line| &line.items)
+            .filter_map(|item| match item {
+                LineItem::Text(text) => Some(text.text.as_str()),
+                LineItem::MultilingualText(text) => Some(text.base().text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, "repre-sentation");
 
         let rebound = SourceNodeId::new(74).expect("header source ID");
         rebind_paragraph_source(&mut block, Some(rebound)).expect("source rebinding succeeds");
@@ -22517,8 +22601,8 @@ mod tests {
                 .all(|item| {
                     !matches!(
                         item,
-                        InlineItem::HyphenatedText { segment, .. }
-                            if !segment.source.is_some_and(|source| source.node == rebound)
+                        InlineItem::MultilingualText(segment)
+                            if !segment.base().source.is_some_and(|source| source.node == rebound)
                     )
                 })
         );
@@ -25776,9 +25860,22 @@ mod tests {
         engine
             .layout(&input)
             .expect("transactional layout succeeds");
+        // The retained Word producer proof can reach the byte ceiling before
+        // the entry ceiling. Both bounds still constrain staging.
+        assert!(engine.pending_paragraph_cache_peak_entries > 0);
+        assert!(engine.pending_paragraph_cache_peak_entries <= PARAGRAPH_CACHE_MAX_ENTRIES);
         assert_eq!(
-            engine.pending_paragraph_cache_peak_entries,
-            PARAGRAPH_CACHE_MAX_ENTRIES
+            engine
+                .paragraph_cache
+                .front()
+                .expect("actual FIFO suffix retained")
+                .key
+                .paragraph
+                .text(),
+            format!(
+                "staged paragraph {}",
+                PARAGRAPH_CACHE_MAX_ENTRIES * 2 - engine.paragraph_cache.len()
+            )
         );
         assert!(engine.pending_paragraph_cache_peak_bytes <= PARAGRAPH_CACHE_MAX_BYTES);
     }
@@ -35594,12 +35691,10 @@ mod tests {
                     .lines
                     .iter()
                     .flat_map(|line| &line.items)
-                    .filter_map(|item| {
-                        if let oxml_layout::LineItem::Text(segment) = item {
-                            Some(segment)
-                        } else {
-                            None
-                        }
+                    .filter_map(|item| match item {
+                        oxml_layout::LineItem::Text(segment) => Some(segment),
+                        oxml_layout::LineItem::MultilingualText(span) => Some(span.base()),
+                        _ => None,
                     })
                     .collect::<Vec<_>>();
                 let inserted = segments

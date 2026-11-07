@@ -11408,6 +11408,11 @@ mod tests {
             };
             block.lines.clear();
             block.anchored.push(drawing);
+            Arc::make_mut(&mut fact.paint)
+                .anchors
+                .push(WordAnchorPaint::Shape {
+                    paragraphs: Vec::new(),
+                });
             fact.placement = HeaderFooterPlacement::Flow;
         }
         (blocks, facts)
@@ -11805,18 +11810,21 @@ mod tests {
             };
             let mut fm = FontManager::new_deterministic().unwrap();
             let node = oxml_layout::SourceNodeId::new(42).unwrap();
-            let paragraph = crate::engine::layout_paragraph_with_source(
-                p,
-                468.0,
-                &input.styles,
-                &input,
-                &MediaRegistry::new(&input.images),
-                &mut fm,
-                &mut crate::style_resolver::NumberingState::new(),
-                &mut Vec::new(),
-                with_source.then_some(node),
-            )
-            .unwrap();
+            let (paragraph, direction, paint) =
+                crate::engine::layout_paragraph_with_source_and_direction(
+                    p,
+                    468.0,
+                    &input.styles,
+                    &input,
+                    &MediaRegistry::new(&input.images),
+                    &mut fm,
+                    &mut crate::style_resolver::NumberingState::new(),
+                    &mut Vec::new(),
+                    with_source.then_some(node),
+                    with_source.then_some(node),
+                    None,
+                )
+                .unwrap();
             let first_ascent = paragraph.lines[0].ascent;
             let frame = |width: i32, y: i32, wrap: &str| HeaderFooterBlockSemantics {
                 placement: HeaderFooterPlacement::Frame {
@@ -11839,7 +11847,11 @@ mod tests {
             let facts = vec![
                 frame(100, if footer { 0 } else { 360 }, "around"),
                 frame(2400, if footer { 1040 } else { 1400 }, "notBeside"),
-                HeaderFooterBlockSemantics::default(),
+                HeaderFooterBlockSemantics {
+                    paint: Arc::new(paint),
+                    direction,
+                    ..Default::default()
+                },
             ];
             let original = vec![make_para(1, 12.0), make_para(1, 12.0), paragraph];
 
