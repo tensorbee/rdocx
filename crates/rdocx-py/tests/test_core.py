@@ -12981,6 +12981,8 @@ def test_body_work_counts_owner_lookup_without_xml():
     if whole is None or splice is None:
         pytest.skip("release build: body work counters are debug-only")
     doc = _issue407_document(False)
+    # This mixed fixture activates its checked authority on the first read.
+    _ = doc.paragraphs
     whole()
     splice()
     paragraph = doc.paragraphs[0]
@@ -15490,8 +15492,10 @@ def test_word_piece_shared_header_identity_uses_opc_part_names(alias):
         work()
     document = rdocx.Document.from_bytes(output.getvalue())
     if work is not None:
-        assert (work()[0] > 0) is alias
+        assert work()[0] == 0
     assert document.section(0).header.paragraphs[0].text == "shared header"
+    if work is not None:
+        assert (work()[0] > 0) is alias
     held = document.paragraphs[0]
     main = document.part_xml("/word/document.xml")
     if work is not None:
