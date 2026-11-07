@@ -20,6 +20,48 @@ use rdocx_oxml::text::{CommentRangeMarker, HyperlinkSpan};
 use crate::document::visit_body_paragraphs_mut;
 use crate::{ContentLocation, Document, Error, Result};
 
+#[cfg(test)]
+thread_local! {
+    static COMMENT_PARENT_READ_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COMMENT_PARENT_READ_COUNTS: std::cell::Cell<Option<[usize; 2]>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct CommentParentReadPhase(bool);
+
+#[cfg(test)]
+impl CommentParentReadPhase {
+    fn enter() -> Self {
+        Self(COMMENT_PARENT_READ_ACTIVE.with(|active| active.replace(true)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for CommentParentReadPhase {
+    fn drop(&mut self) {
+        COMMENT_PARENT_READ_ACTIVE.with(|active| active.set(self.0));
+    }
+}
+
+#[cfg(test)]
+struct CommentParentReadPass(bool);
+
+#[cfg(test)]
+impl CommentParentReadPass {
+    fn paragraph(&mut self) {
+        if COMMENT_PARENT_READ_ACTIVE.with(std::cell::Cell::get) {
+            COMMENT_PARENT_READ_COUNTS.with(|counts| {
+                if let Some(mut value) = counts.get() {
+                    value[0] += usize::from(!self.0);
+                    value[1] += 1;
+                    counts.set(Some(value));
+                }
+            });
+            self.0 = true;
+        }
+    }
+}
+
 /// Refuses comment fields holding a character XML 1.0 cannot carry, as
 /// python-docx refuses such text.
 fn reject_non_xml_comment(author: &str, initials: Option<&str>, text: &str) -> Result<()> {
@@ -1984,63 +2026,14 @@ impl Document {
     fn anchor_reply_to_parent(&mut self, parent_id: i32) -> Result<i32> {
         let no_range = || Error::Other(format!("comment id {parent_id} has no range to reply to"));
         self.flush_to_package()?;
-        let parent = self.comment_anchor(parent_id)?.ok_or_else(no_range)?;
-        let story = parent.start.location.story().clone();
-        let inventory = self.comment_source_inventory_at(&self.doc_part_name)?;
-        let mut counts = [0usize; 3];
-        for (part, markers) in &inventory {
-            for marker in markers.iter().filter(|marker| marker.id == parent_id) {
-                if part != story.part_name() {
-                    return Err(no_range());
-                }
-                counts[marker.family] += 1;
-            }
-        }
-        if counts != [1, 1, 1] || parent.end.location.story() != &story {
-            return Err(no_range());
-        }
-        let markers = inventory.get(story.part_name()).ok_or_else(no_range)?;
-        let parent_end = markers
-            .iter()
-            .find(|marker| marker.id == parent_id && marker.family == 1)
-            .ok_or_else(no_range)?;
-        let parent_reference = markers
-            .iter()
-            .find(|marker| marker.id == parent_id && marker.family == 2)
-            .ok_or_else(no_range)?;
-        if parent_end.span.end > parent_reference.span.start {
-            return Err(no_range());
-        }
-        let mut reference = None;
-        for (_, _, location, raw) in self.comment_story_range_paragraphs()? {
-            if location.story() != &story {
-                continue;
-            }
-            let paragraph = CT_P::from_xml_fragment(&raw)?;
-            for (index, path) in paragraph.accepted_run_paths().iter().enumerate() {
-                let run = paragraph.accepted_run(path).ok_or_else(no_range)?;
-                if !run.content.iter().any(|content| match content {
-                    RunContent::CommentReference { id, .. } => *id == parent_id,
-                    _ => false,
-                }) {
-                    continue;
-                }
-                if reference.is_some()
-                    || location != parent.end.location
-                    || index != parent.end.run_index
-                {
-                    return Err(no_range());
-                }
-                if !reply_reference_has_only_metadata(run, parent_id)? {
-                    return Err(no_range());
-                }
-                reference = Some(StoryRunPosition {
-                    location: location.clone(),
-                    run_index: index + 1,
-                });
-            }
-        }
-        let end = reference.ok_or_else(no_range)?;
+        #[cfg(test)]
+        let parent_read_phase = CommentParentReadPhase::enter();
+        let read = CommentAnchorRead::from_prepared(self, Some(parent_id))?;
+        let parent = read.project(parent_id)?.0.ok_or_else(no_range)?;
+        let (story, end) = read.reply_boundary(parent_id, &parent)?;
+        drop(read);
+        #[cfg(test)]
+        drop(parent_read_phase);
         let id = self.identifiers.reserve_comment_id()?;
         self.anchor_story_range(
             &StoryRunRange {
@@ -3069,6 +3062,234 @@ impl CommentOwnership {
     }
 }
 
+// One actual prepared-source read shared by anchor projection and reply checks.
+#[allow(clippy::type_complexity)] // Preserve the existing physical paragraph read tuple.
+struct CommentAnchorRead {
+    ownership: CommentOwnership,
+    counts: BTreeMap<i32, [usize; 3]>,
+    paragraphs: Vec<(
+        ContentLocation,
+        CT_P,
+        HashSet<i32>,
+        Vec<u8>,
+        (usize, usize),
+        usize,
+    )>,
+    marker_paragraphs: HashMap<i32, Vec<usize>>,
+    flow_paragraphs: HashMap<(usize, usize), Vec<usize>>,
+}
+
+impl CommentAnchorRead {
+    fn from_prepared(source: &Document, selected: Option<i32>) -> Result<Self> {
+        let ownership = source.comment_owned_graph_at(&source.doc_part_name, None, None)?;
+        if let Some(id) = selected
+            && !ownership.parents.contains_key(&id)
+        {
+            return Err(Error::Other(format!("unknown comment {id}")));
+        }
+        let counts = CommentOwnership::marker_counts(&ownership.markers);
+        #[cfg(test)]
+        let mut parent_read_pass = CommentParentReadPass(false);
+        let paragraphs = source
+            .comment_story_range_paragraphs()?
+            .into_iter()
+            .map(|(flow, offset, location, xml)| {
+                let ids = comment_source_markers(&xml)?
+                    .into_iter()
+                    .map(|marker| marker.id)
+                    .collect::<HashSet<_>>();
+                #[cfg(test)]
+                parent_read_pass.paragraph();
+                Ok((
+                    location,
+                    CT_P::from_xml_fragment(&xml)?,
+                    ids,
+                    xml,
+                    flow,
+                    offset,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Physical order: the source, then the offset in it.
+        let order = |index: &usize| (paragraphs[*index].4.0, paragraphs[*index].5);
+        let mut marker_paragraphs = HashMap::<i32, Vec<usize>>::new();
+        // A range runs through one flow, the paragraphs of one story owner and
+        // of the table cells it holds, in physical order.
+        let mut flow_paragraphs = HashMap::<(usize, usize), Vec<usize>>::new();
+        for (index, (_, _, ids, _, flow, _)) in paragraphs.iter().enumerate() {
+            flow_paragraphs.entry(*flow).or_default().push(index);
+            for &id in ids {
+                marker_paragraphs.entry(id).or_default().push(index);
+            }
+        }
+        for indexes in flow_paragraphs
+            .values_mut()
+            .chain(marker_paragraphs.values_mut())
+        {
+            indexes.sort_by_key(order);
+        }
+        Ok(Self {
+            ownership,
+            counts,
+            paragraphs,
+            marker_paragraphs,
+            flow_paragraphs,
+        })
+    }
+
+    fn project(&self, id: i32) -> Result<(Option<StoryRunRange>, Option<String>)> {
+        let order = |index: &usize| (self.paragraphs[*index].4.0, self.paragraphs[*index].5);
+        let count = self.counts.get(&id).copied().unwrap_or_default();
+        if count == [0; 3] {
+            return Ok((None, None));
+        }
+        if count == [0, 0, 1] {
+            return Ok((None, Some(String::new())));
+        }
+        if count[0] != 1 || count[1] != 1 || count[2] > 1 {
+            return Err(Error::Other(format!(
+                "comment {id} has duplicate or unmatched source markers"
+            )));
+        }
+        let mut start = None::<StoryRunPosition>;
+        let mut end = None::<StoryRunPosition>;
+        let mut open = false;
+        let mut text = String::new();
+        let mut first_paragraph = None;
+        for &index in self.marker_paragraphs.get(&id).into_iter().flatten() {
+            let (_, _, _, xml, _, _) = &self.paragraphs[index];
+            let (_, _, first, last) = CT_P::accepted_comment_source_projection(xml, id, false)?;
+            if first.is_some() || last.is_some() {
+                first_paragraph = Some(index);
+                break;
+            }
+        }
+        let first_paragraph = first_paragraph.ok_or_else(|| Error::Other(format!(
+            "comment {id} source cannot be projected faithfully on the existing accepted run axis"
+        )))?;
+        let flow = &self.flow_paragraphs[&self.paragraphs[first_paragraph].4];
+        let offset = flow
+            .binary_search_by_key(&order(&first_paragraph), order)
+            .expect("registered flow paragraph");
+        for &index in &flow[offset..] {
+            let (location, paragraph, ids, xml, _, _) = &self.paragraphs[index];
+            let was_open = open;
+            let (contribution, next_open, first, last) = if ids.contains(&id) {
+                CT_P::accepted_comment_source_projection(xml, id, open)?
+            } else {
+                (paragraph.accepted_text(), open, None, None)
+            };
+            if let Some(index) = first {
+                if start.is_some() {
+                    return Err(Error::Other(format!(
+                        "comment {id} has duplicate projected starts"
+                    )));
+                }
+                start = Some(StoryRunPosition {
+                    location: location.clone(),
+                    run_index: index,
+                });
+            }
+            if was_open || first.is_some() {
+                if was_open {
+                    text.push('\n');
+                }
+                text.push_str(&contribution);
+            }
+            if let Some(index) = last {
+                if end.is_some() {
+                    return Err(Error::Other(format!(
+                        "comment {id} has duplicate projected ends"
+                    )));
+                }
+                end = Some(StoryRunPosition {
+                    location: location.clone(),
+                    run_index: index,
+                });
+            }
+            open = next_open;
+            if end.is_some() {
+                break;
+            }
+        }
+        match (start, end) {
+            (Some(start), Some(end)) if !open => {
+                Ok((Some(StoryRunRange { start, end }), Some(text)))
+            }
+            (None, _) => Err(Error::Other(format!(
+                "comment {id} source cannot be projected faithfully on the existing accepted run axis"
+            ))),
+            _ => Err(Error::Other(format!(
+                "comment {id} range has no ordered end in the same story or its table cells"
+            ))),
+        }
+    }
+
+    fn reply_boundary(
+        &self,
+        parent_id: i32,
+        parent: &StoryRunRange,
+    ) -> Result<(crate::StoryId, StoryRunPosition)> {
+        let no_range = || Error::Other(format!("comment id {parent_id} has no range to reply to"));
+        let story = parent.start.location.story().clone();
+        let inventory = &self.ownership.markers;
+        let mut counts = [0usize; 3];
+        for (part, markers) in inventory {
+            for marker in markers.iter().filter(|marker| marker.id == parent_id) {
+                if part != story.part_name() {
+                    return Err(no_range());
+                }
+                counts[marker.family] += 1;
+            }
+        }
+        if counts != [1, 1, 1] || parent.end.location.story() != &story {
+            return Err(no_range());
+        }
+        let markers = inventory.get(story.part_name()).ok_or_else(no_range)?;
+        let parent_end = markers
+            .iter()
+            .find(|marker| marker.id == parent_id && marker.family == 1)
+            .ok_or_else(no_range)?;
+        let parent_reference = markers
+            .iter()
+            .find(|marker| marker.id == parent_id && marker.family == 2)
+            .ok_or_else(no_range)?;
+        if parent_end.span.end > parent_reference.span.start {
+            return Err(no_range());
+        }
+        let mut reference = None;
+        for (location, paragraph, _, _, _, _) in &self.paragraphs {
+            if location.story() != &story {
+                continue;
+            }
+            for (index, path) in paragraph.accepted_run_paths().iter().enumerate() {
+                let run = paragraph.accepted_run(path).ok_or_else(no_range)?;
+                if !run.content.iter().any(|content| match content {
+                    RunContent::CommentReference { id, .. } => *id == parent_id,
+                    _ => false,
+                }) {
+                    continue;
+                }
+                if reference.is_some()
+                    || location != &parent.end.location
+                    || index != parent.end.run_index
+                {
+                    return Err(no_range());
+                }
+                if !reply_reference_has_only_metadata(run, parent_id)? {
+                    return Err(no_range());
+                }
+                reference = Some(StoryRunPosition {
+                    location: location.clone(),
+                    run_index: index + 1,
+                });
+            }
+        }
+        let end = reference.ok_or_else(no_range)?;
+        Ok((story, end))
+    }
+}
+
 pub(crate) fn comment_source_markers(xml: &[u8]) -> Result<Vec<CommentSourceMarker>> {
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -3306,140 +3527,13 @@ impl Document {
     ) -> Result<BTreeMap<i32, Result<(Option<StoryRunRange>, Option<String>)>>> {
         let mut source = self.clone_for_staging();
         source.flush_to_package()?;
-        let ownership = source.comment_owned_graph_at(&source.doc_part_name, None, None)?;
-        if let Some(id) = selected
-            && !ownership.parents.contains_key(&id)
-        {
-            return Err(Error::Other(format!("unknown comment {id}")));
-        }
-        let counts = CommentOwnership::marker_counts(&ownership.markers);
-        let paragraphs = source
-            .comment_story_range_paragraphs()?
-            .into_iter()
-            .map(|(flow, offset, location, xml)| {
-                let ids = comment_source_markers(&xml)?
-                    .into_iter()
-                    .map(|marker| marker.id)
-                    .collect::<HashSet<_>>();
-                Ok((
-                    location,
-                    CT_P::from_xml_fragment(&xml)?,
-                    ids,
-                    xml,
-                    flow,
-                    offset,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // Physical order: the source, then the offset in it.
-        let order = |index: &usize| (paragraphs[*index].4.0, paragraphs[*index].5);
-        let mut marker_paragraphs = HashMap::<i32, Vec<usize>>::new();
-        // A range runs through one flow, the paragraphs of one story owner and
-        // of the table cells it holds, in physical order.
-        let mut flow_paragraphs = HashMap::<(usize, usize), Vec<usize>>::new();
-        for (index, (_, _, ids, _, flow, _)) in paragraphs.iter().enumerate() {
-            flow_paragraphs.entry(*flow).or_default().push(index);
-            for &id in ids {
-                marker_paragraphs.entry(id).or_default().push(index);
-            }
-        }
-        for indexes in flow_paragraphs
-            .values_mut()
-            .chain(marker_paragraphs.values_mut())
-        {
-            indexes.sort_by_key(order);
-        }
-        let project = |id: i32| -> Result<(Option<StoryRunRange>, Option<String>)> {
-            let count = counts.get(&id).copied().unwrap_or_default();
-            if count == [0; 3] {
-                return Ok((None, None));
-            }
-            if count == [0, 0, 1] {
-                return Ok((None, Some(String::new())));
-            }
-            if count[0] != 1 || count[1] != 1 || count[2] > 1 {
-                return Err(Error::Other(format!(
-                    "comment {id} has duplicate or unmatched source markers"
-                )));
-            }
-            let mut start = None::<StoryRunPosition>;
-            let mut end = None::<StoryRunPosition>;
-            let mut open = false;
-            let mut text = String::new();
-            let mut first_paragraph = None;
-            for &index in marker_paragraphs.get(&id).into_iter().flatten() {
-                let (_, _, _, xml, _, _) = &paragraphs[index];
-                let (_, _, first, last) = CT_P::accepted_comment_source_projection(xml, id, false)?;
-                if first.is_some() || last.is_some() {
-                    first_paragraph = Some(index);
-                    break;
-                }
-            }
-            let first_paragraph = first_paragraph.ok_or_else(|| Error::Other(format!(
-                "comment {id} source cannot be projected faithfully on the existing accepted run axis"
-            )))?;
-            let flow = &flow_paragraphs[&paragraphs[first_paragraph].4];
-            let offset = flow
-                .binary_search_by_key(&order(&first_paragraph), order)
-                .expect("registered flow paragraph");
-            for &index in &flow[offset..] {
-                let (location, paragraph, ids, xml, _, _) = &paragraphs[index];
-                let was_open = open;
-                let (contribution, next_open, first, last) = if ids.contains(&id) {
-                    CT_P::accepted_comment_source_projection(xml, id, open)?
-                } else {
-                    (paragraph.accepted_text(), open, None, None)
-                };
-                if let Some(index) = first {
-                    if start.is_some() {
-                        return Err(Error::Other(format!(
-                            "comment {id} has duplicate projected starts"
-                        )));
-                    }
-                    start = Some(StoryRunPosition {
-                        location: location.clone(),
-                        run_index: index,
-                    });
-                }
-                if was_open || first.is_some() {
-                    if was_open {
-                        text.push('\n');
-                    }
-                    text.push_str(&contribution);
-                }
-                if let Some(index) = last {
-                    if end.is_some() {
-                        return Err(Error::Other(format!(
-                            "comment {id} has duplicate projected ends"
-                        )));
-                    }
-                    end = Some(StoryRunPosition {
-                        location: location.clone(),
-                        run_index: index,
-                    });
-                }
-                open = next_open;
-                if end.is_some() {
-                    break;
-                }
-            }
-            match (start, end) {
-                (Some(start), Some(end)) if !open => {
-                    Ok((Some(StoryRunRange { start, end }), Some(text)))
-                }
-                (None, _) => Err(Error::Other(format!(
-                    "comment {id} source cannot be projected faithfully on the existing accepted run axis"
-                ))),
-                _ => Err(Error::Other(format!(
-                    "comment {id} range has no ordered end in the same story or its table cells"
-                ))),
-            }
-        };
-        Ok(ownership
+        let read = CommentAnchorRead::from_prepared(&source, selected)?;
+        Ok(read
+            .ownership
             .parents
             .keys()
             .filter(|id| selected.is_none_or(|selected| selected == **id))
-            .map(|&id| (id, project(id)))
+            .map(|&id| (id, read.project(id)))
             .collect())
     }
 
@@ -4822,6 +4916,265 @@ mod tests {
                     Some("SOURCE")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fx268_reply_parent_read_uses_one_all_paragraph_factory_pass() {
+        let mut document = Document::new();
+        for text in ["neighbor one", "ANCHOR", "neighbor two"] {
+            document.add_paragraph(text);
+        }
+        let root = document
+            .add_comment_on_text("ANCHOR", 0, "Ada", None, "root", None)
+            .unwrap();
+        COMMENT_PARENT_READ_COUNTS.with(|counts| counts.set(Some([0; 2])));
+        let reply = document.reply_to(root, "Ben", "reply").unwrap();
+        let work = COMMENT_PARENT_READ_COUNTS.with(|counts| counts.replace(None).unwrap());
+        assert!(!COMMENT_PARENT_READ_ACTIVE.with(std::cell::Cell::get));
+        assert_eq!(
+            document.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("ANCHOR")
+        );
+        let bytes = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("ANCHOR")
+        );
+        assert_eq!(reopened.comments().len(), 2);
+        assert!(work[1] >= 3, "actual whole parent paragraph read: {work:?}");
+        assert_eq!(
+            work[0], 1,
+            "actual pre-ID all-paragraph factory passes: {work:?}"
+        );
+    }
+
+    #[test]
+    fn fx268_reply_prepared_parent_read_equals_old_second_flush() {
+        for mode in 0..4 {
+            let mut document = Document::new();
+            document.add_paragraph("ANCHOR");
+            document.add_paragraph("neighbor");
+            let root = if mode == 2 {
+                document.set_header("header anchor");
+                let location = document
+                    .story_range_paragraphs()
+                    .unwrap()
+                    .into_iter()
+                    .find(|(location, _)| location.story().kind() == crate::StoryKind::Header)
+                    .unwrap()
+                    .0;
+                document
+                    .add_story_comment(
+                        StoryRunRange {
+                            start: StoryRunPosition {
+                                location: location.clone(),
+                                run_index: 0,
+                            },
+                            end: StoryRunPosition {
+                                location,
+                                run_index: 1,
+                            },
+                        },
+                        "Ada",
+                        None,
+                        "root",
+                    )
+                    .unwrap()
+            } else {
+                document
+                    .add_comment_on_text("ANCHOR", 0, "Ada", None, "root", None)
+                    .unwrap()
+            };
+            if mode == 3 {
+                document.flush_to_package().unwrap();
+                let part = document.doc_part_name.clone();
+                let raw =
+                    String::from_utf8(document.package.get_part(&part).unwrap().to_vec()).unwrap();
+                document.package.set_part(
+                    &part,
+                    raw.replace("w:", "q:")
+                        .replace("xmlns:w=", "xmlns:q=")
+                        .into_bytes(),
+                );
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                document.package.write_to(&mut bytes).unwrap();
+                document = Document::from_bytes(bytes.get_ref()).unwrap();
+            }
+            document.add_paragraph("unsaved current paragraph");
+            if mode != 0 {
+                document
+                    .add_paragraph("rich ")
+                    .add_run("")
+                    .add_field(r#"DATE \@ "yyyy""#, "2026")
+                    .unwrap();
+                let complex = format!(
+                    r#"<w:p xmlns:w="{}"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>QUOTE "constant"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>rich cached</w:t></w:r><w:r><w:tab/><w:t>tail</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+                    rdocx_oxml::namespace::W_NS
+                );
+                let complex = CT_P::from_xml_fragment(complex.as_bytes()).unwrap();
+                assert!(complex.runs.iter().flat_map(|run| &run.content).any(|content| {
+                    matches!(content, RunContent::Field(field) if field.is_complex() && field.cached_result.contains("rich cached") && field.cached_result.contains("tail"))
+                }));
+                *document.add_paragraph("").inner = complex;
+                let raw = format!(
+                    r#"<w:p xmlns:w="{}"><w:ins w:id="77" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r><w:t>tracked unrelated</w:t></w:r></w:ins></w:p>"#,
+                    rdocx_oxml::namespace::W_NS
+                );
+                *document.add_paragraph("").inner =
+                    CT_P::from_xml_fragment(raw.as_bytes()).unwrap();
+            }
+            // Actual first producer, then the predecessor's extra cloned flush.
+            document.flush_to_package().unwrap();
+            let mut old_source = document.clone_for_staging();
+            old_source.flush_to_package().unwrap();
+            assert_eq!(
+                document.package.parts, old_source.package.parts,
+                "mode={mode}"
+            );
+            let current = CommentAnchorRead::from_prepared(&document, Some(root)).unwrap();
+            let old = CommentAnchorRead::from_prepared(&old_source, Some(root)).unwrap();
+            let current_anchor = current.project(root).unwrap();
+            let old_anchor = old.project(root).unwrap();
+            assert_eq!(current_anchor, old_anchor, "mode={mode}");
+            assert_eq!(
+                current
+                    .reply_boundary(root, current_anchor.0.as_ref().unwrap())
+                    .unwrap(),
+                old.reply_boundary(root, old_anchor.0.as_ref().unwrap())
+                    .unwrap(),
+                "mode={mode}",
+            );
+            drop((current, old));
+            let reply = document.reply_to(root, "Ben", "reply").unwrap();
+            assert_eq!(
+                document.comment_anchor_text(reply).unwrap(),
+                current_anchor.1
+            );
+        }
+    }
+
+    #[test]
+    fn fx268_reply_unrelated_malformed_header_and_unknown_parent_remain_atomic() {
+        let mut document = Document::new();
+        document.add_paragraph("ANCHOR");
+        document.set_header("header");
+        let root = document
+            .add_comment_on_text("ANCHOR", 0, "Ada", None, "root", None)
+            .unwrap();
+        document.flush_to_package().unwrap();
+        let header = document
+            .package
+            .parts
+            .keys()
+            .find(|name| name.contains("header") && name.ends_with(".xml"))
+            .unwrap()
+            .clone();
+        document.package.set_part(
+            &header,
+            format!(
+                r#"<w:hdr xmlns:w="{}"><w:p><w:r><w:t>bad</w:t></w:r></w:q></w:hdr>"#,
+                rdocx_oxml::namespace::W_NS
+            )
+            .into_bytes(),
+        );
+        let parts = document.package.parts.clone();
+        let body = document.document.clone();
+        let comments = document.comments.clone();
+        let styles = std::sync::Arc::clone(&document.styles);
+        let main_source = std::sync::Arc::clone(
+            document
+                .package
+                .get_part_shared(&document.doc_part_name)
+                .unwrap(),
+        );
+        let header_source =
+            std::sync::Arc::clone(document.package.get_part_shared(&header).unwrap());
+        let next = document.identifiers.clone().reserve_comment_id().unwrap();
+        // Unknown parent is rejected before unrelated source admission.
+        assert_eq!(
+            document
+                .reply_to(9999, "Ben", "reply")
+                .unwrap_err()
+                .to_string(),
+            "comment id 9999 does not exist"
+        );
+        let old_error = document.comment_anchor(root).unwrap_err().to_string();
+        let error = document
+            .reply_to(root, "Ben", "reply")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, old_error);
+        assert_eq!(document.package.parts, parts);
+        assert_eq!(document.document, body);
+        assert_eq!(document.comments, comments);
+        assert!(std::sync::Arc::ptr_eq(&document.styles, &styles));
+        assert!(std::sync::Arc::ptr_eq(
+            document
+                .package
+                .get_part_shared(&document.doc_part_name)
+                .unwrap(),
+            &main_source
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            document.package.get_part_shared(&header).unwrap(),
+            &header_source
+        ));
+        assert_eq!(
+            document.identifiers.clone().reserve_comment_id().unwrap(),
+            next
+        );
+        assert!(!COMMENT_PARENT_READ_ACTIVE.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    fn fx268_reply_reference_count_and_nonmetadata_payload_still_refuse() {
+        for missing in [false, true] {
+            let mut seed = Document::new();
+            seed.add_paragraph("ANCHOR");
+            let root = seed
+                .add_comment_on_text("ANCHOR", 0, "Ada", None, "root", None)
+                .unwrap();
+            seed.flush_to_package().unwrap();
+            let part = seed.doc_part_name.clone();
+            let mut raw = seed.package.get_part(&part).unwrap().to_vec();
+            let reference = comment_source_markers(&raw)
+                .unwrap()
+                .into_iter()
+                .find(|marker| marker.id == root && marker.family == 2)
+                .unwrap()
+                .empty_run
+                .unwrap();
+            let replacement = if missing {
+                String::new()
+            } else {
+                format!(
+                    r#"<w:r><w:commentReference w:id="{root}"/><w:t>unrelated payload</w:t></w:r>"#
+                )
+            };
+            raw.splice(reference, replacement.bytes());
+            seed.package.set_part(&part, raw);
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            seed.package.write_to(&mut bytes).unwrap();
+            let mut document = Document::from_bytes(bytes.get_ref()).unwrap();
+            let parts = document.package.parts.clone();
+            let body = document.document.clone();
+            let styles = std::sync::Arc::clone(&document.styles);
+            let main = std::sync::Arc::clone(document.package.get_part_shared(&part).unwrap());
+            let next = document.identifiers.clone().reserve_comment_id().unwrap();
+            assert!(document.reply_to(root, "Ben", "reply").is_err());
+            assert_eq!(document.package.parts, parts);
+            assert_eq!(document.document, body);
+            assert!(std::sync::Arc::ptr_eq(&document.styles, &styles));
+            assert!(std::sync::Arc::ptr_eq(
+                document.package.get_part_shared(&part).unwrap(),
+                &main
+            ));
+            assert_eq!(
+                document.identifiers.clone().reserve_comment_id().unwrap(),
+                next
+            );
         }
     }
 

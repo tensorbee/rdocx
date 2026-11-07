@@ -4989,7 +4989,14 @@ checked authority. It validates the physical story snapshots and every selected
 paragraph without building optional owner read facts or projection caches.
 Eligible plain paragraph pieces reuse the native checked direct-fragment
 producer, including its resource validation, namespace writer and paragraph
-parse. Unproved pieces retain the full owner-facts fallback.
+parse. A cold empty-piece build can instead query all body paragraphs under
+one exact current-opening model, namespace and successful writer proof.
+This finite reader-invariance path admits only PPr-free, capture-free ASCII
+alphanumeric/space Text runs and the explicitly reconstructed formatting
+subset. It returns temporary text and physical run-path facts, without
+Source credit or retained dormant state. Every miss uses the existing
+per-piece producer, and warm piece reuse does not run the whole-opening proof.
+Unproved pieces retain the full owner-facts fallback.
 Dormant state has absent snapshot/removal scopes, empty
 owners/indexes and no pieces or pending pieces. Paragraph/table collections,
 section handles, pictures, stories, furniture variants, hyperlinks, revisions,
@@ -5342,3 +5349,9 @@ order. They expose no budget, Work object or provenance type, and add no Python,
 WASM or CLI operation. Foreign or unread returned-model Sources refuse. The
 external Rust compile client includes all46operations and the retained borrowed
 accessor lifetimes at the final reviewed source.
+
+
+Document.add_picture and Cell.add_picture consume the complete checked inventory returned by their owned Native support bridge. They retain exact inserted-location selection, snapshot construction, validation order and conservative atomic publication. Cell physical source selection remains checked through its existing route.
+
+
+Document.replace_text_at uses the checked current selector bridge for a bound recognized one-index paragraph, table or content control. Causal stale and foreign checks run first. Constructed and numeric items, unknown or unsupported kinds and nested paths keep the original resolver and error ordering. Current source discovery never trusts a stored inventory fingerprint.

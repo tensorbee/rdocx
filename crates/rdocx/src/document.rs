@@ -1369,6 +1369,9 @@ pub struct ReplacementCountMismatch {
 
 enum ScopedReplacementTarget<'a> {
     Item(&'a ContentLocation),
+    // Constructed only by the selector-owned operation after actual source
+    // qualification of this same private candidate, before any mutation.
+    CheckedItem(&'a ContentLocation),
     RelatedCell(&'a StoryId),
     Cell {
         coordinates: (usize, usize, usize),
@@ -7189,6 +7192,12 @@ thread_local! {
     static TRANSACTION_READ_PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static PICTURE_PREPARATION_WORK: std::cell::Cell<Option<[usize; 2]>> = const { std::cell::Cell::new(None) };
+    static PICTURE_PREPARATION_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(debug_assertions)]
 struct TransactionReadPhase(u8);
 
@@ -8015,6 +8024,7 @@ thread_local! {
     static SCOPED_LITERAL_DELIVERIES: std::cell::RefCell<Option<Vec<(usize, bool, bool)>>> = const { std::cell::RefCell::new(None) };
     static FAIL_NEXT_STAGED_REOPEN: Cell<bool> = const { Cell::new(false) };
     pub(crate) static STORY_SOURCE_BUILDS: Cell<usize> = const { Cell::new(0) };
+    static SELECTOR_PREFLUSH_SOURCE_BUILDS: Cell<Option<usize>> = const { Cell::new(None) };
     static STORY_TEXT_PREFIX_BYTES: Cell<usize> = const { Cell::new(0) };
     static STORY_OWNER_SCANS: Cell<usize> = const { Cell::new(0) };
     static STORY_NAMESPACE_SCANS: Cell<usize> = const { Cell::new(0) };
@@ -27934,6 +27944,14 @@ impl Document {
     }
 
     fn prepared_main_read(&self) -> Result<PreparedMainRead<'_>> {
+        #[cfg(test)]
+        if PICTURE_PREPARATION_ACTIVE.get() {
+            PICTURE_PREPARATION_WORK.with(|work| {
+                if let Some([main, related]) = work.get() {
+                    work.set(Some([main + 1, related]));
+                }
+            });
+        }
         let (xml, writer) = self.canonical_source()?;
         let (xml, content, children) = match writer.as_ref() {
             Some(record) => {
@@ -29963,6 +29981,14 @@ impl Document {
     /// The story sources after the main part, in [`Self::story_sources`]
     /// order, read from the package without serializing the main part.
     fn related_story_sources(&self) -> Result<Vec<StorySource<'_>>> {
+        #[cfg(test)]
+        if PICTURE_PREPARATION_ACTIVE.get() {
+            PICTURE_PREPARATION_WORK.with(|work| {
+                if let Some([main, related]) = work.get() {
+                    work.set(Some([main, related + 1]));
+                }
+            });
+        }
         let mut sources = Vec::new();
         let mut seen = HashSet::new();
         seen.insert((StoryKind::Body, self.doc_part_name.clone()));
@@ -31390,6 +31416,16 @@ impl Document {
         location: &ContentLocation,
     ) -> Result<(StorySource<'a>, StoryItemSpan)> {
         let (source, owner, layout) = self.story_source_owner_and_layout(&location.story, true)?;
+        let item = Self::story_item_span(source.xml.as_ref(), &owner, layout.as_ref(), location)?;
+        Ok((source, item))
+    }
+
+    fn story_item_span(
+        xml: &[u8],
+        owner: &StoryOwnerSpan,
+        layout: Option<&MainStoryLayout>,
+        location: &ContentLocation,
+    ) -> Result<StoryItemSpan> {
         if location.index_path.len() != 1 {
             return Err(StoryError::InvalidPath {
                 path: location.index_path.clone(),
@@ -31397,7 +31433,7 @@ impl Document {
             .into());
         }
         let index = location.index_path[0];
-        let (item, len) = story_owner_item(source.xml.as_ref(), &owner, layout.as_ref(), index)?;
+        let (item, len) = story_owner_item(xml, owner, layout, index)?;
         let item = item.ok_or(StoryError::OutOfBounds { index, len })?;
         if item.kind != location.item_kind {
             return Err(StoryError::KindMismatch {
@@ -31406,7 +31442,7 @@ impl Document {
             }
             .into());
         }
-        Ok((source, item))
+        Ok(item)
     }
 
     pub(crate) fn location_is_end(location: &ContentLocation) -> bool {
@@ -32528,6 +32564,7 @@ impl Document {
             image_data,
             image_filename,
             options,
+            None,
         )?;
         self.commit_staged_mutation(updated);
         Ok(location)
@@ -32561,6 +32598,7 @@ impl Document {
             image_data,
             image_filename,
             options,
+            None,
         )?;
         Ok((
             Self::finish_staged_candidate(
@@ -32572,6 +32610,54 @@ impl Document {
             ),
             location,
         ))
+    }
+
+    /// Consume a private candidate and return the complete checked picture inventory.
+    /// Existing insertion-only methods do not perform this inventory.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_picture_to_story_with_options_and_inventory_owned(
+        mut self,
+        story: &StoryId,
+        after: Option<&ContentLocation>,
+        image_data: &[u8],
+        image_filename: &str,
+        width: Option<Length>,
+        height: Option<Length>,
+        options: Option<PictureOptions>,
+    ) -> Result<(Self, ContentLocation, Vec<PictureOccurrence>)> {
+        let options = Self::checked_insertion_picture_options(
+            image_data,
+            image_filename,
+            width,
+            height,
+            options,
+        )?;
+        let mut origin = self.take_staged_commit_origin();
+        let mut inventory = None;
+        let (updated, location) = Self::insert_picture_candidate(
+            self,
+            story,
+            after,
+            image_data,
+            image_filename,
+            options,
+            Some(&mut inventory),
+        )?;
+        let updated = Self::finish_staged_candidate(
+            &origin.package,
+            origin.signature_invalidated,
+            &mut origin.normal_engine,
+            &mut origin.bundled_engine,
+            updated,
+        );
+        // None is only an explicit shared-preparation decline. Collector errors
+        // propagate, never become a second attempted inventory.
+        let inventory = match inventory {
+            Some(inventory) => inventory,
+            None => updated.pictures()?,
+        };
+        Ok((updated, location, inventory))
     }
 
     fn checked_insertion_picture_options(
@@ -32638,6 +32724,7 @@ impl Document {
         image_data: &[u8],
         image_filename: &str,
         options: PictureOptions,
+        inventory: Option<&mut Option<Vec<PictureOccurrence>>>,
     ) -> Result<(Self, ContentLocation)> {
         candidate.flush_to_package()?;
         let (source, mut story_owner) = candidate.story_source_and_owner(story)?;
@@ -32728,9 +32815,11 @@ impl Document {
                 .register_nested_story_drawing(story, drawing_id);
         }
         let reopened = candidate.prepare_and_reopen_staged()?;
+        #[cfg(test)]
+        PICTURE_PREPARATION_ACTIVE.set(PICTURE_PREPARATION_WORK.get().is_some());
         let location = {
             #[cfg(debug_assertions)]
-            let _read_phase = TransactionReadPhase::enter(2);
+            let read_phase = TransactionReadPhase::enter(2);
             let read = reopened.prepared_main_read()?;
             let related = reopened.related_story_sources()?;
             let refreshed_story = read
@@ -32773,6 +32862,14 @@ impl Document {
                 .ok_or_else(|| {
                     Error::Other("inserted picture paragraph was not projected".to_owned())
                 })?;
+            #[cfg(debug_assertions)]
+            drop(read_phase);
+            if let Some(inventory) = inventory
+                && !holds_field_words(&read.xml)
+                && related.iter().all(|source| !holds_field_words(&source.xml))
+            {
+                *inventory = Some(reopened.pictures_in_prepared(&read, &related)?);
+            }
             ContentLocation::new(refreshed_story, StoryItemKind::Paragraph, vec![index])
         };
         Ok((reopened, location))
@@ -33229,15 +33326,22 @@ impl Document {
     /// physical source order. Only the existing accepted paragraph projection
     /// admits a drawing. Unknown XML and unselected alternatives stay opaque.
     pub fn pictures(&self) -> Result<Vec<PictureOccurrence>> {
+        let prepared = self.prepared_main_read()?;
+        let related = self.related_story_sources()?;
+        self.pictures_in_prepared(&prepared, &related)
+    }
+
+    /// The same complete collector over one actual immutable document phase.
+    /// Callers must prepare from this document and keep it unchanged throughout.
+    fn pictures_in_prepared(
+        &self,
+        prepared: &PreparedMainRead<'_>,
+        related: &[StorySource<'_>],
+    ) -> Result<Vec<PictureOccurrence>> {
+        debug_assert!(std::ptr::eq(self, prepared.document));
         let mut result = Vec::new();
         let mut seen = HashSet::new();
-        let prepared = self.prepared_main_read()?;
-        let mut sources = vec![StorySource {
-            root_kind: StoryKind::Body,
-            part_name: self.doc_part_name.clone(),
-            xml: Cow::Borrowed(&prepared.xml),
-        }];
-        sources.extend(self.related_story_sources()?);
+        let sources = prepared.sources(related);
         // Optional, read-only qualification. No child reader or memo filling.
         let plain_proofs = prepared
             .writer
@@ -34348,6 +34452,88 @@ impl Document {
             self.standalone_body_item(&BodyContent::Paragraph(Box::new(paragraph.clone())))?;
         let parsed = CT_P::from_xml_fragment(&xml)?;
         Ok(Some((parsed.accepted_text(), parsed.accepted_run_paths())))
+    }
+
+    /// Read plain opened body paragraphs under one exact opening proof.
+    ///
+    /// This finite reader-invariance proof returns facts only, never Source
+    /// input or retained authority. Every miss leaves the full writer available.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)] // Existing paragraph text and run-path facts, in physical slot order.
+    pub fn opened_plain_body_paragraph_facts(
+        &self,
+    ) -> Result<Option<Vec<(String, Vec<rdocx_oxml::text::AcceptedRunPath>)>>> {
+        let Some(kept) = self.kept_main_part() else {
+            return Ok(None);
+        };
+        if self.plain_local_edit_blocked
+            || kept.serialization_proof.is_none()
+            || kept.root_namespace_declarations != self.root_namespace_declarations
+            || kept.body_namespace_declarations != self.body_namespace_declarations
+            || kept.body_namespace_bindings != self.body_namespace_bindings
+            || kept.main_document() != Some(&self.document)
+        {
+            return Ok(None);
+        }
+        self.document.validate_resource_limits()?;
+        let mut facts = Vec::with_capacity(self.document.body.content.len());
+        for item in &self.document.body.content {
+            let BodyContent::Paragraph(paragraph) = item else {
+                return Ok(None);
+            };
+            if paragraph.properties.is_some() || !paragraph_is_plain(paragraph) {
+                return Ok(None);
+            }
+            for run in &paragraph.runs {
+                if !run.extra_xml_positions.is_empty()
+                    || !run.content.iter().all(|content| matches!(content,
+                        RunContent::Text(text) if text.text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')))
+                {
+                    return Ok(None);
+                }
+                if let Some(properties) = &run.properties {
+                    let shading = properties.shading.as_ref().map(|value| {
+                        Box::new(rdocx_oxml::properties::CT_Shd {
+                            val: value.val.clone(),
+                            color: value.color.clone(),
+                            fill: value.fill.clone(),
+                            theme_color: value.theme_color.clone(),
+                            theme_tint: value.theme_tint,
+                            theme_shade: value.theme_shade,
+                            theme_fill: value.theme_fill.clone(),
+                            theme_fill_tint: value.theme_fill_tint,
+                            theme_fill_shade: value.theme_fill_shade,
+                            extra_attributes: Vec::new(),
+                        })
+                    });
+                    let allowed = rdocx_oxml::properties::CT_RPr {
+                        font_ascii: properties.font_ascii.clone(),
+                        font_hansi: properties.font_hansi.clone(),
+                        font_east_asia: properties.font_east_asia.clone(),
+                        font_cs: properties.font_cs.clone(),
+                        bold: properties.bold,
+                        italic: properties.italic,
+                        small_caps: properties.small_caps,
+                        strike: properties.strike,
+                        color: properties.color.clone(),
+                        sz: properties.sz,
+                        sz_cs: properties.sz_cs,
+                        underline: properties.underline,
+                        shading,
+                        vert_align: properties.vert_align.clone(),
+                        rtl: properties.rtl,
+                        ..Default::default()
+                    };
+                    if properties != &allowed {
+                        return Ok(None);
+                    }
+                }
+            }
+            // In this grammar the real writer emits one t per Text and the
+            // parser reads it unchanged. Formatting never changes run paths.
+            facts.push((paragraph.accepted_text(), paragraph.accepted_run_paths()));
+        }
+        Ok(Some(facts))
     }
 
     /// The number of body story items that the direct body child at `slot`
@@ -47674,6 +47860,90 @@ impl Document {
         )
     }
 
+    /// Resolve a current story selector and replace a checked one-index item.
+    /// Full story discovery precedes literal and item validation, matching
+    /// bound Python StoryItem selection without trusting a stored fingerprint.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_replace_text_at_selector_owned(
+        self,
+        story_kind: StoryKind,
+        part_name: &str,
+        owner_index: usize,
+        item_kind: StoryItemKind,
+        index_path: &[usize],
+        placeholder: &str,
+        replacement: &str,
+        expected: Option<usize>,
+    ) -> Result<std::result::Result<Option<(Self, usize)>, ReplacementCountMismatch>> {
+        let location = {
+            let (sources, content, children) = self.spanned_story_sources()?;
+            let main = self
+                .main_story_layout(&sources[0].xml, &content, &children, false)
+                .ok();
+            let borrowed = sources
+                .iter()
+                .map(|source| StorySource {
+                    root_kind: source.root_kind,
+                    part_name: source.part_name.clone(),
+                    xml: Cow::Borrowed(source.xml.as_ref()),
+                })
+                .collect();
+            // Collect the complete discovery before selection. An unrelated
+            // malformed source keeps its original precedence.
+            let story = Self::stories_in_sources(borrowed, main, children.len())?
+                .into_iter()
+                .find(|story| {
+                    story.kind == story_kind
+                        && story.part_name == part_name
+                        && story.owner_index == owner_index
+                })
+                .ok_or_else(|| {
+                    let kind = match story_kind {
+                        StoryKind::Body => "body",
+                        StoryKind::TableCell => "table_cell",
+                        StoryKind::Header => "header",
+                        StoryKind::Footer => "footer",
+                        StoryKind::Footnote => "footnote",
+                        StoryKind::Endnote => "endnote",
+                        StoryKind::Comment => "comment",
+                        StoryKind::TextBox => "text_box",
+                    };
+                    Error::Other(format!(
+                        "document has no {kind} story {part_name} at owner index {owner_index}"
+                    ))
+                })?;
+            oxml_core::xml::reject_non_xml_characters("replacement text", replacement)?;
+            let location = ContentLocation::new(story, item_kind, index_path.to_vec());
+            if !matches!(
+                item_kind,
+                StoryItemKind::Paragraph | StoryItemKind::Table | StoryItemKind::ContentControl
+            ) {
+                return Err(Error::Other(
+                    "scoped replacement requires an existing paragraph, table or content control"
+                        .into(),
+                ));
+            }
+            let (source, owner, layout) = self.story_source_owner_and_layout_in(
+                &location.story,
+                true,
+                sources,
+                &content,
+                &children,
+            )?;
+            Self::story_item_span(source.xml.as_ref(), &owner, layout.as_ref(), &location)?;
+            location
+        };
+        // No model/package mutation occurs between qualification and this
+        // owned call. CheckedItem cannot be supplied by any public caller.
+        self.replace_scoped_owned(
+            ScopedReplacementTarget::CheckedItem(&location),
+            placeholder,
+            replacement,
+            expected,
+        )
+    }
+
     /// Consume an already private candidate. No change or mismatch returns no candidate.
     #[doc(hidden)]
     pub fn try_replace_text_in_cell_owned(
@@ -47754,6 +48024,9 @@ impl Document {
         literal_input: &Cell<bool>,
     ) -> Result<std::result::Result<Option<(Self, usize)>, ReplacementCountMismatch>> {
         let (story, path, paragraph) = match target {
+            ScopedReplacementTarget::CheckedItem(location) => {
+                (location.story.clone(), Some(location.clone()), None)
+            }
             ScopedReplacementTarget::Item(location) => {
                 if location.is_end
                     || !matches!(
@@ -47846,6 +48119,10 @@ impl Document {
                 )
             }
         };
+        #[cfg(test)]
+        if SELECTOR_PREFLUSH_SOURCE_BUILDS.get().is_some() {
+            SELECTOR_PREFLUSH_SOURCE_BUILDS.set(Some(STORY_SOURCE_BUILDS.get()));
+        }
         // Flush only the private candidate before choosing the preserved physical span.
         candidate.prepare_staged_package()?;
         #[cfg(debug_assertions)]
@@ -57633,6 +57910,420 @@ mod tests {
                     .is_err()
             );
             assert!(!FAIL_NEXT_STAGED_REOPEN.get());
+        }
+    }
+
+    #[test]
+    fn fx268_picture_binding_sequence_shares_post_reopen_preparation() {
+        let seed = owned_transaction_seed();
+        let mut observed = Vec::new();
+        for cell in [false, true] {
+            let story = if cell {
+                let table = seed.direct_body_item_location(1).unwrap().unwrap();
+                seed.story_table_cell(&table, 0, 0).unwrap()
+            } else {
+                seed.stories()
+                    .unwrap()
+                    .into_iter()
+                    .find(|story| story.kind() == StoryKind::Body)
+                    .unwrap()
+            };
+            PICTURE_PREPARATION_ACTIVE.set(false);
+            PICTURE_PREPARATION_WORK.set(Some([0, 0]));
+            let (updated, location, pictures) = seed
+                .clone_for_staging()
+                .insert_picture_to_story_with_options_and_inventory_owned(
+                    &story,
+                    None,
+                    super::watermark_tests::PNG,
+                    "pixel.png",
+                    Some(Length::pt(12.0)),
+                    Some(Length::pt(15.0)),
+                    None,
+                )
+                .unwrap();
+            PICTURE_PREPARATION_ACTIVE.set(false);
+            let work = PICTURE_PREPARATION_WORK.replace(None).unwrap();
+            assert_eq!(pictures.len(), 1);
+            assert_eq!(pictures[0].location, location);
+            assert_eq!(pictures, updated.pictures().unwrap());
+            let (legacy, legacy_location) = seed
+                .clone_for_staging()
+                .insert_picture_to_story_with_options_owned(
+                    &story,
+                    None,
+                    super::watermark_tests::PNG,
+                    "pixel.png",
+                    Some(Length::pt(12.0)),
+                    Some(Length::pt(15.0)),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(location, legacy_location);
+            assert_eq!(pictures, legacy.pictures().unwrap());
+            assert_eq!(updated.package.parts, legacy.package.parts);
+            let mut saved = updated.clone_for_staging();
+            let reopened = Document::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+            assert_eq!(pictures, reopened.pictures().unwrap());
+            observed.push((cell, work));
+        }
+        assert!(
+            observed.iter().all(|(_, work)| *work == [1, 1]),
+            "successful binding sequence: {observed:?}"
+        );
+    }
+
+    #[test]
+    fn fx268_picture_inventory_keeps_field_fallback_and_insertion_only_errors() {
+        for field in [false, true] {
+            let mut seed = owned_transaction_seed();
+            if field {
+                seed.paragraph_mut(0)
+                    .unwrap()
+                    .add_run("")
+                    .add_field("PAGE", "1")
+                    .unwrap();
+            }
+            let seed = Document::from_bytes(&seed.to_bytes().unwrap()).unwrap();
+            let story = seed
+                .stories()
+                .unwrap()
+                .into_iter()
+                .find(|story| story.kind() == StoryKind::Body)
+                .unwrap();
+            PICTURE_PREPARATION_ACTIVE.set(false);
+            PICTURE_PREPARATION_WORK.set(Some([0, 0]));
+            let (updated, location, pictures) = seed
+                .clone_for_staging()
+                .insert_picture_to_story_with_options_and_inventory_owned(
+                    &story,
+                    None,
+                    super::watermark_tests::PNG,
+                    "pixel.png",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            PICTURE_PREPARATION_ACTIVE.set(false);
+            let work = PICTURE_PREPARATION_WORK.replace(None).unwrap();
+            assert_eq!(work, if field { [2, 2] } else { [1, 1] });
+            assert_eq!(pictures[0].location, location);
+            assert_eq!(pictures, updated.pictures().unwrap());
+        }
+        let mut seed = owned_transaction_seed();
+        seed.set_header("header");
+        seed.to_bytes().unwrap();
+        let header = seed
+            .package
+            .parts
+            .keys()
+            .find(|name| name.ends_with("header1.xml"))
+            .unwrap()
+            .to_owned();
+        seed.package.set_part(&header, format!(r#"<w:hdr xmlns:w="{}"><w:p><w:r><w:rPr><w:sz w:val="bad"/></w:rPr><w:t>unrelated</w:t></w:r></w:p></w:hdr>"#, rdocx_oxml::namespace::W_NS).into_bytes());
+        let story = seed
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == StoryKind::Body)
+            .unwrap();
+        let before = seed.package.parts.clone();
+        let (legacy, _) = seed
+            .clone_for_staging()
+            .insert_picture_to_story_with_options_owned(
+                &story,
+                None,
+                super::watermark_tests::PNG,
+                "pixel.png",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let expected = legacy.pictures().unwrap_err().to_string();
+        let actual = seed
+            .clone_for_staging()
+            .insert_picture_to_story_with_options_and_inventory_owned(
+                &story,
+                None,
+                super::watermark_tests::PNG,
+                "pixel.png",
+                None,
+                None,
+                None,
+            )
+            .err()
+            .expect("same unrelated paragraph refusal")
+            .to_string();
+        assert_eq!(actual, expected);
+        assert_eq!(seed.package.parts, before);
+    }
+
+    #[test]
+    fn fx268_selector_replacement_shares_actual_preflush_sources() {
+        let mut observed = Vec::new();
+        for header in [false, true] {
+            let mut seed = owned_transaction_seed();
+            if header {
+                seed.set_header("alpha header");
+            }
+            let seed = Document::from_bytes(&seed.to_bytes().unwrap()).unwrap();
+            let story = seed
+                .stories()
+                .unwrap()
+                .into_iter()
+                .find(|story| {
+                    story.kind
+                        == if header {
+                            StoryKind::Header
+                        } else {
+                            StoryKind::Body
+                        }
+                })
+                .unwrap();
+            STORY_SOURCE_BUILDS.set(0);
+            SELECTOR_PREFLUSH_SOURCE_BUILDS.set(Some(0));
+            let (mut updated, count) = seed
+                .clone_for_staging()
+                .try_replace_text_at_selector_owned(
+                    story.kind,
+                    &story.part_name,
+                    story.owner_index,
+                    StoryItemKind::Paragraph,
+                    &[0],
+                    "alpha",
+                    "omega",
+                    Some(1),
+                )
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let work = SELECTOR_PREFLUSH_SOURCE_BUILDS.replace(None).unwrap();
+            assert_eq!(count, 1);
+            let bytes = updated.to_bytes().unwrap();
+            let reopened = Document::from_bytes(&bytes).unwrap();
+            assert_eq!(updated.package.parts, reopened.package.parts);
+            let snapshots = reopened.standalone_story_item_snapshots().unwrap();
+            assert!(snapshots.iter().any(|item| {
+                item.text()
+                    .is_some_and(|text| text == if header { "omega header" } else { "omega body" })
+            }));
+            assert_eq!(
+                reopened
+                    .table(0)
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap()
+                    .paragraphs()
+                    .next()
+                    .unwrap()
+                    .text(),
+                "alpha cell"
+            );
+            observed.push((header, work));
+        }
+        assert!(
+            observed.iter().all(|(_, work)| *work == 1),
+            "successful existing binding composition: {observed:?}"
+        );
+    }
+
+    #[test]
+    fn fx268_selector_replacement_matches_legacy_fields_raw_and_refusals() {
+        let namespace = rdocx_oxml::namespace::W_NS;
+        let fixtures = [
+            ("<w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p><w:r><w:t>alpha</w:t></w:r></w:p>".to_owned(), StoryItemKind::Paragraph),
+            (format!(r#"<q:p xmlns:q="{namespace}" xmlns:x="urn:producer" x:owner="retained"><q:pPr><x:opaque/></q:pPr><q:r><q:rPr><q:b/></q:rPr><q:t>alpha</q:t></q:r></q:p>"#), StoryItemKind::Paragraph),
+            ("<w:p><w:r><w:t>alpha</w:t></w:r><w:fldSimple w:instr='PAGE'><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>".to_owned(), StoryItemKind::Paragraph),
+            ("<w:p><w:r><w:t>alpha</w:t></w:r><w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r></w:p>".to_owned(), StoryItemKind::Paragraph),
+            ("<w:tbl><w:tr><w:tc><w:p><w:r><w:t>alpha</w:t></w:r></w:p></w:tc></w:tr></w:tbl>".to_owned(), StoryItemKind::Table),
+            ("<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>alpha</w:t></w:r></w:p></w:sdtContent></w:sdt>".to_owned(), StoryItemKind::ContentControl),
+        ];
+        for (body, item_kind) in fixtures {
+            let seed = issue407_document(&body, false);
+            let original = seed.package.parts.clone();
+            for (old, new, expect, kind, path) in [
+                ("alpha", "omega", Some(1), item_kind, vec![0]),
+                ("absent", "omega", Some(0), item_kind, vec![0]),
+                ("alpha", "omega", Some(2), item_kind, vec![0]),
+                ("alpha", "bad\0text", None, item_kind, vec![0]),
+                ("alpha", "omega", None, item_kind, vec![999]),
+                (
+                    "alpha",
+                    "omega",
+                    None,
+                    if item_kind == StoryItemKind::Paragraph {
+                        StoryItemKind::Table
+                    } else {
+                        StoryItemKind::Paragraph
+                    },
+                    vec![0],
+                ),
+                (
+                    "alpha",
+                    "omega",
+                    None,
+                    StoryItemKind::PreservedNode,
+                    vec![0],
+                ),
+            ] {
+                let story = seed
+                    .stories()
+                    .unwrap()
+                    .into_iter()
+                    .find(|story| story.kind == StoryKind::Body)
+                    .unwrap();
+                let location = ContentLocation::new(story.clone(), kind, path.clone());
+                let legacy = seed
+                    .clone_for_staging()
+                    .try_replace_text_at_owned(&location, old, new, expect);
+                let selected = seed.clone_for_staging().try_replace_text_at_selector_owned(
+                    story.kind,
+                    &story.part_name,
+                    story.owner_index,
+                    kind,
+                    &path,
+                    old,
+                    new,
+                    expect,
+                );
+                match (legacy, selected) {
+                    (Ok(Ok(Some((mut legacy, before)))), Ok(Ok(Some((mut selected, after))))) => {
+                        assert_eq!(before, after);
+                        assert_eq!(
+                            legacy.to_bytes().unwrap(),
+                            selected.to_bytes().unwrap(),
+                            "{body}"
+                        );
+                        assert_eq!(legacy.package.parts, selected.package.parts);
+                    }
+                    (Ok(Ok(None)), Ok(Ok(None))) => {}
+                    (Ok(Err(before)), Ok(Err(after))) => assert_eq!(
+                        (before.index, before.found, before.expected),
+                        (after.index, after.found, after.expected)
+                    ),
+                    (Err(before), Err(after)) => {
+                        assert_eq!(before.to_string(), after.to_string(), "{body}")
+                    }
+                    _ => panic!("selector and legacy replacement disagree: {body}"),
+                }
+                assert_eq!(seed.package.parts, original);
+            }
+        }
+        let mut seed = owned_transaction_seed();
+        seed.set_header("alpha header");
+        seed.set_footer("alpha footer");
+        seed.to_bytes().unwrap();
+        let header = seed
+            .package
+            .parts
+            .keys()
+            .find(|name| name.ends_with("header1.xml"))
+            .unwrap()
+            .to_owned();
+        seed.package.set_part(&header, b"<w:hdr".to_vec());
+        for kind in [StoryKind::Body, StoryKind::Footer] {
+            let expected = seed.stories().unwrap_err().to_string();
+            let actual = seed
+                .clone_for_staging()
+                .try_replace_text_at_selector_owned(
+                    kind,
+                    if kind == StoryKind::Body {
+                        "/word/document.xml"
+                    } else {
+                        "/word/footer1.xml"
+                    },
+                    0,
+                    StoryItemKind::Paragraph,
+                    &[0],
+                    "alpha",
+                    "bad\0text",
+                    None,
+                )
+                .err()
+                .expect("full discovery error first")
+                .to_string();
+            assert_eq!(actual, expected);
+        }
+        let seed = owned_transaction_seed();
+        let actual = seed
+            .try_replace_text_at_selector_owned(
+                StoryKind::Header,
+                "/word/missing.xml",
+                0,
+                StoryItemKind::Paragraph,
+                &[0],
+                "alpha",
+                "bad\0text",
+                None,
+            )
+            .err()
+            .expect("missing story first")
+            .to_string();
+        assert_eq!(
+            actual,
+            "document has no header story /word/missing.xml at owner index 0"
+        );
+    }
+
+    #[test]
+    fn fx268_selector_related_owner_matrix_matches_legacy() {
+        let seed = all_story_range_fixture();
+        let snapshots = seed.standalone_story_item_snapshots().unwrap();
+        for kind in [
+            StoryKind::Header,
+            StoryKind::Footer,
+            StoryKind::Footnote,
+            StoryKind::Endnote,
+            StoryKind::Comment,
+            StoryKind::TableCell,
+            StoryKind::TextBox,
+        ] {
+            let item = snapshots
+                .iter()
+                .find(|item| {
+                    item.location().story.kind == kind
+                        && item.location().item_kind == StoryItemKind::Paragraph
+                        && item.location().index_path.len() == 1
+                        && item.text().is_some_and(|text| !text.is_empty())
+                })
+                .expect("existing actual related owner paragraph");
+            let location = item.location();
+            let old = item.text().unwrap();
+            let legacy = seed.clone_for_staging().try_replace_text_at_owned(
+                location,
+                old,
+                "changed selector",
+                Some(1),
+            );
+            let selected = seed.clone_for_staging().try_replace_text_at_selector_owned(
+                kind,
+                &location.story.part_name,
+                location.story.owner_index,
+                location.item_kind,
+                &location.index_path,
+                old,
+                "changed selector",
+                Some(1),
+            );
+            match (legacy, selected) {
+                (Ok(Ok(Some((mut legacy, before)))), Ok(Ok(Some((mut selected, after))))) => {
+                    assert_eq!((before, after), (1, 1));
+                    assert_eq!(
+                        legacy.to_bytes().unwrap(),
+                        selected.to_bytes().unwrap(),
+                        "{kind:?}"
+                    );
+                    assert_eq!(legacy.package.parts, selected.package.parts);
+                    eprintln!("selector_related_kind={kind:?} actual=success");
+                }
+                (Err(before), Err(after)) => {
+                    assert_eq!(before.to_string(), after.to_string(), "{kind:?}");
+                    eprintln!("selector_related_kind={kind:?} actual=unchanged-refusal:{before}");
+                }
+                _ => panic!("related selector and legacy disagree: {kind:?}"),
+            }
         }
     }
 
@@ -83658,6 +84349,60 @@ mod tests {
         let cached = document.clone_for_staging().to_bytes().unwrap();
         let old = disabled.to_bytes().unwrap();
         assert_eq!(cached, old);
+    }
+
+    #[test]
+    fn opened_plain_batch_requires_actual_opening_and_writer_proof() {
+        let mut seed = issue407_document("<w:p><w:r><w:t>one</w:t></w:r></w:p>", false);
+        let bytes = seed.to_bytes().unwrap();
+        let open = || Document::from_bytes(&bytes).unwrap();
+        assert!(
+            open()
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_some()
+        );
+        let mut missing = open();
+        Arc::get_mut(missing.parsed.as_mut().unwrap())
+            .unwrap()
+            .serialization_proof = None;
+        assert!(
+            missing
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
+        let mut namespaces = open();
+        namespaces
+            .body_namespace_bindings
+            .push(("x".to_owned(), "urn:changed".to_owned()));
+        assert!(
+            namespaces
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
+        let mut package = open();
+        package
+            .package
+            .set_part(&package.doc_part_name.clone(), b"<changed/>".to_vec());
+        assert!(
+            package
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
+        let mut metadata = open();
+        let BodyContent::Paragraph(paragraph) = &mut metadata.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        paragraph.runs[0].extra_xml_positions.push(0);
+        assert!(
+            metadata
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

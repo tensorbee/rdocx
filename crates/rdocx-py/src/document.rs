@@ -93,6 +93,10 @@ pub(crate) fn note_visited_owner_record() {
     }
 }
 
+#[cfg(test)]
+static WORD_OPENED_BATCH_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(debug_assertions)]
 static WORD_PIECE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -5566,6 +5570,17 @@ impl WordPieces {
         {
             return (self.clone(), None);
         }
+        let opened_paragraphs = if self.blocks.is_empty() {
+            #[cfg(test)]
+            WORD_OPENED_BATCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            document
+                .opened_plain_body_paragraph_facts()
+                .ok()
+                .flatten()
+                .filter(|facts| facts.len() == blocks.len())
+        } else {
+            None
+        };
         let changed_existing_context = self.context.as_ref().is_some_and(|old| old != &context);
         let same_context = self.context.as_ref() == Some(&context);
         let old = if same_context {
@@ -5601,9 +5616,24 @@ impl WordPieces {
                 }));
             }
         }
-        for block in &blocks[prefix..blocks.len() - suffix] {
+        for (offset, block) in blocks[prefix..blocks.len() - suffix].iter().enumerate() {
             note_word_piece_read();
-            let owners = word_block_owners(document, block).ok().flatten();
+            let owners = opened_paragraphs
+                .as_ref()
+                .and_then(|facts| facts.get(prefix + offset))
+                .map(|(text, runs)| {
+                    let story = rdocx::StoryId::new(
+                        rdocx::StoryKind::Body,
+                        pieces
+                            .context
+                            .as_ref()
+                            .expect("current body context")
+                            .part_name(),
+                        0,
+                    );
+                    plain_paragraph_owners(&story, text, runs)
+                })
+                .or_else(|| word_block_owners(document, block).ok().flatten());
             pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
                 block: block.clone(),
                 owners,
@@ -16501,8 +16531,8 @@ impl PyDocument {
             None => self.body_story(py)?,
         };
         let candidate = self.inner.clone_for_staging();
-        let (candidate, location) = candidate
-            .insert_picture_to_story_with_options_owned(
+        let (candidate, location, pictures) = candidate
+            .insert_picture_to_story_with_options_and_inventory_owned(
                 &story,
                 after.as_ref(),
                 &data,
@@ -16512,9 +16542,7 @@ impl PyDocument {
                 options.map(|options| options.inner.clone()),
             )
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let picture = candidate
-            .pictures()
-            .map_err(|error| rdocx_to_pyerr(py, error))?
+        let picture = pictures
             .into_iter()
             .find(|picture| picture.location == location)
             .ok_or_else(|| PyIndexError::new_err("inserted picture was not inventoried"))?;
@@ -16994,6 +17022,46 @@ impl PyDocument {
         new: &str,
         expect: Option<usize>,
     ) -> PyResult<usize> {
+        // Constructed/numeric/unknown/nested-control selectors retain the
+        // original resolver and its exact validation/error order.
+        let story_kind = match item.story.kind.as_str() {
+            "body" => Some(rdocx::StoryKind::Body),
+            "table_cell" => Some(rdocx::StoryKind::TableCell),
+            "header" => Some(rdocx::StoryKind::Header),
+            "footer" => Some(rdocx::StoryKind::Footer),
+            "footnote" => Some(rdocx::StoryKind::Footnote),
+            "endnote" => Some(rdocx::StoryKind::Endnote),
+            "comment" => Some(rdocx::StoryKind::Comment),
+            "text_box" => Some(rdocx::StoryKind::TextBox),
+            _ => None,
+        };
+        let item_kind = match item.kind.as_str() {
+            "paragraph" => Some(rdocx::StoryItemKind::Paragraph),
+            "table" => Some(rdocx::StoryItemKind::Table),
+            "content_control" => Some(rdocx::StoryItemKind::ContentControl),
+            _ => None,
+        };
+        if item.binding.is_some()
+            && item.index_path.len() == 1
+            && let (Some(story_kind), Some(item_kind)) = (story_kind, item_kind)
+        {
+            self.validate_owned_item(py, item)?;
+            let part_name = item.story.part_name.clone();
+            let owner_index = item.story.owner_index;
+            let index_path = item.index_path.clone();
+            return self.scoped_replacement(py, "Document.replace_text_at", |document| {
+                document.try_replace_text_at_selector_owned(
+                    story_kind,
+                    &part_name,
+                    owner_index,
+                    item_kind,
+                    &index_path,
+                    old,
+                    new,
+                    expect,
+                )
+            });
+        }
         let location = self.native_location(py, item)?;
         self.scoped_replacement(py, "Document.replace_text_at", |document| {
             document.try_replace_text_at_owned(&location, old, new, expect)
@@ -20398,6 +20466,205 @@ fn fx283_dormant_activation_preserves_serial_and_all_factory_ingresses() {
 }
 
 #[test]
+fn fx268_opened_rich_batch_preserves_owners_without_fragment_writers() {
+    Python::initialize();
+    Python::attach(|py| {
+        let rpr = r#"<w:rPr><w:rFonts w:ascii="Arial" w:cs="Arial" w:eastAsia="Arial" w:hAnsi="Arial"/><w:b w:val="0"/><w:i w:val="0"/><w:smallCaps w:val="0"/><w:strike w:val="0"/><w:color w:val="000000"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:u w:val="none"/><w:shd w:fill="auto" w:val="clear"/><w:vertAlign w:val="baseline"/><w:rtl w:val="0"/></w:rPr>"#;
+        let body = (0..3).map(|i| format!("<w:p>{}</w:p>", (0..6).map(|k| format!("<w:r>{rpr}<w:t xml:space='preserve'>run {k} of paragraph {i} </w:t></w:r>")).collect::<String>())).collect::<String>();
+        let native = fx283_native_xml(py, &body);
+        let expected = word_owner_locations(&native, None).unwrap();
+        let batch = native
+            .opened_plain_body_paragraph_facts()
+            .unwrap()
+            .expect("actual rich407 parsed formatting is eligible");
+        assert_eq!(batch.len(), 3);
+        for (block, facts) in native.body_children().iter().zip(&batch) {
+            let rdocx_oxml::BodyContent::Paragraph(paragraph) = block else {
+                unreachable!()
+            };
+            assert_eq!(
+                native
+                    .direct_body_paragraph_facts(paragraph)
+                    .unwrap()
+                    .as_ref(),
+                Some(facts)
+            );
+        }
+        let (pieces, _) = WordPieces::default().assemble(&native);
+        WORD_OPENED_BATCH_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = pieces.assemble(&native);
+        assert_eq!(
+            WORD_OPENED_BATCH_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "warm pieces never run a whole-opening batch proof"
+        );
+        let mut document = PyDocument::from_document(native, py).unwrap();
+        rdocx::take_direct_fragment_bytes();
+        document.ensure_word_authority(py).unwrap();
+        let bytes = rdocx::take_direct_fragment_bytes();
+        assert_eq!(document.owners.len(), expected.len());
+        for (owner, expected) in document.owners.iter().zip(expected) {
+            let actual = WordOwnerAddress {
+                location: owner.location.clone(),
+                parent: owner.parent,
+                body_slot: owner.body_slot,
+                projection_ordinal: owner.projection_ordinal,
+                read_facts: owner.read_facts.clone(),
+            };
+            assert_eq!(
+                body_unfingerprinted_address(&actual),
+                body_unfingerprinted_address(&expected)
+            );
+        }
+        assert_eq!(
+            bytes, 0,
+            "cold opening must not invoke per-paragraph fragment writers"
+        );
+    });
+}
+
+#[test]
+fn fx268_opened_batch_optional_grammar_retains_full_fallback() {
+    Python::initialize();
+    Python::attach(|py| {
+        for (content, eligible) in [
+            ("", true),
+            ("<w:p/>", true),
+            ("<w:p><w:r/></w:p>", false),
+            ("<w:p><w:r></w:r></w:p>", true),
+            ("<w:p><w:r><w:t></w:t></w:r></w:p>", true),
+            (
+                "<w:p><w:r><w:t/></w:r></w:p><w:p><w:r><w:t/></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:p><w:r><w:t>same</w:t></w:r></w:p><w:p><w:r><w:t>same</w:t></w:r></w:p>",
+                true,
+            ),
+            (
+                "<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>ppr</w:t></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:p><w:r><w:rPr><w:lang w:val='en'/></w:rPr><w:t>extra modeled</w:t></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:p><w:r><w:rPr><w:rFonts xmlns:x='urn:producer' x:tag='kept' w:ascii='Arial'/></w:rPr><w:t>attribute</w:t></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:p><w:r><w:rPr><w:shd xmlns:x='urn:producer' x:tag='kept' w:val='clear'/></w:rPr><w:t>shading</w:t></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:p xmlns:x='urn:producer' x:tag='kept'><w:r><w:t>root</w:t></w:r></w:p>",
+                false,
+            ),
+            (
+                "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' xmlns:w='urn:foreign'><q:r><q:t>alias</q:t></q:r></q:p>",
+                true,
+            ),
+            (
+                "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' xmlns:w='urn:foreign' w:producer='kept'><q:r><q:t>retained</q:t></q:r></q:p>",
+                false,
+            ),
+            ("<w:p><w:r><w:t>nonascii é</w:t></w:r></w:p>", false),
+            ("<w:p><w:r><w:t>punctuation.</w:t></w:r></w:p>", false),
+            ("<w:p><w:r><w:tab/></w:r></w:p>", false),
+            (
+                "<w:p><w:r><w:fldSimple w:instr='PAGE'><w:r><w:t>1</w:t></w:r></w:fldSimple></w:r></w:p>",
+                false,
+            ),
+            (
+                "<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+                false,
+            ),
+            (
+                "<w:p><w:ins w:id='9' w:author='Old'><w:r><w:t>revision</w:t></w:r></w:ins></w:p>",
+                false,
+            ),
+        ] {
+            let native = fx283_native_xml(py, content);
+            assert_eq!(
+                native
+                    .opened_plain_body_paragraph_facts()
+                    .unwrap()
+                    .is_some(),
+                eligible,
+                "{content}"
+            );
+            let expected = word_owner_locations(&native, None).unwrap();
+            let (_, actual, _) = {
+                let (owners, projections, pieces) = validate_word_facts(&native, py).unwrap();
+                (projections, owners, pieces)
+            };
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(body_unfingerprinted_address)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(body_unfingerprinted_address)
+                    .collect::<Vec<_>>(),
+                "{content}"
+            );
+        }
+        let mut native = fx283_native_xml(py, "<w:p><w:r><w:t>opened</w:t></w:r></w:p>");
+        native.add_paragraph("changed");
+        assert!(
+            native
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
+        let expected = word_owner_locations(&native, None).unwrap();
+        let actual = validate_word_facts(&native, py).unwrap().0;
+        assert_eq!(
+            actual
+                .iter()
+                .map(body_unfingerprinted_address)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(body_unfingerprinted_address)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            rdocx::Document::new()
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none(),
+            "an authored document has no actual opening proof"
+        );
+        native.add_paragraph("invalid\0text");
+        assert!(
+            native
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .is_none()
+        );
+        let expected = word_owner_locations(&native, None);
+        let actual = validate_word_facts(&native, py).map(|facts| facts.0);
+        match (expected, actual) {
+            (Ok(expected), Ok(actual)) => assert_eq!(
+                actual
+                    .iter()
+                    .map(body_unfingerprinted_address)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(body_unfingerprinted_address)
+                    .collect::<Vec<_>>()
+            ),
+            (Err(expected), Err(actual)) => assert_eq!(actual.to_string(), expected.to_string()),
+            _ => panic!("full reader and fallback must retain the same caller-text outcome"),
+        }
+    });
+}
+
+#[test]
 fn fx283_plain_piece_facts_match_full_owner_source() {
     Python::initialize();
     Python::attach(|py| -> PyResult<()> {
@@ -20782,4 +21049,212 @@ fn fx283_complete_table_membership_compares_native_inventory_and_projected_cells
             }
         }
     }
+}
+
+#[test]
+fn fx268_picture_bridge_preserves_binding_publication_and_refusal() {
+    Python::initialize();
+    Python::attach(|py| -> PyResult<()> {
+        let scope = PyDict::new(py);
+        py.run(c"import base64\npng=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAIAAeIhvDMAAAAASUVORK5CYII=')", Some(&scope), Some(&scope))?;
+        for cell_target in [false, true] {
+            let mut native = rdocx::Document::new();
+            native.add_paragraph("body");
+            native.add_table(1, 2).cell(0, 1).unwrap().set_text("selected");
+            let document = Py::new(py, PyDocument::from_document(native, py)?)?;
+            let held = document.bind(py).getattr("paragraphs")?.get_item(0)?;
+            let target = if cell_target {
+                let cell = document.bind(py).getattr("tables")?.get_item(0)?.call_method1("cell", (0, 1))?;
+                cell.getattr("paragraphs")?.get_item(0)?.getattr("runs")?.get_item(0)?.setattr("bold", true)?;
+                cell
+            } else { document.bind(py).as_any().clone() };
+            let before = document.borrow_mut(py).inner.to_bytes().unwrap();
+            assert!(target.call_method1("add_picture", (PyBytes::new(py, b"invalid"),)).is_err());
+            assert_eq!(document.borrow_mut(py).inner.to_bytes().unwrap(), before);
+            assert_eq!(held.getattr("text")?.extract::<String>()?, "body");
+            target.call_method1("add_picture", (scope.get_item("png")?.unwrap(),))?;
+            assert!(held.getattr("text").is_err());
+            let actual = document.borrow(py).inner.pictures().unwrap();
+            assert_eq!(actual.len(), 1);
+            let bytes = document.borrow_mut(py).inner.to_bytes().unwrap();
+            let reopened = rdocx::Document::from_bytes(&bytes).unwrap();
+            assert_eq!(actual, reopened.pictures().unwrap());
+            if cell_target {
+                assert_eq!(actual[0].location.story().kind(), rdocx::StoryKind::TableCell);
+                assert_eq!(reopened.table(0).unwrap().cell(0, 1).unwrap().paragraphs().next().unwrap().text(), "selected");
+                assert!(reopened.part_xml("/word/document.xml").unwrap().contains("<w:b"));
+            } else {
+                assert_eq!(actual[0].location.story().kind(), rdocx::StoryKind::Body);
+            }
+        }
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn fx268_selector_binding_matches_legacy_current_and_fallback_contracts() {
+    Python::initialize();
+    Python::attach(|py| -> PyResult<()> {
+        for case in [
+            "bound",
+            "bold",
+            "text",
+            "header",
+            "absent",
+            "mismatch",
+            "invalid",
+            "constructed",
+            "numeric_stale",
+            "unknown_kind",
+            "unknown_story",
+            "nested",
+            "foreign",
+            "stale",
+        ] {
+            let mut results = Vec::new();
+            for fast in [false, true] {
+                let mut native = rdocx::Document::new();
+                native.add_paragraph("alpha outside");
+                native.add_paragraph("alpha selected");
+                if case == "header" {
+                    native.set_header("alpha header");
+                }
+                let document = Py::new(py, PyDocument::from_document(native, py)?)?;
+                let snapshots = document.bind(py).getattr("story_items")?;
+                let mut item = snapshots
+                    .try_iter()?
+                    .map(|item| -> PyResult<PyStoryItem> {
+                        Ok(item?.extract::<PyRef<'_, PyStoryItem>>()?.clone())
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+                    .into_iter()
+                    .find(|item| {
+                        item.kind == "paragraph"
+                            && if case == "header" {
+                                item.story.kind == "header"
+                            } else {
+                                item.story.kind == "body" && item.index_path == [1]
+                            }
+                    })
+                    .unwrap();
+                assert!(item.binding.is_some());
+                assert_eq!(item.index_path.len(), 1);
+                if matches!(case, "bold" | "text") {
+                    let run = document
+                        .bind(py)
+                        .getattr("paragraphs")?
+                        .get_item(1)?
+                        .getattr("runs")?
+                        .get_item(0)?;
+                    if case == "bold" {
+                        run.setattr("bold", true)?;
+                    } else {
+                        run.setattr("text", "current selected")?;
+                    }
+                }
+                let foreign = if case == "foreign" {
+                    Some(Py::new(
+                        py,
+                        PyDocument::from_document(rdocx::Document::new(), py)?,
+                    )?)
+                } else {
+                    None
+                };
+                match case {
+                    "constructed" | "numeric_stale" => {
+                        item.binding = None;
+                        item.story.binding = None;
+                        item.document = None;
+                        if case == "numeric_stale" {
+                            item.revision += 1;
+                        }
+                    }
+                    "unknown_kind" => item.kind = "unknown".to_owned(),
+                    "unknown_story" => item.story.kind = "unknown".to_owned(),
+                    "nested" => item.index_path.push(0),
+                    "foreign" => {
+                        let mut other = foreign.as_ref().unwrap().borrow_mut(py);
+                        other.ensure_word_authority(py)?;
+                        item.binding = Some(other.capture_snapshot(smallvec![])?);
+                    }
+                    "stale" => {
+                        document
+                            .bind(py)
+                            .call_method1("add_paragraph", ("later",))?;
+                    }
+                    _ => {}
+                }
+                let held = document
+                    .bind(py)
+                    .getattr("paragraphs")?
+                    .get_item(0)?
+                    .getattr("runs")?
+                    .get_item(0)?;
+                let revision = document.borrow(py).revisions.current();
+                let before = document.borrow_mut(py).inner.to_bytes().unwrap();
+                let (old, new, expect) = match case {
+                    "absent" => ("absent", "omega", Some(0)),
+                    "mismatch" => ("alpha", "omega", Some(2)),
+                    "invalid" | "foreign" | "stale" | "numeric_stale" => {
+                        ("alpha", "bad\0text", None)
+                    }
+                    "text" => ("current", "omega", Some(1)),
+                    _ => ("alpha", "omega", Some(1)),
+                };
+                let result = if fast {
+                    document
+                        .borrow_mut(py)
+                        .replace_text_at(py, &item, old, new, expect)
+                } else {
+                    let location = document.borrow(py).native_location(py, &item);
+                    match location {
+                        Ok(location) => document.borrow_mut(py).scoped_replacement(
+                            py,
+                            "Document.replace_text_at",
+                            |candidate| {
+                                candidate.try_replace_text_at_owned(&location, old, new, expect)
+                            },
+                        ),
+                        Err(error) => Err(error),
+                    }
+                };
+                let outcome = match result {
+                    Ok(count) => format!("count:{count}"),
+                    Err(error) => format!("{}:{error}", error.get_type(py).name()?),
+                };
+                if matches!(case, "bound" | "bold" | "header" | "constructed") {
+                    assert_eq!(
+                        outcome, "count:1",
+                        "actual successful current selector, {case}"
+                    );
+                }
+                let saved = document.borrow_mut(py).inner.to_bytes().unwrap();
+                if !outcome.starts_with("count:1") {
+                    assert_eq!(saved, before, "{case}");
+                    assert_eq!(document.borrow(py).revisions.current(), revision, "{case}");
+                    assert_eq!(
+                        held.getattr("text")?.extract::<String>()?,
+                        "alpha outside",
+                        "{case}"
+                    );
+                }
+                if matches!(case, "foreign" | "stale" | "numeric_stale") {
+                    assert!(
+                        !outcome.starts_with("count:"),
+                        "real refusal discriminator: {case}"
+                    );
+                }
+                let reopened = rdocx::Document::from_bytes(&saved).unwrap();
+                assert_eq!(reopened.paragraph(0).unwrap().text(), "alpha outside");
+                results.push((outcome, saved));
+            }
+            eprintln!("selector_binding_case={case} actual={}", results[1].0);
+            assert_eq!(
+                results[0], results[1],
+                "actual legacy versus selector binding, {case}"
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
 }

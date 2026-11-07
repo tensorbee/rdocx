@@ -2206,8 +2206,8 @@ impl PyCell {
         let mut document = self.document.borrow_mut(py);
         let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
         let candidate = document.inner.clone_for_staging();
-        let (candidate, location) = candidate
-            .insert_picture_to_story_with_options_owned(
+        let (candidate, location, pictures) = candidate
+            .insert_picture_to_story_with_options_and_inventory_owned(
                 &story,
                 None,
                 &data,
@@ -2217,9 +2217,7 @@ impl PyCell {
                 options.map(|o| o.inner.clone()),
             )
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let picture = candidate
-            .pictures()
-            .map_err(|error| rdocx_to_pyerr(py, error))?
+        let picture = pictures
             .into_iter()
             .find(|p| p.location == location)
             .ok_or_else(|| PyIndexError::new_err("inserted cell picture was not inventoried"))?;

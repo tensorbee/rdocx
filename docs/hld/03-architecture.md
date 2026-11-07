@@ -2613,6 +2613,14 @@ whole map. Document-wide inventory and ownership failures still fail both
 calls. A known
 orphan returns no range or text, and a reference-only point returns no paired
 range with empty text. Imported replies without anchors retain that shape.
+Reply preparation shares one complete successful comment ownership and
+all-paragraph read between accepted anchor projection and reference-run
+qualification. It preserves unrelated malformed-source admission and every
+physical marker, story, revision and reference-payload guard. The read belongs
+to the already flushed private candidate and is dropped before identifier
+allocation or mutation. Public snapshots retain their private clone and flush.
+This adds no retained cache, Source input or resource allowance, and leaves
+outer staged transactions and later anchor publication unchanged.
 Authored replies require a projectable parent start/end/reference in one story.
 Their start immediately follows the selected parent start, and their end and
 separate reference follow its reference run, preserving crossing order.
@@ -3522,3 +3530,9 @@ comment-root and raw-record pairs at its staging clone. Dirty flush, initial
 fragment load, refresh, Field preparation/installation and later emission share
 the same operation and actual returned-model Source. Ordinary None paths keep
 the existing parser and writer behavior.
+
+
+The owned picture insertion support bridge can return the complete physical picture inventory from the same immutable prepared read used to reconstruct the inserted location. It shares the substantive pictures collector only for field-free prepared main and related sources. Field-bearing sources use the original fresh collection after staged finish. Ordinary insertion-only APIs do not collect pictures or acquire new inventory errors.
+
+
+The owned checked replacement-selector bridge resolves the complete current story inventory and validates the selected one-index source item in the same read. Its private immediate target skips only duplicate initial qualification. The existing postflush source, Field, copy-budget and publication checks remain authoritative.
