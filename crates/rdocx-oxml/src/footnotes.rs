@@ -130,8 +130,11 @@ impl CT_Footnotes {
                         let mut raw_type = None;
                         for attr in e.attributes().flatten() {
                             if is_word_attribute(attr.key.as_ref(), b"id", &prefixes) {
-                                id = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("0")
+                                id = attr
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        e.decoder(),
+                                    )?
                                     .parse()
                                     .unwrap_or(0);
                             } else if is_word_attribute(attr.key.as_ref(), b"type", &prefixes) {
@@ -416,6 +419,25 @@ mod tests {
         let reparsed = CT_Footnotes::from_xml(&output)
             .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output)));
         assert_eq!(reparsed.to_xml_footnotes().unwrap(), output);
+    }
+
+    #[test]
+    fn qualified_note_ids_decode_character_references() {
+        let xml = format!(
+            r#"<q:footnotes xmlns:q="{W_NS}"><q:footnote q:id="&#45;1"><q:p/></q:footnote><q:footnote q:id="&#48;"><q:p/></q:footnote><q:footnote q:id="&#x35;"><q:p/></q:footnote></q:footnotes>"#
+        );
+        let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            notes
+                .footnotes
+                .iter()
+                .map(|note| note.id)
+                .collect::<Vec<_>>(),
+            [-1, 0, 5]
+        );
+        for id in [-1, 0, 5] {
+            assert!(notes.get_by_id(id).is_some());
+        }
     }
 
     #[test]

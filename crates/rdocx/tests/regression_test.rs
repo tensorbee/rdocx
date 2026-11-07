@@ -9139,7 +9139,7 @@ fn escaped_separator_types_are_not_exposed_as_editable_stories() {
 }
 
 #[test]
-fn escaped_nonpositive_note_ids_are_not_exposed_as_editable_stories() {
+fn escaped_normal_nonpositive_note_ids_remain_editable_and_separators_do_not() {
     const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     let mut seed = Document::new();
     let mut package =
@@ -9153,7 +9153,7 @@ fn escaped_nonpositive_note_ids_are_not_exposed_as_editable_stories() {
         );
     package.set_part(
         "/word/footnotes.xml",
-        format!(r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="&#45;1"><w:p><w:r><w:t>hidden separator</w:t></w:r></w:p></w:footnote><w:footnote w:id="5"><w:p><w:r><w:t>real note</w:t></w:r></w:p></w:footnote></w:footnotes>"#).into_bytes(),
+        format!(r#"<w:footnotes xmlns:w="{W}"><w:footnote w:type="separator" w:id="0"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="&#45;1"><w:p><w:r><w:t>normal negative note</w:t></w:r></w:p></w:footnote><w:footnote w:id="5"><w:p><w:r><w:t>real note</w:t></w:r></w:p></w:footnote></w:footnotes>"#).into_bytes(),
     );
     package.content_types.add_override(
         "/word/footnotes.xml",
@@ -9169,14 +9169,19 @@ fn escaped_nonpositive_note_ids_are_not_exposed_as_editable_stories() {
         .filter(|story| story.kind() == rdocx::StoryKind::Footnote)
         .collect::<Vec<_>>();
 
-    assert_eq!(notes.len(), 1);
-    assert_eq!(
-        document.story_items(&notes[0]).unwrap()[0]
-            .text()
-            .unwrap()
-            .as_deref(),
-        Some("real note")
-    );
+    assert_eq!(notes.len(), 2);
+    for (id, expected) in [(-1, "normal negative note"), (5, "real note")] {
+        let story = document.footnote_story(id).unwrap().unwrap();
+        assert!(notes.contains(&story));
+        assert_eq!(
+            document.story_items(&story).unwrap()[0]
+                .text()
+                .unwrap()
+                .as_deref(),
+            Some(expected)
+        );
+    }
+    assert!(document.footnote_story(0).unwrap().is_none());
 }
 
 struct MeasuredAllocator;
