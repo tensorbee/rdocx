@@ -160,6 +160,11 @@ A plain tail removal can keep earlier entries when the suffix contains sections
 or appended runs whose parents precede the removed owner. It updates those
 suffix indices. Non-contiguous descendants of the removed owner retain the
 conservative path. This is not a bound independent of prior local edits.
+Fresh run-font and run-collection content views capture the checked current
+owner and its content scopes from the generation index. Capturing those views
+does not refresh story XML. Typed access and mutation keep their existing
+physical owner and scope validation.
+
 Every captured physical Word owner includes a removal epoch, so that shortcut
 retires held handles without allocating successors for every paragraph. Fresh
 handles capture the new epoch. Other removals retain conservative reconciliation.

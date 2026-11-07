@@ -16150,6 +16150,29 @@ def test_issue437_cell_edits_keep_handles_values_and_avoid_staging(opened):
     run.font.size = rdocx.Pt(14)
     if staging:
         assert list(staging()) == [0] * 6
+    # Acquire each font inside the operation, as the original Issue437 script
+    # does. A held font view must keep following the same actual run.
+    held_font = run.font
+    outputs = getattr(_rdocx, "_word_transaction_outputs", None)
+    release_counts = bool(outputs and outputs().get("allphase.debug_assertions") == [0, 0])
+    scans = getattr(_rdocx, "_main_body_block_scans", None)
+    if release_counts:
+        assert staging and scans
+    for points in (13, 15, 14):
+        if release_counts:
+            staging()
+            scans_before = scans()
+            outputs()
+        document.tables[0].cell(1, 1).paragraphs[0].runs[0].font.size = rdocx.Pt(points)
+        if release_counts:
+            assert list(staging()) == [0] * 6
+            assert scans() == scans_before
+            measured = outputs()
+            assert measured["allphase.cell.direct"] == [1, 0]
+            assert measured["allphase.cell.checked_fallback"] == [0, 0]
+            assert measured["allphase.styles.parse"] == [0, 0]
+            assert measured["allphase.styles.serialize"] == [0, 0]
+        assert held_font.size == rdocx.Pt(points)
     assert paragraph.text == "selected cell"
     assert run.text == "selected cell"
     fresh = document.tables[0].cell(1, 1).paragraphs[0]

@@ -993,16 +993,12 @@ impl PyParagraph {
         let path = match &self.owner {
             Some(owner) => {
                 let document = self.document.borrow(py);
-                document
-                    .capture_owner(
-                        &crate::document::WordOwnerLocation::Paragraph(
-                            document.current_paragraph_owner(owner)?,
-                        ),
-                        self.path.segs.clone(),
-                        crate::document::WordView::Content,
-                        self.furniture_scope.as_ref(),
-                    )?
-                    .0
+                document.capture_current_view(
+                    owner,
+                    self.path.segs.clone(),
+                    crate::document::WordView::Content,
+                    self.furniture_scope.as_ref(),
+                )?
             }
             None => self.path.clone(),
         };
