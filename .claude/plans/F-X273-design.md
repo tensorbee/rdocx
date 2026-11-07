@@ -992,3 +992,19 @@ Use that private constructor at the existing explicit-context factory empty and 
 The seventh method remains exactly its approved signature and payload-preservation contract. Production assembly preserves false for already rich results, preserves true for actual legacy results, or sets true on the actual old Latin-hyphen producer. It does not request false on an oppositely ordered legacy result or manufacture a rich reshaping. Generic construction and unmodified existing callers do not acquire the private legacy exception.
 
 Retain all immutable failed observations. In the same existing bodies, require the numeric/trailing-space factory and mixed old-Text parity control to pass, including the rich-initial Latin span with whitespace and repeated width reflow. Retain strict public invalid-level/map refusals, and add an explicit genuine-rich parity mismatch refusal beside an accepted fully covered opposite-order legacy control. Both malformed directions remain rejected. No test may change source bidi levels, drop the control or tolerate a refusal. Reacquire both affected binaries together and rerun the same finite shared/Word batch after source correction. Native/full/hash/raster/installed/WASM/hosted/independent-review acceptance remains pending.
+
+
+## Integrated hybrid carrier repair checkpoint
+
+The H4 full integration run exposed a normalized legacy multiline hyphen
+association failure. The existing source-less hyphen and neighboring prefix
+checks now recognize legacy MultilingualText as well as plain Text carriers.
+Both logical item matching and visual carrier selection use their existing
+source spans and direction checks. Nonlegacy rich carriers and coordinates
+are unchanged. Original PDF and SVG logical-order assertions remain intact.
+Actual final affected host batch passed17cases, including that regression
+and a source-less stored-field control, with stable source and binary guards.
+The independent bounded review and Root final adoption are recorded in
+.claude/reviews/S96-root-final-union-repair-pass-2.md. Earlier failed candidates
+and temporary diagnostic observations remain retained. Final sprint acceptance
+and all previously named external riders remain pending.

@@ -6673,8 +6673,14 @@ fn conditional_hyphen_key(
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            let oxml_layout::InlineItem::HyphenatedText { segment, .. } = item else {
-                return None;
+            let segment = match item {
+                oxml_layout::InlineItem::HyphenatedText { segment, .. } => segment,
+                oxml_layout::InlineItem::MultilingualText(segment)
+                    if segment.uses_legacy_shaping() =>
+                {
+                    segment.base()
+                }
+                _ => return None,
             };
             let item_source = normalize_reflow_source(segment.source?, source_node)?;
             let prefix_end = provenance
@@ -6705,8 +6711,10 @@ fn conditional_hyphen_visual_items(
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            let LineItem::Text(hyphen) = item else {
-                return None;
+            let hyphen = match item {
+                LineItem::Text(hyphen) => hyphen,
+                LineItem::MultilingualText(hyphen) if hyphen.uses_legacy_shaping() => hyphen.base(),
+                _ => return None,
             };
             if hyphen.text != "-"
                 || hyphen.source.is_some()
@@ -6719,6 +6727,11 @@ fn conditional_hyphen_visual_items(
                 .iter()
                 .filter_map(|item| match item {
                     oxml_layout::InlineItem::HyphenatedText { segment, .. } => Some(segment),
+                    oxml_layout::InlineItem::MultilingualText(segment)
+                        if segment.uses_legacy_shaping() =>
+                    {
+                        Some(segment.base())
+                    }
                     _ => None,
                 })
                 .any(|segment| {
