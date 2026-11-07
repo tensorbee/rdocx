@@ -1298,3 +1298,10 @@ memory riders, build-only26payloads, full verification, sprint review and
 close remain due where not actually performed. The named native exception
 remains unproved. No feature completion, dependency unblock, main merge,
 tag, publication, yank or reporter comment is authorized by this checkpoint.
+
+
+## H9 measured eager-open repair
+
+Actual final-source FX237 open timing fails at240cells,13.6175ms against the unchanged10ms limit. Root approves replacing from_document transient piece assembly with the authoritative whole story-owner snapshot checks and the same selected paragraph fragment parser. Retain every fallible check and its error conversion, including related stories and links. Optional read facts, accepted-text/run-path vectors, piece clones and projections need not be built merely to discard them. No dormant facts are retained, and first activation and positive dormant publication still use validate_word_facts unchanged. This is a bounded mechanism clarification within A283-13, with no API, error, budget, threshold or supported-input change. The separate cold407 and five flat-cost failures remain due.
+
+The predecessor test-only command has actual semantic RED at the zero-piece-work assertion after mixed-owner, alias, shared-header and malformed-related-paragraph error comparisons pass. Its earlier fixture mutability compile failure is preserved separately and is not the RED. Independent source support found zero concrete defects or smells. Actual fixed GREEN, scoped checks, microscope and a fresh ordinary shipping-artifact timing successor remain required.
