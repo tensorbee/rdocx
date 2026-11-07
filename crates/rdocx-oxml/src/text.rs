@@ -506,6 +506,18 @@ pub(crate) fn emitted_bindings() -> EmittedBindingSnapshot {
 }
 
 impl EmittedBindingSnapshot {
+    pub(crate) fn has_foreign_word_binding(&self) -> bool {
+        let mut next = self.0.as_deref();
+        while let Some(frame) = next {
+            if let Some((_, namespace)) = frame.local.iter().rev().find(|(prefix, _)| prefix == "w")
+            {
+                return namespace != crate::namespace::W_NS;
+            }
+            next = frame.parent.as_deref();
+        }
+        false
+    }
+
     fn guarantees_w14_name(&self) -> bool {
         let scope = self.bindings();
         if let Some((_, namespace)) = scope.iter().find(|(prefix, _)| *prefix == "w14") {
@@ -725,9 +737,7 @@ pub(crate) fn restore_generated_word_binding(start: &mut BytesStart<'_>) -> Resu
 fn needs_generated_word_binding(start: &BytesStart<'_>) -> Result<bool> {
     let local = raw_namespace_declarations(start)?;
     let snapshot = emitted_bindings();
-    let scope = snapshot.bindings();
-    Ok(!local.iter().any(|(prefix, _)| prefix == "w")
-        && !scope.contains(&("w", crate::namespace::W_NS)))
+    Ok(!local.iter().any(|(prefix, _)| prefix == "w") && snapshot.has_foreign_word_binding())
 }
 
 fn namespace_declaration(name: &[u8]) -> bool {
@@ -36838,16 +36848,48 @@ mod tests {
         child.validate_for_attachment().unwrap();
         *parent.cached_field_mut(0).unwrap() = child;
         let before = parent.clone();
-        let error = parent
-            .normalize_cached_result_owner()
-            .unwrap_err()
-            .to_string();
+        let error = parent.normalize_cached_result_owner().unwrap_err();
+        // The checked semantic revision reader now diagnoses the malformed
+        // property before the later source-path consistency check.
         assert!(
-            error.contains("normalized field owner changed its accepted source paths"),
+            matches!(
+                &error,
+                crate::OxmlError::InvalidValue(message)
+                    if message == "w:sz/@w:val \"bad\" is not an integer measurement"
+            ),
             "{error}"
         );
         assert_eq!(parent, before);
         assert!(std::sync::Arc::ptr_eq(&parent.source, &before.source));
+
+        // The same local name in an opaque foreign property stays admissible.
+        let mut opaque_parent = parsed_field(&paragraph, 0).clone();
+        let mut opaque_run = super::CT_R::new("new");
+        opaque_run.properties = Some(super::CT_RPr {
+            revision_xml: vec![br#"<x:sz xmlns:x="urn:producer" x:val="bad"/>"#.to_vec()],
+            ..Default::default()
+        });
+        *opaque_parent.cached_field_mut(0).unwrap() = super::Field::from_instruction(
+            super::FieldInstruction::new("CUSTOM", Vec::new(), Vec::new()).unwrap(),
+            super::FieldForm::Simple,
+            vec![opaque_run],
+        )
+        .unwrap();
+        opaque_parent.normalize_cached_result_owner().unwrap();
+        assert_eq!(opaque_parent.cached_result, "new");
+        assert!(
+            String::from_utf8_lossy(
+                &ordered_paragraph_xml(
+                    &opaque_parent
+                        .cached_result_owner_projection()
+                        .unwrap()
+                        .unwrap(),
+                    None,
+                )
+                .unwrap()
+            )
+            .contains(r#"<x:sz xmlns:x="urn:producer" x:val="bad"/>"#)
+        );
     }
 
     #[test]
@@ -44949,15 +44991,244 @@ mod tests {
                 "q:sdt".len(),
             );
             let _root = emitted_root_binding_scope(&root, 0, false).unwrap();
-            for paired in [false, true] {
+            for properties in 0..5 {
                 let mut paragraph = CT_P::new();
-                if paired {
-                    paragraph.properties = Some(CT_PPr::default());
+                if properties >= 3 {
+                    let content = if properties == 3 {
+                        "<q:keepNext/><w:producerOnly/>"
+                    } else {
+                        "<q:rPr><q:b/><w:producerOnly/></q:rPr>"
+                    };
+                    let source = format!(
+                        "<q:p xmlns:q=\"{word}\" xmlns:w=\"urn:producer\"><q:pPr>{content}</q:pPr></q:p>"
+                    );
+                    paragraph = CT_P::from_xml_fragment_checked(source.as_bytes()).unwrap();
+                } else if properties != 0 {
+                    paragraph.properties = Some(CT_PPr {
+                        keep_next: (properties == 2).then_some(true),
+                        ..CT_PPr::default()
+                    });
                 }
                 let output =
                     String::from_utf8(owner_bytes(&paragraph, XmlWriteRole::Publication)).unwrap();
-                assert_eq!(output.contains("xmlns:w="), foreign, "{output}");
+                // A nonempty paragraph can use the destination's Word alias
+                // while the foreign w binding remains in scope. The empty
+                // fast path instead restores its own canonical w declaration.
+                if properties < 2 {
+                    assert_eq!(
+                        output.contains("xmlns:w="),
+                        foreign && properties == 0,
+                        "{output}"
+                    );
+                }
+                let wrapped = format!(
+                    "<{}>{output}<w:outerProbe/></q:sdt>",
+                    String::from_utf8_lossy(root.as_ref())
+                );
+                let mut reader = NsReader::from_reader(wrapped.as_bytes());
+                let mut buffer = Vec::new();
+                let mut paragraph_names = Vec::new();
+                loop {
+                    let (namespace, event) = reader.read_resolved_event_into(&mut buffer).unwrap();
+                    match event {
+                        Event::Start(element) | Event::Empty(element)
+                            if matches!(
+                                element.local_name().as_ref(),
+                                b"p" | b"pPr" | b"keepNext" | b"rPr" | b"b"
+                            ) =>
+                        {
+                            assert!(
+                                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == word.as_bytes()),
+                                "{wrapped}"
+                            );
+                            paragraph_names.push(element.local_name().as_ref().to_vec());
+                        }
+                        Event::Empty(element)
+                            if matches!(
+                                element.local_name().as_ref(),
+                                b"producerOnly" | b"outerProbe"
+                            ) =>
+                        {
+                            let expected =
+                                if element.local_name().as_ref() == b"producerOnly" || foreign {
+                                    "urn:producer"
+                                } else {
+                                    word
+                                };
+                            assert!(
+                                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == expected.as_bytes()),
+                                "{wrapped}"
+                            );
+                        }
+                        Event::Eof => break,
+                        _ => {}
+                    }
+                    buffer.clear();
+                }
+                assert_eq!(
+                    paragraph_names,
+                    match properties {
+                        2 | 3 => vec![b"p".to_vec(), b"pPr".to_vec(), b"keepNext".to_vec()],
+                        4 => vec![
+                            b"p".to_vec(),
+                            b"pPr".to_vec(),
+                            b"rPr".to_vec(),
+                            b"b".to_vec()
+                        ],
+                        _ => vec![b"p".to_vec()],
+                    },
+                    "{wrapped}"
+                );
             }
+        }
+        // Exercise each property root directly, including positioned raw-only
+        // records whose modeled root has no typed children. A repaired pPr
+        // must not hide a still-shadowed standalone rPr producer.
+        for foreign in [false, true] {
+            let root = format!(
+                "q:sdt xmlns:q=\"{word}\" xmlns:w=\"{}\"",
+                if foreign { "urn:producer" } else { word }
+            );
+            let start = BytesStart::from_content(root.as_str(), "q:sdt".len());
+            let _root = emitted_root_binding_scope(&start, 0, false).unwrap();
+            for case in 0..12 {
+                let kind = case % 4;
+                let local_word = match case / 4 {
+                    1 => Some(word),
+                    2 => Some("urn:local"),
+                    _ => None,
+                };
+                let raw = "<w:producerOnly/>";
+                let mut content = match kind {
+                    0 => format!("<q:pPr><q:keepNext/>{raw}</q:pPr>"),
+                    1 => format!("<q:pPr>{raw}</q:pPr>"),
+                    2 => format!("<q:r><q:rPr><q:b/>{raw}</q:rPr><q:t>7</q:t></q:r>"),
+                    _ => format!("<q:r><q:rPr>{raw}</q:rPr><q:t>7</q:t></q:r>"),
+                };
+                if let Some(local_word) = local_word {
+                    let root = if kind < 2 { "q:pPr" } else { "q:rPr" };
+                    content = content.replacen(
+                        &format!("<{root}>"),
+                        &format!("<{root} xmlns:w=\"{local_word}\">"),
+                        1,
+                    );
+                }
+                let source =
+                    format!("<q:p xmlns:q=\"{word}\" xmlns:w=\"urn:producer\">{content}</q:p>");
+                let paragraph = CT_P::from_xml_fragment_checked(source.as_bytes()).unwrap();
+                let mut writer = Writer::new(Vec::new());
+                if kind < 2 {
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .unwrap()
+                        .write_xml_role_in(&mut writer, XmlWriteRole::Publication, None, None)
+                        .unwrap();
+                } else {
+                    paragraph.runs[0]
+                        .properties
+                        .as_ref()
+                        .unwrap()
+                        .write_xml_role(&mut writer, None, XmlWriteRole::Publication, None, None)
+                        .unwrap();
+                }
+                let bytes = writer.into_inner();
+                let output = String::from_utf8(bytes).unwrap();
+                let wrapped = format!("<{root}>{output}<w:outerProbe/></q:sdt>");
+                let mut reader = NsReader::from_reader(wrapped.as_bytes());
+                let mut buffer = Vec::new();
+                let mut word_names = Vec::new();
+                let mut foreign_records = 0;
+                loop {
+                    let (namespace, event) = reader.read_resolved_event_into(&mut buffer).unwrap();
+                    match event {
+                        Event::Start(element) | Event::Empty(element)
+                            if matches!(
+                                element.local_name().as_ref(),
+                                b"pPr" | b"keepNext" | b"rPr" | b"b"
+                            ) =>
+                        {
+                            assert!(
+                                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == word.as_bytes()),
+                                "{wrapped}"
+                            );
+                            word_names.push(element.local_name().as_ref().to_vec());
+                        }
+                        Event::Empty(element)
+                            if element.local_name().as_ref() == b"producerOnly" =>
+                        {
+                            let expected = local_word.unwrap_or("urn:producer");
+                            assert!(
+                                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == expected.as_bytes()),
+                                "{wrapped}"
+                            );
+                            foreign_records += 1;
+                        }
+                        Event::Empty(element) if element.local_name().as_ref() == b"outerProbe" => {
+                            let expected = if foreign { "urn:producer" } else { word };
+                            assert!(
+                                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == expected.as_bytes()),
+                                "{wrapped}"
+                            );
+                        }
+                        Event::Eof => break,
+                        _ => {}
+                    }
+                    buffer.clear();
+                }
+                assert_eq!(foreign_records, 1, "{wrapped}");
+                let expected = match kind {
+                    0 => vec![b"pPr".to_vec(), b"keepNext".to_vec()],
+                    1 => vec![b"pPr".to_vec()],
+                    2 => vec![b"rPr".to_vec(), b"b".to_vec()],
+                    _ => vec![b"rPr".to_vec()],
+                };
+                assert_eq!(word_names, expected, "{wrapped}");
+            }
+        }
+        // A binding query reads the nearest actual frame without flattening
+        // unrelated namespace declarations. Guard drops restore the caller.
+        {
+            let check = |expected| {
+                let snapshot = emitted_bindings();
+                let current = snapshot.has_foreign_word_binding();
+                assert_eq!(current, expected);
+                assert_eq!(
+                    current,
+                    !snapshot.bindings().contains(&("w", word)),
+                    "nearest-w query matches the previous full-scope predicate"
+                );
+            };
+            let _unbound = root_binding_scope(0);
+            check(false);
+            {
+                let root = BytesStart::from_content("q:sdt xmlns:w=\"urn:outer\"", "q:sdt".len());
+                let _root = emitted_root_binding_scope(&root, 0, false).unwrap();
+                check(true);
+                {
+                    let unchanged = BytesStart::new("q:inner");
+                    let _unchanged = emitted_binding_scope(&unchanged, false, false).unwrap();
+                    check(true);
+                    {
+                        let canonical = BytesStart::from_content(
+                            format!("q:p xmlns:w=\"{word}\""),
+                            "q:p".len(),
+                        );
+                        let _canonical = emitted_binding_scope(&canonical, false, false).unwrap();
+                        check(false);
+                        {
+                            let foreign =
+                                BytesStart::from_content("q:r xmlns:w=\"urn:inner\"", "q:r".len());
+                            let _foreign = emitted_binding_scope(&foreign, false, false).unwrap();
+                            check(true);
+                        }
+                        check(false);
+                    }
+                    check(true);
+                }
+                check(true);
+            }
+            check(false);
         }
         // Finalizer-added root w14 must not be imported into an earlier writer.
         let first = format!(

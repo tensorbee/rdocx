@@ -1396,6 +1396,14 @@ impl CT_PPr {
 
         let mut buf = itoa::Buffer::new();
         let mut start = crate::text::FieldXmlStart::new("w:pPr", emission)?;
+        let shadowed_word = role == crate::text::XmlWriteRole::Publication
+            && crate::text::emitted_bindings().has_foreign_word_binding();
+        if shadowed_word {
+            start.restore_word_binding()?;
+        }
+        let _property_scope = shadowed_word
+            .then(|| crate::text::emitted_binding_scope(start.element(), false, false))
+            .transpose()?;
         let word_prefix = if role == crate::text::XmlWriteRole::Source {
             start.qualify(&[], role, source_context)?
         } else {
@@ -1899,7 +1907,13 @@ impl CT_PPr {
         emission: Option<&crate::text::FieldXmlEmission>,
     ) -> Result<()> {
         if self.is_empty_in(false) {
-            crate::text::FieldXmlStart::new("w:pPr", emission)?.write(writer, false)?;
+            let mut start = crate::text::FieldXmlStart::new("w:pPr", emission)?;
+            if role == crate::text::XmlWriteRole::Publication
+                && crate::text::emitted_bindings().has_foreign_word_binding()
+            {
+                start.restore_word_binding()?;
+            }
+            start.write(writer, false)?;
             if let Some(emission) = emission {
                 emission.write_end_name(writer, "w:pPr")?;
             } else {

@@ -1407,7 +1407,17 @@ pub(crate) fn parse_scoped_ppr_with_observation(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref start)) => {
-                let owner_bindings = local_namespace_overrides(start, word_prefixes)?;
+                let local_bindings = local_namespace_overrides(start, word_prefixes)?;
+                // Publication restores canonical w on typed property roots.
+                // Close retained foreign-w records at their actual reader.
+                let inherited_word_binding = word_prefixes
+                    .iter()
+                    .find_map(|binding| binding.strip_prefix("\0w\0"))
+                    .filter(|namespace| *namespace != W_NS)
+                    .map(|namespace| vec![("w".to_owned(), namespace.to_owned())])
+                    .unwrap_or_default();
+                let owner_bindings =
+                    merged_owner_bindings(&inherited_word_binding, &local_bindings);
                 let prefixes = word_prefixes_at(start, word_prefixes)?;
                 let mut selected = None;
                 let model = CT_PPr::from_xml_with_property_observation(
@@ -1470,8 +1480,15 @@ pub(crate) fn parse_scoped_rpr_with_observation(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref start)) => {
                 let local_bindings = local_namespace_overrides(start, word_prefixes)?;
-                let owner_bindings =
-                    merged_owner_bindings(inherited_owner_bindings, &local_bindings);
+                let inherited_word_binding = word_prefixes
+                    .iter()
+                    .find_map(|binding| binding.strip_prefix("\0w\0"))
+                    .filter(|namespace| *namespace != W_NS)
+                    .map(|namespace| vec![("w".to_owned(), namespace.to_owned())])
+                    .unwrap_or_default();
+                let inherited_bindings =
+                    merged_owner_bindings(&inherited_word_binding, inherited_owner_bindings);
+                let owner_bindings = merged_owner_bindings(&inherited_bindings, &local_bindings);
                 let prefixes = word_prefixes_at(start, word_prefixes)?;
                 let mut selected = None;
                 let model = CT_RPr::from_xml_with_property_observation(
