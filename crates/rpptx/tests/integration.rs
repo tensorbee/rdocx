@@ -498,7 +498,7 @@ fn fx218_ordered_labels_and_explicit_no_bullet() {
 fn issue431_smartart_frame_is_contextless_and_names_its_cause_once() {
     use rpptx::Presentation;
     let mut package = smartart_fixture_package();
-    make_smartart_renderable(&mut package);
+    add_smartart_theme(&mut package);
     let presentation = Presentation::from_bytes(&package_bytes(package)).unwrap();
     let before = presentation.to_bytes().unwrap();
     let report = presentation.fit_report(&[]).unwrap();
@@ -6773,7 +6773,7 @@ fn smartart_fixture_package() -> OpcPackage {
     package
 }
 
-fn make_smartart_renderable(package: &mut OpcPackage) {
+fn add_smartart_theme(package: &mut OpcPackage) {
     let master_part = "/custom/masters/scope.xml";
     let theme_part = "/custom/theme/theme1.xml";
     package.set_part(
@@ -6786,6 +6786,10 @@ fn make_smartart_renderable(package: &mut OpcPackage) {
     package
         .get_or_create_part_rels(master_part)
         .add(rel_types::THEME, "../theme/theme1.xml");
+}
+
+fn make_smartart_renderable(package: &mut OpcPackage) {
+    add_smartart_theme(package);
     for scope in ["one", "two", "layout-scope", "master-scope"] {
         package.set_part(
             &format!("/custom/diagrams/{scope}/style1.xml"),
