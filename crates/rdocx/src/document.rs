@@ -18857,6 +18857,116 @@ fn bind_text_box_source_owners(
     prepare_physical_story_projection(body, &mut anchors)
 }
 
+// These are read/layout clones. No raw drawing scan or whole-body clone is
+// needed to make already-admitted revision fields available to semantic readers.
+fn prepare_semantic_paragraph_projection(value: &mut CT_P) -> Result<()> {
+    for (_, _, revision) in &mut value.revisions {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_semantic_paragraph_projection(paragraph)?;
+        }
+    }
+    for (_, _, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for run in &mut value.runs {
+        prepare_semantic_run_projection(run)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_run_projection(value: &mut CT_R) -> Result<()> {
+    for drawing in value
+        .content
+        .iter_mut()
+        .filter_map(|content| {
+            if let RunContent::Drawing(drawing) = content {
+                Some(drawing)
+            } else {
+                None
+            }
+        })
+        .chain(value.alt_drawings.iter_mut())
+    {
+        let shape = drawing
+            .anchor
+            .as_mut()
+            .and_then(|anchor| anchor.shape.as_mut());
+        if let Some(shape) = shape {
+            if let Some(body) = &mut shape.text_body {
+                prepare_semantic_body_projection(&mut body.content)?;
+            } else {
+                for paragraph in &mut shape.text {
+                    prepare_semantic_paragraph_projection(paragraph)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_semantic_control_projection(value: &mut CT_Sdt) -> Result<()> {
+    for (_, revision) in value.physical_revisions_mut() {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_semantic_paragraph_projection(paragraph)?;
+        }
+    }
+    for child in &mut value.content {
+        match child {
+            SdtContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            SdtContent::Table(t) => prepare_semantic_table_projection(t)?,
+            SdtContent::Row(r) => prepare_semantic_row_projection(r)?,
+            SdtContent::Cell(c) => prepare_semantic_cell_projection(c)?,
+            SdtContent::Run(r) => prepare_semantic_run_projection(r)?,
+            SdtContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn prepare_semantic_table_projection(value: &mut CT_Tbl) -> Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for row in &mut value.rows {
+        prepare_semantic_row_projection(row)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_row_projection(value: &mut CT_Row) -> Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for cell in &mut value.cells {
+        prepare_semantic_cell_projection(cell)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_cell_projection(value: &mut CT_Tc) -> Result<()> {
+    for content in &mut value.content {
+        match content {
+            CellContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            CellContent::Table(t) => prepare_semantic_table_projection(t)?,
+            CellContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_semantic_body_projection(values: &mut [BodyContent]) -> Result<()> {
+    for value in values {
+        match value {
+            BodyContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            BodyContent::Table(t) => prepare_semantic_table_projection(t)?,
+            BodyContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_physical_story_projection(
     body: &mut rdocx_oxml::document::CT_Body,
     anchors: &mut [(Vec<u8>, Option<usize>, bool)],
@@ -50547,6 +50657,9 @@ impl Document {
             // Binding is atomic. Unresolved physical owners retain their caches.
         }
 
+        // Optional drawing binding has already chosen its successful/fallback
+        // projection. Semantic admission failures must not be swallowed with it.
+        prepare_semantic_body_projection(&mut document.body.content)?;
         let mut story_bodies = HashMap::new();
         if let Ok(stories) = self.stories() {
             for (identity, part_name) in &story_part_names {
@@ -50583,7 +50696,48 @@ impl Document {
                     {
                         // The unbound authoritative projection remains renderable.
                     }
+                    prepare_semantic_body_projection(&mut body.content)?;
                     story_bodies.insert(identity.clone(), body);
+                }
+            }
+        }
+
+        // Fallback paragraph caches are real layout consumers too, even if an
+        // optional authoritative story-body projection could not be acquired.
+        for (header, parts) in [(true, &mut headers), (false, &mut footers)] {
+            for (id, part) in parts {
+                let story = if header {
+                    rdocx_layout::WordStory::Header {
+                        relationship_id: id.clone(),
+                    }
+                } else {
+                    rdocx_layout::WordStory::Footer {
+                        relationship_id: id.clone(),
+                    }
+                };
+                if !story_bodies.contains_key(&story) {
+                    for paragraph in &mut part.paragraphs {
+                        prepare_semantic_paragraph_projection(paragraph)?;
+                    }
+                }
+            }
+        }
+        for (footnote, notes) in [(true, &mut footnotes), (false, &mut endnotes)] {
+            if let Some(notes) = notes {
+                for note in &mut notes.footnotes {
+                    if note.note_type != rdocx_oxml::footnotes::NoteType::Normal {
+                        continue;
+                    }
+                    let story = if footnote {
+                        rdocx_layout::WordStory::Footnote { id: note.id }
+                    } else {
+                        rdocx_layout::WordStory::Endnote { id: note.id }
+                    };
+                    if !story_bodies.contains_key(&story) {
+                        for paragraph in &mut note.paragraphs {
+                            prepare_semantic_paragraph_projection(paragraph)?;
+                        }
+                    }
                 }
             }
         }

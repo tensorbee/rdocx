@@ -22,6 +22,7 @@ const MAX_REVISION_NESTING_DEPTH: usize = 32;
 pub(crate) struct RevisionSourceFacts {
     pub(crate) runs: Vec<CT_R>,
     pub(crate) revisions: Vec<(usize, CT_Revision)>,
+    pub(crate) simple_fields_deferred: bool,
     copy_nodes_bound: usize,
     copy_bytes_bound: usize,
     copy_nodes: usize,
@@ -350,6 +351,7 @@ pub struct CT_Revision {
     require_author: bool,
     accepted_fields_pending: bool,
     accepted_payload_pending: bool,
+    semantic_fields_pending: bool,
     read_context: Option<Arc<RevisionReadContext>>,
 }
 
@@ -571,6 +573,7 @@ impl CT_Revision {
                         require_author,
                         accepted_fields_pending: false,
                         accepted_payload_pending: false,
+                        semantic_fields_pending: false,
                         read_context: None,
                     });
                 }
@@ -584,7 +587,7 @@ impl CT_Revision {
             buffer.clear();
         };
         let (kind, id, author, timestamp) = kind;
-        let (content, content_paragraph, nested_revisions) = if matches!(
+        let (content, content_paragraph, nested_revisions, semantic_fields_pending) = if matches!(
             RevisionBodyMode::selected(
                 kind,
                 RevisionBodyMode::without_source_probe(kind).is_none()
@@ -600,17 +603,23 @@ impl CT_Revision {
             )?;
             let (paragraph, facts) =
                 parse_revision_content_with_facts(&raw_xml, &prefixes, copy_bound, input, output)?;
+            let semantic_fields_pending = facts.simple_fields_deferred;
             let content = if facts.runs.is_empty() {
                 RevisionContent::Marker
             } else {
                 RevisionContent::Runs(facts.runs)
             };
-            (content, Some(Arc::new(paragraph)), facts.revisions)
+            (
+                content,
+                Some(Arc::new(paragraph)),
+                facts.revisions,
+                semantic_fields_pending,
+            )
         } else {
             let cursor = input.map(|input| input.cursor(&raw_xml)).transpose()?;
             let (content, nested_revisions) =
                 parse_content(&mut reader, kind, &prefixes, cursor.as_ref())?;
-            (content, None, nested_revisions)
+            (content, None, nested_revisions, false)
         };
         Ok(Self {
             kind,
@@ -625,6 +634,7 @@ impl CT_Revision {
             require_author,
             accepted_fields_pending: false,
             accepted_payload_pending: false,
+            semantic_fields_pending,
             read_context: None,
         })
     }
@@ -696,7 +706,6 @@ impl CT_Revision {
     /// The original raw XML remains the serializer's authority.
     #[doc(hidden)]
     pub fn physical_content_paragraph_mut(&mut self) -> crate::Result<Option<&mut CT_P>> {
-        self.read_context = None;
         if !matches!(
             self.kind,
             RevisionKind::Insertion
@@ -706,12 +715,22 @@ impl CT_Revision {
         ) {
             return Ok(None);
         }
-        if self.content_paragraph.is_none() {
+        if self.content_paragraph.is_none() || self.semantic_fields_pending {
+            // This is the same successful revision reader's actual produced map.
+            // Forward its live registry, never register the view as new ingress.
+            let input = self.read_context.as_ref().and_then(|context| {
+                context.registry.upgrade().map(|registry| {
+                    crate::document::WordFieldInput::produced(context.raw_map.clone(), registry)
+                })
+            });
             self.content_paragraph = Some(Arc::new(parse_accepted_revision_content(
                 &self.raw_xml,
                 &self.parse_word_prefixes,
+                input.as_ref(),
             )?));
+            self.semantic_fields_pending = false;
         }
+        self.read_context = None;
         Ok(self.content_paragraph.as_mut().map(Arc::make_mut))
     }
 
@@ -1218,6 +1237,18 @@ impl CT_Revision {
         if let Some(mapped) = &mapped {
             normalized.attach_read_context(mapped, read_maps);
         }
+        if !self.semantic_fields_pending && normalized.semantic_fields_pending {
+            // The prior edited owner already has typed simple fields. The
+            // physical refresh reader deliberately defers those fields, so
+            // prepare this same revision's checked view before identity proof.
+            // Keep its actual produced read context for the scoped publisher.
+            normalized.content_paragraph = Some(Arc::new(parse_accepted_revision_content(
+                &normalized.raw_xml,
+                &normalized.parse_word_prefixes,
+                mapped.as_ref(),
+            )?));
+            normalized.semantic_fields_pending = false;
+        }
         let parsed_source = normalized.content_paragraph.clone();
         if let Some(current) = normalized.content_paragraph.as_mut() {
             if scoped {
@@ -1640,13 +1671,195 @@ fn collect_revision<'a>(revision: &'a CT_Revision, revisions: &mut Vec<&'a CT_Re
     }
 }
 
+pub(crate) fn prepare_semantic_paragraph_projection(value: &mut CT_P) -> crate::Result<()> {
+    for (_, _, revision) in &mut value.revisions {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_semantic_paragraph_projection(paragraph)?;
+        }
+    }
+    for (_, _, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for run in &mut value.runs {
+        prepare_semantic_run_projection(run)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_run_projection(value: &mut CT_R) -> crate::Result<()> {
+    for drawing in value
+        .content
+        .iter_mut()
+        .filter_map(|content| {
+            if let crate::text::RunContent::Drawing(drawing) = content {
+                Some(drawing)
+            } else {
+                None
+            }
+        })
+        .chain(value.alt_drawings.iter_mut())
+    {
+        let shape = drawing
+            .anchor
+            .as_mut()
+            .and_then(|anchor| anchor.shape.as_mut());
+        if let Some(shape) = shape {
+            if let Some(body) = &mut shape.text_body {
+                prepare_semantic_body_projection(&mut body.content)?;
+            } else {
+                for paragraph in &mut shape.text {
+                    prepare_semantic_paragraph_projection(paragraph)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_semantic_control_projection(value: &mut CT_Sdt) -> crate::Result<()> {
+    for (_, revision) in value.physical_revisions_mut() {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_semantic_paragraph_projection(paragraph)?;
+        }
+    }
+    for child in &mut value.content {
+        match child {
+            SdtContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            SdtContent::Table(t) => prepare_semantic_table_projection(t)?,
+            SdtContent::Row(r) => prepare_semantic_row_projection(r)?,
+            SdtContent::Cell(c) => prepare_semantic_cell_projection(c)?,
+            SdtContent::Run(r) => prepare_semantic_run_projection(r)?,
+            SdtContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn prepare_semantic_table_projection(value: &mut CT_Tbl) -> crate::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for row in &mut value.rows {
+        prepare_semantic_row_projection(row)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_row_projection(value: &mut CT_Row) -> crate::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_semantic_control_projection(control)?;
+    }
+    for cell in &mut value.cells {
+        prepare_semantic_cell_projection(cell)?;
+    }
+    Ok(())
+}
+
+fn prepare_semantic_cell_projection(value: &mut CT_Tc) -> crate::Result<()> {
+    for content in &mut value.content {
+        match content {
+            CellContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            CellContent::Table(t) => prepare_semantic_table_projection(t)?,
+            CellContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+        }
+    }
+    Ok(())
+}
+
+fn prepare_semantic_body_projection(values: &mut [BodyContent]) -> crate::Result<()> {
+    for value in values {
+        match value {
+            BodyContent::Paragraph(p) => prepare_semantic_paragraph_projection(p)?,
+            BodyContent::Table(t) => prepare_semantic_table_projection(t)?,
+            BodyContent::ContentControl(c) => prepare_semantic_control_projection(c)?,
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn parse_accepted_revision_content(
     raw_xml: &[u8],
     word_prefixes: &[String],
+    input: Option<&crate::document::WordFieldInput>,
 ) -> crate::Result<CT_P> {
-    let copy_bound = crate::document::admit_word_xml(raw_xml, word_prefixes, None)?;
-    parse_revision_content_with_facts(raw_xml, word_prefixes, copy_bound, None, None)
-        .map(|(paragraph, _)| paragraph)
+    // The successful original revision reader owns these boundaries and scope.
+    // This later semantic view is checked separately from its raw admission.
+    let (content_start, content_end) = revision_content_bounds(raw_xml)?;
+    let mut root_reader = Reader::from_reader(raw_xml);
+    let prefixes = match root_reader.read_event()? {
+        Event::Start(root) => word_prefixes_at(&root, word_prefixes)?,
+        _ => {
+            return Err(crate::OxmlError::MissingElement(
+                "revision source root".into(),
+            ));
+        }
+    };
+    let bindings = crate::text::field_scope_bindings(&prefixes);
+    let prefix = bindings
+        .iter()
+        .find_map(|(prefix, uri)| (*uri == W_NS).then_some(*prefix))
+        .ok_or_else(|| crate::OxmlError::MissingElement("revision Word namespace".into()))?;
+    let name = if prefix.is_empty() {
+        "p".to_owned()
+    } else {
+        format!("{prefix}:p")
+    };
+    let opening = format!("<{name}>");
+    let closing = format!("</{name}>");
+    let chunks = [
+        opening.as_bytes(),
+        &raw_xml[content_start..content_end],
+        closing.as_bytes(),
+    ];
+    // Same actual paragraph and field constructor roles, before payload growth.
+    crate::document::admit_word_field_input(
+        crate::document::WordXmlInput::pieces(&chunks),
+        &prefixes,
+        input.map(crate::document::WordFieldInput::registry),
+    )?;
+    let paragraph_input = input
+        .map(|input| {
+            input
+                .slice(content_start..content_end)?
+                .with_shell(opening.len(), closing.len())
+        })
+        .transpose()?;
+    let bytes = chunks
+        .iter()
+        .try_fold(0usize, |sum, chunk| sum.checked_add(chunk.len()))
+        .ok_or_else(|| {
+            crate::OxmlError::InvalidValue("semantic revision source overflow".into())
+        })?;
+    let mut paragraph_xml = Vec::with_capacity(bytes);
+    for chunk in chunks {
+        paragraph_xml.extend_from_slice(chunk);
+    }
+    let mut reader = Reader::from_reader(paragraph_xml.as_slice());
+    let start = match reader.read_event()? {
+        Event::Start(start) => start,
+        _ => {
+            return Err(crate::OxmlError::MissingElement(
+                "semantic revision paragraph".into(),
+            ));
+        }
+    };
+    let mut cursor = paragraph_input
+        .as_ref()
+        .map(|input| input.cursor(&paragraph_xml))
+        .transpose()?;
+    let mut paragraph = CT_P::from_xml_with_revision_facts(
+        &mut reader,
+        &prefixes,
+        Some(&start),
+        None,
+        cursor.as_mut(),
+        None,
+        None,
+    )?;
+    prepare_semantic_paragraph_projection(&mut paragraph)?;
+    Ok(paragraph)
 }
 
 fn parse_revision_content_with_facts(
@@ -3391,5 +3604,96 @@ mod tests {
             CT_Revision::try_from_raw(nested.into_bytes(), &["w".into()], true, None).is_err(),
             "the existing qualified revision nesting admission remains binding"
         );
+    }
+    #[test]
+    fn semantic_revision_projection_keeps_initial_raw_admission_and_models_actual_simple_fields() {
+        for kind in ["ins", "moveTo", "del", "moveFrom"] {
+            let raw = format!(
+                r#"<w:{kind} xmlns:w="{W_NS}" w:id="7" w:author="Ada"><w:fldSimple w:instr="SEQ item"><w:r><w:t>old</w:t></w:r></w:fldSimple><w:fldSimple w:instr="TC &quot;Entry&quot; \l 1"/></w:{kind}>"#
+            );
+            let mut revision = CT_Revision::from_raw(raw.as_bytes().to_vec(), &[]).unwrap();
+            if matches!(kind, "ins" | "moveTo") {
+                assert!(revision.content_paragraph().unwrap().runs.is_empty());
+            } else {
+                assert!(revision.content_paragraph().is_none());
+            }
+            let paragraph = revision.physical_content_paragraph_mut().unwrap().unwrap();
+            let names = paragraph
+                .runs
+                .iter()
+                .flat_map(|run| &run.content)
+                .filter_map(|content| {
+                    if let crate::text::RunContent::Field(field) = content {
+                        Some(field.instruction.name.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["SEQ", "TC"]);
+            let mut accepted = Vec::new();
+            revision.append_accepted_run_paths(&mut Vec::new(), &mut accepted);
+            assert_eq!(accepted.is_empty(), matches!(kind, "del" | "moveFrom"));
+            assert_eq!(revision.into_raw_xml(), raw.as_bytes());
+        }
+    }
+
+    #[test]
+    fn materialized_simple_field_revision_refresh_keeps_checked_typed_owner() {
+        for kind in ["ins", "moveTo"] {
+            let raw = format!(
+                r#"<w:{kind} xmlns:w="{W_NS}" w:id="7" w:author="Ada"><w:fldSimple w:instr="SEQ item" w:dirty="0"><w:r><w:t>old</w:t></w:r></w:fldSimple></w:{kind}>"#
+            );
+            let mut revision = CT_Revision::from_raw(raw.as_bytes().to_vec(), &[]).unwrap();
+            assert!(revision.semantic_fields_pending);
+            let paragraph = revision.physical_content_paragraph_mut().unwrap().unwrap();
+            let crate::text::RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+                panic!("actual simple field owner");
+            };
+            field.cached_result = "1".into();
+            field.dirty = Some(false);
+            revision.refresh_accepted_content().unwrap();
+            assert!(!revision.semantic_fields_pending);
+            let paragraph = revision.content_paragraph().unwrap();
+            assert_eq!(paragraph.runs.len(), 1);
+            let crate::text::RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("refreshed simple field owner");
+            };
+            assert_eq!(field.instruction.raw, "SEQ item");
+            assert_eq!(field.cached_result, "1");
+            assert_eq!(field.form(), crate::text::FieldForm::Simple);
+            let raw = revision.into_raw_xml();
+            let mut reopened = CT_Revision::from_raw(raw, &[]).unwrap();
+            assert!(reopened.semantic_fields_pending);
+            let paragraph = reopened.physical_content_paragraph_mut().unwrap().unwrap();
+            assert_eq!(paragraph.accepted_text(), "1");
+        }
+    }
+
+    #[test]
+    fn semantic_revision_projection_uses_actual_alias_scope_without_rebinding_foreign_w() {
+        let raw = format!(
+            r#"<q:ins xmlns:q="{W_NS}" xmlns:w="urn:foreign" w:id="opaque" q:id="7" q:author="Ada"><q:fldSimple xmlns="" q:instr="SEQ item"><q:r><q:t>old</q:t></q:r></q:fldSimple><w:fldSimple w:instr="SEQ foreign"><w:r><w:t>foreign</w:t></w:r></w:fldSimple></q:ins>"#
+        );
+        let mut revision = CT_Revision::from_raw(raw.as_bytes().to_vec(), &[]).unwrap();
+        let paragraph = revision.physical_content_paragraph_mut().unwrap().unwrap();
+        let names = paragraph
+            .runs
+            .iter()
+            .flat_map(|run| &run.content)
+            .filter_map(|content| {
+                if let crate::text::RunContent::Field(field) = content {
+                    Some(field.instruction.name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["SEQ"]);
+        assert!(paragraph.extra_xml.iter().any(|(_, raw)| {
+            raw.windows(b"SEQ foreign".len())
+                .any(|piece| piece == b"SEQ foreign")
+        }));
+        assert_eq!(revision.into_raw_xml(), raw.as_bytes());
     }
 }

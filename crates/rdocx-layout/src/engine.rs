@@ -1950,9 +1950,13 @@ impl SequenceCollector<'_> {
         Ok(())
     }
 
-    fn bookmark_boundaries(&mut self, paragraph: &CT_P, story: &WordStory, run: usize) {
-        for marker in paragraph
-            .bookmark_markers
+    fn bookmark_boundaries(
+        &mut self,
+        markers: &[rdocx_oxml::text::BookmarkMarker],
+        story: &WordStory,
+        run: usize,
+    ) {
+        for marker in markers
             .iter()
             .filter(|marker| marker.projected_run_index() == run)
         {
@@ -2093,7 +2097,8 @@ impl SequenceCollector<'_> {
         }
         let projected_runs = project_paragraph_runs(paragraph, RevisionView::Accepted);
         let projected_count = projected_runs.len();
-        for (order, marker) in paragraph.bookmark_markers.iter().enumerate() {
+        let current_bookmarks = paragraph.current_bookmark_projection();
+        for (order, marker) in current_bookmarks.iter().enumerate() {
             let Some(id) = marker.id() else {
                 continue;
             };
@@ -2119,7 +2124,7 @@ impl SequenceCollector<'_> {
         }
         for (run_index, projected) in projected_runs.into_iter().enumerate() {
             if main {
-                self.bookmark_boundaries(paragraph, &path.story, run_index);
+                self.bookmark_boundaries(&current_bookmarks, &path.story, run_index);
             }
             for content in &projected.run.content {
                 match content {
@@ -2246,7 +2251,7 @@ impl SequenceCollector<'_> {
             }
         }
         if main {
-            self.bookmark_boundaries(paragraph, &path.story, projected_count);
+            self.bookmark_boundaries(&current_bookmarks, &path.story, projected_count);
         }
         Ok(())
     }
@@ -11465,6 +11470,7 @@ fn layout_paragraph_with_source_and_table(
     let mut multilingual_styles = HashMap::<usize, WordMultilingualStyle>::new();
     let mut requested_context_bytes = 0usize;
     let mut requested_context_entries = 0usize;
+    let current_bookmarks = para.current_bookmark_projection();
 
     if let Some(source_node) = source_node {
         for name in para
@@ -11867,7 +11873,7 @@ fn layout_paragraph_with_source_and_table(
             push_targeted_bookmark_markers(
                 &mut inline_items,
                 &mut multilingual_styles,
-                para,
+                &current_bookmarks,
                 projected_index,
                 input,
                 fm,
@@ -12825,7 +12831,7 @@ fn layout_paragraph_with_source_and_table(
     push_targeted_bookmark_markers(
         &mut inline_items,
         &mut multilingual_styles,
-        para,
+        &current_bookmarks,
         projected_run_count,
         input,
         fm,
@@ -13131,14 +13137,14 @@ fn layout_paragraph_with_source_and_table(
 fn push_targeted_bookmark_markers(
     items: &mut Vec<InlineItem>,
     styles: &mut HashMap<usize, WordMultilingualStyle>,
-    paragraph: &CT_P,
+    markers: &[rdocx_oxml::text::BookmarkMarker],
     projected_run_index: usize,
     input: &LayoutInput,
     fm: &mut FontManager,
     source_node: Option<SourceNodeId>,
 ) -> Result<()> {
     let mut font_id = None;
-    for marker in paragraph.bookmark_markers.iter().filter(|marker| {
+    for marker in markers.iter().filter(|marker| {
         let marker_run_index = match input.revision_view {
             RevisionView::Accepted => marker.projected_run_index(),
             RevisionView::Tracked => marker.tracked_run_index(),
@@ -13763,9 +13769,13 @@ fn bookmark_range_in_paragraphs(
     let mut starts: HashMap<i32, Vec<BookmarkStart<'_>>> = HashMap::new();
     let mut ends: HashMap<i32, Vec<OrderedBodyRunPosition>> = HashMap::new();
     let mut encounter = 0usize;
+    let current_bookmarks = paragraphs
+        .iter()
+        .map(|paragraph| paragraph.current_bookmark_projection())
+        .collect::<Vec<_>>();
     for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
         let projected_run_count = project_paragraph_runs(paragraph, input.revision_view).len();
-        for marker in &paragraph.bookmark_markers {
+        for marker in &current_bookmarks[paragraph_index] {
             let Some(id) = marker.id() else {
                 continue;
             };

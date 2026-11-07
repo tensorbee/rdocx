@@ -6688,3 +6688,45 @@ native observation stays unproved under its user-approved exception. Generic
 typed note attribute recovery is outside the operative contract, not a claimed
 repair. Optional deeper security work stays deferred separately. Publication
 still requires final sprint close and a separate approval at the reviewed SHA.
+
+
+## Bounded current bookmark projection provider, 2026-11-07
+
+Root approves this explicit callable technical amendment within the existing
+accepted-view and raw-preservation contract. Actual H6 regression batches
+prove that deferred revision fields can be materialized correctly while the
+parent paragraph retains bookmark indexes copied from the earlier raw-only
+view. Scope therefore remains0through0 instead of the actual2through4 and
+incorrectly excludes the TC field at3. Rewriting source, an empty remap call
+or another raw parse does not repair that current-model fact.
+
+The lower provider may add one doc-hidden concrete read accessor on CT_P,
+current_bookmark_projection(&self) -> Vec<BookmarkMarker>. This is an
+additive lower Rust callable in the already selected minor release, with no
+facade, Python or CLI addition and no changed existing signature or budget.
+It computes current accepted and tracked indexes from actual typed physical
+paragraph, control and revision owners. Reuse the existing concrete bookmark
+projection rules and preserve the complete original marker identities, source
+slots, namespaces and malformed-source evidence. The existing bounded,
+namespace-qualified raw marker classifier may inspect an already admitted
+control child to recover its marker metadata. This does not parse paragraphs
+or Fields or add a general validator. Do not construct Fields, serialize XML,
+mutate retained source, introduce an input allowance or replace existing
+duplicate/pairing/source-offset validation. The existing legacy
+infallible-read exception remains explicit for caller-assembled models.
+
+The consumer work list covers every current accepted/tracked-index reader
+that can see a semantically prepared paragraph, including Native TOC scope
+and actual layout/source registration. Stored marker reads used only for
+physical source mutation or untouched lexical preservation stay unchanged.
+The existing HLD04 bookmark and revision projection sections must describe
+this distinction before final verification. No new source file, module,
+trait or parser framework is authorized.
+
+Discriminators retain the original TOC scope/title/page expectation and cover
+current fields before, inside and after nested markers, direct markers after
+a deferred owner, multiple owners sharing a raw boundary, accepted versus
+deleted/moveFrom content, controls, duplicate/unmatched marker refusal and
+unchanged raw/save identity. Actual constructor and operation guards remain
+in force. The prior failed receipts remain failed. This amendment supplies
+no completed provider, runtime or native evidence and resets no review cap.

@@ -6632,7 +6632,9 @@ impl Field {
             }
             let _ = copy_work;
         }
-        Ok(Some(Arc::unwrap_or_clone(owner.paragraph)))
+        let mut paragraph = Arc::unwrap_or_clone(owner.paragraph);
+        crate::revision::prepare_semantic_paragraph_projection(&mut paragraph)?;
+        Ok(Some(paragraph))
     }
 
     /// Complete pending cached-child/cache assignments atomically on this field.
@@ -11901,6 +11903,19 @@ pub(crate) fn retain_ordered_field_source_identities_in(
     current: &mut CT_P,
     origins: Option<&Arc<std::sync::Mutex<FieldOriginRegistry>>>,
 ) -> Result<()> {
+    let old_paths = previous.accepted_run_paths();
+    let parsed_paths = current.accepted_run_paths();
+    if old_paths.len() != parsed_paths.len()
+        || old_paths
+            .iter()
+            .zip(&parsed_paths)
+            .any(|(old, new)| old.segments() != new.segments())
+    {
+        // The actual writer's new reader may still hold deferred raw revisions.
+        // Materialize its checked semantic view before the unchanged identity
+        // proof. This does not relax or replace any path/field fact comparison.
+        crate::revision::prepare_semantic_paragraph_projection(current)?;
+    }
     // These Arc aliases were made by RevisionSourceFacts from these exact
     // freshly parsed physical revision occurrences, before any rebinding COW.
     let revision_sources = current
@@ -11908,7 +11923,6 @@ pub(crate) fn retain_ordered_field_source_identities_in(
         .iter()
         .map(|(_, _, revision)| revision.shared_content_paragraph())
         .collect::<Vec<_>>();
-    let old_paths = previous.accepted_run_paths();
     let new_paths = current.accepted_run_paths();
     if old_paths.len() != new_paths.len()
         || old_paths
@@ -18535,6 +18549,16 @@ impl CT_P {
         run_wrapper_paragraph(raw, &["w".to_owned()])
     }
 
+    /// Current accepted/tracked indexes for the retained physical marker occurrences.
+    /// Original source slots and malformed marker evidence are unchanged.
+    #[doc(hidden)]
+    pub fn current_bookmark_projection(&self) -> Vec<BookmarkMarker> {
+        if self.bookmark_markers.is_empty() {
+            return Vec::new();
+        }
+        current_paragraph_bookmark_projection(self).markers
+    }
+
     /// Return accepted-view runs in the same order as bookmark projections.
     #[doc(hidden)]
     pub fn accepted_bookmark_runs(&self) -> Vec<&CT_R> {
@@ -21586,7 +21610,8 @@ impl CT_P {
                             None
                         };
                         let raw = capture_element(reader, e)?;
-                        if source_facts.is_some() {
+                        if let Some(facts) = source_facts.as_deref_mut() {
+                            facts.simple_fields_deferred = true;
                             extra_xml.push((runs.len(), raw));
                         } else {
                             let mapped = control_facts.as_deref().and_then(|facts| {
@@ -21769,6 +21794,10 @@ impl CT_P {
                             parse_empty_simple_field(e, &raw, prefixes, mapped.as_ref())?
                                 .map(|(field, _)| field)
                         } else {
+                            source_facts
+                                .as_deref_mut()
+                                .expect("physical revision facts")
+                                .simple_fields_deferred = true;
                             None
                         };
                         if let Some(field) = field {
@@ -28913,6 +28942,369 @@ fn append_nested_bookmark_projection(
     }));
     *projected_run_count += projection.projected_run_count;
     *tracked_run_count += projection.tracked_run_count;
+}
+
+// Match each actual marker occurrence once, while retaining the original source
+// slots, namespace scope and malformed/duplicate evidence verbatim.
+fn install_current_bookmark(
+    original: &mut [BookmarkMarker],
+    assigned: &mut [bool],
+    current: &BookmarkMarker,
+) {
+    if let Some((index, marker)) = original.iter_mut().enumerate().find(|(index, marker)| {
+        !assigned[*index]
+            && marker.start == current.start
+            && marker.id == current.id
+            && marker.name == current.name
+            && marker.raw_before == current.raw_before
+            && marker.has_child_content == current.has_child_content
+    }) {
+        marker.projected_run_index = current.projected_run_index;
+        marker.tracked_run_index = current.tracked_run_index;
+        assigned[index] = true;
+    }
+}
+
+fn current_raw_bookmark(
+    raw: &[u8],
+    originals: &[BookmarkMarker],
+    boundary: usize,
+    slot: usize,
+    accepted: usize,
+    tracked: usize,
+) -> Option<BookmarkMarker> {
+    originals
+        .iter()
+        .filter(|marker| marker.run_index == boundary && marker.raw_before == slot)
+        .find_map(|marker| {
+            let parsed = bookmark_marker_projection_from_raw(
+                raw,
+                &marker.word_prefixes,
+                boundary,
+                slot,
+                accepted,
+                tracked,
+            )?;
+            (parsed.start == marker.start && parsed.id == marker.id && parsed.name == marker.name)
+                .then_some(parsed)
+        })
+}
+
+fn current_paragraph_bookmark_projection(paragraph: &CT_P) -> AcceptedBookmarkProjection {
+    let mut output = AcceptedBookmarkProjection {
+        markers: paragraph.bookmark_markers.clone(),
+        ..Default::default()
+    };
+    let mut assigned = vec![false; output.markers.len()];
+    let mut revision_positions = vec![None; paragraph.revisions.len()];
+    let mut boundary_positions = Vec::new();
+    let mut raw_positions = Vec::new();
+    for boundary in 0..=paragraph.runs.len() {
+        let before_owners = (output.projected_run_count, output.tracked_run_count);
+        let raws = paragraph
+            .extra_xml
+            .iter()
+            .filter(|(at, _)| *at == boundary)
+            .collect::<Vec<_>>();
+        // Only typed owners contribute to the bookmark run axis. In particular,
+        // no opaque wrapper is reparsed to discover a speculative run owner.
+        let mut owners = paragraph
+            .content_controls
+            .iter()
+            .filter(|(at, _, _, _)| *at == boundary)
+            .map(|(_, slot, _, control)| {
+                (
+                    AcceptedOwnerOrder::Raw(*slot),
+                    0u8,
+                    None,
+                    current_control_bookmark_projection(control),
+                )
+            })
+            .chain(
+                paragraph
+                    .revisions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (at, _, _))| *at == boundary)
+                    .map(|(index, (_, slot, revision))| {
+                        let order = if let Some(link) = hyperlink_revision_index(*slot) {
+                            let link = paragraph.hyperlinks.get(link);
+                            match link.and_then(|link| link.preserved_raw_before) {
+                                Some(slot) => AcceptedOwnerOrder::Raw(slot),
+                                None if link.is_some_and(|link| boundary == link.run_end) => {
+                                    AcceptedOwnerOrder::BeforeRaw
+                                }
+                                None => AcceptedOwnerOrder::AfterRaw,
+                            }
+                        } else {
+                            AcceptedOwnerOrder::Raw(*slot)
+                        };
+                        (
+                            order,
+                            1u8,
+                            Some(index),
+                            current_revision_bookmark_projection(revision),
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|(order, kind, _, _)| (*order, *kind));
+        let mut owners = owners.into_iter().peekable();
+        for slot in 0..=raws.len() {
+            while owners
+                .peek()
+                .is_some_and(|(order, _, _, _)| *order <= AcceptedOwnerOrder::Raw(slot))
+            {
+                let (order, _, revision_index, projection) = owners.next().expect("peeked owner");
+                let before = (output.projected_run_count, output.tracked_run_count);
+                let raw_before = if revision_index.is_some_and(|index| {
+                    hyperlink_revision_index(paragraph.revisions[index].1).is_some()
+                }) {
+                    0
+                } else {
+                    match order {
+                        AcceptedOwnerOrder::Raw(slot) => slot,
+                        AcceptedOwnerOrder::BeforeRaw | AcceptedOwnerOrder::AfterRaw => 0,
+                    }
+                };
+                for mut marker in projection.markers {
+                    marker.raw_before = raw_before;
+                    marker.projected_run_index += output.projected_run_count;
+                    marker.tracked_run_index += output.tracked_run_count;
+                    install_current_bookmark(&mut output.markers, &mut assigned, &marker);
+                }
+                output.projected_run_count += projection.projected_run_count;
+                output.tracked_run_count += projection.tracked_run_count;
+                if let Some(index) = revision_index {
+                    revision_positions[index] = Some((
+                        before,
+                        (output.projected_run_count, output.tracked_run_count),
+                    ));
+                }
+            }
+            raw_positions.push((
+                boundary,
+                slot,
+                output.projected_run_count,
+                output.tracked_run_count,
+            ));
+            if let Some((_, raw)) = raws.get(slot)
+                && let Some(marker) = current_raw_bookmark(
+                    raw,
+                    &paragraph.bookmark_markers,
+                    boundary,
+                    slot,
+                    output.projected_run_count,
+                    output.tracked_run_count,
+                )
+            {
+                install_current_bookmark(&mut output.markers, &mut assigned, &marker);
+            }
+        }
+        for (_, _, revision_index, projection) in owners {
+            let before = (output.projected_run_count, output.tracked_run_count);
+            for mut marker in projection.markers {
+                marker.raw_before = 0;
+                marker.projected_run_index += output.projected_run_count;
+                marker.tracked_run_index += output.tracked_run_count;
+                install_current_bookmark(&mut output.markers, &mut assigned, &marker);
+            }
+            output.projected_run_count += projection.projected_run_count;
+            output.tracked_run_count += projection.tracked_run_count;
+            if let Some(index) = revision_index {
+                revision_positions[index] = Some((
+                    before,
+                    (output.projected_run_count, output.tracked_run_count),
+                ));
+            }
+        }
+        boundary_positions.push((
+            before_owners,
+            (output.projected_run_count, output.tracked_run_count),
+        ));
+        if boundary < paragraph.runs.len() {
+            output.projected_run_count += 1;
+            output.tracked_run_count += 1;
+        }
+    }
+    // Hyperlink raw children already retain their exact relative boundary and
+    // revision ordinal. Reuse those source slots around the actual typed owners.
+    for (link_index, link) in paragraph.hyperlinks.iter().enumerate() {
+        for (relative, before, raw) in &link.extra_xml {
+            let boundary = link.run_start + relative;
+            let Some((start, end)) = boundary_positions.get(boundary) else {
+                continue;
+            };
+            let revisions = paragraph
+                .revisions
+                .iter()
+                .enumerate()
+                .filter(|(_, (at, slot, _))| {
+                    *at == boundary && hyperlink_revision_index(*slot) == Some(link_index)
+                })
+                .filter_map(|(index, _)| revision_positions[index])
+                .collect::<Vec<_>>();
+            let position = if let Some((start, _)) = revisions.get(*before) {
+                *start
+            } else if let Some((_, end)) = revisions.last() {
+                *end
+            } else if let Some(slot) = link.preserved_raw_before {
+                raw_positions
+                    .iter()
+                    .find(|(at, raw_slot, _, _)| *at == boundary && *raw_slot == slot)
+                    .map_or(*end, |(_, _, accepted, tracked)| (*accepted, *tracked))
+            } else if boundary == link.run_end {
+                *start
+            } else {
+                *end
+            };
+            if let Some(marker) = current_raw_bookmark(
+                raw,
+                &paragraph.bookmark_markers,
+                boundary,
+                0,
+                position.0,
+                position.1,
+            ) {
+                install_current_bookmark(&mut output.markers, &mut assigned, &marker);
+            }
+        }
+    }
+    output
+}
+
+fn current_revision_bookmark_projection(revision: &CT_Revision) -> AcceptedBookmarkProjection {
+    if let Some(paragraph) = revision.content_paragraph() {
+        let mut projection = current_paragraph_bookmark_projection(paragraph);
+        if !matches!(
+            revision.kind(),
+            RevisionKind::Insertion | RevisionKind::MoveTo
+        ) {
+            projection.markers.clear();
+            projection.projected_run_count = 0;
+        }
+        return projection;
+    }
+    let mut tracked_run_count = 0;
+    if let crate::revision::RevisionContent::Runs(runs) = revision.content() {
+        tracked_run_count = runs.len();
+        for (_, nested) in revision
+            .nested_revisions()
+            .iter()
+            .filter(|(boundary, _)| *boundary <= runs.len())
+        {
+            tracked_run_count += current_revision_bookmark_projection(nested).tracked_run_count;
+        }
+    }
+    AcceptedBookmarkProjection {
+        markers: Vec::new(),
+        projected_run_count: 0,
+        tracked_run_count,
+    }
+}
+
+fn current_control_bookmark_projection(control: &CT_Sdt) -> AcceptedBookmarkProjection {
+    let mut output = AcceptedBookmarkProjection::default();
+    for boundary in 0..=control.content.len() {
+        for (_, revision) in control.revisions().iter().filter(|(at, _)| *at == boundary) {
+            let projection = current_revision_bookmark_projection(revision);
+            append_projection(&mut output, projection, 0, 0);
+        }
+        let Some(content) = control.content.get(boundary) else {
+            continue;
+        };
+        match content {
+            SdtContent::Run(_) => {
+                output.projected_run_count += 1;
+                output.tracked_run_count += 1;
+            }
+            SdtContent::RawXml(raw) => {
+                if let Some(marker) = bookmark_marker_projection_from_raw(
+                    raw,
+                    control.word_prefixes(),
+                    0,
+                    0,
+                    output.projected_run_count,
+                    output.tracked_run_count,
+                ) {
+                    output.markers.push(marker);
+                }
+            }
+            SdtContent::ContentControl(control) => {
+                let projection = current_control_bookmark_projection(control);
+                append_projection(&mut output, projection, 0, 0);
+            }
+            SdtContent::Paragraph(paragraph) => {
+                let projection = current_paragraph_bookmark_projection(paragraph);
+                append_projection(&mut output, projection, 0, 0);
+            }
+            SdtContent::Table(table) => {
+                append_current_control_table_bookmark_projection(&mut output, table)
+            }
+            SdtContent::Row(row) => {
+                append_current_control_row_bookmark_projection(&mut output, row)
+            }
+            SdtContent::Cell(cell) => {
+                append_current_control_cell_bookmark_projection(&mut output, cell)
+            }
+        }
+    }
+    output
+}
+
+fn append_current_control_table_bookmark_projection(
+    output: &mut AcceptedBookmarkProjection,
+    table: &CT_Tbl,
+) {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            let projection = current_control_bookmark_projection(control);
+            append_projection(output, projection, 0, 0);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            append_current_control_row_bookmark_projection(output, row);
+        }
+    }
+}
+
+fn append_current_control_row_bookmark_projection(
+    output: &mut AcceptedBookmarkProjection,
+    row: &CT_Row,
+) {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            let projection = current_control_bookmark_projection(control);
+            append_projection(output, projection, 0, 0);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            append_current_control_cell_bookmark_projection(output, cell);
+        }
+    }
+}
+
+fn append_current_control_cell_bookmark_projection(
+    output: &mut AcceptedBookmarkProjection,
+    cell: &CT_Tc,
+) {
+    for content in &cell.content {
+        let projection = match content {
+            CellContent::Paragraph(paragraph) => current_paragraph_bookmark_projection(paragraph),
+            CellContent::Table(table) => {
+                append_current_control_table_bookmark_projection(output, table);
+                continue;
+            }
+            CellContent::ContentControl(control) => current_control_bookmark_projection(control),
+        };
+        append_projection(output, projection, 0, 0);
+    }
 }
 
 fn accepted_paragraph_bookmark_projection(paragraph: &CT_P) -> AcceptedBookmarkProjection {
@@ -48149,6 +48541,157 @@ mod tests {
     }
 
     #[test]
+    fn current_bookmark_projection_uses_materialized_revision_boundaries_without_rewriting_source()
+    {
+        let xml = br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:ins w:id="21" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:fldSimple w:instr="TC &quot;Before&quot;"><w:r><w:t>hidden</w:t></w:r></w:fldSimple><w:bookmarkStart w:id="22" w:name="Scope"/><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>8</w:t></w:r></w:fldSimple><w:fldSimple w:instr="TC &quot;Inside&quot;"><w:r><w:t>hidden</w:t></w:r></w:fldSimple><w:bookmarkEnd w:id="22"/><w:fldSimple w:instr="TC &quot;After&quot;"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins><w:bookmarkStart w:id="23" w:name="After"/><w:bookmarkEnd w:id="23"/></w:p>"#;
+        let mut paragraph = CT_P::from_xml_fragment(xml).unwrap();
+        assert_eq!(paragraph.bookmark_markers[0].projected_run_index(), 0);
+        crate::revision::prepare_semantic_paragraph_projection(&mut paragraph).unwrap();
+        let stored = paragraph.bookmark_markers.clone();
+        let serialize = |value: &CT_P| {
+            let mut bytes = Vec::new();
+            value.to_xml(&mut Writer::new(&mut bytes)).unwrap();
+            bytes
+        };
+        let before = serialize(&paragraph);
+        let constructions = PARSED_RUN_CONSTRUCTIONS.get();
+        let current = paragraph.current_bookmark_projection();
+        assert_eq!(PARSED_RUN_CONSTRUCTIONS.get(), constructions);
+        assert_eq!(
+            current
+                .iter()
+                .map(|marker| marker.projected_run_index())
+                .collect::<Vec<_>>(),
+            [2, 4, 5, 5]
+        );
+        assert_eq!(
+            current
+                .iter()
+                .map(|marker| marker.tracked_run_index())
+                .collect::<Vec<_>>(),
+            [2, 4, 5, 5]
+        );
+        assert_eq!(paragraph.bookmark_markers, stored);
+        for (old, new) in stored.iter().zip(&current) {
+            assert_eq!(
+                (
+                    old.start,
+                    old.id,
+                    &old.name,
+                    old.run_index,
+                    old.raw_before,
+                    &old.word_prefixes,
+                    old.has_child_content
+                ),
+                (
+                    new.start,
+                    new.id,
+                    &new.name,
+                    new.run_index,
+                    new.raw_before,
+                    &new.word_prefixes,
+                    new.has_child_content
+                )
+            );
+        }
+        assert_eq!(serialize(&paragraph), before);
+    }
+
+    #[test]
+    fn current_bookmark_projection_counts_same_boundary_controls_and_revision_views() {
+        let word = crate::namespace::W_NS;
+        for kind in ["ins", "moveTo", "del", "moveFrom"] {
+            let source = format!(
+                r#"<q:p xmlns:q="{word}" xmlns:w="urn:foreign"><q:sdt><q:sdtContent><q:bookmarkStart q:id="1" q:name="Control"/><q:ins q:id="8" q:author="Ada"><q:fldSimple q:instr="PAGE"><q:r><q:t>1</q:t></q:r></q:fldSimple></q:ins><q:bookmarkEnd q:id="1"/><w:bookmarkStart w:id="99" w:name="opaque"/></q:sdtContent></q:sdt><q:{kind} q:id="9" q:author="Ada"><q:fldSimple q:instr="PAGE"><q:r><q:t>2</q:t></q:r></q:fldSimple></q:{kind}><q:bookmarkStart q:id="2" q:name="After"/><q:bookmarkEnd q:id="2"/></q:p>"#
+            );
+            let mut paragraph = CT_P::from_xml_fragment(source.as_bytes()).unwrap();
+            crate::revision::prepare_semantic_paragraph_projection(&mut paragraph).unwrap();
+            let current = paragraph.current_bookmark_projection();
+            let accepted = if matches!(kind, "ins" | "moveTo") {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                current
+                    .iter()
+                    .map(|marker| marker.projected_run_index())
+                    .collect::<Vec<_>>(),
+                [0, 1, accepted, accepted],
+                "{kind}"
+            );
+            assert_eq!(
+                current
+                    .iter()
+                    .map(|marker| marker.tracked_run_index())
+                    .collect::<Vec<_>>(),
+                [0, 1, 2, 2],
+                "{kind}"
+            );
+            assert_eq!(current.len(), paragraph.bookmark_markers.len());
+            assert!(current.iter().all(|marker| marker.id() != Some(99)));
+        }
+    }
+
+    #[test]
+    fn current_bookmark_projection_keeps_hyperlink_revision_raw_marker_ordinals() {
+        let mut paragraph = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>lead</w:t></w:r><w:hyperlink w:anchor="other"><w:bookmarkStart w:id="2" w:name="Link"/><w:ins w:id="4" w:author="Ada"><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins><w:bookmarkEnd w:id="2"/></w:hyperlink><w:bookmarkStart w:id="3" w:name="After"/><w:bookmarkEnd w:id="3"/></w:p>"#).unwrap();
+        crate::revision::prepare_semantic_paragraph_projection(&mut paragraph).unwrap();
+        assert_eq!(
+            paragraph
+                .current_bookmark_projection()
+                .iter()
+                .map(|marker| marker.projected_run_index())
+                .collect::<Vec<_>>(),
+            [1, 2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn current_bookmark_revision_fallback_keeps_legacy_tracked_selection() {
+        for content in [
+            r#"<w:ins w:id="2" w:author="Ada"><w:r><w:t>nested</w:t></w:r></w:ins>"#,
+            r#"<w:r><w:delText>direct</w:delText></w:r><w:ins w:id="2" w:author="Ada"><w:r><w:t>nested</w:t></w:r></w:ins>"#,
+            "",
+        ] {
+            let raw = format!(
+                r#"<w:del xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:id="1" w:author="Ada">{content}</w:del>"#
+            );
+            let revision = CT_Revision::from_raw(raw.into_bytes(), &["w".to_owned()]).unwrap();
+            let mut expected = Vec::new();
+            append_tracked_revision_runs(&revision, &mut expected);
+            assert_eq!(
+                current_revision_bookmark_projection(&revision).tracked_run_count,
+                expected.len()
+            );
+        }
+    }
+
+    #[test]
+    fn current_bookmark_projection_keeps_duplicate_and_unmatched_marker_evidence() {
+        let mut paragraph = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:ins w:id="1" w:author="Ada"><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins><w:bookmarkStart w:id="2" w:name="duplicate"/><w:bookmarkStart w:id="2" w:name="duplicate"/><w:bookmarkEnd w:id="3"/><w:bookmarkStart w:name="missing"/></w:p>"#).unwrap();
+        crate::revision::prepare_semantic_paragraph_projection(&mut paragraph).unwrap();
+        let current = paragraph.current_bookmark_projection();
+        assert_eq!(current.len(), 4);
+        assert_eq!(
+            current
+                .iter()
+                .map(|marker| (marker.is_start(), marker.id(), marker.name()))
+                .collect::<Vec<_>>(),
+            paragraph
+                .bookmark_markers
+                .iter()
+                .map(|marker| (marker.is_start(), marker.id(), marker.name()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            current
+                .iter()
+                .all(|marker| marker.projected_run_index() == 1)
+        );
+    }
+
+    #[test]
     fn simple_field_actual_paragraph_role_preserves_data_bounds_and_word_scopes() {
         let word = crate::namespace::W_NS;
         for (p, a, declarations) in [
@@ -48252,6 +48795,24 @@ mod tests {
             let parsed = crate::revision::CT_Revision::from_raw_with_input(source.as_bytes().to_vec(), &[], false, None).unwrap().expect("actual ordered paragraph lane retains direct field source without constructing its runs");
             assert_eq!(PARSED_RUN_CONSTRUCTIONS.get(), 0);
             assert!(parsed.content_paragraph().is_some());
+            let mut semantic = parsed.clone();
+            let old_semantic = semantic.clone();
+            let error = semantic.physical_content_paragraph_mut().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("source capture exceeds admitted source work"),
+                "{error}"
+            );
+            assert_eq!(
+                PARSED_RUN_CONSTRUCTIONS.get(),
+                0,
+                "semantic preflight precedes result-run construction"
+            );
+            assert_eq!(
+                semantic, old_semantic,
+                "refused semantic projection leaves raw and old paragraph intact"
+            );
             assert_eq!(parsed.into_raw_xml(), source.as_bytes());
             assert!(
                 crate::revision::CT_Revision::from_raw_with_input(
@@ -49977,6 +50538,36 @@ mod tests {
             PARSER_FIELD_SOURCE_ASSEMBLIES.get(),
             0,
             "the actual source admission must run before constructing a field source Vec"
+        );
+    }
+    #[test]
+    fn actual_owned_ordered_field_projection_materializes_deferred_revision_fields_only_on_view() {
+        let source = format!(
+            r#"<w:fldSimple xmlns:w="{}" w:instr="REF anchor"><w:ins w:id="7" w:author="Ada"><w:fldSimple w:instr="SEQ item"><w:r><w:t>old</w:t></w:r></w:fldSimple></w:ins></w:fldSimple>"#,
+            crate::namespace::W_NS
+        );
+        let field = parse_simple_field(source.as_bytes(), &[], None)
+            .unwrap()
+            .unwrap();
+        let stored = field.stored_ordered_result().unwrap();
+        assert!(
+            stored.revisions[0]
+                .2
+                .content_paragraph()
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+        let prepared = field.cached_result_owner_projection().unwrap().unwrap();
+        assert!(prepared.revisions[0].2.content_paragraph().unwrap().runs.iter().any(|run| run.content.iter().any(|content| matches!(content, RunContent::Field(field) if field.instruction.name == "SEQ"))));
+        assert!(
+            field.stored_ordered_result().unwrap().revisions[0]
+                .2
+                .content_paragraph()
+                .unwrap()
+                .runs
+                .is_empty(),
+            "owned view never rewrites the stored field cache"
         );
     }
 }

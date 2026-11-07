@@ -1115,7 +1115,7 @@ impl Document {
             );
         }
         for (body_index, (paragraph, direct_index)) in paragraphs.into_iter().enumerate() {
-            for marker in &paragraph.bookmark_markers {
+            for marker in paragraph.current_bookmark_projection() {
                 let run_index = marker.projected_run_index();
                 markers.push(Marker {
                     position: RunPosition {

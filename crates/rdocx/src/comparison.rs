@@ -16680,7 +16680,7 @@ fn paragraph_boundaries_differ(
     };
     let bookmarks = |paragraph: &CT_P, boundaries: &[usize]| {
         paragraph
-            .bookmark_markers
+            .current_bookmark_projection()
             .iter()
             .map(|marker| {
                 (

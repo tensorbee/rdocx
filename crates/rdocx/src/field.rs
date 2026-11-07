@@ -3419,6 +3419,9 @@ impl Document {
                 ..Default::default()
             });
         }
+        // Layout and dynamic-instruction parsing prepare their own clones.
+        // Source discovery below consumes this actual staged body instead.
+        crate::document::prepare_semantic_body_projection(&mut candidate.document.body.content)?;
         let bookmark_state = inspect_toc_bookmarks(&candidate.document.body, &document_xml)?;
         let numbering_layout = candidate.layout_deterministic()?;
         let sources = discover_toc_sources(
@@ -10358,7 +10361,7 @@ fn inspect_toc_bookmarks(body: &CT_Body, xml: &[u8]) -> Result<TocBookmarkState>
     let mut names = HashSet::new();
     let mut max_id = 0i32;
     for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
-        for marker in &paragraph.bookmark_markers {
+        for marker in paragraph.current_bookmark_projection() {
             let Some(id) = marker.id() else {
                 return Err(Error::Other(
                     "table of contents source has a bookmark without an ID".to_owned(),

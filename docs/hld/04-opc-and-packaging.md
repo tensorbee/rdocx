@@ -807,6 +807,19 @@ tolerant and writers use the fixed Word prefixes.
 
 A valid isolated legacy field admits Word's exact own-name bookmark pair at pure begin and end run boundaries. The internal start stays verbatim inside the field source and the external end stays in the paragraph. Its semantic endpoints use the actual accepted and tracked prefix counts, including preceding wrappers. Other interior markers, partial or crossing pairs, duplicate IDs, mismatched names and shared boundary content retain the untyped fallback. The sole nested exception is one total complex ordinary TIME, DATE or formula leaf in either the cached result or one direct instruction argument of an own-bookmarked FORMTEXT TextInput. The instruction variant has no extra literal operand or nested switch argument. Both parsed sources and their physical markers remain authoritative. Children in both regions, multiple or deep children, simple children, nested legacy owners and private interior owners retain the fallback. Actual source inspection excludes an unmodeled simple instruction child and private instruction content without projected display. Untouched and same-current output keeps the child source. A changed literal parent uses the existing result writer, preserving reset metadata and both bookmark markers. It retains an instruction child and removes only a result child. Canonical rebuilding with a retained own-name bookmark refuses if the original instruction identity cannot be preserved. Run-root namespace sidecars are scope metadata, not extra physical run children. Projection retains one exact paragraph namespace frame, including both marker aliases, foreign opaque names and the default namespace, without hoisting child scopes. Bindings conflicting with the shared inline validation scope or the generated `w15` types decline projection before mutation. Existing root declarations are merged once. If typed rich fragment merge makes such an identity authored and canonical ordering renumbers it, the existing whole-XML bookmark patch and reparse updates both markers. Preserved imported IDs remain outside authored renumbering.
 
+Bookmark source metadata retains the original marker occurrences, raw slots,
+namespace scopes and malformed or duplicate evidence. The doc-hidden
+`CT_P::current_bookmark_projection` read accessor recomputes only accepted and
+tracked indexes from current typed paragraph, control and revision owners.
+This keeps deferred revision fields aligned after checked semantic
+materialization. TOC scope, public bookmark reads and layout source, range
+and target registration use current indexes. Physical source mutation and
+lexical custody checks continue to use the stored marker metadata. The
+accessor does not construct Fields, serialize paragraphs or grant input
+allowance. Its bounded raw-marker classifier reuses admitted marker children
+without interpreting opaque paragraph or Field content. Pairing, duplicate
+and original source-offset validation remain separate and unchanged.
+
 Run splitting uses the same encoded raw-child position sidecar. A second
 private classification bit associates each parsed `mc:AlternateContent`
 drawing projection with its verbatim compatibility block, so both move to the
