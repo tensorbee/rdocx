@@ -209,3 +209,30 @@ No F272 provider/context edge is newly required by these source-backed reads. If
 Root approves the complete original A279-4 independent implementation on the stated same-tree mechanism with the operative clean-Base corrections above. Existing source-order/owner, table separators, scalar decoder, cache-only field and Python constructor/equality rules are accepted. The prior draft/preparation/approval-pending statements are historical. No fourth design peer is started. Fresh Issue434/PR444 identities and proposed remote branch absence are authenticated in the14:10UTC read-only packet.
 
 The parent and B remain draft and keep all F272, comparison/comment, import/list and native comment candidate gates. Their carried readiness proposals are not formal product approval. Root permits exact metadata-only claim coordination and /private/tmp/rdocx-s96-f279a-codex with sole owner codex. No unfinished canonical source is in the Base. Shared facade revision/document/HLD hunks need explicit semantic integration against C1 and other children, not broad file replacement. Every original final installed/typing/schema/native/hash/WASM/archive/CI rider remains due. No totals, completion or publication follow.
+
+
+## Installed abi3 Python3.9 signature capability, 2026-11-07
+
+Actual authenticated H4 release wheel66708ca6a7b6d419cc7e8410fa9ff70a3dc1b88e184b5113dba3bbaf1fadb609
+exposes the correct callable empty-text default on Python3.9 and3.12. The3.12
+class text signature is exactly keyword-only with text=''. On3.9 the class
+text signature is None and inspect.signature raises ValueError before any
+constructor behavior assertion. This is the pinned PyO3abi3 capability limit,
+not an observed constructor failure or changed accepted input.
+
+Primary evidence is packaged PyO3 0.29.0 guide/src/class.md:1157, SHA256
+`577715bd4a37edbec9423562c7ee86e6a04a9e04c1841891a4cabe6529e0d39a`. It explicitly limits constructor text_signature in
+abi3 mode to Python3.10or newer, and its own example expects introspection to
+fail on the older limited API. Root's actual two-runtime observation is retained
+at /private/tmp/rdocx-s96-h4-reviewed-checkpoint/REVISION_SIGNATURE_OBSERVATION_CORRECTED.json.
+The first exploratory command incorrectly used a nonexistent RevisionType and
+is retained separately as a failed probe, not product evidence.
+
+Root clarifies A279-4e's existing runtime/signature gate accordingly. Where
+metadata exists, assert the exact visible empty default. Missing metadata is
+admitted only on Python3.9. Every supported runtime still executes omission,
+explicit empty/nonempty text, None refusal, story default, frozen and equality
+checks, plus installed stub and typing requirements. Python3.10or newer cannot
+silently lose metadata. No wrapper, metadata fabrication, public constructor
+change or new exception to accepted values is introduced. HLD10 describes
+this existing runtime capability. Original failures remain recorded.

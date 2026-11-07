@@ -658,3 +658,28 @@ verified publication dry-run, current CLI hash/pixel checks and build-only
 reviewed clean sprint/s96 ref push and normal CI routing. No ledger completion,
 dependency unblocking, main merge, sprint/release tag or publication follows.
 Actual upcoming SHA, push and CI run identity will be appended after observation.
+
+
+## H5 reviewed source availability renewal, 2026-11-07
+
+The successor to b26837a9 repairs the actual16H4 integration failures. The
+current guarded native-host batch passes17cases, including the unchanged
+PDF/SVG logical-order regression and a stored-field control. Bounded independent
+review and Root final pass2 have zero findings. Full workspace Clippy and
+Rustdoc include both PyO3 binding crates and actually pass with warnings denied.
+The two affected Word archives have actual authenticated measurements and
+post-adoption packages within the existing64byte compression tolerance, with
+correct per-page Nov7dates. Other package records remain unchanged.
+
+The canonical orchestrator renews only the previously consumed source-
+availability checkpoint. Actual clean sprint ref, source SHA, workflow bytes,
+remote ancestry, push and normal CI request/run identities are recorded after
+observation in the existing S96run state and progress. Both optional CI flags
+remain false. Only the reviewed sprint ref may be pushed without force.
+
+H4CI42315170211 remains failed at Test/MSRV, despite actual public conformance,
+Python, hash, Docs and six SemVer producer/signer successes. Current source
+normal CI, fresh Word release wheel, remaining full/risk/native/performance
+acceptance, verified publish dry run and build-only26payload rehearsal remain
+due. No completion ledger, dependency unblock, main merge, tag, reporter
+comment, yank or publication is authorized by this source checkpoint.

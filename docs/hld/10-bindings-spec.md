@@ -749,7 +749,11 @@ reject methods resolve, each with a snake_case `kind` and the `Story` that
 holds it, so its length equals the count they return. A `Revision` built
 directly keeps its four required keyword fields and has no story unless one is
 passed. Its optional `text: str` defaults to the empty string. Snapshots own
-immutable text, and equality includes text. `None` is not a text value. `try_replace_text` and `replace_all_regex` return their
+immutable text, and equality includes text. `None` is not a text value.
+PyO3 abi3 constructor text signatures are available from Python3.10. On
+Python3.9, constructor defaults remain callable and specified by the installed
+stub, while class signature introspection is unavailable.
+`try_replace_text` and `replace_all_regex` return their
 replacement counts. `update_fields` takes the native evaluation context as
 keyword arguments, reads the wall-clock fields of `now` as given, and returns
 the number of updated fields. Comments are

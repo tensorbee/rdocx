@@ -16446,7 +16446,12 @@ def test_issue434_revision_constructor_text_defaults_and_frozen_equality(text):
 
     metadata = dict(id=7, author="Ada", timestamp=None, kind="insertion")
     import inspect
-    assert inspect.signature(rdocx.Revision).parameters["text"].default == ""
+    import sys
+    # PyO3 abi3 constructor text signatures require Python 3.10 or newer.
+    if rdocx.Revision.__text_signature__ is None:
+        assert sys.version_info[:2] == (3, 9)
+    else:
+        assert inspect.signature(rdocx.Revision).parameters["text"].default == ""
     omitted = rdocx.Revision(**metadata)
     explicit = rdocx.Revision(**metadata, text=text)
     assert omitted.text == ""

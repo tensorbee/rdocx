@@ -149,7 +149,7 @@ fn story_item_links_resolve_only_through_the_checked_owner() {
         r#"<w:body><w:p><w:hyperlink r:id="scopedLink"><w:r><w:t>body link</w:t></w:r></w:hyperlink></w:p><w:sdt><w:sdtContent><w:sdt><w:sdtContent><w:p><w:hyperlink w:anchor="nested-target"><w:r><w:t>nested link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt><w:p><w:hyperlink w:anchor="after-target"><w:r><w:t>after link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt>"#,
         1,
     );
-    assert!(body.contains("w:name='body'"));
+    assert!(body.contains(r#"<w:hyperlink r:id="scopedLink">"#));
     package.set_part("/word/document.xml", body.into_bytes());
     let header = std::str::from_utf8(package.get_part("/word/header-story.xml").unwrap()).unwrap();
     let header = header.replacen(
@@ -2313,7 +2313,8 @@ mod theme_and_embedded_font_tests {
             .add_paragraph("")
             .add_run("Pinned theme and font resolution")
             .font("Corpus Sans")
-            .size(18.0);
+            .size(18.0)
+            .set_kern_value(Some(0.0));
 
         let theme = authored.theme().unwrap();
         let font = authored
@@ -2361,7 +2362,8 @@ mod theme_and_embedded_font_tests {
             .add_paragraph("")
             .add_run("Pinned theme and font resolution")
             .font("Carlito")
-            .size(18.0);
+            .size(18.0)
+            .set_kern_value(Some(0.0));
 
         let authored_render = authored.render_page_to_png_deterministic(0, 150.0).unwrap();
         assert_eq!(
@@ -21946,6 +21948,11 @@ mod advanced_table_authoring_and_geometry {
                 for (cell_index, text) in row_texts.iter().enumerate() {
                     let mut cell = row.cell(cell_index).expect("autofit cell");
                     cell.set_text(text);
+                    cell.paragraph_mut(0)
+                        .unwrap()
+                        .run_mut(0)
+                        .unwrap()
+                        .set_kern_value(Some(0.0));
                     cell.set_shading("DDDDDD");
                 }
             }
@@ -22061,6 +22068,7 @@ mod f266a_mixed_script_typography {
 
         let mut latin = document.add_paragraph("");
         latin.add_run(LATIN).font("Carlito").language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut arabic = document.add_paragraph("").right_to_left(true);
         {
@@ -22069,6 +22077,7 @@ mod f266a_mixed_script_typography {
             run.set_rtl_value(Some(true));
             run.set_complex_script_value(Some(true));
             run.set_language_bidi_value(Some("ar-SA"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut hebrew = document.add_paragraph("").right_to_left(true);
@@ -22078,6 +22087,7 @@ mod f266a_mixed_script_typography {
             run.set_rtl_value(Some(true));
             run.set_complex_script_value(Some(true));
             run.set_language_bidi_value(Some("he-IL"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut korean = document.add_paragraph("");
@@ -22085,6 +22095,7 @@ mod f266a_mixed_script_typography {
             let mut run = korean.add_run(KOREAN);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans KR"));
             run.set_language_east_asia_value(Some("ko-KR"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut japanese = document.add_paragraph("");
@@ -22092,6 +22103,7 @@ mod f266a_mixed_script_typography {
             let mut run = japanese.add_run(JAPANESE);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut kanji = document.add_paragraph("");
@@ -22100,6 +22112,7 @@ mod f266a_mixed_script_typography {
             run.set_slot_font(RunFontSlot::Ascii, Some("Noto Sans SC"));
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         document
@@ -22468,6 +22481,7 @@ mod f266b_ruby_and_emphasis_typography {
         let rpr = properties.get_or_insert_with(CT_RPr::default);
         rpr.font_east_asia = Some(family.to_owned());
         rpr.language_east_asia = Some(language.to_owned());
+        rpr.kern = Some(HalfPoint(0));
     }
 
     /// One page carrying ruby-annotated Japanese, emphasis-marked Japanese
@@ -22480,6 +22494,7 @@ mod f266b_ruby_and_emphasis_typography {
             .add_run(LATIN_CONTROL)
             .font("Carlito")
             .language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut annotated = document.add_paragraph("");
         {
@@ -22490,6 +22505,7 @@ mod f266b_ruby_and_emphasis_typography {
                     .expect("the base run is a paragraph run");
                 base.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
                 base.set_language_east_asia_value(Some("ja-JP"));
+                base.set_kern_value(Some(0.0));
             }
             let ruby = annotated.ruby_mut(index).expect("the ruby was just added");
             east_asian_run(&mut ruby.ruby_text[0].properties, "Noto Sans JP", "ja-JP");
@@ -22513,6 +22529,7 @@ mod f266b_ruby_and_emphasis_typography {
             run.set_slot_font(RunFontSlot::EastAsia, Some(family));
             run.set_language_east_asia_value(Some(language));
             run.set_emphasis_mark_value(Some(mark));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut latin_marked = document.add_paragraph("");
@@ -22520,6 +22537,7 @@ mod f266b_ruby_and_emphasis_typography {
             let mut run = latin_marked.add_run(EMPHASIS_LATIN);
             run.set_font("Carlito");
             run.set_emphasis_mark_value(Some(ST_Em::UnderDot));
+            run.set_kern_value(Some(0.0));
         }
 
         document
@@ -22931,9 +22949,10 @@ mod floating_table_placement_and_wrap {
 
     fn prose(document: &mut Document, from: usize, to: usize) {
         for index in from..to {
-            document.add_paragraph(&format!(
+            let mut paragraph = document.add_paragraph(&format!(
                 "Body line {index:02} with enough words to wrap across the measure of the page and show the reservation."
             ));
+            paragraph.run_mut(0).unwrap().set_kern_value(Some(0.0));
         }
     }
 
@@ -23332,12 +23351,14 @@ mod f266c_character_grid_and_vertical_text {
             .add_run(LATIN_CONTROL)
             .font("Carlito")
             .language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut japanese = document.add_paragraph("");
         {
             let mut run = japanese.add_run(GRIDDED_JAPANESE);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut combined = document.add_paragraph("");
@@ -23345,6 +23366,7 @@ mod f266c_character_grid_and_vertical_text {
             let mut run = combined.add_run(COMBINED);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
             run.set_east_asian_layout_value(Some(CT_EastAsianLayout {
                 combine: Some(true),
                 combine_brackets: Some("round".to_owned()),
@@ -23370,6 +23392,7 @@ mod f266c_character_grid_and_vertical_text {
                 let mut run = paragraph.run_mut(0).expect("cell run");
                 run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
                 run.set_slot_font(RunFontSlot::Ascii, Some("Carlito"));
+                run.set_kern_value(Some(0.0));
             }
         }
 
@@ -24525,7 +24548,7 @@ fn rich_footnotes_match_word_after_create_edit_reorder_and_remove() {
     assert!(notes.contains("rich continuation"));
     document.remove_footnote(first).unwrap();
     let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
-    assert_eq!(reopened.footnotes(), vec![(second, "second".to_owned())]);
+    assert_eq!(reopened.footnotes(), vec![(second, " second".to_owned())]);
     let package =
         OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
     let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
@@ -37524,6 +37547,149 @@ fn issue430_replace_parts(
     Document::from_bytes(bytes.get_ref()).unwrap()
 }
 
+// These generated fixtures use canonical Word names. Give every physical
+// element of one actual note unit its own test author, without changing IDs,
+// custody tokens, presence bits, references or unowned producer content.
+fn issue430_author_for_unit(document: &mut Document, owner: i32, author: &str) -> Document {
+    use quick_xml::events::{BytesStart, Event};
+    let package = issue430_package(document);
+    let mut ids = std::collections::BTreeSet::new();
+    let word_id = |start: &BytesStart<'_>| {
+        start
+            .attributes()
+            .map(Result::unwrap)
+            .find(|attribute| attribute.key.as_ref() == b"w:id")
+            .map(|attribute| {
+                std::str::from_utf8(&attribute.value)
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+    };
+    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap();
+    let mut reader = quick_xml::Reader::from_str(notes);
+    let mut current_owner = None;
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start) => {
+                if start.name().as_ref() == b"w:footnote" {
+                    current_owner = word_id(&start);
+                }
+                if current_owner == Some(owner)
+                    && matches!(start.name().as_ref(), b"w:ins" | b"w:del")
+                {
+                    ids.insert(word_id(&start).unwrap());
+                }
+            }
+            Event::End(end) if end.name().as_ref() == b"w:footnote" => current_owner = None,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert!(
+        ids.len() >= 2,
+        "actual note paragraph mark and content records"
+    );
+    let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let mut reader = quick_xml::Reader::from_str(body);
+    let mut ancestors = Vec::new();
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) => {
+                ancestors.push(if matches!(start.name().as_ref(), b"w:ins" | b"w:del") {
+                    word_id(&start)
+                } else {
+                    None
+                })
+            }
+            Event::Empty(start)
+                if start.name().as_ref() == b"w:footnoteReference"
+                    && word_id(&start) == Some(owner) =>
+            {
+                ids.insert(
+                    *ancestors
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .next()
+                        .expect("actual reference revision"),
+                );
+            }
+            Event::End(_) => {
+                ancestors.pop().unwrap();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert!(
+        ids.len() >= 3,
+        "actual body reference belongs to the same unit"
+    );
+    let mut outputs = Vec::new();
+    for xml in [body, notes] {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        let mut edits = Vec::new();
+        loop {
+            let at = reader.buffer_position() as usize;
+            let event = reader.read_event().unwrap();
+            let empty = matches!(&event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start)
+                    if matches!(start.name().as_ref(), b"w:ins" | b"w:del")
+                        && word_id(&start).is_some_and(|id| ids.contains(&id)) =>
+                {
+                    let name = std::str::from_utf8(start.name().as_ref())
+                        .unwrap()
+                        .to_owned();
+                    let mut updated = BytesStart::new(name);
+                    let mut changed = 0;
+                    for attribute in start.attributes().map(Result::unwrap) {
+                        if attribute.key.as_ref() == b"w:author" {
+                            updated.push_attribute(("w:author", author));
+                            changed += 1;
+                        } else {
+                            updated
+                                .push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+                        }
+                    }
+                    assert_eq!(changed, 1);
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    writer
+                        .write_event(if empty {
+                            Event::Empty(updated)
+                        } else {
+                            Event::Start(updated)
+                        })
+                        .unwrap();
+                    edits.push((
+                        at..reader.buffer_position() as usize,
+                        String::from_utf8(writer.into_inner()).unwrap(),
+                    ));
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        let mut output = xml.to_owned();
+        for (span, value) in edits.into_iter().rev() {
+            output.replace_range(span, &value);
+        }
+        outputs.push(output);
+    }
+    let result = issue430_replace_parts(document, Some(outputs.remove(0)), Some(outputs.remove(0)));
+    assert_eq!(
+        result
+            .story_revisions()
+            .unwrap()
+            .iter()
+            .filter(|revision| revision.author() == author)
+            .count(),
+        ids.len()
+    );
+    result
+}
+
 #[test]
 fn issue430_comparison_part_presence_survives_partial_resolution() {
     let empty = format!("{}{}", issue430_p("left", None), issue430_p("right", None));
@@ -37544,22 +37710,36 @@ fn issue430_comparison_part_presence_survives_partial_resolution() {
     original
         .compare(&edited, "Issue430", ISSUE430_DATE)
         .unwrap();
-    let ids = original
-        .story_revisions()
-        .unwrap()
-        .iter()
-        .map(|r| r.id())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    original = issue430_author_for_unit(&mut original, 5, "Unit5");
+    original = issue430_author_for_unit(&mut original, 6, "Unit6");
+    let listed = original.story_revisions().unwrap();
     assert_eq!(
-        ids.len(),
-        2,
-        "each referenced definition has its own actual revision id"
+        listed.len(),
+        6,
+        "three physical records per referenced definition"
     );
-    for order in [[ids[0], ids[1]], [ids[1], ids[0]]] {
+    assert_eq!(
+        listed
+            .iter()
+            .map(|revision| revision.id())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        listed.len()
+    );
+    let mut partial = issue430_roundtrip(&mut original);
+    let before = partial.to_bytes().unwrap();
+    assert!(
+        partial
+            .reject_revision_id(listed[0].id())
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(partial.to_bytes().unwrap(), before);
+    let authors = ["Unit5", "Unit6"];
+    for order in [[authors[0], authors[1]], [authors[1], authors[0]]] {
         let mut pending = issue430_roundtrip(&mut original);
-        pending.reject_revision_id(order[0]).unwrap();
+        assert_eq!(pending.reject_revisions_by_author(order[0]).unwrap(), 3);
         assert!(issue430_note_xml(&mut pending).is_some());
         assert!(
             issue430_note_xml(&mut pending)
@@ -37567,7 +37747,7 @@ fn issue430_comparison_part_presence_survives_partial_resolution() {
                 .contains("_rdocxCmpNoteF")
         );
         let mut pending = issue430_roundtrip(&mut pending);
-        pending.reject_revision_id(order[1]).unwrap();
+        assert_eq!(pending.reject_revisions_by_author(order[1]).unwrap(), 3);
         issue430_assert_settled(&mut pending, &[], false);
     }
 }
@@ -37600,26 +37780,40 @@ fn issue430_comparison_rejects_mixed_creation_lifetime_to_absent() {
     );
     first.compare(&edited, "B", ISSUE430_DATE).unwrap();
     let listed = first.story_revisions().unwrap();
-    let a = listed
-        .iter()
-        .find(|revision| revision.author() == "A")
-        .unwrap()
-        .id();
-    let b = listed
-        .iter()
-        .find(|revision| revision.author() == "B")
-        .unwrap()
-        .id();
-    for order in [[a, b], [b, a]] {
+    for author in ["A", "B"] {
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|revision| revision.author() == author)
+                .count(),
+            3
+        );
+        let mut partial = issue430_roundtrip(&mut first);
+        let before = partial.to_bytes().unwrap();
+        let id = listed
+            .iter()
+            .find(|revision| revision.author() == author)
+            .unwrap()
+            .id();
+        assert!(
+            partial
+                .reject_revision_id(id)
+                .unwrap_err()
+                .to_string()
+                .contains("partial footnote custody")
+        );
+        assert_eq!(partial.to_bytes().unwrap(), before);
+    }
+    for order in [["A", "B"], ["B", "A"]] {
         for accept_a in [false, true] {
             for accept_b in [false, true] {
                 let mut pending = issue430_roundtrip(&mut first);
-                for id in order {
-                    let accept = if id == a { accept_a } else { accept_b };
+                for author in order {
+                    let accept = if author == "A" { accept_a } else { accept_b };
                     if accept {
-                        pending.accept_revision_id(id).unwrap();
+                        assert_eq!(pending.accept_revisions_by_author(author).unwrap(), 3);
                     } else {
-                        pending.reject_revision_id(id).unwrap();
+                        assert_eq!(pending.reject_revisions_by_author(author).unwrap(), 3);
                     }
                     pending = issue430_roundtrip(&mut pending);
                 }
@@ -37750,12 +37944,25 @@ fn issue430_comparison_generates_shared_reference_unit_without_new_references() 
             .map(|r| r.id())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        1
+        listed.len(),
+        "new physical revision IDs stay unique even within one logical unit"
     );
+    for revision in &listed {
+        let mut partial = issue430_roundtrip(&mut original);
+        let before = partial.to_bytes().unwrap();
+        assert!(
+            partial
+                .reject_revision_id(revision.id())
+                .unwrap_err()
+                .to_string()
+                .contains("partial footnote custody")
+        );
+        assert_eq!(partial.to_bytes().unwrap(), before);
+    }
     let mut rejected = issue430_roundtrip(&mut original);
-    rejected.reject_all().unwrap();
+    assert_eq!(rejected.reject_all().unwrap(), listed.len());
     issue430_assert_settled(&mut rejected, &[], false);
-    original.accept_all().unwrap();
+    assert_eq!(original.accept_all().unwrap(), listed.len());
     issue430_assert_settled(&mut original, &[5], true);
     let package = issue430_package(&mut original);
     assert_eq!(
@@ -37944,6 +38151,8 @@ fn issue430_comparison_retained_tombstone_before_an_unrelated_live_reference() {
     original
         .compare(&edited, "Reviewer", ISSUE430_DATE)
         .unwrap();
+    original = issue430_author_for_unit(&mut original, 5, "Unit5");
+    original = issue430_author_for_unit(&mut original, 7, "Unit7");
     let id = original
         .story_revisions()
         .unwrap()
@@ -37951,7 +38160,16 @@ fn issue430_comparison_retained_tombstone_before_an_unrelated_live_reference() {
         .find(|r| r.text() == "A")
         .unwrap()
         .id();
-    original.reject_revision_id(id).unwrap();
+    let before = original.to_bytes().unwrap();
+    assert!(
+        original
+            .reject_revision_id(id)
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    assert_eq!(original.reject_revisions_by_author("Unit5").unwrap(), 3);
     let mut reopened = issue430_roundtrip(&mut original);
     assert_eq!(
         reopened
@@ -38113,18 +38331,31 @@ fn issue430_comparison_retained_tombstone_before_reference_only_insertion() {
                 original
                     .compare(&edited, "Reviewer", ISSUE430_DATE)
                     .unwrap();
+                original = issue430_author_for_unit(&mut original, 5, "Unit5");
+                original = issue430_author_for_unit(&mut original, 7, "Unit7");
                 let revisions = original.story_revisions().unwrap();
-                let ids = [
-                    revisions.iter().find(|r| r.text() == "A").unwrap().id(),
-                    revisions.iter().find(|r| r.text() == "C").unwrap().id(),
-                ];
+                for revision in revisions
+                    .iter()
+                    .filter(|revision| matches!(revision.author(), "Unit5" | "Unit7"))
+                {
+                    let mut partial = issue430_roundtrip(&mut original);
+                    let before = partial.to_bytes().unwrap();
+                    assert!(
+                        partial
+                            .reject_revision_id(revision.id())
+                            .unwrap_err()
+                            .to_string()
+                            .contains("partial footnote custody")
+                    );
+                    assert_eq!(partial.to_bytes().unwrap(), before);
+                }
                 let order = if first_id == 5 {
-                    [ids[0], ids[1]]
+                    ["Unit5", "Unit7"]
                 } else {
-                    [ids[1], ids[0]]
+                    ["Unit7", "Unit5"]
                 };
-                for id in order {
-                    assert_eq!(original.reject_revision_id(id).unwrap(), 3);
+                for author in order {
+                    assert_eq!(original.reject_revisions_by_author(author).unwrap(), 3);
                     assert!(
                         issue430_note_xml(&mut original)
                             .unwrap()
@@ -38347,25 +38578,31 @@ fn issue430_comparison_partial_resolution_keeps_unowned_invalid_content() {
         )),
     );
     first.compare(&edited, "A", ISSUE430_DATE).unwrap();
-    let ids = first
-        .story_revisions()
-        .unwrap()
-        .iter()
-        .map(|r| r.id())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    first = issue430_author_for_unit(&mut first, 5, "Unit5");
+    first = issue430_author_for_unit(&mut first, 6, "Unit6");
+    let listed = first.story_revisions().unwrap();
+    assert_eq!(listed.len(), 6);
+    let before = first.to_bytes().unwrap();
+    assert!(
+        first
+            .reject_revision_id(listed[0].id())
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(first.to_bytes().unwrap(), before);
+    let authors = ["Unit5", "Unit6"];
     let invalid = r#"<w:footnote w:id="0" w:type=""><w:p/></w:footnote>"#;
     let notes = issue430_note_xml(&mut first)
         .unwrap()
         .replace("</w:footnotes>", &format!("{invalid}</w:footnotes>"));
     let mut first = issue430_replace_parts(&mut first, None, Some(notes));
-    for order in [[ids[0], ids[1]], [ids[1], ids[0]]] {
+    for order in [[authors[0], authors[1]], [authors[1], authors[0]]] {
         let mut pending = issue430_roundtrip(&mut first);
-        pending.reject_revision_id(order[0]).unwrap();
+        assert_eq!(pending.reject_revisions_by_author(order[0]).unwrap(), 3);
         assert!(issue430_note_xml(&mut pending).unwrap().contains(invalid));
         let mut pending = issue430_roundtrip(&mut pending);
-        pending.reject_revision_id(order[1]).unwrap();
+        assert_eq!(pending.reject_revisions_by_author(order[1]).unwrap(), 3);
         issue430_assert_settled(&mut pending, &[], true);
         assert!(issue430_note_xml(&mut pending).unwrap().contains(invalid));
     }

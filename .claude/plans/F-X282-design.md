@@ -794,3 +794,32 @@ refusal, observer neutrality or memory-history acceptance. Exact final-H
 compilation and execution remain required. Prepare the source delta in a
 separate TEMP overlay for Root review before the final diagnostic composition.
 Existing old worker bodies, records and failed evidence remain unchanged.
+
+
+## Fixed-font diagnostic operational time admission, 2026-11-07
+
+Root retains the actual original enabledN100601second incomplete observation,
+the reviewed buffered-transport enabledN100complete result at560.67seconds,
+and the buffered no-WeakN100incomplete result at603.67seconds. The last process
+was cleanly reaped after reaching97prepare completions and before its terminal
+records. Its sampled peak was3429449728bytes. This is an insufficient finite
+measurement run allowance, not a product refusal, OOM, completed lifecycle
+pair or failed timing/RSS acceptance threshold. No concurrency cause is claimed.
+
+Root admits a versioned private controller successor with operational elapsed
+allowances900seconds forN100and3600seconds forN400. The existing12/24GiB child
+RSS guards and2GiB raw-log guard remain unchanged. Original controllers,
+protocols and failed rows remain immutable, with an explicit additive Root
+authority rather than a silent repin. The controller change may alter only
+those elapsed constants, not child arguments, fixture, edit counts, source/
+build joins, field inventory, samples, consumer criteria or cleanup.
+
+These are incomplete-run resource guards, not measured performance pass limits.
+All original public budgets, N/4N rules, full lifecycle/root vectors, enabled/
+no-Weak semantic equality, ordinary calibration, quiet paired RSS and other
+release thresholds remain deciding and unchanged. Root must review the exact
+controller delta and consumer compatibility before execution. A successful
+enabledN100observation under the stricter600second guard may be reused only
+when the unchanged consumer authenticates the same source, artifact, fixture
+and complete semantic record. The failed no-Weak row never authorizes N400.
+Any new operational stop remains incomplete. No future success is asserted.
