@@ -7646,6 +7646,9 @@ impl DrawingMut<'_> {
 struct StylesPartCache {
     bytes: Arc<Vec<u8>>,
     parsed: Arc<CT_Styles>,
+    // The exact immutable model this writer successfully emitted. It is not
+    // the parsed read model and must not replace that model on reopen.
+    emitted_model: Option<Arc<CT_Styles>>,
     proof: StylesSerializationProof,
 }
 
@@ -24187,15 +24190,30 @@ impl Document {
             .expect("a freshly constructed package has valid identifiers");
 
         let styles = Arc::new(styles);
-        // The compatible package writer has already serialized this exact model.
-        let styles_part_cache =
-            package
-                .get_part_shared(DEFAULT_STYLES_PART)
-                .map(|bytes| StylesPartCache {
-                    bytes: Arc::clone(bytes),
-                    parsed: Arc::clone(&styles),
-                    proof: StylesSerializationProof::Serializable,
-                });
+        // Preserve the authored writer model while recording a genuine read
+        // model for a later same-package reopen.
+        let styles_part_cache = package.get_part_shared(DEFAULT_STYLES_PART).map(|bytes| {
+            #[cfg(test)]
+            FX282_STYLES_WORK.with(|work| {
+                let mut counts = work.get();
+                counts[0] += 1;
+                counts[1] += 1;
+                work.set(counts);
+            });
+            let parsed =
+                Arc::new(CT_Styles::from_xml(bytes).expect("freshly emitted styles must parse"));
+            let proof = if parsed.to_xml().is_ok() {
+                StylesSerializationProof::Serializable
+            } else {
+                StylesSerializationProof::Unserializable
+            };
+            StylesPartCache {
+                bytes: Arc::clone(bytes),
+                parsed,
+                emitted_model: Some(Arc::clone(&styles)),
+                proof,
+            }
+        });
         let local_cell_source = package.get_part("/word/document.xml").and_then(|xml| {
             let (blocked, _) = plain_local_edit_facts(&[], &[], xml, &OnceLock::new());
             LocalCellSource::classified(&package, "/word/document.xml", &[], &[], !blocked)
@@ -26601,6 +26619,7 @@ impl Document {
                     let cache = StylesPartCache {
                         bytes: Arc::clone(bytes),
                         parsed: Arc::clone(&parsed),
+                        emitted_model: None,
                         proof,
                     };
                     (parsed, Some(cache))
@@ -28501,6 +28520,13 @@ impl Document {
             .as_ref()
             .filter(|cache| Arc::ptr_eq(&bytes, &cache.bytes))
         {
+            if cache.emitted_model.as_ref().is_some_and(|emitted| {
+                Arc::ptr_eq(&self.styles, emitted) || self.styles == *emitted
+            }) {
+                // The exact writer already succeeded for this model and these
+                // bytes. Keep its lexical form rather than adopting a reparse.
+                return Ok(false);
+            }
             if Arc::ptr_eq(&self.styles, &cache.parsed) || self.styles == cache.parsed {
                 if matches!(cache.proof, StylesSerializationProof::Unserializable) {
                     #[cfg(test)]
@@ -28550,6 +28576,7 @@ impl Document {
         self.styles_part_cache = Some(StylesPartCache {
             bytes,
             parsed,
+            emitted_model: None,
             proof,
         });
         Ok(false)
@@ -28672,10 +28699,27 @@ impl Document {
                 .package
                 .get_part_shared(&styles_part)
                 .expect("just installed styles bytes");
+            // The cache promises the model an actual reopening would parse.
+            // Authored properties can acquire retained namespace context on
+            // parse, so the pre-publication model is not that proof.
+            let parsed = Arc::new(CT_Styles::from_xml(bytes)?);
+            let proof = if parsed.to_xml().is_ok() {
+                StylesSerializationProof::Serializable
+            } else {
+                StylesSerializationProof::Unserializable
+            };
+            #[cfg(test)]
+            FX282_STYLES_WORK.with(|work| {
+                let mut counts = work.get();
+                counts[0] += 1;
+                counts[1] += 1;
+                work.set(counts);
+            });
             self.styles_part_cache = Some(StylesPartCache {
                 bytes: Arc::clone(bytes),
-                parsed: Arc::clone(&self.styles),
-                proof: StylesSerializationProof::Serializable,
+                parsed,
+                emitted_model: Some(Arc::clone(&self.styles)),
+                proof,
             });
         }
 
@@ -54488,6 +54532,74 @@ mod tests {
     }
 
     #[test]
+    fn issue437_authored_styles_keep_lexical_emission_across_intermediate_flushes() {
+        fn build(intermediate: bool) -> Vec<u8> {
+            let mut document = Document::new();
+            document
+                .add_style(
+                    StyleBuilder::paragraph("FirstAuthored", "First Authored")
+                        .paragraph_properties(rdocx_oxml::properties::CT_PPr {
+                            keep_next: Some(true),
+                            ..Default::default()
+                        })
+                        .run_properties(rdocx_oxml::properties::CT_RPr {
+                            bold: Some(true),
+                            ..Default::default()
+                        }),
+                )
+                .unwrap();
+            let first_authored = Arc::clone(&document.styles);
+            if intermediate {
+                document.flush_to_package().unwrap();
+                assert!(Arc::ptr_eq(&first_authored, &document.styles));
+                let cache = document.styles_part_cache.as_ref().unwrap();
+                assert_eq!(*cache.parsed, CT_Styles::from_xml(&cache.bytes).unwrap());
+                assert!(Arc::ptr_eq(
+                    cache.emitted_model.as_ref().unwrap(),
+                    &first_authored
+                ));
+                FX282_STYLES_WORK.set([0, 0]);
+                document.flush_to_package().unwrap();
+                assert_eq!(FX282_STYLES_WORK.get(), [0, 0]);
+            }
+            document
+                .add_style(
+                    StyleBuilder::paragraph("SecondAuthored", "Second Authored").run_properties(
+                        rdocx_oxml::properties::CT_RPr {
+                            italic: Some(true),
+                            ..Default::default()
+                        },
+                    ),
+                )
+                .unwrap();
+            document.flush_to_package().unwrap();
+            let xml = document
+                .package
+                .get_part("/word/styles.xml")
+                .unwrap()
+                .to_vec();
+            let actual = CT_Styles::from_xml(&xml).unwrap();
+            assert_eq!(*document.styles_part_cache.as_ref().unwrap().parsed, actual);
+            FX282_STYLES_WORK.set([0, 0]);
+            document.flush_to_package().unwrap();
+            assert_eq!(FX282_STYLES_WORK.get(), [0, 0]);
+            let reopened = document.prepare_and_reopen_staged().unwrap();
+            assert_eq!(*reopened.styles, actual);
+            assert_eq!(
+                reopened.package.get_part("/word/styles.xml"),
+                Some(xml.as_slice())
+            );
+            assert_eq!(
+                *reopened.styles_part_cache.as_ref().unwrap().parsed,
+                CT_Styles::from_xml(reopened.package.get_part("/word/styles.xml").unwrap())
+                    .unwrap()
+            );
+            xml
+        }
+        assert_eq!(build(true), build(false));
+    }
+
+    #[test]
     fn issue437_styles_open_proof_and_unchanged_flush() {
         let mut seed = Document::new();
         seed.add_paragraph("replace this token");
@@ -54576,9 +54688,18 @@ mod tests {
         document.flush_to_package().unwrap();
         assert_eq!(
             FX282_STYLES_WORK.get(),
-            [0, 1],
-            "changed model serializes once"
+            [1, 2],
+            "changed model writes once and proves its actual parsed successor once"
         );
+        let cache = document.styles_part_cache.as_ref().unwrap();
+        assert_eq!(
+            cache.parsed.as_ref(),
+            &CT_Styles::from_xml(&cache.bytes).unwrap(),
+            "a cache hit must match an actual parse of its recorded bytes"
+        );
+        FX282_STYLES_WORK.set([0, 0]);
+        document.flush_to_package().unwrap();
+        assert_eq!(FX282_STYLES_WORK.get(), [0, 0]);
         assert!(!Arc::ptr_eq(
             &original_part,
             document

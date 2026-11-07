@@ -79,6 +79,7 @@ pub(crate) styles_part_cache: Option<StylesPartCache>,
 struct StylesPartCache {
     bytes: Arc<Vec<u8>>,
     parsed: Arc<CT_Styles>,
+    emitted_model: Option<Arc<CT_Styles>>,
     proof: StylesSerializationProof,
 }
 
@@ -101,13 +102,14 @@ At open, after `CT_Styles::from_xml` succeeds, call `CT_Styles::to_xml` once and
 The helper decides a cache hit only in this order. Current styles part bytes `Arc` identity is the first condition.
 
 - The current styles part bytes `Arc` must be pointer-equal to the cached bytes `Arc`. If it differs, the lookup is a miss even when the model `Arc` is pointer-equal. Model pointer equality alone never suppresses inspection after a part replacement. Discriminator: open a document, call `package.set_part("/word/styles.xml", new_valid_bytes)`, then flush without touching the model. The helper parses the new bytes and does not return a stale-bytes hit. On `Document`, `package` is `pub(crate)` at `document.rs:7207`. That visibility was re-read.
+- After that bytes identity, an actual successfully emitted model snapshot is a hit by pointer or full model equality. Keep that live writer model. It is not a parsed read proof. This snapshot is present only after the existing writer and root retention succeeded, including compatible new-document creation. An edited model still uses copy-on-write.
 - After that bytes identity, a model `Arc` that is pointer-equal to the cached parsed `Arc` is a hit. If the proof is `Serializable`, return `false` and write nothing. If the proof is `Unserializable`, call `to_xml` again to preserve the exact error and return `Err` before `set_part`.
 - After that bytes identity, a model that value-equals the cached parsed model is a hit. If the proof is `Serializable`, adopt the cached `Arc` and return `false`. If the proof is `Unserializable`, call `to_xml` again and return `Err` before `set_part`.
 - After that bytes identity, a model that differs returns `true`.
 - Cache miss: parse the part bytes. If `from_xml` fails, return `Err` before `set_part`. If parse succeeds, call `to_xml` once and record the proof. If the model value-equals the parsed model and the proof is `Serializable`, adopt the parsed `Arc` and return `false`. If value-equals and the proof is `Unserializable`, call `to_xml` again and return `Err`. If the model differs, return `true`.
 - No part: return `true` and write the default styles.
 
-On `true`, serialize the current model, run `retain_styles_root_attributes`, and call `set_part` only after both succeed. See `crates/rdocx/src/document.rs:2753-2820`. On any error, return before `set_part` and leave the cache unchanged. A writer error is never recorded as `Serializable`. After both succeed, read the installed bytes back with `get_part_shared` and store that `Arc`, the published model `Arc`, and `Serializable`. The next unchanged flush hits that cache and does not re-prove. The A282-1 unchanged path still uses the open proof and does not depend on this refresh.
+On `true`, serialize the current model, run `retain_styles_root_attributes`, and call `set_part` only after both succeed. See `crates/rdocx/src/document.rs:2753-2820`. On any error, return before `set_part` and leave the cache unchanged. A writer error is never recorded as `Serializable`. After both succeed, read the installed bytes back with `get_part_shared`. Parse those actual bytes and record the parsed model's serialization proof for reopening. Store the immutable actual writer model separately as `emitted_model`, retaining its lexical emission on subsequent authored updates. Do not install parser-added namespace context into the live authored model merely to refresh the cache. Compatible new-document creation also obtains its parsed cache by an actual parse of its emitted bytes, with actual parse/proof work counted. A reopened model always comes from the genuine parsed cache. The next unchanged flush hits the relevant model proof and does not re-prove. The A282-1 unchanged path still uses the open proof and does not depend on this refresh.
 
 Every style mutation path uses `Arc::make_mut` on the candidate or owned document. The original document keeps its shared `Arc` until publication succeeds. Where a deep model clone is genuinely required, use `CT_Styles::clone(&self.styles)` rather than `self.styles.clone()`, which would clone only the `Arc`.
 

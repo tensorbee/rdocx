@@ -8,8 +8,13 @@ proves a newly parsed model once. Staged in-memory reopen reuses proof only for
 the same source allocation. Unchanged proved models preserve original part
 bytes. A replaced source is parsed again, and malformed styles refuse before
 replacement. Changed styles use copy-on-write and publish cache state only
-after serialization and root-attribute retention succeed. A failed proof is
-retained as a failed proof and the writer error is retried when needed.
+after serialization and root-attribute retention succeed. A separate immutable
+emitted-model snapshot keeps the actual authored lexical form across later
+style writes. It never substitutes for the genuine parse used by reopening.
+New-document caches also parse their actual emitted bytes once. Unchanged
+writer snapshots retain their live model and require no new parse or write.
+A failed parsed-model proof remains failed and the writer error is retried
+when that parsed model requires it.
 
 Direct physical cell paragraph edits resolve the immutable reader location and
 require its paragraph count to equal the direct paragraph count. They edit a
