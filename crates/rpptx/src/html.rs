@@ -3312,7 +3312,7 @@ mod tests {
             ("0;General", true),
             ("", true),
         ] {
-            let data = oxml_chart::ChartData {
+            let mut data = oxml_chart::ChartData {
                 categories: vec!["Q1".into()],
                 series: vec![("Zeta region".into(), vec![1820.0])],
                 number_format: Some(code.into()),
@@ -3320,6 +3320,25 @@ mod tests {
             };
             let mut deck = Presentation::new().unwrap();
             deck.add_slide(6).unwrap();
+            if code.is_empty() {
+                let Err(error) = deck.add_chart(
+                    0,
+                    oxml_chart::ChartKind::Bar,
+                    Emu(0),
+                    Emu(0),
+                    Emu(4572000),
+                    Emu(2743200),
+                    &data,
+                ) else {
+                    panic!("checked chart authoring accepted an empty number format");
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains("number format must not be empty")
+                );
+                data.number_format = Some("General".into());
+            }
             deck.add_chart(
                 0,
                 oxml_chart::ChartKind::Bar,
@@ -3330,6 +3349,30 @@ mod tests {
                 &data,
             )
             .unwrap();
+            if code.is_empty() {
+                // Imported empty codes remain readable and reach the painter's
+                // General fallback. Checked authoring above still refuses them.
+                let source = deck.slides[0].part_name.clone();
+                let rel = deck
+                    .package
+                    .get_part_rels(&source)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .find(|rel| rel.rel_type == rel_types::CHART)
+                    .unwrap();
+                let part = OpcPackage::resolve_rel_target(&source, &rel.target);
+                let original =
+                    String::from_utf8(deck.package.get_part(&part).unwrap().to_vec()).unwrap();
+                let imported = original
+                    .replace(r#"formatCode="General""#, r#"formatCode="""#)
+                    .replace(
+                        "<c:formatCode>General</c:formatCode>",
+                        "<c:formatCode></c:formatCode>",
+                    );
+                assert_ne!(imported, original);
+                deck.package.set_part(&part, imported.into_bytes());
+            }
             let (_, layout) = deck.render_deterministic_with_fonts(&[]).unwrap();
             let diagnostics = layout.diagnostics;
             assert!(
