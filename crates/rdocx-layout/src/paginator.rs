@@ -5767,8 +5767,10 @@ fn tab_aligned_fields(items: &[LineItem]) -> Vec<Option<TabAlignedField>> {
         let mut past_point = false;
         let mut in_number = false;
         for (offset, item) in segment.iter().enumerate() {
-            let LineItem::Text(text) = item else {
-                continue;
+            let text = match item {
+                LineItem::Text(text) => text,
+                LineItem::MultilingualText(text) if text.uses_legacy_shaping() => text.base(),
+                _ => continue,
             };
             if text.field_kind.is_some() || text.field_source.is_some() {
                 fields[index + offset] = Some(TabAlignedField {

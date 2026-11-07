@@ -10018,6 +10018,17 @@ fn substitute_styleref(
             seen.insert(source);
         }
         if value.is_empty() {
+            if let PositionedElement::Text(old) = element
+                && let Some(aligned) = old.tab_aligned
+            {
+                changes.push(FieldWidthChange {
+                    aligned,
+                    baseline: old.origin.y,
+                    font_size: old.font_size,
+                    x: old.origin.x,
+                    delta: -old.advances.iter().sum::<f64>(),
+                });
+            }
             painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
             continue;
         }
