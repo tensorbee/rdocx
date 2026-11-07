@@ -31394,6 +31394,9 @@ fn document_facing_aliases_share_one_caller_font() {
     );
 
     let mut document = Document::new();
+    document
+        .set_default_font_name_value(Some("Document Serif"))
+        .unwrap();
     for (family, text) in [
         ("Document Serif", "first alias"),
         ("Legacy Serif", "second alias"),
@@ -31438,7 +31441,11 @@ fn document_facing_aliases_share_one_caller_font() {
             .skip(1)
             .all(|font| Arc::ptr_eq(&alias_fonts[0], font))
     );
-    assert!(result.layout.diagnostics.is_empty());
+    assert!(
+        result.layout.diagnostics.is_empty(),
+        "{:?}",
+        result.layout.diagnostics
+    );
 }
 
 #[test]

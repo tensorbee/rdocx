@@ -1884,6 +1884,21 @@ impl FontManager {
         let Some(db_id) = self.fonts.get(index).map(|font| font.db_id) else {
             return;
         };
+        let requested_key = requested.to_lowercase();
+        let selected_family = self
+            .explicit_alias_map
+            .get(&requested_key)
+            .map_or(requested, String::as_str);
+        let selected_key = selected_family.to_lowercase();
+        if self
+            .caller_aliases
+            .get(&selected_key)
+            .into_iter()
+            .chain(self.embedded_aliases.get(&selected_key))
+            .any(|ids| ids.contains(&db_id))
+        {
+            return;
+        }
         let (physical, tier) = {
             let Some(face) = self.db.face(db_id) else {
                 return;
@@ -1892,7 +1907,7 @@ impl FontManager {
                 return;
             };
             let physical = physical.clone();
-            if physical.eq_ignore_ascii_case(requested) {
+            if physical.eq_ignore_ascii_case(selected_family) {
                 return;
             }
             let tier = if self
@@ -4551,6 +4566,8 @@ for feature in ['smcp=0','smcp=1']:
         let aliased = manager
             .resolve_font(Some("Document Serif"), false, false)
             .expect("caller label resolves");
+        manager.record_font_approximation(aliased, Some("Document Serif"));
+        assert!(manager.word_substitution_diagnostics().is_empty());
         assert_eq!(
             manager.fonts[manager.index_of(aliased).unwrap()].family,
             "Caladea"
@@ -4583,6 +4600,8 @@ for feature in ['smcp=0','smcp=1']:
         let caller_alias = manager
             .resolve_font(Some("Arial"), false, false)
             .expect("explicit alias resolves before mapped fallback");
+        manager.record_font_approximation(caller_alias, Some("Arial"));
+        assert!(manager.word_substitution_diagnostics().is_empty());
         assert_eq!(
             manager.fonts[manager.index_of(caller_alias).unwrap()].family,
             "Caladea"
@@ -4594,6 +4613,11 @@ for feature in ['smcp=0','smcp=1']:
             manager.fonts[manager.index_of(generic).unwrap()].family,
             "Carlito"
         );
+        manager.record_font_approximation(generic, Some("Unmapped Document Family"));
+        let diagnostics = manager.word_substitution_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("Unmapped Document Family"));
+        assert!(manager.current_font_diagnostics().is_empty());
     }
 
     #[test]
