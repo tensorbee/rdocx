@@ -12304,7 +12304,9 @@ fn layout_paragraph_with_source_and_table(
                             spacing: word_character_advance_pt(&effective_rpr, grid_char_space_pt),
                         },
                     );
-                    if automatic_hyphenation && let Some(language) = effective_rpr.language.as_ref()
+                    if automatic_hyphenation
+                        && !stored_cache
+                        && let Some(language) = effective_rpr.language.as_ref()
                     {
                         inline_items.push(InlineItem::HyphenatedText {
                             segment,
