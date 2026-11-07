@@ -16298,15 +16298,18 @@ fn set_story_source_xml_in(
             !blocked,
         );
     } else if document.comments_part_name.as_deref() == Some(part_name) {
-        document.comments = Some(if let Some((writer, source)) = scoped.as_mut() {
+        let mut comments = if let Some((writer, source)) = scoped.as_mut() {
             let comments = writer.operation.source_comments(source)?;
             // The operation reader and package publication below are the same producer handback.
             comments
         } else {
             rdocx_oxml::comments::CT_Comments::from_xml(&xml)?
-        });
+        };
+        let changed = document.reconcile_comment_paragraph_publication(&mut comments)?;
+        document.comments = Some(comments);
         document.package.set_part(part_name, xml);
-        document.comments_dirty = false;
+        // Existing ordinary/scoped model writer emits the generated attributes.
+        document.comments_dirty = changed;
     } else if document.footnotes_part_name.as_deref() == Some(part_name) {
         document.footnotes = if let Some((template, source)) = scoped.as_mut() {
             let notes = template.operation.source_notes(source)?;

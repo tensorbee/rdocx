@@ -62255,12 +62255,8 @@ fn comment_moves_preserve_thread_identity() {
             .collect::<Vec<_>>()
     };
     let original_metadata = metadata(&document);
-    let selected = document
-        .story_ranges()
-        .unwrap()
-        .into_iter()
-        .find(|r| matches!(r.kind(), rdocx::StoryRangeKind::Comment { id: found } if *found == id))
-        .unwrap();
+    // Root-only comment movement uses its qualified selected-comment proof.
+    // Generic story_ranges retains its stricter nesting contract.
     let header = f254_story(&document, StoryKind::Header);
     let location = document
         .story_items(&header)
@@ -62281,7 +62277,7 @@ fn comment_moves_preserve_thread_identity() {
         },
     };
     // Before proof uses the existing move route, not missing API availability.
-    document.move_story_range(&selected, target).unwrap();
+    document.move_comment(id, target).unwrap();
     assert_eq!(metadata(&document), original_metadata);
     assert_eq!(
         document.comment_anchor_text(id).unwrap().as_deref(),
@@ -62607,20 +62603,6 @@ fn comment_moves_to_literal_text_keep_zero_width_and_namespace_semantics() {
             false,
         ),
     ] {
-        if matches!(
-            name,
-            "table-local-alias" | "cell-local-shadow" | "paragraph-local-alias"
-        ) {
-            let (mut document, id, _) = imported(target);
-            let before = document.to_bytes().unwrap();
-            let error = document.move_comment_to_text(id, anchor, 0).unwrap_err();
-            assert!(
-                error.to_string().contains("has no occurrence 0"),
-                "{name}: {error}"
-            );
-            assert_eq!(document.to_bytes().unwrap(), before, "{name}");
-            continue;
-        }
         let mut xml = wrap_word_body(&format!("<w:p><w:r><w:t>SOURCE</w:t></w:r></w:p>{target}"));
         if alias {
             xml = xml
@@ -62637,21 +62619,6 @@ fn comment_moves_to_literal_text_keep_zero_width_and_namespace_semantics() {
             .iter()
             .map(|comment| (comment.id(), comment.text()))
             .collect::<Vec<_>>();
-        // These three preserved q:sdt owners are not represented by the existing
-        // accepted literal axis before the guard. Do not invent accepted runs.
-        if matches!(
-            name,
-            "table-local-alias" | "cell-local-shadow" | "paragraph-local-alias"
-        ) {
-            let before = document.to_bytes().unwrap();
-            let error = document.move_comment_to_text(id, anchor, 0).unwrap_err();
-            assert!(
-                error.to_string().contains("has no occurrence 0"),
-                "{name}: {error}"
-            );
-            assert_eq!(document.to_bytes().unwrap(), before, "{name}");
-            continue;
-        }
         if let Err(error) = document.move_comment_to_text(id, anchor, 0) {
             failures.push(format!("{name}: {error}"));
             continue;
@@ -62754,7 +62721,8 @@ fn comment_moves_to_literal_text_keep_zero_width_and_namespace_semantics() {
             "{xml}"
         );
         assert!(
-            xml.contains(r#"<q:fldSimple q:instr=" PAGE "><q:r><q:t>7</q:t></q:r></q:fldSimple>"#),
+            xml.contains(r#"<q:fldSimple q:instr=" PAGE "><q:r><q:t>7</q:t></q:r></q:fldSimple>"#)
+                || xml.contains(&format!(r#"<q:fldSimple q:instr=" PAGE " xmlns:q="{W_NS}"><q:r><q:t>7</q:t></q:r></q:fldSimple>"#)),
             "{xml}"
         );
         let reopened = Document::from_bytes(&bytes).unwrap();
@@ -413556,6 +413524,321 @@ fn issue434_coalesced_held_containers_keep_equal_partitions_only() {
                     assert_eq!(original.to_bytes().unwrap(), before);
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn comment_terminal_paragraph_publication_rebinds_owned_thread_without_losing_alias_metadata() {
+    fn legacy_xml(xml: &[u8], id: i32) -> String {
+        let xml = std::str::from_utf8(xml).unwrap();
+        let body = f276_word_owner_body_range(xml, b"comment", id);
+        let start = xml[..body.start].rfind('<').unwrap();
+        let end = body.end + xml[body.end..].find('>').unwrap() + 1;
+        xml[start..end].to_owned()
+    }
+    for picture in [false, true] {
+        let mut seed = Document::new();
+        seed.add_paragraph("anchor");
+        let parent = seed
+            .add_comment(
+                RunRange {
+                    start: RunPosition {
+                        body_index: 0,
+                        run_index: 0,
+                    },
+                    end: RunPosition {
+                        body_index: 0,
+                        run_index: 1,
+                    },
+                },
+                "Ada",
+                None,
+                "parent",
+            )
+            .unwrap();
+        let reply = seed.reply_to(parent, "Ben", "existing reply").unwrap();
+        seed.add_paragraph("legacy anchor");
+        let legacy = seed
+            .add_comment(
+                RunRange {
+                    start: RunPosition {
+                        body_index: 1,
+                        run_index: 0,
+                    },
+                    end: RunPosition {
+                        body_index: 1,
+                        run_index: 1,
+                    },
+                },
+                "Legacy",
+                None,
+                "unrelated legacy",
+            )
+            .unwrap();
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap()))
+                .unwrap();
+        let mut comments = rdocx_oxml::comments::CT_Comments::from_xml(
+            package.get_part("/word/comments.xml").unwrap(),
+        )
+        .unwrap();
+        let legacy_para_id = comments
+            .comments
+            .iter()
+            .find(|comment| comment.id == legacy)
+            .unwrap()
+            .paragraph_ids
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        // This separate, actually anchored imported owner has no paragraph ID
+        // or commentsEx row. Updating another owner must preserve that absence.
+        comments
+            .comments
+            .iter_mut()
+            .find(|comment| comment.id == legacy)
+            .unwrap()
+            .paragraph_ids
+            .clear();
+        let source = String::from_utf8(comments.to_xml().unwrap()).unwrap();
+        let range = f276_word_owner_body_range(&source, b"comment", legacy);
+        let attribute = format!(r#" w14:paraId="{legacy_para_id}""#);
+        assert_eq!(source[range.clone()].matches(&attribute).count(), 1);
+        let body = source[range.clone()].replace(&attribute, "");
+        let source = format!("{}{}{}", &source[..range.start], body, &source[range.end..]);
+        let imported = rdocx_oxml::comments::CT_Comments::from_xml(source.as_bytes()).unwrap();
+        assert!(
+            imported
+                .comments
+                .iter()
+                .find(|comment| comment.id == legacy)
+                .unwrap()
+                .paragraph_ids
+                .iter()
+                .all(Option::is_none),
+            "fixture must really omit the imported ID"
+        );
+        package.set_part("/word/comments.xml", source.into_bytes());
+        let legacy_before = legacy_xml(package.get_part("/word/comments.xml").unwrap(), legacy);
+        let old = comments
+            .comments
+            .iter()
+            .find(|comment| comment.id == parent)
+            .unwrap()
+            .paragraph_ids
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let child = comments
+            .comments
+            .iter()
+            .find(|comment| comment.id == reply)
+            .unwrap()
+            .paragraph_ids
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let extended = format!(
+            r#"<q:commentsEx xmlns:q="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:x="urn:publication" x:root="keep"><q:commentEx q:paraId="{old}" q:done="0" x:entry="keep"/><q:commentEx q:paraId="{child}" q:paraIdParent="{old}" q:done="0"/><x:opaque exact="same"/></q:commentsEx>"#
+        );
+        package.set_part("/word/commentsExtended.xml", extended.into_bytes());
+        let mut input = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut input).unwrap();
+        let mut document = Document::from_bytes(input.get_ref()).unwrap();
+        let story = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| {
+                story.kind() == StoryKind::Comment
+                    && document
+                        .story_items(story)
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.text().unwrap().as_deref() == Some("parent"))
+            })
+            .unwrap();
+        if picture {
+            document
+                .add_picture_to_story(
+                    &story,
+                    &f_x204_picture_fixture(b"terminal"),
+                    "terminal.png",
+                    Length::pt(1.0),
+                    Length::pt(1.0),
+                )
+                .unwrap();
+        } else {
+            document
+                .insert_content(
+                    &ContentLocation::end(story),
+                    f254_paragraph("appended paragraph"),
+                )
+                .unwrap();
+        }
+        document.validate_comment_ownership().unwrap();
+        let bytes = document.to_bytes().unwrap();
+        let output =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes.as_slice())).unwrap();
+        let parsed = rdocx_oxml::comments::CT_Comments::from_xml(
+            output.get_part("/word/comments.xml").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_xml(output.get_part("/word/comments.xml").unwrap(), legacy),
+            legacy_before
+        );
+        let untouched = parsed
+            .comments
+            .iter()
+            .find(|comment| comment.id == legacy)
+            .unwrap();
+        assert!(untouched.paragraph_ids.iter().all(Option::is_none));
+        assert_eq!(untouched.paragraphs.len(), 1);
+        let owner = parsed
+            .comments
+            .iter()
+            .find(|comment| comment.id == parent)
+            .unwrap();
+        assert_eq!(owner.paragraph_ids.first().unwrap().as_ref(), Some(&old));
+        let new = owner.paragraph_ids.last().unwrap().as_ref().unwrap();
+        assert_ne!(new, &old);
+        let extended =
+            std::str::from_utf8(output.get_part("/word/commentsExtended.xml").unwrap()).unwrap();
+        assert!(
+            extended.contains(&format!(r#"q:paraId="{new}""#)),
+            "{extended}"
+        );
+        assert!(
+            extended.contains(&format!(r#"q:paraIdParent="{new}""#)),
+            "{extended}"
+        );
+        assert!(extended.contains(r#"x:root="keep""#));
+        assert!(extended.contains(r#"x:entry="keep""#));
+        assert!(extended.contains(r#"<x:opaque exact="same"/>"#));
+        let mut reopened = Document::from_bytes(&bytes).unwrap();
+        reopened.validate_comment_ownership().unwrap();
+        reopened.reply_to(parent, "Cara", "after append").unwrap();
+        let again = reopened.to_bytes().unwrap();
+        Document::from_bytes(&again)
+            .unwrap()
+            .validate_comment_ownership()
+            .unwrap();
+        let final_package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(again)).unwrap();
+        assert_eq!(
+            legacy_xml(
+                final_package.get_part("/word/comments.xml").unwrap(),
+                legacy
+            ),
+            legacy_before
+        );
+        assert!(
+            reopened
+                .comments()
+                .iter()
+                .any(|comment| comment.text() == "after append")
+        );
+    }
+}
+
+#[test]
+fn comment_terminal_paragraph_publication_refuses_incompatible_imported_ids_and_ambiguous_rows_atomically()
+ {
+    for duplicate in [false, true] {
+        let mut seed = Document::new();
+        seed.add_paragraph("anchor");
+        let parent = seed
+            .add_comment(
+                RunRange {
+                    start: RunPosition {
+                        body_index: 0,
+                        run_index: 0,
+                    },
+                    end: RunPosition {
+                        body_index: 0,
+                        run_index: 1,
+                    },
+                },
+                "Ada",
+                None,
+                "parent",
+            )
+            .unwrap();
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap()))
+                .unwrap();
+        let parsed = rdocx_oxml::comments::CT_Comments::from_xml(
+            package.get_part("/word/comments.xml").unwrap(),
+        )
+        .unwrap();
+        let old = parsed
+            .comments
+            .iter()
+            .find(|comment| comment.id == parent)
+            .unwrap()
+            .paragraph_ids
+            .last()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        if duplicate {
+            let xml = std::str::from_utf8(package.get_part("/word/commentsExtended.xml").unwrap())
+                .unwrap();
+            let end = xml.rfind("</").unwrap();
+            let xml = format!(
+                "{}<w15:commentEx w15:paraId=\"{old}\" w15:done=\"0\"/>{}",
+                &xml[..end],
+                &xml[end..]
+            );
+            package.set_part("/word/commentsExtended.xml", xml.into_bytes());
+        } else {
+            let xml = format!(
+                r#"<ci:commentsIds xmlns:ci="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:x="urn:keep"><ci:commentId ci:paraId="{old}" ci:durableId="00000010" x:kept="exact"/></ci:commentsIds>"#
+            );
+            package.set_part("/annotations/ids.xml", xml.into_bytes());
+            package.content_types.add_override(
+                "/annotations/ids.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml",
+            );
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .items
+                .push(oxml_opc::Relationship {
+                    id: "rIdImportedIds".into(),
+                    rel_type:
+                        "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
+                            .into(),
+                    target: "/annotations/ids.xml".into(),
+                    target_mode: None,
+                });
+        }
+        let mut input = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut input).unwrap();
+        let mut document = Document::from_bytes(input.get_ref()).unwrap();
+        let before = document.to_bytes().unwrap();
+        let comment = f254_story(&document, StoryKind::Comment);
+        assert!(
+            document
+                .insert_content(
+                    &ContentLocation::end(comment),
+                    f254_paragraph("new terminal")
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+        if !duplicate {
+            let output = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(before)).unwrap();
+            assert_eq!(
+                output.get_part("/annotations/ids.xml"),
+                package.get_part("/annotations/ids.xml")
+            );
         }
     }
 }

@@ -2769,6 +2769,10 @@ fn compare_story_inner(
 ) -> Result<String> {
     #[cfg(test)]
     let _diagnostic_scope = PolicyDiagnosticScope::enter("compare_story_inner", location);
+    // Formatting policy uses the same qualified paired host publisher as the
+    // main story. Ignored text boxes keep the existing mask-and-restore scan.
+    let scan_text_boxes = !metadata.options.ignore_formatting
+        || story_ignored(metadata.options, ComparisonStoryKind::TextBox);
     compare_story_inner_impl(
         original,
         edited,
@@ -2778,7 +2782,7 @@ fn compare_story_inner(
         edited_bindings,
         metadata,
         diagnostics,
-        true,
+        scan_text_boxes,
     )
 }
 
@@ -13277,8 +13281,36 @@ fn coalesced_paragraph_signature(paragraph: &CT_P, options: &ComparisonOptions) 
             }
         }
     }
+    // Character publication protects every new whitespace boundary. On the
+    // whole-run path, retain the actual unprotected edge characters as
+    // additional content facts before using that publication view as equality.
+    // Internal whitespace and explicitly protected split boundaries stay equal.
+    let mut unprotected_edges = Vec::new();
+    if !uses_attributed_run_path(options) {
+        let xml_space = |character: char| matches!(character, ' ' | '\t' | '\n' | '\r');
+        let mut offset = 0usize;
+        for run in &paragraph.runs {
+            for content in &run.content {
+                if let RunContent::Text(text) = content {
+                    let leading = text.text.len() - text.text.trim_start_matches(xml_space).len();
+                    let trailing = text.text.trim_end_matches(xml_space).len();
+                    for (byte, character) in text.text.char_indices() {
+                        if !text.preserve_space
+                            && xml_space(character)
+                            && (byte < leading || byte >= trailing)
+                        {
+                            unprotected_edges.push(offset);
+                        }
+                        offset += 1;
+                    }
+                } else {
+                    offset += 1;
+                }
+            }
+        }
+    }
     format!(
-        "{}:{properties:?}",
+        "{}:{properties:?}:{unprotected_edges:?}",
         paragraph_signature_with_options(paragraph, &scalar)
     )
 }
@@ -30034,6 +30066,60 @@ fn issue434_scalar_equality_keeps_explicit_empty_model_properties() {
         assert_ne!(
             coalesced_paragraph_signature(&original, &options),
             coalesced_paragraph_signature(&edited, &options)
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn coalesced_run_equality_preserves_actual_whitespace_edge_policy() {
+    let paragraph = |parts: &[(&str, bool)]| {
+        let mut paragraph = CT_P::new();
+        for (text, preserve) in parts {
+            paragraph.add_run(text);
+            let run = paragraph.runs.last_mut().unwrap();
+            let RunContent::Text(text) = &mut run.content[0] else {
+                unreachable!();
+            };
+            text.preserve_space = *preserve;
+        }
+        paragraph
+    };
+    let options = ComparisonOptions::default();
+    for (left, right, equal) in [
+        (vec![("WORD ", true)], vec![("WORD ", false)], false),
+        (vec![(" WORD", true)], vec![(" WORD", false)], false),
+        (
+            vec![("WORD ", false)],
+            vec![("WORD", false), (" ", false)],
+            true,
+        ),
+        (
+            vec![("two words", false)],
+            vec![("two ", true), ("words", false)],
+            true,
+        ),
+        (
+            vec![("two words", false)],
+            vec![("two ", false), ("words", false)],
+            false,
+        ),
+        (vec![("é ", false)], vec![("é", false), (" ", false)], true),
+    ] {
+        let left = paragraph(&left);
+        let right = paragraph(&right);
+        assert_eq!(
+            coalesced_paragraph_signature(&left, &options)
+                == coalesced_paragraph_signature(&right, &options),
+            equal,
+        );
+        let attributed = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            coalesced_paragraph_signature(&left, &attributed),
+            coalesced_paragraph_signature(&right, &attributed),
         );
     }
 }

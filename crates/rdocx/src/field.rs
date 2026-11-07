@@ -14994,7 +14994,7 @@ fn ref_comment_occupied_identity_values(package: &OpcPackage) -> Result<HashSet<
     Ok(occupied)
 }
 
-fn patch_ref_comment_identity_attributes(
+pub(crate) fn patch_ref_comment_identity_attributes(
     xml: &[u8],
     comment_ids: &BTreeMap<String, String>,
     paragraph_ids: &BTreeMap<String, String>,
@@ -15059,6 +15059,19 @@ fn patch_ref_comment_identity_attributes(
                             paragraph_ids,
                             &mut edits,
                         )?;
+                        if matches!(kind, RefCommentCompanionKind::Extended) {
+                            add_identity_attribute_edit(
+                                xml,
+                                start,
+                                end,
+                                &element,
+                                reader.resolver(),
+                                b"paraIdParent",
+                                AttributeNamespace::Bound(kind.namespace()),
+                                paragraph_ids,
+                                &mut edits,
+                            )?;
+                        }
                         add_identity_attribute_edit(
                             xml,
                             start,
