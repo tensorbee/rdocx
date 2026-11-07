@@ -12038,6 +12038,23 @@ fn layout_paragraph_with_source_and_table(
         let font_id = fm.resolve_font_for_text(font_family.as_deref(), bold, italic, &run_text)?;
         let metrics = fm.metrics(font_id, font_size)?;
 
+        // Stored-display expansion replaces the sole Field run with its
+        // cache runs. Its instruction events still belong before that display.
+        if stored_cache && first {
+            let owner_run = prepared_runs[projected_index]
+                .as_ref()
+                .unwrap_or(original_runs[projected_index].run);
+            if let [RunContent::Field(field)] = owner_run.content.as_slice() {
+                push_sequence_context_markers(
+                    field,
+                    input.sequence_snapshot.as_deref().zip(source_node),
+                    &field_indices,
+                    font_id,
+                    &mut inline_items,
+                    &mut multilingual_styles,
+                );
+            }
+        }
         let run_inline_start = inline_items.len();
         let content_char_starts = projected_content_char_starts(run);
         let note_events = if num_state.note_body_context.is_some() {
@@ -12373,29 +12390,14 @@ fn layout_paragraph_with_source_and_table(
                     }
                 }
                 RunContent::Field(field) => {
-                    if let Some((snapshot, node)) =
-                        input.sequence_snapshot.as_ref().zip(source_node)
-                    {
-                        let mut pending = vec![field];
-                        while let Some(owner) = pending.pop() {
-                            if let Some(index) =
-                                field_indices.get(&std::ptr::from_ref(owner)).copied()
-                            {
-                                let source = FieldSource { node, index };
-                                if let Some(event) = snapshot.event_sources.get(&source) {
-                                    push_structural_field_marker(
-                                        &mut inline_items,
-                                        &mut multilingual_styles,
-                                        FieldKind::SequenceContext(*event),
-                                        font_id,
-                                        source_node,
-                                        Some(source),
-                                    );
-                                }
-                            }
-                            pending.extend(owner.nested_fields_in_source_order().into_iter().rev());
-                        }
-                    }
+                    push_sequence_context_markers(
+                        field,
+                        input.sequence_snapshot.as_deref().zip(source_node),
+                        &field_indices,
+                        font_id,
+                        &mut inline_items,
+                        &mut multilingual_styles,
+                    );
                     let (computed_value, field_kind) = computed_fields
                         .get(&std::ptr::from_ref(field))
                         .cloned()
@@ -13187,6 +13189,36 @@ fn push_targeted_bookmark_markers(
         }
     }
     Ok(())
+}
+
+fn push_sequence_context_markers(
+    field: &rdocx_oxml::text::Field,
+    source: Option<(&crate::WordSequenceSnapshot, SourceNodeId)>,
+    field_indices: &HashMap<*const rdocx_oxml::text::Field, u32>,
+    font_id: oxml_layout::FontId,
+    items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
+) {
+    let Some((snapshot, node)) = source else {
+        return;
+    };
+    let mut pending = vec![field];
+    while let Some(owner) = pending.pop() {
+        if let Some(index) = field_indices.get(&std::ptr::from_ref(owner)).copied() {
+            let source = FieldSource { node, index };
+            if let Some(event) = snapshot.event_sources.get(&source) {
+                push_structural_field_marker(
+                    items,
+                    styles,
+                    FieldKind::SequenceContext(*event),
+                    font_id,
+                    Some(node),
+                    Some(source),
+                );
+            }
+        }
+        pending.extend(owner.nested_fields_in_source_order().into_iter().rev());
+    }
 }
 
 fn push_structural_field_marker(
