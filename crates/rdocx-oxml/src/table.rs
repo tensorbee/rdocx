@@ -3684,7 +3684,9 @@ impl CT_Tbl {
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     // tblPr and tblGrid have fixed positions ahead of the rows,
                     // so a self-closing one must not be re-emitted from here.
-                    if is_word_element(name.as_ref(), b"tblGrid", &prefixes) {
+                    if is_word_element(name.as_ref(), b"tblPr", &prefixes) {
+                        properties = Some(CT_TblPr::default());
+                    } else if is_word_element(name.as_ref(), b"tblGrid", &prefixes) {
                         grid = Some(CT_TblGrid::default());
                     } else if is_word_element(name.as_ref(), b"tr", &prefixes) {
                         rows.push(CT_Row::from_empty_root(e, &prefixes)?);
@@ -6081,15 +6083,49 @@ mod tests {
     /// from the row positions, so capturing them would reorder the children.
     #[test]
     fn self_closing_table_properties_are_not_reordered() {
-        let tbl = parse_table(
-            r#"<w:tblPr/><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
-        );
+        let contents =
+            r#"<w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#;
+        let tbl = parse_table(&format!("<w:tblPr/>{contents}"));
+        assert_eq!(tbl.properties, Some(CT_TblPr::default()));
         assert!(tbl.extra_xml.is_empty(), "tblPr must not be captured");
         let xml = table_to_xml(&tbl);
         assert!(
-            !xml.contains("</w:tr><w:tblPr/>"),
-            "tblPr must never follow the rows: {xml}"
+            xml.find("<w:tblPr>").unwrap() < xml.find("<w:tblGrid>").unwrap(),
+            "tblPr must precede the grid: {xml}"
         );
+        let paired = parse_table(&format!("<w:tblPr></w:tblPr>{contents}"));
+        assert_eq!(tbl, paired, "empty spellings have the same properties");
+        let reopened = parse_scoped_table(&xml).unwrap();
+        assert_eq!(reopened, tbl);
+        assert_eq!(table_to_xml(&reopened), xml);
+
+        let uri = crate::namespace::W_NS;
+        for property in [
+            format!(r#"<q:tblPr xmlns:q="{uri}"/>"#),
+            format!(r#"<w:tblPr xmlns:w="{uri}"/>"#),
+        ] {
+            let aliased = parse_scoped_table(&format!(
+                r#"<w:tbl xmlns:w="{uri}">{property}{contents}</w:tbl>"#
+            ))
+            .unwrap();
+            assert_eq!(aliased, tbl);
+            assert_eq!(table_to_xml(&aliased), xml);
+        }
+        let foreign = parse_scoped_table(&format!(
+            r#"<w:tbl xmlns:w="{uri}"><w:tblPr xmlns:w="urn:producer" w:keep="yes"/>{contents}</w:tbl>"#
+        ))
+        .unwrap();
+        assert!(foreign.properties.is_none());
+        assert_eq!(foreign.extra_xml.len(), 1);
+        let foreign_xml = table_to_xml(&foreign);
+        assert!(foreign_xml.contains(r#"xmlns:w="urn:producer" w:keep="yes""#));
+        let reopened = parse_scoped_table(&foreign_xml).unwrap();
+        assert!(reopened.properties.is_none());
+        assert_eq!(table_to_xml(&reopened), foreign_xml);
+
+        let absent = parse_table(contents);
+        assert!(absent.properties.is_none());
+        assert!(!table_to_xml(&absent).contains("<w:tblPr"));
     }
 }
 
