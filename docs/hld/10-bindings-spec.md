@@ -4985,7 +4985,12 @@ without freezing supported text and metadata edits on its owner. This does
 not establish a recursive schema validator or broaden ordinary import.
 
 Open retains exact eager fallible owner validation but returns with dormant
-checked authority. Dormant state has absent snapshot/removal scopes, empty
+checked authority. It validates the physical story snapshots and every selected
+paragraph without building optional owner read facts or projection caches.
+Eligible plain paragraph pieces reuse the native checked direct-fragment
+producer, including its resource validation, namespace writer and paragraph
+parse. Unproved pieces retain the full owner-facts fallback.
+Dormant state has absent snapshot/removal scopes, empty
 owners/indexes and no pieces or pending pieces. Paragraph/table collections,
 section handles, pictures, stories, furniture variants, hyperlinks, revisions,
 comments and story items activate under an exclusive document borrow. Existing

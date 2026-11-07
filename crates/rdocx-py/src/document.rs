@@ -5347,6 +5347,13 @@ fn word_block_owners(
     document: &rdocx::Document,
     block: &rdocx_oxml::BodyContent,
 ) -> rdocx::Result<Option<WordBlockOwners>> {
+    if let rdocx_oxml::BodyContent::Paragraph(paragraph) = block
+        && let Ok(Some((text, runs))) = document.direct_body_paragraph_facts(paragraph)
+    {
+        let context = document.body_item_context();
+        let story = rdocx::StoryId::new(rdocx::StoryKind::Body, context.part_name(), 0);
+        return Ok(Some(plain_paragraph_owners(&story, &text, &runs)));
+    }
     let rdocx::BodyItemOwners {
         snapshots,
         cells,
@@ -12286,8 +12293,14 @@ impl PyDocument {
     }
 
     fn from_document(inner: rdocx::Document, py: Python<'_>) -> PyResult<Self> {
-        // Keep all eager fallible checks, without retaining dormant facts.
-        drop(validate_word_facts(&inner, py)?);
+        // Keep all eager fallible checks, without building dormant read facts.
+        let (_, _, paragraphs, _) = inner
+            .story_owner_snapshots()
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        for (_, xml) in paragraphs {
+            rdocx_oxml::CT_P::from_xml_fragment(&xml)
+                .map_err(|error| rdocx_to_pyerr(py, error.into()))?;
+        }
         Ok(Self {
             inner,
             revisions: RevisionCounter::new(),
@@ -19267,8 +19280,14 @@ fn fx268_case_equivalent_story_parts_use_the_full_inventory() {
             }
             let expected = word_owner_locations(&inner, None).unwrap();
             word_whole_body_work();
-            let mut document = PyDocument::from_document(inner.clone_for_staging(), py).unwrap();
+            drop(validate_word_facts(&inner, py).unwrap());
             assert_eq!(word_whole_body_work().0 > 0, duplicate, "target={target}");
+            let mut document = PyDocument::from_document(inner.clone_for_staging(), py).unwrap();
+            assert_eq!(
+                word_whole_body_work().0,
+                0,
+                "no dormant inventory, target={target}"
+            );
             document.ensure_word_authority(py).unwrap();
             assert_eq!(document.owners.len(), expected.len());
             for (owner, expected) in document.owners.iter().zip(expected) {
@@ -20379,9 +20398,119 @@ fn fx283_dormant_activation_preserves_serial_and_all_factory_ingresses() {
 }
 
 #[test]
+fn fx283_plain_piece_facts_match_full_owner_source() {
+    Python::initialize();
+    Python::attach(|py| -> PyResult<()> {
+        for content in [
+            "<w:p><w:r><w:t>plain</w:t></w:r></w:p>",
+            "<w:p><w:r><w:rPr><w:rFonts w:ascii='Arial'/><w:b w:val='0'/><w:color w:val='000000'/><w:sz w:val='20'/></w:rPr><w:t xml:space='preserve'>rich </w:t></w:r></w:p>",
+            "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' xmlns:w='urn:opaque'><q:r><q:rPr><q:b/></q:rPr><q:t>alias</q:t></q:r></q:p>",
+            "<w:p><w:pPr><w:keepNext/><x:opaque xmlns:x='urn:producer'/></w:pPr><w:r><w:t>property raw</w:t></w:r></w:p>",
+            "<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>control fallback</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+        ] {
+            let document = fx283_native_xml(py, content);
+            for block in document.body_children() {
+                let original = document.body_item_owners(block).unwrap();
+                let relationships = link_relationships(&original.links);
+                let expected = word_owner_facts(
+                    (original.snapshots, original.cells, original.paragraphs, original.links),
+                    |snapshot| word_table_facts(snapshot.xml()),
+                ).unwrap().unwrap();
+                let actual = word_block_owners(&document, block).unwrap().unwrap();
+                assert_eq!(actual.relationships, relationships);
+                assert_eq!(actual.cell_stories, original.cell_stories);
+                assert_eq!(actual.text_boxes, original.text_boxes);
+                assert_eq!(actual.paragraphs, original.paragraph_routes);
+                assert_eq!(actual.tables, original.tables);
+                assert_eq!(actual.cell_paragraphs, original.cell_paragraphs);
+                assert_eq!(actual.holds_field, original.holds_field);
+                let addresses = |facts| word_piece_owner_addresses(facts, document.section_count())
+                    .iter().map(body_unfingerprinted_address).collect::<Vec<_>>();
+                assert_eq!(addresses(actual.facts), addresses(expected), "{content}");
+            }
+        }
+        let document = fx283_native_xml(py, "<w:p><w:r><w:t>selected</w:t></w:r></w:p>");
+        rdocx::take_direct_fragment_bytes();
+        assert!(word_block_owners(&document, &document.body_children()[0]).unwrap().is_some());
+        assert!(rdocx::take_direct_fragment_bytes() > 0, "existing checked direct-fragment producer was selected");
+        // Caller-assembled invalid text is compared with the full actual source
+        // route, rather than using model shape as a successful writer proof.
+        let mut paragraph = rdocx_oxml::CT_P::new();
+        paragraph.add_run("invalid\0text");
+        let block = rdocx_oxml::BodyContent::Paragraph(Box::new(paragraph));
+        let original = document.body_item_owners(&block).map(|_| ());
+        let actual = word_block_owners(&document, &block).map(|_| ());
+        assert_eq!(actual.err().map(|error| error.to_string()), original.err().map(|error| error.to_string()));
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn fx283_open_retains_missing_link_error_and_unbound_link_removal_activates() {
     Python::initialize();
     Python::attach(|py| -> PyResult<()> {
+        for content in [
+            "<w:p><w:r><w:t>plain</w:t></w:r></w:p>",
+            "<w:tbl><w:tblPr/><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tr><w:tc><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl>",
+            "<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+            "<w:p><w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r></w:p>",
+            "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' xmlns:w='urn:opaque'><q:r><q:t>alias</q:t></q:r><w:producerOnly/></q:p>",
+            "<w:p><w:hyperlink w:anchor='inside'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
+            "<w:p><w:hyperlink r:id='missing'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
+        ] {
+            let native = fx283_native_xml(py, content);
+            let legacy_error = validate_word_facts(&native, py)
+                .err()
+                .map(|error| error.to_string());
+            let eager_error = PyDocument::from_document(native.clone_for_staging(), py)
+                .err()
+                .map(|error| error.to_string());
+            assert_eq!(eager_error, legacy_error, "{content}");
+        }
+        for target in ["header1.xml", "Header1.xml"] {
+            let native = fx268_piece_context_input(py, Some(target));
+            let legacy_error = validate_word_facts(&native, py)
+                .err()
+                .map(|error| error.to_string());
+            let eager_error = PyDocument::from_document(native.clone_for_staging(), py)
+                .err()
+                .map(|error| error.to_string());
+            assert_eq!(eager_error, legacy_error, "target={target}");
+        }
+        // The native opener retains the related part. The binding must still
+        // refuse its malformed selected paragraph before first activation.
+        let mut header = fx268_piece_context_input(py, Some("header1.xml"));
+        let scope = PyDict::new(py);
+        scope.set_item("seed", PyBytes::new(py, &header.to_bytes().unwrap()))?;
+        py.run(
+            c"import io, zipfile\nsource=zipfile.ZipFile(io.BytesIO(seed))\noutput=io.BytesIO()\nwith zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:\n    for name in source.namelist():\n        data=source.read(name)\n        if name=='word/header1.xml':\n            data=data.replace(b'<w:r>',b'<w:r><w:rPr><w:sz w:val=\"bad\"/></w:rPr>',1)\n        archive.writestr(name,data)\nresult=output.getvalue()",
+            Some(&scope),
+            Some(&scope),
+        )?;
+        let malformed = rdocx::Document::from_bytes(
+            &scope.get_item("result")?.unwrap().extract::<Vec<u8>>()?,
+        ).unwrap();
+        let legacy_error = validate_word_facts(&malformed, py)
+            .err()
+            .map(|error| error.to_string());
+        let eager_error = PyDocument::from_document(malformed, py)
+            .err()
+            .map(|error| error.to_string());
+        assert!(legacy_error.is_some(), "malformed related paragraph must be selected");
+        assert_eq!(eager_error, legacy_error);
+        let native = fx283_native_xml(
+            py,
+            "<w:tbl><w:tblPr/><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        );
+        #[cfg(debug_assertions)]
+        word_piece_work();
+        let dormant = PyDocument::from_document(native, py)?;
+        #[cfg(debug_assertions)]
+        assert_eq!(word_piece_work(), 0);
+        assert!(dormant.owners.is_empty());
+        assert!(dormant.pieces.is_none());
+        assert!(dormant.pending_pieces.is_none());
+        assert!(dormant.snapshot_scope.is_none());
         let missing = fx283_native_xml(
             py,
             "<w:p><w:hyperlink r:id='missing'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
