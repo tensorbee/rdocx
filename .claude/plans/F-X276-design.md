@@ -499,3 +499,38 @@ The preparation turn re-hashed the files below. The ten hashes carried since V1 
 | `docs/hld/10-bindings-spec.md` | `c09cf197a66315737897aa597361ff2d32dfa1a109d8db67930924e985410ade` |
 
 `git apply` was not re-run. Full Actions logs were not re-downloaded. No test, build, claim, or Git mutation ran in the preparation turn.
+## Current measurement preparation successor, 2026-11-07
+
+The original preparation manifest and recipe-decision bytes remain unavailable.
+Their historical hashes above are retained. The versioned successor manifest
+`b7384e9967a1030878d2b50f6477dcbc105b094df41d630b6bf3a6b45636e3c9`
+is a new reconstruction of the same approved seven-route measurement recipe,
+not recovered original evidence. Actual baseline9a3b and currentH8 Rust worker
+and CLI release builds pass. The baseline Python wheel is built and authenticated.
+The current PPT Python artifact retains its actual4cf producer and the bounded
+unchanged production-source applicability assessment.
+
+Actual untimed preflight found two measurement-tool premise errors. Literal NaN
+is an existing chart-reader refusal, rather than a successful dense projection
+containing a missing numeric cell. The corrected control removes point0 while
+retaining ptCount2 and point1 at1190.5, matching the existing sparse-cache test.
+All21 performance fixtures and the other five controls remain byte-identical.
+The original literal-NaN input and failed preflight remain preserved separately.
+
+The title predicate also confused hidden W2-TITLE-1 with visible W2-TITLE-10.
+The versioned utility now compares complete numbered title identities. Its
+SHA256 is `a44dae8057eb497ed3da2fa26ed421a0e76941ffa8b05846ee1a2b41eaf67047`.
+The accepted table-cell counting rule and its16-cell threshold remain unchanged.
+Actual old-helper RED, corrected valid-input GREEN and leaked-hidden/missing-visible
+negative controls pass. The qualified cmark producer remains unchanged.
+
+The actual successor handoff is
+/private/tmp/rdocx-s96-prepared-integration-readiness/markdown-H8-artifact-successor-20261107/UNTIMED_ALL_READY_HANDOFF.json,
+SHA256 `327e87110bd5fb400f04418f1da1028f844f95e61eccffa3bae6c983b1dfd682`.
+It records84 actual chart controls and426 actual route/profile preflights over
+213 rows, retaining original product exports and revalidating affected captured
+W2 results through the corrected independent helper. Failed attempts remain
+failed. No2130 timing samples have run and quiet admission remains unset.
+The cold/four-warm sampling rule, workloads, publication boundaries, chart
+semantics and uncapped timing/growth report are unchanged. Actual final-source
+applicability, quiet observations and the complete benchmark remain due.

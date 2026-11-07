@@ -1262,3 +1262,39 @@ build-only26payloads, full verification, sprint review and close remain due
 where not actually performed. The named native exception remains unproved.
 No feature completion, dependency unblock, main merge, tag, publication, yank
 or reporter comment is authorized by this checkpoint.
+
+## H9 property namespace source availability renewal
+
+The H8 normal run42346571659 has an actual MSRV failure after419layout cases
+pass. Two older assertions conflate a namespace declaration with its expanded
+name, and a later generic path refusal with the earlier checked invalid
+measurement refusal. Strengthened namespace controls also exposed genuine
+property publication and inherited foreign binding capture defects.
+
+The successor preserves Word identities at generated property roots while
+retaining foreign opaque records at their actual reader. The same tests cover
+empty, default, nonempty, positioned and direct property writers, local
+namespace shadowing, invalid measurement refusal and unchanged caller state.
+The private source-qualified lower library passes1289cases. Actual integrated-source and hash receipts remain bound to their recorded
+producer snapshots. Independent support pass2 closes S1 with zero defects
+and zero smells. The final Root microscope and affected source/metadata checks
+remain explicit prerequisites.
+The empty table-property parser repair retains a qualified self-closing
+property owner at its schema position. The PowerPoint number-format test
+separately proves checked authoring refusal and imported empty-code fallback.
+Both retain their actual prior failures and successor results.
+
+The consumed source availability checkpoint is renewed only for reviewed clean
+canonical sprint source and complete normal CI. Record the actual source,
+tree, origin, ancestry, actor, request, run and outcomes after observation.
+H8 remains failed and its successful categories retain their exact source.
+No earlier native subject, signature, decider, wheel or diagnostic artifact
+is relabeled at the successor. Existing per-feature pending arrays and states
+remain unchanged, with additional affected input debt recorded separately.
+
+Current release and diagnostic artifacts, installed functional and typing
+checks, affected package checks, remaining native, quiet performance and
+memory riders, build-only26payloads, full verification, sprint review and
+close remain due where not actually performed. The named native exception
+remains unproved. No feature completion, dependency unblock, main merge,
+tag, publication, yank or reporter comment is authorized by this checkpoint.
