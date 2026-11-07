@@ -820,3 +820,36 @@ memory riders, build-only26payloads, full verification, sprint review and
 close remain due where not actually performed. The named native exception
 remains unproved. No feature completion, dependency unblock, main merge,
 tag, publication, yank or reporter comment is authorized by this checkpoint.
+
+## Reviewed H11 source availability preparation
+
+The H10 normal CI run42358850520 is terminal with21successful jobs,
+three failed jobs and two optional skips. Its complete Test job passed,
+including workspace, animation and golden checks. Docs failed the stale
+PowerPoint archive tuple. Word Python recorded1439passes, two failures
+and two skips from obsolete eager-inventory phase assertions. The CI
+decider failed accordingly. Those failures remain recorded against H10.
+
+The successor carries separately reviewed F268 cold-owner, reply-parent,
+picture-preparation and current-selector repairs. Independent support and
+Root final reviews are retained for each increment. The two Python phase
+assertion corrections passed all three actual cases with zero skips on a
+fresh authenticated H10 debug wheel. This does not qualify the newer
+shipping artifact or a hosted successor run.
+
+Only the affected rdocx and rpptx package records were refreshed from actual
+archives. The recorded tuples are4475293/56239208/37 and799413/4246845/16
+for compressed bytes, normalized member bytes and members. Actual
+post-adoption packaging and eight focused README policy cases passed.
+Member bytes and counts match exactly. Compression deltas are0and10bytes,
+within the unchanged64byte tolerance. The other20package records and all
+speed measurements remain unchanged. Tests are package inputs.
+
+The source availability renewal still requires a clean reviewed canonical
+SHA and actual authenticated normal CI dispatch. No earlier native subject,
+signature or decider is relabeled. Fresh ordinary performance measurements,
+affected installed and diagnostic artifacts, native layout comparisons,
+memory riders, complete union verification and final sprint review remain
+pending. Newly observed native anchor and exact-line baseline comparisons
+are unresolved, with original failures and source provenance retained.
+No feature state, pending array, delivery ledger or review cap is reset.
