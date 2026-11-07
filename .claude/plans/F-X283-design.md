@@ -1161,3 +1161,43 @@ normal CI, fresh Word release wheel, remaining full/risk/native/performance
 acceptance, verified publish dry run and build-only26payload rehearsal remain
 due. No completion ledger, dependency unblock, main merge, tag, reporter
 comment, yank or publication is authorized by this source checkpoint.
+
+
+## H6 reviewed source availability renewal, 2026-11-07
+
+The successor to a5765aa0 repairs the actual70H5 integration failures. The
+source-stable host batch passes73regressions, including all70original cases,
+plus18Native controls and18lower semantic and normalization controls. Root
+final repair passes3and4 and the retained bounded independent reviews record their actual
+scope and source. Full workspace Clippy and Rustdoc actually pass, with warnings
+denied for Clippy. The explicit F272 amendment adds one doc-hidden lower current
+bookmark projection accessor in the prepared minor. HLD04 states its current
+versus preserved-source distinction. Actual four-package archive measurements and post-adoption checks pass. A later
+rdocx-only cache repair has a genuine measured successor and a pending
+post-adoption check before push.
+
+The canonical orchestrator renews only the previously consumed source-
+availability checkpoint. Actual clean sprint ref, source SHA, workflow bytes,
+remote ancestry, local evidence and normal CI request/run identities are
+recorded after observation in the existing S96run state and progress. Both
+optional CI flags remain false. Only the reviewed sprint ref may be pushed
+without force. Historical consumed integration a13b1292 remains a historical
+fact, not current source qualification or a fabricated new worker handoff.
+
+H5CI42322974698 remains failed at Test, MSRV and CI gate. Its successful jobs
+are not a green current-source CI run. The initial H6policy run retained7actual
+environment errors. The four affected policy methods actually pass under the required normal
+process and download access. An initial hash failure exposed three redundant
+nested namespace declarations after authored style publication. The private
+cache now retains an actual emitted-model witness separately from its genuine
+parsed source proof. All16focused style controls pass, and all49hashes match
+the unchanged baseline. Full workspace Clippy and Rustdoc pass again on that
+actual source. The exact original failed receipts remain. Fresh-document cache
+parsing is actual counted work, not a model clone labeled as a parse.
+
+Current-source normal CI, fresh installed Word artifact and full functional
+qualification, remaining complete/risk/native/performance acceptance, exact
+source-diagnostic applicability, verified publish dry run and the subsequent
+build-only26payload rehearsal remain due. The permanent named native exception
+remains unproved. No completion ledger, dependency unblock, main merge, tag,
+reporter comment, yank or publication is authorized by this source checkpoint.

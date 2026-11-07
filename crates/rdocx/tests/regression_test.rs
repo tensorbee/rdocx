@@ -3453,7 +3453,20 @@ fn f255_install_producer_story_drawing(
         &format!(r#"{root_start} xmlns:r="urn:producer-r" r:kept="exact""#),
         1,
     );
-    let updated = source.replacen(story_close, &producer, 1).replacen(
+    let updated = if part_name == "/word/comments.xml" {
+        let comment = document.comments()[0].id();
+        let body_start = f276_word_owner_body_range(&source, b"comment", comment).start;
+        let contents = producer.strip_suffix(story_close).unwrap();
+        format!(
+            "{}{}{}",
+            &source[..body_start],
+            contents,
+            &source[body_start..]
+        )
+    } else {
+        source.replacen(story_close, &producer, 1)
+    }
+    .replacen(
         root_close,
         &format!(r#"<x:rootChild xmlns:x="urn:f255" x:kept="exact"/>{root_close}"#),
         1,
@@ -4343,7 +4356,7 @@ fn related_footnote_insertion_survives_later_typed_mutation() {
     assert!(
         footnotes
             .iter()
-            .any(|(id, text)| *id == added_id && text == "later typed footnote"),
+            .any(|(id, text)| *id == added_id && text == " later typed footnote"),
         "added {added_id}, footnotes {footnotes:?}"
     );
 
@@ -4574,7 +4587,7 @@ fn typed_footnote_flush_preserves_canonical_story_history() {
             reopened
                 .footnotes()
                 .iter()
-                .any(|(_, text)| text == "later typed footnote")
+                .any(|(_, text)| text == " later typed footnote")
         );
         assert_eq!(reopened.to_bytes().unwrap(), bytes);
         bytes
@@ -4585,8 +4598,54 @@ fn typed_footnote_flush_preserves_canonical_story_history() {
 
 #[test]
 fn typed_comment_flush_preserves_canonical_story_history() {
+    fn identity_view(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        let comments = rdocx_oxml::comments::CT_Comments::from_xml(
+            package.get_part("/word/comments.xml").unwrap(),
+        )
+        .unwrap();
+        let ids = comments
+            .comments
+            .iter()
+            .flat_map(|comment| &comment.paragraph_ids)
+            .filter_map(Option::as_ref)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            ids.len()
+        );
+        let mut parts = package
+            .parts
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.as_ref().clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (part, attributes) in [
+            ("/word/comments.xml", &["w14:paraId"][..]),
+            (
+                "/word/commentsExtended.xml",
+                &["w15:paraId", "w15:paraIdParent"][..],
+            ),
+        ] {
+            let mut xml = String::from_utf8(parts[part].clone()).unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                for attribute in attributes {
+                    xml = xml.replace(
+                        &format!(r#" {attribute}="{id}""#),
+                        &format!(r#" {attribute}="@physical-paragraph-{index}@""#),
+                    );
+                }
+            }
+            parts.insert(part.to_owned(), xml.into_bytes());
+        }
+        parts
+    }
+
     fn build(reorder: bool) -> Vec<u8> {
         let mut document = f255_producer_comment_drawing_document();
+        let original = rdocx_oxml::comments::CT_Comments::from_xml(
+            document.part_xml("/word/comments.xml").unwrap().as_bytes(),
+        )
+        .unwrap();
         let images: [(&[u8], &str); 2] = if reorder {
             [
                 (&f_x204_picture_fixture(b"image A")[..], "a.png"),
@@ -4617,6 +4676,23 @@ fn typed_comment_flush_preserves_canonical_story_history() {
             .unwrap();
 
         let bytes = document.to_bytes().unwrap();
+        let saved = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+        let current = rdocx_oxml::comments::CT_Comments::from_xml(
+            saved.get_part("/word/comments.xml").unwrap(),
+        )
+        .unwrap();
+        for old in &original.comments {
+            let owner = current
+                .comments
+                .iter()
+                .find(|comment| comment.id == old.id)
+                .unwrap();
+            assert_eq!(
+                &owner.paragraph_ids[..old.paragraph_ids.len()],
+                old.paragraph_ids.as_slice(),
+                "preexisting paragraph identities must survive both histories exactly"
+            );
+        }
         assert_eq!(document.to_bytes().unwrap(), bytes);
         f255_assert_canonical_producer_story(&bytes, "/word/comments.xml");
         assert_eq!(
@@ -4645,7 +4721,10 @@ fn typed_comment_flush_preserves_canonical_story_history() {
         bytes
     }
 
-    assert_eq!(build(true), build(false));
+    // Newly authored paragraph IDs follow their owners through a move. Compare
+    // those identities by physical owner order, keeping every other package
+    // byte and the actual ownership/reopen assertions above unchanged.
+    assert_eq!(identity_view(&build(true)), identity_view(&build(false)));
 }
 
 #[test]
@@ -4730,7 +4809,7 @@ fn existing_footnote_field_update_survives_a_prior_typed_addition() {
         reopened
             .footnotes()
             .iter()
-            .any(|(_, text)| text == "later typed footnote")
+            .any(|(_, text)| text == " later typed footnote")
     );
     assert_eq!(reopened.to_bytes().unwrap(), bytes);
 }
@@ -5813,7 +5892,7 @@ fn package_backed_footnote_content_operation_survives_dirty_staging() {
         .unwrap();
 
     let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
-    assert_eq!(reopened.footnotes()[0].1, "first\nsecond");
+    assert_eq!(reopened.footnotes()[0].1, " first\nsecond");
 }
 
 #[test]
@@ -6975,7 +7054,7 @@ fn complex_field_story_snapshots_preserve_cached_text() {
 }
 
 #[test]
-fn complex_field_internal_hyperlink_boundary_remains_opaque() {
+fn complex_field_internal_hyperlink_boundary_keeps_its_own_relationship() {
     let body = concat!(
         r#"<w:p><w:hyperlink r:id="rIdShared"><w:r><w:t>before</w:t></w:r></w:hyperlink>"#,
         r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
@@ -6994,12 +7073,15 @@ fn complex_field_internal_hyperlink_boundary_remains_opaque() {
     let mut document = hyperlink_story_document(body, None);
     let before = document.to_bytes().unwrap();
     let story = f254_story(&document, StoryKind::Body);
-    assert!(
+    assert_eq!(
         document
             .story_items(&story)
             .unwrap()
             .iter()
-            .all(|item| item.kind() != StoryItemKind::Field)
+            .filter(|item| item.kind() == StoryItemKind::Field)
+            .map(|item| item.text().unwrap().unwrap())
+            .collect::<Vec<_>>(),
+        ["Page 7", "7"]
     );
     let links = document.story_links(&story).unwrap();
     assert_eq!(
@@ -22794,7 +22876,7 @@ mod replacement_reaches_content_controls {
     /// A table that declares a namespace on its start tag came back from a
     /// replacement in a header or a text box without the declaration, so
     /// the saved part used an unbound prefix. A table that declares it on a
-    /// cell cannot be rewritten, so it keeps its bytes and counts nothing.
+    /// cell carries that declaration through the same qualified rewrite.
     #[test]
     fn a_rewritten_table_keeps_the_namespaces_it_declares() {
         use quick_xml::events::Event as XmlEvent;
@@ -22815,8 +22897,8 @@ mod replacement_reaches_content_controls {
             r#"<w:document xmlns:w="{W_NS}" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><w:pict><v:shape><v:textbox><w:txbxContent>{tables}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p></w:body></w:document>"#
         ));
 
-        assert_eq!(header.try_replace_text("{{x}}", "Y").unwrap(), 1);
-        assert_eq!(text_box.try_replace_text("{{x}}", "Y").unwrap(), 1);
+        assert_eq!(header.try_replace_text("{{x}}", "Y").unwrap(), 2);
+        assert_eq!(text_box.try_replace_text("{{x}}", "Y").unwrap(), 2);
 
         for xml in [
             super::header_story_xml(&mut header),
@@ -22840,7 +22922,9 @@ mod replacement_reaches_content_controls {
                 }
             }
             assert!(xml.contains(">table Y<"), "{xml}");
-            assert!(xml.contains(&on_cell), "{xml}");
+            assert!(xml.contains(">cell Y<"), "{xml}");
+            assert!(!xml.contains("{{x}}"), "{xml}");
+            assert_eq!(xml.matches("w14:paraId=\"0000ABCD\"").count(), 2, "{xml}");
         }
     }
 
@@ -23201,7 +23285,14 @@ mod replacement_reaches_notes_and_tracked_insertions {
             let left = usize::from(*part == DOCUMENT);
             assert_eq!(xml.matches("{{name}}").count(), left, "{part}: {xml}");
         }
-        assert_eq!(parts[FOOTNOTES], notes("footnote", "Footnote Ada."));
+        // Template publication closes the rewritten paragraph's inherited
+        // namespace scope. The root, special notes and payload stay exact.
+        let expected = notes("footnote", "Footnote Ada.").replacen(
+            r#"<w:footnote w:id="1"><w:p>"#,
+            &format!(r#"<w:footnote w:id="1"><w:p xmlns="" xmlns:w="{W_NS}">"#),
+            1,
+        );
+        assert_eq!(parts[FOOTNOTES], expected);
         assert!(parts[DOCUMENT].contains(">del {{name}}</w:delText>"));
     }
 
@@ -29820,7 +29911,7 @@ fn related_story_formatting_diagnostics_retain_deterministic_story_locations() {
         (
             "/word/footnotes.xml",
             "<w:r><w:footnoteRef/>",
-            "footnotes:/word/footnotes.xml/footnote[2]/paragraph[0]/run[0]",
+            "footnotes:/word/footnotes.xml/footnote-id[1]/paragraph[0]/run[0]",
         ),
         (
             "/word/endnotes.xml",
@@ -30931,8 +31022,12 @@ fn empty_paragraph_uses_resolved_default_metrics() {
             &mut diagnostics,
         )
         .expect("metric paragraph lays out");
-        let oxml_layout::LineItem::Text(segment) = &block.lines[0].items[0] else {
-            panic!("empty paragraph carrier");
+        let segment = match &block.lines[0].items[0] {
+            oxml_layout::LineItem::Text(segment) => segment,
+            oxml_layout::LineItem::MultilingualText(segment) if segment.uses_legacy_shaping() => {
+                segment.base()
+            }
+            _ => panic!("empty paragraph carrier"),
         };
         assert_eq!(segment.width, 0.0);
         let resolved = font_manager
@@ -34929,7 +35024,10 @@ fn ignored_whitespace_preserves_source_whitespace_without_hiding_structural_cont
         )
         .unwrap();
     let xml = document_xml(&mut tracked);
-    assert!(xml.contains(">  </w:t>"), "{xml}");
+    let parsed = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    let visible = parsed.body.paragraphs().next().unwrap().accepted_text();
+    assert!(visible.starts_with("a  b"), "{visible:?}: {xml}");
+    assert!(!visible.starts_with("a b"), "{visible:?}: {xml}");
     assert!(xml.contains("<w:tab"), "{xml}");
     assert!(xml.contains("<w:br"), "{xml}");
 }
@@ -39039,22 +39137,22 @@ fn word_embedded_forbidden_literal_xml_characters_fail_closed_atomically() {
             package
         }),
     ] {
-        let mut document =
-            Document::from_bytes(&f236_package_bytes_with_producer_literals(package)).unwrap();
-        let before = document.to_bytes().unwrap();
-        assert!(document.embedded_content().is_err(), "{label}");
+        let bytes = f236_package_bytes_with_producer_literals(package);
+        let error = Document::from_bytes(&bytes)
+            .err()
+            .expect("forbidden XML must refuse at open");
+        let expected_part = if label.starts_with("ActiveX") {
+            "/word/activeX/activeX1.xml"
+        } else {
+            "/word/forbidden-literal.xml"
+        };
+        let expected_code = if label.contains("FFFE") { 0xFFFE } else { 1 };
         assert!(
-            document
-                .replace_embedded_content(
-                    "/word/document.xml",
-                    "ole-rel",
-                    b"must-not-land",
-                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
-                )
-                .is_err(),
-            "{label}"
+            matches!(error, rdocx::Error::Opc(
+            oxml_opc::OpcError::InvalidXmlCharacter { ref part, code_point, .. }
+        ) if part == expected_part && code_point == expected_code),
+            "{label}: {error}"
         );
-        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
     }
 }
 
@@ -39771,15 +39869,29 @@ fn imported_and_preserved_collisions_fail_before_mutation() {
 
     let mut package = f249_package(&bytes);
     let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
-    let collided = xml.replacen(
-        r#"<w:bookmarkStart w:id="1""#,
-        r#"<w:bookmarkStart w:id="0""#,
-        1,
-    );
+    let collided = xml
+        .replacen(
+            r#"<w:bookmarkStart w:id="1""#,
+            r#"<w:bookmarkStart w:id="0""#,
+            1,
+        )
+        .replacen(
+            r#"<w:bookmarkEnd w:id="1""#,
+            r#"<w:bookmarkEnd w:id="0""#,
+            1,
+        );
     assert_ne!(xml, collided, "second bookmark id must be present");
     package.set_part("/word/document.xml", collided.into_bytes());
-    let error = f249_open_error("bookmark", package);
-    assert!(error.contains("duplicate bookmark id 0"), "{error}");
+    // Existing producer bookmark ID collisions are preserved, not refused at open.
+    let expected = package.get_part("/word/document.xml").unwrap().to_vec();
+    let mut input = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut input).unwrap();
+    let mut opened = Document::from_bytes(input.get_ref()).unwrap();
+    let saved = f249_package(&opened.to_bytes().unwrap());
+    assert_eq!(
+        saved.get_part("/word/document.xml"),
+        Some(expected.as_slice())
+    );
 
     let mut package = f249_package(&bytes);
     let xml = String::from_utf8(package.get_part("/word/comments.xml").unwrap().to_vec()).unwrap();
@@ -41497,10 +41609,16 @@ mod compare_producer_noise {
         for (cached, deleted) in [(true, "<w:r><w:delText>1</w:delText></w:r>"), (false, "")] {
             let split = refreshed_field_comparison(false, cached);
             let packed = refreshed_field_comparison(true, cached);
+            let deletion = if cached {
+                format!(r#"<w:del w:id="0" w:author="R" w:date="{TIMESTAMP}">{deleted}</w:del>"#)
+            } else {
+                String::new()
+            };
+            let insertion_id = usize::from(cached);
             assert_eq!(
                 result_and_end(&split),
                 format!(
-                    r#"{separate}<w:del w:id="0" w:author="R" w:date="{TIMESTAMP}">{deleted}</w:del><w:ins w:id="1" w:author="R" w:date="{TIMESTAMP}"><w:r><w:t>2</w:t></w:r></w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>"#
+                    r#"{separate}{deletion}<w:ins w:id="{insertion_id}" w:author="R" w:date="{TIMESTAMP}"><w:r><w:t>2</w:t></w:r></w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>"#
                 ),
                 "cached={cached}"
             );
@@ -41588,8 +41706,28 @@ mod compare_producer_noise {
         };
         let rdocx_order =
             r#"w:author="Ada" w:date="2026-09-04T09:00:00Z" w:initials="AL" w:id="0""#;
-        let footnotes = format!(
+        let rewritten_specials = format!(
             r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="-1" w:type="separator"><w:p xmlns:w="{W_NS}"><w:r><w:separator /></w:r></w:p></w:footnote><w:footnote w:id="0" w:type="continuationSeparator"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/><w:t xml:space="preserve"> same footnote</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+        );
+        // F272a retains special and unowned note records exactly. Unlike
+        // ordinary story-shell spelling, rewriting a special is unsupported.
+        let mut unchanged = document_with_comparison_stories("same");
+        let before = unchanged.to_bytes().unwrap();
+        let changed = with_part(
+            document_with_comparison_stories("same"),
+            "/word/footnotes.xml",
+            &rewritten_specials,
+        );
+        assert!(
+            unchanged
+                .compare(&changed, "R", TIMESTAMP)
+                .unwrap_err()
+                .to_string()
+                .contains("footnotes retained root/special/opaque shell changed")
+        );
+        assert_eq!(unchanged.to_bytes().unwrap(), before);
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/><w:t xml:space="preserve"> same footnote</w:t></w:r></w:p></w:footnote></w:footnotes>"#
         );
         let header = format!(
             r#"<w:hdr xmlns:r="{RELATIONSHIPS}" xmlns:w="{W_NS}"><w:p><w:r><w:t>edited header</w:t></w:r></w:p></w:hdr>"#
@@ -43516,13 +43654,23 @@ mod advanced_table_geometry_regressions {
         properties.layout = None;
         properties.width = Some(CT_TblWidth::auto());
 
-        let untouched = lay_out(&table, 468.0);
+        // These intrinsic-width pins use the explicit legacy kerning-on fixture.
+        let mut styles = CT_Styles::new_default();
+        styles
+            .doc_defaults
+            .as_mut()
+            .unwrap()
+            .rpr
+            .as_mut()
+            .unwrap()
+            .kern = Some(rdocx_oxml::units::HalfPoint(0));
+        let untouched = lay_out_with(&table, &styles, 468.0);
         assert_eq!(untouched.col_widths, vec![72.0, 360.0]);
 
         // Declaring the layout mode autofit opts the same table in, which is
         // the positive arm of the same predicate.
         table.properties.as_mut().expect("table properties").layout = Some("autofit".to_owned());
-        let autofitted = lay_out(&table, 468.0);
+        let autofitted = lay_out_with(&table, &styles, 468.0);
         let rounded = autofitted
             .col_widths
             .iter()
@@ -44324,9 +44472,10 @@ mod floating_table_placement_regressions {
 
     fn prose(document: &mut Document, from: usize, to: usize) {
         for index in from..to {
-            document.add_paragraph(&format!(
+            let mut paragraph = document.add_paragraph(&format!(
                 "Body line {index:02} with enough words to wrap across the measure of the page and show the reservation."
             ));
+            paragraph.run_mut(0).unwrap().set_kern_value(Some(0.0));
         }
     }
 
@@ -48659,7 +48808,7 @@ fn footnote_removal_clears_references_atomically() {
     let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
     assert!(!body.contains(&format!("footnoteReference w:id=\"{first}\"")));
     assert!(body.contains(&format!("footnoteReference w:id=\"{second}\"")));
-    assert_eq!(document.footnotes(), vec![(second, "second".to_owned())]);
+    assert_eq!(document.footnotes(), vec![(second, " second".to_owned())]);
 }
 
 #[test]
@@ -49166,7 +49315,7 @@ fn f276_complete_dependency_source() -> Document {
         .set_style(StyleBuilder::paragraph("CycleStyle", "Cycle Style").next_style("FragmentStyle"))
         .unwrap();
     let body = f254_story(&source, StoryKind::Body);
-    source
+    let note_id = source
         .create_footnote(&f254_item(&source, &body, 1), "combined footnote")
         .unwrap();
     let body = f254_story(&source, StoryKind::Body);
@@ -49184,9 +49333,9 @@ fn f276_complete_dependency_source() -> Document {
         );
     package.set_part("/word/styles.xml", styles.into_bytes());
     let binding = r#"<w:sdt><w:sdtPr><w:dataBinding w:storeItemID="{11111111-1111-1111-1111-111111111111}" w:xpath="/root"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>combined binding</w:t></w:r></w:p></w:sdtContent></w:sdt>"#;
-    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap())
-        .unwrap()
-        .replacen("</w:footnote>", &format!("{binding}</w:footnote>"), 1);
+    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap();
+    let owner = f276_word_owner_body_range(notes, b"footnote", note_id);
+    let notes = format!("{}{binding}{}", &notes[..owner.end], &notes[owner.end..]);
     package.set_part("/word/footnotes.xml", notes.into_bytes());
     package.set_part(
         "/customXml/item276.xml",
@@ -49765,10 +49914,19 @@ fn fragment_import_remaps_nested_note_references_and_companion_bindings() {
     let comment = source
         .add_comment(range, "Note reviewer", None, "companion comment")
         .unwrap();
-    source
+    let reply = source
         .reply_to(comment, "Reply", "companion reply")
         .unwrap();
     let list = source.add_list_definition(&[ListLevel::decimal()]);
+    let note_story = source.footnote_story(first).unwrap().unwrap();
+    let note_paragraph = f254_item(&source, &note_story, 0);
+    source
+        .edit_story_paragraph(&note_paragraph, |paragraph| {
+            paragraph.set_style("NoteOnly");
+            assert!(paragraph.set_numbering(list, 0));
+            Ok(())
+        })
+        .unwrap();
     let mut package =
         oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(source.to_bytes().unwrap()))
             .unwrap();
@@ -49782,13 +49940,16 @@ fn fragment_import_remaps_nested_note_references_and_companion_bindings() {
         "abcdefab-abcd-abcd-abcd-abcdefabcdef",
     );
     let anchors = format!(
-        "<w:commentRangeStart w:id=\"{comment}\"/><w:r><w:t>commented note</w:t></w:r><w:commentRangeEnd w:id=\"{comment}\"/><w:r><w:commentReference w:id=\"{comment}\"/></w:r>"
+        "<w:commentRangeStart w:id=\"{comment}\"/><w:commentRangeStart w:id=\"{reply}\"/><w:r><w:t>commented note</w:t></w:r><w:commentRangeEnd w:id=\"{comment}\"/><w:r><w:commentReference w:id=\"{comment}\"/></w:r><w:commentRangeEnd w:id=\"{reply}\"/><w:r><w:commentReference w:id=\"{reply}\"/></w:r>"
     );
     let marker = r#"<w:p><w:bookmarkStart w:id="90" w:name="NoteMark"/><w:permStart w:id="91" w:edGrp="everyone"/><w:ins w:id="92" w:author="Ada"><w:r><w:t>note revision</w:t></w:r></w:ins><w:permEnd w:id="91"/><w:bookmarkEnd w:id="90"/></w:p>"#;
     let body_xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap()
         .replace(&format!("<w:commentRangeStart w:id=\"{comment}\"/>"), "")
         .replace(&format!("<w:commentRangeEnd w:id=\"{comment}\"/>"), "")
         .replace(&format!("<w:commentReference w:id=\"{comment}\"/>"), "")
+        .replace(&format!("<w:commentRangeStart w:id=\"{reply}\"/>"), "")
+        .replace(&format!("<w:commentRangeEnd w:id=\"{reply}\"/>"), "")
+        .replace(&format!("<w:commentReference w:id=\"{reply}\"/>"), "")
         .replacen("</w:p>", "<w:fldSimple w:instr=\"REF NoteMark\"><w:r><w:t>note ref</w:t></w:r></w:fldSimple></w:p>", 1);
     let body_xml = body_xml.replacen("<w:sectPr", &format!("{root_binding}<w:sectPr"), 1);
     package.set_part("/word/document.xml", body_xml.into_bytes());
@@ -49796,18 +49957,18 @@ fn fragment_import_remaps_nested_note_references_and_companion_bindings() {
         .unwrap()
         .replacen("</w:comment>", &format!("{comment_binding}</w:comment>"), 1);
     package.set_part("/word/comments.xml", comments.into_bytes());
-    let footnotes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap()
-        .replacen("<w:p>", &format!("<w:p><w:pPr><w:pStyle w:val=\"NoteOnly\"/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"{list}\"/></w:numPr></w:pPr>"), 1)
-        .replacen("</w:footnote>", &format!("<w:p><w:r><w:footnoteReference w:id=\"{second}\"/><w:endnoteReference w:id=\"{endnote}\"/></w:r></w:p>{binding}{marker}<w:p>{anchors}</w:p></w:footnote>"), 1);
-    let offset = footnotes.find("second companion").unwrap();
+    let footnotes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap();
+    let first_body = f276_word_owner_body_range(footnotes, b"footnote", first);
     let footnotes = format!(
-        "{}{}",
-        &footnotes[..offset],
-        footnotes[offset..].replacen(
-            "</w:footnote>",
-            &format!("<w:p><w:r><w:footnoteReference w:id=\"{first}\"/></w:r></w:p></w:footnote>"),
-            1
-        )
+        "{}<w:p><w:r><w:footnoteReference w:id=\"{second}\"/><w:endnoteReference w:id=\"{endnote}\"/></w:r></w:p>{binding}{marker}<w:p>{anchors}</w:p>{}",
+        &footnotes[..first_body.end],
+        &footnotes[first_body.end..],
+    );
+    let second_body = f276_word_owner_body_range(&footnotes, b"footnote", second);
+    let footnotes = format!(
+        "{}<w:p><w:r><w:footnoteReference w:id=\"{first}\"/></w:r></w:p>{}",
+        &footnotes[..second_body.end],
+        &footnotes[second_body.end..],
     );
     package.set_part("/word/footnotes.xml", footnotes.into_bytes());
     package.set_part("/customXml/item276.xml", b"<root>value</root>".to_vec());
@@ -50125,6 +50286,69 @@ fn fragment_import_rejects_integrity_bound_reachable_signature_atomically() {
     assert_eq!(destination.to_bytes().unwrap(), before);
 }
 
+// Test-fixture edits select the actual returned normal owner, never a physical
+// first separator or an unrelated occurrence of its payload text.
+fn f276_word_owner_body_range(xml: &str, local: &[u8], id: i32) -> std::ops::Range<usize> {
+    let mut reader = quick_xml::NsReader::from_str(xml);
+    let mut depth = 0usize;
+    let mut selected = None;
+    let mut ranges = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader.read_resolved_event().unwrap();
+        let word = namespace
+            == quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(W_NS.as_bytes()));
+        match event {
+            XmlEvent::Start(element) => {
+                depth += 1;
+                if word && element.local_name().as_ref() == local {
+                    let actual_id =
+                        element
+                            .attributes()
+                            .map(Result::unwrap)
+                            .find_map(|attribute| {
+                                let (namespace, name) =
+                                    reader.resolver().resolve_attribute(attribute.key);
+                                (namespace
+                                    == quick_xml::name::ResolveResult::Bound(
+                                        quick_xml::name::Namespace(W_NS.as_bytes()),
+                                    )
+                                    && name.as_ref() == b"id")
+                                    .then(|| {
+                                        attribute
+                                            .decoded_and_normalized_value(
+                                                quick_xml::XmlVersion::Implicit1_0,
+                                                reader.decoder(),
+                                            )
+                                            .unwrap()
+                                            .parse::<i32>()
+                                            .unwrap()
+                                    })
+                            });
+                    if actual_id == Some(id) {
+                        assert!(selected.is_none());
+                        selected = Some((depth, reader.buffer_position() as usize));
+                    }
+                }
+            }
+            XmlEvent::End(element) => {
+                if let Some((owner_depth, start)) = selected
+                    && owner_depth == depth
+                {
+                    assert!(word && element.local_name().as_ref() == local);
+                    ranges.push(start..before);
+                    selected = None;
+                }
+                depth -= 1;
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+    }
+    assert_eq!(ranges.len(), 1, "one qualified {id} owner required");
+    ranges.pop().unwrap()
+}
+
 #[test]
 fn fragment_import_numbering_maps_do_not_cascade_across_companions() {
     let mut source = Document::new();
@@ -50135,10 +50359,10 @@ fn fragment_import_numbering_maps_do_not_cascade_across_companions() {
     source.add_paragraph("first list").set_numbering(first, 0);
     source.add_paragraph("second list").set_numbering(second, 0);
     let body = f254_story(&source, StoryKind::Body);
-    source
+    let note = source
         .create_footnote(&f254_item(&source, &body, 0), "numbered note")
         .unwrap();
-    source
+    let comment = source
         .add_comment(
             RunRange {
                 start: RunPosition {
@@ -50168,14 +50392,17 @@ fn fragment_import_numbering_maps_do_not_cascade_across_companions() {
     );
     package.set_part("/word/document.xml", xml.into_bytes());
     let numbered = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr><w:r><w:t>first companion list</w:t></w:r></w:p><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr><w:r><w:t>second companion list</w:t></w:r></w:p>"#;
-    for (part, end) in [
-        ("/word/footnotes.xml", "</w:footnote>"),
-        ("/word/comments.xml", "</w:comment>"),
+    for (part, local, id, prepend) in [
+        ("/word/footnotes.xml", b"footnote".as_slice(), note, false),
+        ("/word/comments.xml", b"comment".as_slice(), comment, true),
     ] {
-        let xml = std::str::from_utf8(package.get_part(part).unwrap())
-            .unwrap()
-            .replacen(end, &format!("{numbered}{end}"), 1);
-        package.set_part(part, xml.into_bytes());
+        let xml = std::str::from_utf8(package.get_part(part).unwrap()).unwrap();
+        let body = f276_word_owner_body_range(xml, local, id);
+        // Keep the comment's actual final paraId paragraph last so the existing
+        // commentsExtended row still identifies that physical comment.
+        let at = if prepend { body.start } else { body.end };
+        let updated = format!("{}{numbered}{}", &xml[..at], &xml[at..]);
+        package.set_part(part, updated.into_bytes());
     }
     let mut bytes = std::io::Cursor::new(Vec::new());
     package.write_to(&mut bytes).unwrap();
@@ -50349,7 +50576,7 @@ fn fragment_import_store_allocation_reserves_incoming_companion_identities() {
     let mut source = Document::new();
     source.add_paragraph("source root");
     let body = f254_story(&source, StoryKind::Body);
-    source
+    let note = source
         .create_footnote(&f254_item(&source, &body, 0), "store companion")
         .unwrap();
     let mut package = f249_package(&source.to_bytes().unwrap());
@@ -50361,16 +50588,14 @@ fn fragment_import_store_allocation_reserves_incoming_companion_identities() {
             1,
         );
     package.set_part("/word/document.xml", xml.into_bytes());
-    let xml = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap())
-        .unwrap()
-        .replacen(
-            "</w:footnote>",
-            &format!(
-                "{}</w:footnote>",
-                binding("f2760000-0000-4000-8000-000000000001", "second store")
-            ),
-            1,
-        );
+    let xml = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap();
+    let body = f276_word_owner_body_range(xml, b"footnote", note);
+    let xml = format!(
+        "{}{}{}",
+        &xml[..body.end],
+        binding("f2760000-0000-4000-8000-000000000001", "second store"),
+        &xml[body.end..],
+    );
     package.set_part("/word/footnotes.xml", xml.into_bytes());
     for (ordinal, id) in [(1, original), (2, companion)] {
         let item = format!("/customXml/itemF276{ordinal}.xml");
@@ -50466,7 +50691,7 @@ fn rich_merge_rejects_companion_external_edges_while_fragment_import_preserves_t
     for part in ["/word/comments.xml", "/word/footnotes.xml"] {
         let mut source = Document::new();
         source.add_paragraph("source root");
-        if part == "/word/comments.xml" {
+        let owner_id = if part == "/word/comments.xml" {
             source
                 .add_comment(
                     RunRange {
@@ -50483,19 +50708,32 @@ fn rich_merge_rejects_companion_external_edges_while_fragment_import_preserves_t
                     None,
                     "source comment",
                 )
-                .unwrap();
+                .unwrap()
         } else {
             let body = f254_story(&source, StoryKind::Body);
             source
                 .create_footnote(&f254_item(&source, &body, 0), "source note")
-                .unwrap();
-        }
+                .unwrap()
+        };
         let mut package = f249_package(&source.to_bytes().unwrap());
         let id = package.get_or_create_part_rels(part).add_external(
             oxml_opc::relationship::rel_types::HYPERLINK,
             "https://example.test/companion",
         );
-        let xml = std::str::from_utf8(package.get_part(part).unwrap()).unwrap().replacen("</w:p>", &format!(r#"<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{id}"><w:r><w:t>companion link</w:t></w:r></w:hyperlink></w:p>"#), 1);
+        let xml = std::str::from_utf8(package.get_part(part).unwrap()).unwrap();
+        let local = if part == "/word/comments.xml" {
+            b"comment".as_slice()
+        } else {
+            b"footnote".as_slice()
+        };
+        let body = f276_word_owner_body_range(xml, local, owner_id);
+        let original_body = &xml[body.clone()];
+        let updated_body = original_body.replacen("</w:p>", &format!(r#"<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{id}"><w:r><w:t>companion link</w:t></w:r></w:hyperlink></w:p>"#), 1);
+        assert_ne!(
+            updated_body, original_body,
+            "actual normal owner needs a paragraph"
+        );
+        let xml = format!("{}{}{}", &xml[..body.start], updated_body, &xml[body.end..]);
         package.set_part(part, xml.into_bytes());
         let mut bytes = std::io::Cursor::new(Vec::new());
         package.write_to(&mut bytes).unwrap();
@@ -55352,8 +55590,8 @@ fn ref_note_copy_matches_pinned_word_typed_content() {
     // a separately allocated copied note. It is not a number-string cache.
     let notes = document.footnotes();
     assert_eq!(notes.len(), 2);
-    assert_eq!(notes[0].1, "Source note payload");
-    assert_eq!(notes[1].1, "Source note payload");
+    assert_eq!(notes[0].1, " Source note payload");
+    assert_eq!(notes[1].1, " Source note payload");
     assert_ne!(notes[0].0, notes[1].0);
     let bytes = document.to_bytes().unwrap();
     let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
@@ -57413,6 +57651,105 @@ fn all_caption_references_match_authenticated_before_and_after_word() {
 #[test]
 fn all_sequence_story_controls_match_authenticated_word_and_physical_pages() {
     use base64::Engine as _;
+    // This pinned fixture is single-line Latin text per source paragraph.
+    // Paint order may put a generated Field group before its ordinary label.
+    // Read actual positions inside each physical source, not the paint list.
+    fn positioned_text(layout: &rdocx_layout::WordLayoutResult, page_index: usize) -> String {
+        type Placed = (f64, f64, f64, String, Option<oxml_layout::FieldSource>);
+        let mut owners =
+            std::collections::BTreeMap::<oxml_layout::SourceNodeId, Vec<Placed>>::new();
+        oxml_layout::walk(
+            &layout.layout.pages[page_index].elements,
+            &mut |element, transform| {
+                let (text, source, field, origin, advance, note_marker) = match element {
+                    oxml_layout::PositionedElement::Text(run) => (
+                        run.text.as_str(),
+                        run.source,
+                        run.field_source,
+                        run.origin,
+                        run.advances.iter().sum::<f64>(),
+                        run.note.is_some() || run.note_reference_source.is_some(),
+                    ),
+                    oxml_layout::PositionedElement::MultilingualText(run) => (
+                        run.logical_text.as_str(),
+                        run.source,
+                        run.field_source,
+                        run.origin,
+                        run.x_advances.iter().sum::<f64>(),
+                        run.note.is_some() || run.note_reference_source.is_some(),
+                    ),
+                    _ => return,
+                };
+                if text.is_empty() || text == "\u{2060}" {
+                    return;
+                }
+                if let (Some(source), Some(field)) = (source, field) {
+                    assert_eq!(source.node, field.node, "text and Field source disagree");
+                }
+                if field.is_none() && note_marker {
+                    return;
+                }
+                let Some(node) = field
+                    .map(|field| field.node)
+                    .or(source.map(|source| source.node))
+                else {
+                    // The actual note-body marker emitter has no SourceSpan or
+                    // note flag. These are the only labels in this pinned fixture.
+                    assert!(
+                        matches!(text, "1" | "2"),
+                        "unexpected source-free sequence text {text:?}"
+                    );
+                    return;
+                };
+                assert!(
+                    layout.source_node(node).is_some(),
+                    "unregistered sequence source"
+                );
+                let placed = transform.apply(origin);
+                let right = transform.apply(oxml_layout::Point {
+                    x: origin.x + advance,
+                    y: origin.y,
+                });
+                assert!(placed.x.is_finite() && placed.y.is_finite() && right.x.is_finite());
+                owners.entry(node).or_default().push((
+                    placed.x,
+                    placed.y,
+                    right.x,
+                    text.to_owned(),
+                    field,
+                ));
+            },
+        );
+        let mut text = String::new();
+        for (node, mut placed) in owners {
+            placed.sort_by(|left, right| left.0.total_cmp(&right.0));
+            if let Some(label) = placed
+                .iter()
+                .filter(|entry| entry.4.is_none())
+                .max_by(|left, right| left.0.total_cmp(&right.0))
+            {
+                for field in placed.iter().filter(|entry| entry.4.is_some()) {
+                    assert_eq!(
+                        field.1,
+                        label.1,
+                        "Field and label baseline differ at {:?}",
+                        layout.source_node(node)
+                    );
+                    assert!(
+                        field.0 >= label.2,
+                        "Field overlaps or precedes its label at {:?}: {placed:?}",
+                        layout.source_node(node)
+                    );
+                }
+            }
+            for (_, _, _, value, _) in placed {
+                text.push_str(&value);
+            }
+            text.push('\n');
+        }
+        text
+    }
+
     // Source SHA ff0937b6623d1ab52f4eea4d75980c62e26d9d5a80684ac12f15bc779a9dd9dd.
     // Native post-close SHA e0127ff029da72d1b861ce825d1924d18ccaed625fefb56980a57ed747cffa6c.
     // Actual no-F9 reopened SHA d870d0a4e355ecee5c067b77c004de4ad48f58488b6af15775a3f49c91ee848f.
@@ -57540,7 +57877,7 @@ fn all_sequence_story_controls_match_authenticated_word_and_physical_pages() {
         let layout = document.layout_deterministic().unwrap();
         assert_eq!(layout.layout.pages.len(), 2, "pass {pass}");
         for (index, page) in layout.layout.pages.iter().enumerate() {
-            let text = f252_page_text(page);
+            let text = positioned_text(&layout, index);
             let mut repeats = Vec::new();
             oxml_layout::walk(&page.elements, &mut |element, _| match element {
                 oxml_layout::PositionedElement::Text(run)
@@ -57582,7 +57919,8 @@ fn all_sequence_story_controls_match_authenticated_word_and_physical_pages() {
             .layout
             .pages
             .iter()
-            .map(|page| f252_page_text(page))
+            .enumerate()
+            .map(|(index, _)| positioned_text(&layout, index))
             .collect::<String>();
         for (_, value, label, repeat) in expected {
             if !repeat {
@@ -64034,6 +64372,49 @@ fn scoped_control_paragraph_ordinals_match_reopened_comment_anchors() {
     assert_eq!(reopened.paragraphs()[5].text(), "Version cell");
 }
 
+// Select one actual qualified fixture owner without assuming a bare start tag.
+fn x188_word_owner(
+    xml: &str,
+    ancestors: &[&[u8]],
+    local: &[u8],
+) -> (std::ops::Range<usize>, usize) {
+    let mut reader = quick_xml::NsReader::from_str(xml);
+    let mut owners = Vec::<Vec<u8>>::new();
+    loop {
+        let start = reader.buffer_position() as usize;
+        let (namespace, event) = reader.read_resolved_event().unwrap();
+        let word = matches!(namespace, quick_xml::name::ResolveResult::Bound(uri) if uri.as_ref() == W_NS.as_bytes());
+        match event {
+            quick_xml::events::Event::Start(element) => {
+                if word
+                    && element.local_name().as_ref() == local
+                    && owners.len() == ancestors.len()
+                    && owners
+                        .iter()
+                        .zip(ancestors)
+                        .all(|(owner, expected)| owner.as_slice() == *expected)
+                {
+                    let content_start = reader.buffer_position() as usize;
+                    reader.read_to_end(element.name()).unwrap();
+                    return (start..reader.buffer_position() as usize, content_start);
+                }
+                owners.push(if word {
+                    element.local_name().as_ref().to_vec()
+                } else {
+                    Vec::new()
+                });
+            }
+            quick_xml::events::Event::End(_) => {
+                owners.pop().unwrap();
+            }
+            quick_xml::events::Event::Eof => {
+                panic!("expected qualified fixture owner {ancestors:?}/{local:?}")
+            }
+            _ => {}
+        }
+    }
+}
+
 // Issues 288 and 292, reported by hadim. Build producer-owned source in memory.
 fn x188_commented_story(glossary: bool) -> Document {
     let mut seed = Document::new();
@@ -64066,23 +64447,21 @@ fn x188_commented_story(glossary: bool) -> Document {
     let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
     let original =
         String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
-    let start = original.find("<w:p>").unwrap();
-    let end = original[start..].find("</w:p>").unwrap() + start + 6;
-    let paragraph = &original[start..end];
-    package.set_part(
-        "/word/document.xml",
-        original
-            .replace(paragraph, "<w:p><w:r><w:t>main retained</w:t></w:r></w:p>")
-            .into_bytes(),
-    );
+    let (span, _) = x188_word_owner(&original, &[b"document", b"body"], b"p");
+    let paragraph = &original[span.clone()];
+    let mut main = original.clone();
+    main.replace_range(span, "<w:p><w:r><w:t>main retained</w:t></w:r></w:p>");
+    package.set_part("/word/document.xml", main.into_bytes());
     if glossary {
-        let xml =
+        let mut xml =
             String::from_utf8(package.get_part(&entry.glossary_part).unwrap().to_vec()).unwrap();
-        package.set_part(
-            &entry.glossary_part,
-            xml.replace("<w:docPartBody>", &format!("<w:docPartBody>{paragraph}"))
-                .into_bytes(),
+        let (_, at) = x188_word_owner(
+            &xml,
+            &[b"glossaryDocument", b"docParts", b"docPart"],
+            b"docPartBody",
         );
+        xml.insert_str(at, paragraph);
+        package.set_part(&entry.glossary_part, xml.into_bytes());
     } else {
         package.set_part(
             header.part_name(),
@@ -64383,17 +64762,17 @@ fn x188_local_glossary() -> Document {
         oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
             .unwrap();
     let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
-    let start = main.find("<w:p>").unwrap();
-    let end = main[start..].find("</w:p>").unwrap() + start + 6;
-    let paragraph = main[start..end].replace("MAIN", "LOCAL");
-    let glossary =
+    let (span, _) = x188_word_owner(&main, &[b"document", b"body"], b"p");
+    let paragraph = main[span].replace("MAIN", "LOCAL");
+    let mut glossary =
         String::from_utf8(package.get_part(&entry.glossary_part).unwrap().to_vec()).unwrap();
-    package.set_part(
-        &entry.glossary_part,
-        glossary
-            .replace("<w:docPartBody>", &format!("<w:docPartBody>{paragraph}"))
-            .into_bytes(),
+    let (_, at) = x188_word_owner(
+        &glossary,
+        &[b"glossaryDocument", b"docParts", b"docPart"],
+        b"docPartBody",
     );
+    glossary.insert_str(at, &paragraph);
+    package.set_part(&entry.glossary_part, glossary.into_bytes());
     let rels = package
         .get_part_rels("/word/document.xml")
         .unwrap()
@@ -64583,10 +64962,17 @@ fn shared_story_comment_ownership_survives_until_last_reference() {
                     let original =
                         String::from_utf8(source.get_part(story.part_name()).unwrap().to_vec())
                             .unwrap();
-                    let expected = original
-                        .replace(r#"<w:commentRangeStart w:id="0"/>"#, "")
-                        .replace(r#"<w:commentRangeEnd w:id="0"/>"#, "")
-                        .replace(r#"<w:commentReference w:id="0"/>"#, "");
+                    let mut expected = original;
+                    for comment in Document::from_bytes(&before).unwrap().comments() {
+                        let id = comment.id();
+                        for marker in [
+                            format!(r#"<w:commentRangeStart w:id="{id}"/>"#),
+                            format!(r#"<w:commentRangeEnd w:id="{id}"/>"#),
+                            format!(r#"<w:commentReference w:id="{id}"/>"#),
+                        ] {
+                            expected = expected.replace(&marker, "");
+                        }
+                    }
                     assert_eq!(
                         final_package.get_part(story.part_name()).unwrap(),
                         expected.as_bytes()
@@ -64941,10 +65327,11 @@ fn whole_story_partial_and_malformed_companions_refuse_without_publication() {
                     .unwrap()
                     .replace(marker, "");
                 package.set_part(target, xml.into_bytes());
-                let main =
+                let mut main =
                     String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
-                        .unwrap()
-                        .replacen("<w:p>", &format!("<w:p>{marker}"), 1);
+                        .unwrap();
+                let (_, at) = x188_word_owner(&main, &[b"document", b"body"], b"p");
+                main.insert_str(at, marker);
                 package.set_part("/word/document.xml", main.into_bytes());
             } else {
                 package.set_part("/annotations/broken-ids.xml", b"<not-xml".to_vec());
@@ -65310,31 +65697,39 @@ fn x188_shared_review_note(annotated: bool) -> Document {
             .unwrap();
     let original =
         String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
-    let start = original.find("<w:p>").unwrap();
-    let end = original[start..].find("</w:p>").unwrap() + start + 6;
-    let mut paragraph = original[start..end].to_owned();
-    let markers = [
-        r#"<w:commentRangeStart w:id="0"/>"#,
-        r#"<w:commentRangeEnd w:id="0"/>"#,
-        r#"<w:commentReference w:id="0"/>"#,
-    ];
+    let (span, _) = x188_word_owner(&original, &[b"document", b"body"], b"p");
+    let mut paragraph = original[span].to_owned();
+    let markers = source
+        .comments()
+        .iter()
+        .flat_map(|comment| {
+            let id = comment.id();
+            [
+                format!(r#"<w:commentRangeStart w:id="{id}"/>"#),
+                format!(r#"<w:commentRangeEnd w:id="{id}"/>"#),
+                format!(r#"<w:commentReference w:id="{id}"/>"#),
+            ]
+        })
+        .collect::<Vec<_>>();
     if !annotated {
-        for marker in markers {
+        for marker in &markers {
             paragraph = paragraph.replace(marker, "");
         }
     }
     for part in ["/word/document.xml", entry.glossary_part.as_str()] {
         let mut xml = String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap();
         if annotated {
-            for marker in markers {
+            for marker in &markers {
                 xml = xml.replace(marker, "");
             }
         }
-        xml = xml.replacen(
-            "<w:p>",
-            r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r>"#,
-            1,
-        );
+        let ancestors: &[&[u8]] = if part == "/word/document.xml" {
+            &[b"document", b"body"]
+        } else {
+            &[b"glossaryDocument", b"docParts", b"docPart", b"docPartBody"]
+        };
+        let (_, at) = x188_word_owner(&xml, ancestors, b"p");
+        xml.insert_str(at, r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#);
         package.set_part(part, xml.into_bytes());
         package.get_or_create_part_rels(part).add(
             oxml_opc::relationship::rel_types::FOOTNOTES,
@@ -402212,7 +402607,7 @@ fn fx201_rich_related_paragraphs_and_note_boundaries_publish_atomically() {
             "checked note",
         )
         .unwrap();
-    assert_eq!(document.footnotes(), vec![(id, "checked note".to_owned())]);
+    assert_eq!(document.footnotes(), vec![(id, " checked note".to_owned())]);
     assert_eq!(document.paragraphs()[0].text(), "body");
     let before = document.to_bytes().unwrap();
     let body = document.paragraph_story_location(0).unwrap().unwrap();
@@ -402229,7 +402624,7 @@ fn fx201_rich_related_paragraphs_and_note_boundaries_publish_atomically() {
     );
     assert_eq!(document.to_bytes().unwrap(), before);
     let mut reopened = Document::from_bytes(&before).unwrap();
-    assert_eq!(reopened.footnotes(), vec![(id, "checked note".to_owned())]);
+    assert_eq!(reopened.footnotes(), vec![(id, " checked note".to_owned())]);
     reopened.remove_footnote(id).unwrap();
     assert!(reopened.footnotes().is_empty());
     assert_eq!(reopened.paragraphs()[0].text(), "body");
@@ -407505,16 +407900,13 @@ fn part_xml_matches_zip_entry() {
     std::io::Write::write_all(&mut writer, b"<bad>\x01</bad>").unwrap();
     let bad_bytes = writer.finish().unwrap().into_inner();
     match Document::from_bytes(&bad_bytes) {
-        Ok(mut bad) => {
-            let names = bad.part_names().err().map(|error| error.to_string());
-            let save = bad.to_bytes().err().map(|error| error.to_string());
-            if names.is_none() != save.is_none() {
-                failures.push(format!(
-                    "unrelated invalid part diverges names={names:?} save={save:?}"
-                ));
-            }
-        }
-        Err(error) => failures.push(format!("bad part did not open: {error}")),
+        Err(rdocx::Error::Opc(oxml_opc::OpcError::InvalidXmlCharacter {
+            part,
+            code_point: 1,
+            ..
+        })) if part == "/word/bad.xml" => {}
+        Err(error) => failures.push(format!("wrong invalid-part admission error: {error}")),
+        Ok(_) => failures.push("forbidden XML character was admitted at open".to_owned()),
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
@@ -408547,6 +408939,9 @@ fn self_closing_story_paragraph_fields_evaluate() {
             let mut output = std::io::Cursor::new(Vec::new());
             package.write_to(&mut output).unwrap();
             let mut document = Document::from_bytes(output.get_ref()).unwrap();
+            document
+                .set_default_font_name_value(Some("Carlito"))
+                .unwrap();
             let before = document.to_bytes().unwrap();
             let label = format!("{shape} in {part_name} placed={placed}");
             let evaluations = match document.evaluate_fields(&FieldEvaluationContext::default()) {
@@ -411370,6 +411765,9 @@ fn toc_table_omission_preserves_visible_nested_headings_and_adjacent_navigation(
 fn issue423_page_and_pageref_share_policy_with_their_distinct_actual_owners() {
     let body = r#"<w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="7"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGE \* UPPER"><w:r><w:t>old-page</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF destination"><w:r><w:t>old-ref</w:t></w:r></w:fldSimple></w:p><w:p><w:bookmarkStart w:id="1" w:name="destination"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>old-second</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="decimal" w:start="42"/></w:sectPr>"#;
     let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    document
+        .set_default_font_name_value(Some("Carlito"))
+        .unwrap();
     let layout = document.layout_deterministic().unwrap();
     assert_eq!(
         layout
@@ -411493,6 +411891,9 @@ fn issue423_implicit_final_section_defaults_only_for_the_actual_missing_owner() 
 fn issue423_duplicate_numbering_page_pageref_toc_cache_and_source_agree() {
     let body = r#"<w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="decimal" w:start="1"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGE"><w:r><w:t>old-page</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF destination"><w:r><w:t>old-ref</w:t></w:r></w:fldSimple></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/><w:outlineLvl w:val="0"/></w:pPr><w:bookmarkStart w:id="1" w:name="destination"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>old-second</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="12"/><w:pgNumType w:fmt="decimal" w:start="27"/></w:sectPr>"#;
     let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    document
+        .set_default_font_name_value(Some("Carlito"))
+        .unwrap();
     let source = document.section_properties_xml(1).unwrap();
     let layout = document.layout_deterministic().unwrap();
     let target = layout.bookmark_page_section("destination").unwrap();
