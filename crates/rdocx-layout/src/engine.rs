@@ -4261,7 +4261,7 @@ impl Engine {
 
     /// Lay out the entire document.
     pub fn layout(&mut self, input: &LayoutInput) -> Result<LayoutResult> {
-        self.layout_inner(input, None)
+        self.layout_inner(prepared_semantic_layout_input(input)?, None)
     }
 
     pub(crate) fn measure_content(
@@ -4335,7 +4335,8 @@ impl Engine {
         &mut self,
         input: &LayoutInput,
     ) -> Result<(LayoutResult, Vec<WordSourcePath>)> {
-        let sources = SourceRegistry::for_input(input)?;
+        let input = prepared_semantic_layout_input(input)?;
+        let sources = SourceRegistry::for_input(input.as_ref())?;
         let result = self.layout_inner(input, Some(&sources))?;
         self.last_field_source_xml = sources.field_source_xml;
         self.last_text_box_owner_indices = sources.text_box_owner_indices;
@@ -4399,9 +4400,10 @@ impl Engine {
 
     fn layout_inner(
         &mut self,
-        input: &LayoutInput,
+        mut prepared_input: Cow<'_, LayoutInput>,
         sources: Option<&SourceRegistry>,
     ) -> Result<LayoutResult> {
+        let input = prepared_input.as_ref();
         self.navigation_by_source.clear();
         self.numbering_by_source.clear();
         self.bookmark_numbering.clear();
@@ -4422,29 +4424,26 @@ impl Engine {
         let sources = sources.or(generated_sources.as_ref());
         // Caller hints never establish provenance or freshness. Derive once,
         // before any retained shaping, furniture or restart cache can be read.
-        let derived_input =
-            if needs_sequences || needs_ref_projection || input.sequence_snapshot.is_some() {
-                let mut derived = input.clone();
-                derived.sequence_snapshot = if (needs_sequences
-                    || needs_ref_projection
-                    || input
-                        .sequence_snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.navigation_document.is_some()))
-                    && input.revision_view == RevisionView::Accepted
-                {
-                    Some(Arc::new(sequence_snapshot(
-                        input,
-                        sources.expect("sequence source registry"),
-                    )?))
-                } else {
-                    None
-                };
-                Some(derived)
+        if needs_sequences || needs_ref_projection || input.sequence_snapshot.is_some() {
+            let snapshot = if (needs_sequences
+                || needs_ref_projection
+                || input
+                    .sequence_snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.navigation_document.is_some()))
+                && input.revision_view == RevisionView::Accepted
+            {
+                Some(Arc::new(sequence_snapshot(
+                    input,
+                    sources.expect("sequence source registry"),
+                )?))
             } else {
                 None
             };
-        let input = derived_input.as_ref().unwrap_or(input);
+            // Reuse the semantic-preparation clone when one was required.
+            prepared_input.to_mut().sequence_snapshot = snapshot;
+        }
+        let input = prepared_input.as_ref();
         // Load user-provided / DOCX-embedded fonts (highest priority). An exact
         // unchanged set is a no-op in a reusable engine.
         let font_context_changed = self
@@ -13473,6 +13472,287 @@ fn numbered_ref_text(
         value.push_str(position);
     }
     Ok(value)
+}
+
+// Borrowed admission precedes the recursive predicate, any clone and all
+// deferred semantic factories. The caller's source model remains untouched.
+fn prepared_semantic_layout_input(input: &LayoutInput) -> Result<Cow<'_, LayoutInput>> {
+    let validate = || -> rdocx_oxml::Result<()> {
+        input.document.validate_resource_limits()?;
+        for body in input.story_bodies.values() {
+            body.validate_resource_limits()?;
+        }
+        for part in input.headers.values().chain(input.footers.values()) {
+            for paragraph in &part.paragraphs {
+                paragraph.validate_resource_limits()?;
+            }
+        }
+        for notes in [input.footnotes.as_ref(), input.endnotes.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            for note in &notes.footnotes {
+                for paragraph in &note.paragraphs {
+                    paragraph.validate_resource_limits()?;
+                }
+            }
+        }
+        Ok(())
+    };
+    validate().map_err(|error| LayoutError::Layout(error.to_string()))?;
+    let mut needs_projection = false;
+    // This is the existing authoritative story selection, including its
+    // drawing children. Raw foreign payload is never promoted to a model.
+    visit_input_paragraphs(input, &mut |p| {
+        needs_projection |= paragraph_has_semantic_revision(p);
+    });
+    // Direct-run revisions can belong to a block control without a paragraph.
+    needs_projection |= body_has_semantic_revision(&input.document.body.content)
+        || input
+            .story_bodies
+            .values()
+            .any(|b| body_has_semantic_revision(&b.content));
+    if !needs_projection {
+        return Ok(Cow::Borrowed(input));
+    }
+    let mut prepared = input.clone();
+    prepare_layout_body_projection(&mut prepared.document.body.content)
+        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+    for (header, parts) in [
+        (true, &mut prepared.headers),
+        (false, &mut prepared.footers),
+    ] {
+        for (id, part) in parts {
+            let story = if header {
+                WordStory::Header {
+                    relationship_id: id.clone(),
+                }
+            } else {
+                WordStory::Footer {
+                    relationship_id: id.clone(),
+                }
+            };
+            if let Some(body) = prepared.story_bodies.get_mut(&story) {
+                prepare_layout_body_projection(&mut body.content)
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?;
+            } else {
+                for paragraph in &mut part.paragraphs {
+                    prepare_layout_paragraph_projection(paragraph)
+                        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                }
+            }
+        }
+    }
+    for (footnote, notes) in [
+        (true, &mut prepared.footnotes),
+        (false, &mut prepared.endnotes),
+    ] {
+        if let Some(notes) = notes {
+            for note in &mut notes.footnotes {
+                if note.note_type != rdocx_oxml::footnotes::NoteType::Normal {
+                    continue;
+                }
+                let story = if footnote {
+                    WordStory::Footnote { id: note.id }
+                } else {
+                    WordStory::Endnote { id: note.id }
+                };
+                if let Some(body) = prepared.story_bodies.get_mut(&story) {
+                    prepare_layout_body_projection(&mut body.content)
+                        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                } else {
+                    for paragraph in &mut note.paragraphs {
+                        prepare_layout_paragraph_projection(paragraph)
+                            .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(Cow::Owned(prepared))
+}
+
+fn paragraph_has_semantic_revision(p: &CT_P) -> bool {
+    !p.revisions.is_empty()
+        || p.content_controls
+            .iter()
+            .any(|(_, _, _, c)| control_has_semantic_revision(c))
+        || p.runs.iter().any(run_has_semantic_revision)
+}
+
+fn run_has_semantic_revision(run: &CT_R) -> bool {
+    run.content
+        .iter()
+        .filter_map(|c| match c {
+            RunContent::Drawing(d) => Some(d),
+            _ => None,
+        })
+        .chain(run.alt_drawings.iter())
+        .any(|drawing| {
+            drawing
+                .anchor
+                .as_ref()
+                .and_then(|a| a.shape.as_ref())
+                .is_some_and(|shape| {
+                    shape.text_body.as_ref().map_or_else(
+                        || shape.text.iter().any(paragraph_has_semantic_revision),
+                        |b| body_has_semantic_revision(&b.content),
+                    )
+                })
+        })
+}
+
+fn control_has_semantic_revision(control: &CT_Sdt) -> bool {
+    !control.revisions().is_empty()
+        || control.content.iter().any(|c| match c {
+            SdtContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+            SdtContent::Table(t) => table_has_semantic_revision(t),
+            SdtContent::Row(r) => row_has_semantic_revision(r),
+            SdtContent::Cell(c) => cell_has_semantic_revision(c),
+            SdtContent::Run(r) => run_has_semantic_revision(r),
+            SdtContent::ContentControl(c) => control_has_semantic_revision(c),
+            SdtContent::RawXml(_) => false,
+        })
+}
+
+fn table_has_semantic_revision(table: &CT_Tbl) -> bool {
+    table
+        .content_controls
+        .iter()
+        .any(|(_, _, c)| control_has_semantic_revision(c))
+        || table.rows.iter().any(row_has_semantic_revision)
+}
+
+fn row_has_semantic_revision(row: &CT_Row) -> bool {
+    row.content_controls
+        .iter()
+        .any(|(_, _, c)| control_has_semantic_revision(c))
+        || row.cells.iter().any(cell_has_semantic_revision)
+}
+
+fn cell_has_semantic_revision(cell: &CT_Tc) -> bool {
+    cell.content.iter().any(|c| match c {
+        CellContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+        CellContent::Table(t) => table_has_semantic_revision(t),
+        CellContent::ContentControl(c) => control_has_semantic_revision(c),
+    })
+}
+
+fn body_has_semantic_revision(body: &[BodyContent]) -> bool {
+    body.iter().any(|c| match c {
+        BodyContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+        BodyContent::Table(t) => table_has_semantic_revision(t),
+        BodyContent::ContentControl(c) => control_has_semantic_revision(c),
+        BodyContent::RawXml(_) => false,
+    })
+}
+
+fn prepare_layout_paragraph_projection(value: &mut CT_P) -> rdocx_oxml::Result<()> {
+    for (_, _, revision) in &mut value.revisions {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_layout_paragraph_projection(paragraph)?;
+        }
+    }
+    for (_, _, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for run in &mut value.runs {
+        prepare_layout_run_projection(run)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_run_projection(value: &mut CT_R) -> rdocx_oxml::Result<()> {
+    for drawing in value
+        .content
+        .iter_mut()
+        .filter_map(|content| {
+            if let RunContent::Drawing(drawing) = content {
+                Some(drawing)
+            } else {
+                None
+            }
+        })
+        .chain(value.alt_drawings.iter_mut())
+    {
+        let shape = drawing
+            .anchor
+            .as_mut()
+            .and_then(|anchor| anchor.shape.as_mut());
+        if let Some(shape) = shape {
+            if let Some(body) = &mut shape.text_body {
+                prepare_layout_body_projection(&mut body.content)?;
+            } else {
+                for paragraph in &mut shape.text {
+                    prepare_layout_paragraph_projection(paragraph)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_control_projection(value: &mut CT_Sdt) -> rdocx_oxml::Result<()> {
+    for (_, revision) in value.physical_revisions_mut() {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_layout_paragraph_projection(paragraph)?;
+        }
+    }
+    for child in &mut value.content {
+        match child {
+            SdtContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            SdtContent::Table(t) => prepare_layout_table_projection(t)?,
+            SdtContent::Row(r) => prepare_layout_row_projection(r)?,
+            SdtContent::Cell(c) => prepare_layout_cell_projection(c)?,
+            SdtContent::Run(r) => prepare_layout_run_projection(r)?,
+            SdtContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_table_projection(value: &mut CT_Tbl) -> rdocx_oxml::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for row in &mut value.rows {
+        prepare_layout_row_projection(row)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_row_projection(value: &mut CT_Row) -> rdocx_oxml::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for cell in &mut value.cells {
+        prepare_layout_cell_projection(cell)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_cell_projection(value: &mut CT_Tc) -> rdocx_oxml::Result<()> {
+    for content in &mut value.content {
+        match content {
+            CellContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            CellContent::Table(t) => prepare_layout_table_projection(t)?,
+            CellContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_body_projection(values: &mut [BodyContent]) -> rdocx_oxml::Result<()> {
+    for value in values {
+        match value {
+            BodyContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            BodyContent::Table(t) => prepare_layout_table_projection(t)?,
+            BodyContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn document_has_ref_projection(input: &LayoutInput) -> bool {
@@ -30485,6 +30765,35 @@ mod tests {
     }
 
     #[test]
+    fn plain_layout_semantic_input_stays_borrowed() {
+        let input = make_input_with_text("ordinary");
+        assert!(matches!(
+            prepared_semantic_layout_input(&input).unwrap(),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn checked_layout_propagates_deferred_revision_source_refusal() {
+        // Exact existing lower semantic-factory refusal discriminator. The
+        // initial reader retains direct simple-field source without building
+        // the opaque cache runs. Layout must not turn its checked error into
+        // a cached-display success or mutate the caller's physical XML.
+        let uri = format!("urn:{}", "u".repeat(400));
+        let runs = "<w:r><x:opaque/></w:r>".repeat(250);
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins xmlns:x="{uri}" w:id="1" w:author="Ada"><w:fldSimple w:instr="PAGE">{runs}</w:fldSimple></w:ins></w:p></w:body></w:document>"#
+        );
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let before = input.document.to_xml().unwrap();
+        let mut engine = Engine::new_deterministic().unwrap();
+        assert!(engine.layout(&input).is_err());
+        assert!(engine.layout_with_provenance(&input).is_err());
+        assert_eq!(input.document.to_xml().unwrap(), before);
+    }
+
+    #[test]
     fn revision_wrapped_forward_numbered_ref_triggers_two_pass_projection() {
         let field_document = rdocx_oxml::CT_Document::from_xml(
             br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins w:id="1" w:author="Ada"><w:fldSimple w:instr="REF numbered_target \n"><w:r><w:t>stored number</w:t></w:r></w:fldSimple></w:ins></w:p></w:body></w:document>"#,
@@ -30522,7 +30831,20 @@ mod tests {
                 .content
                 .push(BodyContent::Paragraph(Box::new(target)));
 
+            let before = input.document.to_xml().unwrap();
             let text = output_text(&deterministic_layout(&input));
+            let (provenance_result, paths) = Engine::new_deterministic()
+                .unwrap()
+                .layout_with_provenance(&input)
+                .unwrap();
+            let provenance_text = output_text(&provenance_result);
+            assert_eq!(provenance_text, text);
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.story == WordStory::Document && p.children == [0])
+            );
+            assert_eq!(input.document.to_xml().unwrap(), before);
             assert!(text.iter().any(|value| value == "1"), "{text:?}");
             assert!(
                 !text.iter().any(|value| value == "stored number"),

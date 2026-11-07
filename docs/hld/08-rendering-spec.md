@@ -1934,6 +1934,13 @@ validated, so tracked content can add pages. Unknown view names fail before
 output is created. HTML and Markdown conversion do not accept the tracked
 rendering selector.
 
+Checked Engine entry points prepare deferred revision Fields on a layout-only
+clone before source registration and REF or SEQ planning. Existing borrowed
+resource admission precedes recursive work, and preparation errors propagate.
+Revision-free inputs stay borrowed. Revision source registration, snapshot
+derivation and layout share the prepared owner. The caller's raw XML remains
+authoritative and unchanged.
+
 `LayoutInput::revision_view` selects the accepted or tracked projection before
 Word text shaping. One ordered projection combines ordinary runs and typed
 revision wrappers at their preserved boundaries, including nested wrappers and
