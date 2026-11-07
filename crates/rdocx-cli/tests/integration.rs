@@ -105,7 +105,13 @@ fn assert_existing_output_needs_force(args: &[&str], output: &Path) {
     assert_eq!(fs::read(output).unwrap(), b"keep me");
 
     let forced = [args, &["--force"]].concat();
-    assert_success(&cli(&forced), &forced.join(" "));
+    let diagnostics = assert_success_with_font_diagnostics(&cli(&forced), &forced.join(" "));
+    assert!(
+        diagnostics.is_empty()
+            || diagnostics
+                == "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n",
+        "{diagnostics}"
+    );
     assert_ne!(fs::read(output).unwrap(), b"keep me");
     assert!(
         fs::read_dir(output.parent().unwrap())
@@ -340,7 +346,7 @@ fn inspect_json_uses_the_shared_schema() {
             "count_scope": "accepted-main-body",
             "character_include_spaces": true,
             "page_count_source": "deterministic-layout",
-            "diagnostics": [],
+            "diagnostics": ["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
             "pictures": [],
         })
     );
@@ -597,7 +603,7 @@ fn text_views_read_every_story_after_the_body() {
          --- header (/word/header1.xml) ---\nHeader NEEDLE\n\
          --- footer (/word/footer1.xml) ---\nFooter NEEDLE\n\nFooter cell NEEDLE\n\
          --- footer (/word/footerFirst1.xml) ---\nFirst footer NEEDLE\n\
-         --- footnote (/word/footnotes.xml) ---\nFootnote NEEDLE.\n\
+         --- footnote (/word/footnotes.xml) ---\n Footnote NEEDLE.\n\
          --- endnote (/word/endnotes.xml) ---\n Endnote NEEDLE.\n"
     );
 
@@ -647,7 +653,7 @@ fn text_views_read_every_story_after_the_body() {
             story(
                 "footnote",
                 "/word/footnotes.xml",
-                json!([paragraph(0, "Footnote NEEDLE.")])
+                json!([paragraph(0, " Footnote NEEDLE.")])
             ),
             story(
                 "endnote",
@@ -1016,7 +1022,10 @@ fn convert_writes_valid_formats_and_uses_the_shared_default_output() {
         "--output",
         path_text(&pdf),
     ]);
-    assert_success(&output, "convert PDF");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&output, "convert PDF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("Written to {}\n", pdf.display())
@@ -1036,7 +1045,10 @@ fn convert_writes_valid_formats_and_uses_the_shared_default_output() {
         "--output",
         path_text(&png),
     ]);
-    assert_success(&output, "convert PNG");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&output, "convert PNG"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("Written to {}\n", png.display())
@@ -1301,8 +1313,8 @@ fn diff_compares_headers_footers_notes_and_comments() {
         diff_body(&before, &after),
         "- [header default, section 1, paragraph 1] Header alpha\n\
          + [header default, section 1, paragraph 1] Header beta\n\
-         - [footnote 1, paragraph 1] Footnote alpha\n\
-         + [footnote 1, paragraph 1] Footnote beta\n\
+         - [footnote 1, paragraph 1]  Footnote alpha\n\
+         + [footnote 1, paragraph 1]  Footnote beta\n\
          - [comment 1, paragraph 1] Comment alpha\n\
          + [comment 1, paragraph 1] Comment beta\n\
          \n3 paragraph(s) changed, 0 added, 0 removed.\n"
@@ -2058,12 +2070,12 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         ),
         (
             "inserted-drawing",
-            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            "<w:ins w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:ins>",
             false,
         ),
         (
             "moved-away-drawing",
-            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            "<w:moveFrom w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:moveFrom>",
             true,
         ),
         (
@@ -2086,7 +2098,7 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         ),
         (
             "deleted",
-            "<w:del><w:r><w:delText>deleted</w:delText><w:drawing/></w:r></w:del>",
+            "<w:del w:id=\"9\" w:author=\"Fixture\"><w:r><w:delText>deleted</w:delText><w:drawing/></w:r></w:del>",
             true,
         ),
         (
@@ -2110,6 +2122,31 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         let input = temp.path.join(format!("{label}.docx"));
         write_document(&input, &["CONTENT"]);
         rewrite_run(&input, "CONTENT", |_| fragment.to_owned());
+        if let Some((kind, relationship_type)) = match label {
+            "footnote" => Some(("footnote", rel_types::FOOTNOTES)),
+            "endnote" => Some(("endnote", rel_types::ENDNOTES)),
+            _ => None,
+        } {
+            let mut package = OpcPackage::open(&input).unwrap();
+            let part = format!("/word/{kind}s.xml");
+            package.set_part(
+                &part,
+                format!(
+                    r#"<w:{kind}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:{kind} w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:{kind}></w:{kind}s>"#,
+                )
+                .into_bytes(),
+            );
+            package.content_types.add_override(
+                &part,
+                &format!(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}s+xml"
+                ),
+            );
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, &format!("{kind}s.xml"));
+            package.save(&input).unwrap();
+        }
         let before = fs::read(&input).unwrap();
         let output = cli(&["validate", path_text(&input)]);
         assert_success(&output, label);
@@ -2230,17 +2267,17 @@ fn validation_qualified_display_content_and_field_controls_preserve_source() {
         ),
         (
             "deleted-drawing",
-            "<w:del><w:r><w:drawing/></w:r></w:del>",
+            "<w:del w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:del>",
             false,
         ),
         (
             "moved-away",
-            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            "<w:moveFrom w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:moveFrom>",
             false,
         ),
         (
             "inserted-drawing",
-            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            "<w:ins w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:ins>",
             true,
         ),
         (
@@ -2361,12 +2398,12 @@ fn validation_qualified_display_content_and_field_controls_preserve_source() {
         ),
         (
             "inserted-loose-marker",
-            r#"<w:ins><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:ins>"#,
+            r#"<w:ins w:id="9" w:author="Fixture"><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:ins>"#,
             false,
         ),
         (
             "deleted-loose-marker",
-            r#"<w:del><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del>"#,
+            r#"<w:del w:id="9" w:author="Fixture"><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del>"#,
             false,
         ),
         (
@@ -2474,9 +2511,10 @@ fn validation_preserves_recursive_block_control_and_table_paragraph_scope() {
         "</w:sdtContent></w:sdt>",
         "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p/></w:tc></w:tr></w:tbl>",
     );
+    assert_eq!(xml.matches("<w:sectPr").count(), 1);
     package.set_part(
         &part,
-        xml.replace("</w:body>", &format!("{controls}</w:body>"))
+        xml.replacen("<w:sectPr", &format!("{controls}<w:sectPr"), 1)
             .into_bytes(),
     );
     package.save(&input).unwrap();
@@ -2557,9 +2595,10 @@ fn validation_ignores_opaque_content_control_slots() {
         let mut package = OpcPackage::open(&input).unwrap();
         let part = package.main_document_part().unwrap();
         let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+        assert_eq!(xml.matches("<w:sectPr").count(), 1);
         package.set_part(
             &part,
-            xml.replace("</w:body>", &format!("{control}</w:body>"))
+            xml.replacen("<w:sectPr", &format!("{control}<w:sectPr"), 1)
                 .into_bytes(),
         );
         package.save(&input).unwrap();
@@ -2687,7 +2726,7 @@ fn validate_rejects_malformed_related_parts_and_undefined_style_ids() {
         (
             "/word/settings.xml",
             "end tag",
-            "the part ends inside 1 unclosed element(s)",
+            "expected exactly one complete root element",
         ),
     ] {
         let broken = temp.path.join("broken.docx");
@@ -2725,7 +2764,7 @@ fn validate_rejects_malformed_related_parts_and_undefined_style_ids() {
     let output = cli(&["validate", path_text(&broken)]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains(&format!(
-        "part {header} is not well-formed XML: the part has CDATA outside its root element"
+        "part {header} is not well-formed XML: text outside root element"
     )));
 
     // Undefined paragraph, table, and character style ids in the body and a
@@ -2895,7 +2934,10 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
             "--revision-view",
             view,
         ]);
-        assert_success(&result, view);
+        assert_eq!(
+            assert_success_with_font_diagnostics(&result, view),
+            "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+        );
         assert_eq!(fs::read(&output).unwrap(), expected);
     }
     let invalid = temp.path.join("invalid.pdf");
@@ -2948,7 +2990,10 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
         "--revision-view",
         "tracked",
     ]);
-    assert_success(&result, "tracked render");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "tracked render"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         fs::read(rendered.join("redline_page1.png")).unwrap(),
         tracked_png
@@ -2997,7 +3042,10 @@ fn cli_revision_style_colours_the_tracked_view_only() {
         "--revision-style",
         "legal",
     ]);
-    assert_success(&result, "legal convert");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "legal convert"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(fs::read(&output).unwrap(), legal_pdf);
 
     let legal_png = opened
@@ -3017,7 +3065,10 @@ fn cli_revision_style_colours_the_tracked_view_only() {
         "--revision-style",
         "legal",
     ]);
-    assert_success(&result, "legal render");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "legal render"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         fs::read(rendered.join("redline_page1.png")).unwrap(),
         legal_png
@@ -3090,7 +3141,10 @@ fn render_page_and_pages_flags_keep_legacy_and_range_indexing_separate() {
         "--page",
         "1",
     ]);
-    assert_success(&legacy, "render zero-based legacy page");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&legacy, "render zero-based legacy page"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let legacy_png = page_dir.join("pages_page2.png");
     assert_eq!(fs::read(&legacy_png).unwrap(), expected);
     assert_eq!(
@@ -3112,7 +3166,10 @@ fn render_page_and_pages_flags_keep_legacy_and_range_indexing_separate() {
         "--pages",
         "2",
     ]);
-    assert_success(&ranged, "render one-based page range");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&ranged, "render one-based page range"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let ranged_png = pages_dir.join("pages_page2.png");
     assert_eq!(fs::read(&ranged_png).unwrap(), expected);
     assert_eq!(
@@ -3418,6 +3475,7 @@ fn cli_collaboration_commands_are_schema_stable_and_atomic() {
                     "author": "Alice",
                     "timestamp": "2026-09-13T12:00:00Z",
                     "kind": "deletion",
+                    "text": "Comment target",
                     "story": {
                         "kind": "body",
                         "part_name": "/word/document.xml",
@@ -3429,6 +3487,7 @@ fn cli_collaboration_commands_are_schema_stable_and_atomic() {
                     "author": "Alice",
                     "timestamp": "2026-09-13T12:00:00Z",
                     "kind": "insertion",
+                    "text": "Edited target",
                     "story": {
                         "kind": "body",
                         "part_name": "/word/document.xml",
@@ -3594,8 +3653,11 @@ fn comment_commands_round_trip_one_resolved_thread() {
                     "text": "Agreed",
                     "parent_id": 0,
                     "resolved": false,
-                    "anchor_text": null,
-                    "anchor": null,
+                    "anchor_text": "Comment target",
+                    "anchor": {
+                        "start": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 0, "direct_body_index": 0 },
+                        "end": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 2, "direct_body_index": 0 },
+                    },
                     "anchor_issue": null,
                 },
             ],
@@ -7887,12 +7949,13 @@ fn issue424_cli_layout_and_pdf_clear_five_spaced_normal_paragraphs_and_logo_tabl
     for index in 0..40 {
         document.add_paragraph(&format!("Body line {index}"));
     }
-    // Same one-pixel PNG used by the picture consumer control, constructed in source.
+    // Valid one-pixel RGB PNG with checked IDAT checksum and chunk CRCs.
     let png = [
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
-        0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44,
-        0x41, 0x54, 8, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0,
-        0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
     document.set_header_image(
         &png,
@@ -7936,7 +7999,10 @@ fn issue424_cli_layout_and_pdf_clear_five_spaced_normal_paragraphs_and_logo_tabl
         "--output",
         path_text(&pdf),
     ]);
-    assert_success(&result, "issue424 PDF");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "issue424 PDF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
     assert_eq!(fs::read(&input).unwrap(), before);
 }

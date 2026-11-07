@@ -413,3 +413,29 @@ source-diagnostic applicability, verified publish dry run and the subsequent
 build-only26payload rehearsal remain due. The permanent named native exception
 remains unproved. No completion ledger, dependency unblock, main merge, tag,
 reporter comment, yank or publication is authorized by this source checkpoint.
+
+
+## H7 CLI fixture source availability renewal
+
+The H6 normal run42335559891fails Test and MSRV on the same17CLI integration
+cases after the Word library/integration/regression suites pass. Its later
+Test goldens and final compatibility decider are skipped, not passed.
+
+The successor changes only CLI tests and affected archive metadata. Production
+code, version carriers, public interfaces, parser/renderer/CLI behavior, all
+thresholds and the hash baseline are unchanged. Actual current macOS CLI
+integration passes116cases, with the one existing Linux-only case retained for
+hosted qualification. Source-qualified XML positives, preserved invalid
+negatives, exact diagnostics/JSON and corrected valid PNG retain their intended
+assertions. Root bounded repair pass6 reviews these exact changes.
+
+The consumed source-availability checkpoint is renewed for the reviewed clean
+canonical sprint ref and normal CI only. Record the actual SHA/tree, origin,
+ancestry, actor, request/run and outcomes after observation. H6failed CI is not
+current green evidence. Current product artifacts retain their actual4cf
+producer identities and require explicit nonproduct applicability, never a
+fabricated rebuild. Other21archive-source inputs remain unchanged, with the
+updated CLI archive measured and post-adoption checked. All final native,
+performance, hosted, verification/review and close debt remains pending. No
+completion ledger, dependency unblock, main merge, tag, registry publication,
+yank or reporter comment is authorized by this checkpoint.
