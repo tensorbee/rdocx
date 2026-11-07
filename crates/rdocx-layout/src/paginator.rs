@@ -5016,10 +5016,14 @@ fn reflow_around_wraps(
     }) {
         return Ok(None);
     }
-    let reflow = para
-        .reflow
-        .as_ref()
-        .ok_or_else(|| "intersecting furniture flow has no retained line-break input".to_owned())?;
+    let Some(reflow) = para.reflow.as_ref() else {
+        // Public neutral pre-laid blocks have no Word producer companion.
+        // Keep their established placement when no rebreak recipe was supplied.
+        if word_paint.is_none() && policy == WrapReflowPolicy::Body {
+            return Ok(None);
+        }
+        return Err("intersecting furniture flow has no retained line-break input".to_owned());
+    };
     let reflow_items = reflow.items.as_slice();
 
     let mut lines = para.lines.clone();
@@ -12888,5 +12892,53 @@ mod tests {
         let (page, placed) = pass.resolved.get(&(1, 0)).expect("block one, anchor zero");
         assert_eq!(*page, 1);
         assert_eq!(placed.wrap, WrapType::Square);
+    }
+
+    #[test]
+    fn neutral_prelaid_wraps_keep_placement_but_word_requires_reflow_source() {
+        let fm = FontManager::new_deterministic().expect("bundled fonts");
+        let para = make_para(1, 14.0);
+        let geometry = PageGeometry::default();
+        let wraps = [PlacedWrap {
+            rect: Rect {
+                x: geometry.margin_left,
+                y: geometry.margin_top,
+                width: 100.0,
+                height: 50.0,
+            },
+            wrap: WrapType::Square,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+        }];
+        assert!(
+            reflow_around_wraps(
+                &para,
+                (TextDirection::Auto, None),
+                &wraps,
+                0.0,
+                &geometry,
+                &fm,
+                WrapReflowPolicy::Body
+            )
+            .expect("neutral prelaid compatibility")
+            .is_none()
+        );
+        let paint = WordParagraphPaint::default();
+        assert_eq!(
+            reflow_around_wraps(
+                &para,
+                (TextDirection::Auto, Some(&paint)),
+                &wraps,
+                0.0,
+                &geometry,
+                &fm,
+                WrapReflowPolicy::Body
+            )
+            .err()
+            .expect("Word flow requires retained reflow source"),
+            "intersecting furniture flow has no retained line-break input"
+        );
     }
 }
