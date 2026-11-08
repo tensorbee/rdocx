@@ -4709,10 +4709,10 @@ mod tests {
         );
 
         let mut controlled = Document::new();
-        controlled.document = CT_Document::from_xml(
+        controlled.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(
             br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#,
         )
-        .unwrap();
+        .unwrap());
         assert!(render_body_projection(&controlled.document.body.content[0]).is_none());
         let result = controlled.to_epub_bytes().unwrap();
         assert!(
@@ -4759,7 +4759,9 @@ mod tests {
                 r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">Visible </w:t></w:r><w:sdt><w:sdtContent><w:r><w:t>{wrapped}</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#
             );
             let mut document = Document::new();
-            document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            document.document = crate::document::DocumentModel::unproved(
+                CT_Document::from_xml(xml.as_bytes()).unwrap(),
+            );
             document.to_epub_bytes()
         };
 
@@ -5290,10 +5292,10 @@ mod tests {
     #[test]
     fn epub_reports_typed_and_raw_paragraph_run_table_row_cell_and_field_losses() {
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(
+        document.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(
             b"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:x=\"urn:root-foreign\"><w:body><w:p xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:y=\"urn:foreign\"><w:bookmarkStart w:id=\"1\" w:name=\"place\"/><w:commentRangeStart w:id=\"2\"/><y:ins/><x:ins\n x:id=\"3\" x:author=\"author\"><x:r><x:t>revision</x:t></x:r></x:ins><w:fldSimple w:instr=\"PAGE\"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:rPr><w:rPrChange w:id=\"4\" w:author=\"author\"><w:rPr/></w:rPrChange></w:rPr><w:t>run</w:t></w:r></w:p></w:body></w:document>",
         )
-        .unwrap();
+        .unwrap());
         let mut table = CT_Tbl::new();
         table.extra_xml.push((0, b"<w:tableRaw/>".to_vec()));
         let mut row = CT_Row::new();

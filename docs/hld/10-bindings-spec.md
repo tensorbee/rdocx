@@ -1,5 +1,9 @@
 # 10, Bindings spec
 
+Comment anchor and reply factories retain fresh source, namespace, marker, ordering and flow preparation. Their fixed standalone paragraph value reads may use positive exact-input, immutable-root and valid-selector certificates, with actual first reads and unchanged first errors. Direct paragraphs retain one key, while eligible simple model tables retain one key per direct paragraph selector under one active Weak root. Factory-local ordinal hints never identify a physical owner or source ancestry, including incidental equal-value matches. The finite value language and cold invariance grammar stay unchanged. Held and fresh handles, atomic refusal and saved/reopened values remain independent acceptance requirements.
+
+Cold binding inventory may borrow immutable model values only after Native complete opening and staged alignment proofs. Paired model origin and original writer-vector identity can discharge those repeated comparisons. Mutable model/vector access invalidates their proof. Only a currently finite-qualified plain item may use identity to omit comparison, while unavailable identity and unsupported/private items retain actual full comparison work. Held/fresh ownership, publication atomicity and Source admission remain independent.
+
 ## Cell edit and shared part surfaces
 
 `OpcPackage::get_part_shared(&self, part_name: &str) -> Option<&Arc<Vec<u8>>>`
@@ -4545,7 +4549,13 @@ ordered report payload.
 
 Rust provides `try_add_paragraph`, `try_insert_paragraph`, `try_add_table` and `try_insert_table` as additive checked methods. Python keeps its existing add and insert paragraph and table APIs, paragraph insertion before an owner, heading creation and page-break creation. Those paths share the checked native policy before their existing publishers. Insertion bounds precede paragraph XML characters, which precede namespace refusal. Existing error families remain. No Python `try_` method or stub export is added. The internal paragraph preflight is shared so XML errors keep that order without replacing the source-preserving splice path.
 
-Word publication consumes current native serialization pieces and retained-source read proofs without adding a stable Python export. Source normalization does not make a parsed child eligible for writer reuse. The page-border publisher validates through the existing save-equivalent path before its conservative owner publication. Trusted byte-opened packages can avoid ZIP output there, while untrusted packages retain the ZIP fallback. Debug `_staging_work` has six slots: parsed bytes, scanned bytes, canonicalized bytes, ZIP bytes written, serialized children and children read. The last two units count children rather than bytes.
+Word publication consumes current native serialization pieces and retained-source read proofs without adding a stable Python export. Cold plain-paragraph batches return accepted text and run paths under the existing complete opening, writer, namespace and finite payload proof. They optionally lend current immutable staged model Arcs after complete per-slot alignment. A valid full writer proof without such a record retains the successful facts and ordinary model copies. The query schedules complete opening/staged comparisons and finite facts per physical slot, while retaining exhaustive root/section metadata and exact lengths. A late opening mismatch discards prefix facts before resource fallback, and a late staged mismatch makes every model loan absent. Cached pieces share only model values. They retain no source record, XML, frame or historical opening. The exact finite graph proves zero weighted/table resource depth, while every unsupported post-opening miss keeps the old full model guard and fallback. A borrowed last-successful run-property value can reuse that same finite eligibility proof only after complete equality within the call. No property proof or facts are retained while dormant. Body piece read facts may reuse a context whose unique retained root declarations and effective body bindings differ only in order. The Native BodyItemContext::read_facts_compatible predicate keeps the main part, model namespaces, root attributes including MC values, body declarations and edit-eligibility flag exact. All five collections must have unique names on the new order-only branch. Exact context equality keeps its existing behavior. Changed names, values, default bindings, duplicate names or other context changes use the full inventory. Native source/writer/opening equality and local cell/splice guards stay exact. Current related-part discovery, duplicate physical-part checks, Field exclusions and hyperlink qualification still run before publication. Source normalization does not make a parsed child eligible for writer reuse. The page-border publisher validates through the existing save-equivalent path before its conservative owner publication. Trusted byte-opened packages can avoid ZIP output there, while untrusted packages retain the ZIP fallback. Debug `_staging_work` has six slots: parsed bytes, scanned bytes, canonicalized bytes, ZIP bytes written, serialized children and children read. The last two units count children rather than bytes.
+
+The qualified cold opening query preallocates paragraph text from checked stored Text lengths and copies the same values in physical run/content order. Returned accepted-run paths and optional model loans stay unchanged. Unavailable sizes or variants retain the original text materializer. No Python signature, cache authority or dormant payload is added.
+
+Private comment projections consume owned first-read paragraphs or immutable certified model loans. Their source marker reads and accepted text/run axes remain unchanged. The loan owner is not exposed through bindings or retained in public results, and releases before reply publication. Table-root lifetime, inline tuple size and actual Arc operations remain memory/equivalence costs.
+
+
 
 Document.charts is a read-only tuple of owned Chart snapshots. chart_type is an
 optional integer, categories a tuple of strings and series a tuple of existing
@@ -5032,7 +5042,7 @@ physical table for local publication. Nested neighboring cells use checked
 publication so equal row/cell ordinals cannot exchange held authority. Signed width truncation and wrap, border
 validation and atomic nonnegative margin validation remain field-specific.
 
-Current paragraph, table and cell capture uses derived exact-route indexes.
+Current paragraph, table and cell capture uses derived exact-route indexes. Direct body paragraph slot lookup borrows its existing complete ContentLocation key, including fingerprint and end marker. Control-contained lookup retains its constructed key. This changes no retained owner, map insertion or publication policy.
 Body and cell-paragraph aliases are prepared from the native batch location
 projections when the owner inventory is prepared, including before candidate
 publication. The additive doc-hidden native methods paragraph_story_locations and
@@ -5355,3 +5365,22 @@ Document.add_picture and Cell.add_picture consume the complete checked inventory
 
 
 Document.replace_text_at uses the checked current selector bridge for a bound recognized one-index paragraph, table or content control. Causal stale and foreign checks run first. Constructed and numeric items, unknown or unsupported kinds and nested paths keep the original resolver and error ordering. Current source discovery never trusts a stored inventory fingerprint.
+
+
+The Native Cell literal replacement route shares its actual initial main output between direct-body selection and physical-cell qualification only under the existing exact current writer proof. Related discovery, optional legacy fallback and postflush source admission remain unchanged. No retained binding fingerprint supplies this qualification, and ordinary writer equality grants no scoped input credit.
+
+
+Reply anchoring reuses one successfully qualified source/item for completely equal endpoints. Different endpoints remain independently qualified. After anchoring, complete fresh story discovery and selected-owner qualification share the same actual source buffers. Full unrelated-source errors precede selection. Both transaction staging boundaries and all source/resource checks remain, without an owned public reply bridge or fresh input credit.
+
+
+Cell.add_picture resolves an ordinary direct-body table cell through the shared current-source Native qualifier. Its doc-hidden support method is also used by Native Cell replacement. Current typed table identity, writer proof, physical source owner and complete related discovery remain authoritative. Related and nested binding routes retain their full resolver. Held formatting changes never reuse a stored cell fingerprint.
+
+
+The existing debug-only transaction provenance map includes phase-zero outputs as ordinary-prefixed producer names. Its six-slot work counters and scoped/picture labels retain their existing meanings. This additive diagnostic observes actual initial binding source work without hiding ordinary work or changing shipping behavior.
+
+
+The shared unpublished binding support allocator exposes concrete Global, Local and Replacement preparation modes. Existing global/local entrypoints preserve their contracts. Only Word Conservative splice and general publication select Replacement. It retains document successor index zero and every declared birth, reserves all original owner-successor generation positions, and retires the same validated states at commit. It returns no unused owner successors. First invalidation causes, serials, stale and overflow checks remain unchanged. PowerPoint keeps its required successors.
+
+The private debug transaction provenance map reports actual ScopeGeneration creations as allphase.scope_generation_allocations and their actual non-document-entry owner-successor subset as allphase.scope_owner_successor_allocations. Each row records calls and exact value payload bytes, excluding Arc headers and allocator overhead. The subset excludes retired index zero, regardless of scope kind. Existing six-slot staging and eight-slot splice units are unchanged. Shipping builds carry neither diagnostic.
+
+Debug transaction output rows allphase.modeled_namespace_scope_copies count actual deep vector copies and the UTF8 name/URI payload bytes copied, excluding allocator/container overhead. They follow the existing staging reference pause and introduce no pause. Row allphase.word_piece_model_clones counts actual model clone sites and BodyContent value payload bytes, excluding nested heap traffic. Both are diagnostics only. Modeled owner scanning shares immutable namespace vectors without skipping attributes, declarations or any parser/source/resource check. No stable Python export or stub changes.

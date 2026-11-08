@@ -137,7 +137,7 @@ impl FontTable {
                     let prefixes = word_prefixes_at(&start, &[])?;
                     if is_word_element(start.name().as_ref(), b"fonts", &prefixes) {
                         reject_conflicting_writer_prefixes(&start)?;
-                        return Self::read(&mut reader, &start, prefixes);
+                        return Self::read(&mut reader, &start, prefixes.into_owned());
                     }
                     return Err(OxmlError::UnexpectedElement(element_name(&start)));
                 }
@@ -203,7 +203,7 @@ impl FontTable {
                         table.fonts.push(read_font(
                             reader,
                             &child,
-                            prefixes,
+                            prefixes.into_owned(),
                             namespace_prefixes_at(&child, &relationship_prefixes, R_NS)?,
                             namespace_prefixes_at(&child, &extension_prefixes, RDOCX_FONT_NS)?,
                         )?);

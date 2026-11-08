@@ -516,6 +516,7 @@ impl CT_GlossaryDocument {
                         root_seen = true;
                         collect_namespace_declarations(&element, &mut inherited_namespaces)?;
                         stack.push(local);
+                        let local_prefixes = local_prefixes.into_owned();
                         prefix_scopes.push(std::mem::replace(&mut word_prefixes, local_prefixes));
                     } else if stack.len() == 1
                         && stack[0].as_deref() == Some("glossaryDocument")
@@ -529,6 +530,7 @@ impl CT_GlossaryDocument {
                             ));
                         }
                         stack.push(local);
+                        let local_prefixes = local_prefixes.into_owned();
                         prefix_scopes.push(std::mem::replace(&mut word_prefixes, local_prefixes));
                     } else if stack.len() == 2
                         && stack[0].as_deref() == Some("glossaryDocument")
@@ -542,6 +544,7 @@ impl CT_GlossaryDocument {
                         doc_parts.push(part);
                     } else {
                         stack.push(local);
+                        let local_prefixes = local_prefixes.into_owned();
                         prefix_scopes.push(std::mem::replace(&mut word_prefixes, local_prefixes));
                     }
                 }
@@ -1005,7 +1008,7 @@ fn parse_doc_part(
                 let local_prefixes = word_prefixes_at(&element, &prefixes)?;
                 let local = word_local_name(&element, &local_prefixes);
                 if depth == 0 {
-                    owner_prefixes = local_prefixes.clone();
+                    owner_prefixes = local_prefixes.to_vec();
                 }
                 if depth == 1 && local.as_deref() == Some("docPartPr") {
                     if properties_xml.is_some() {
@@ -1030,6 +1033,7 @@ fn parse_doc_part(
                     body_span = Some(event_start..reader.buffer_position() as usize);
                 } else {
                     depth += 1;
+                    let local_prefixes = local_prefixes.into_owned();
                     prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
                 }
             }
@@ -1126,8 +1130,8 @@ fn parse_properties(raw_xml: &[u8], inherited_prefixes: &[String]) -> Result<CT_
                 if !root_seen {
                     root_seen = true;
                     root_start_xml = standalone_event(Event::Start(element.into_owned()))?;
-                    source_word_prefixes = local_prefixes.clone();
-                    prefixes = local_prefixes;
+                    source_word_prefixes = local_prefixes.to_vec();
+                    prefixes = local_prefixes.into_owned();
                 } else {
                     let raw = capture_element(&mut reader, &element)?;
                     if let Some(field_slot) = property_slot(&element, &local_prefixes) {
@@ -1154,7 +1158,7 @@ fn parse_properties(raw_xml: &[u8], inherited_prefixes: &[String]) -> Result<CT_
                 let local_prefixes = word_prefixes_at(&element, &prefixes)?;
                 if !root_seen {
                     root_seen = true;
-                    source_word_prefixes = local_prefixes;
+                    source_word_prefixes = local_prefixes.into_owned();
                     let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                     root_start_xml = capture_empty_element(&element)?;
                     root_start_xml.splice(root_start_xml.len() - 2.., *b">");
@@ -1489,6 +1493,7 @@ where
                     writer.write_event(Event::Start(element))?;
                     output.extend_from_slice(&writer.into_inner());
                     depth += 1;
+                    let local_prefixes = local_prefixes.into_owned();
                     prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
                 }
             }
@@ -1721,7 +1726,7 @@ fn root_value(raw: &[u8], inherited_prefixes: &[String]) -> Result<Option<String
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) | Event::Empty(element) => {
-                prefixes = word_prefixes_at(&element, &prefixes)?;
+                prefixes = word_prefixes_at(&element, &prefixes)?.into_owned();
                 return Ok(Some(word_value(&element, &prefixes)?.ok_or_else(|| {
                     OxmlError::MissingElement("modeled glossary w:val".to_owned())
                 })?));
@@ -1750,6 +1755,7 @@ fn nested_values(raw: &[u8], wanted: &[u8], inherited_prefixes: &[String]) -> Re
                     })?);
                 }
                 depth += 1;
+                let local_prefixes = local_prefixes.into_owned();
                 prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
             }
             Event::Empty(element) => {
@@ -1813,6 +1819,7 @@ fn category_values(
                     &mut values,
                 )?;
                 depth += 1;
+                let local_prefixes = local_prefixes.into_owned();
                 prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
             }
             Event::Empty(element) => {
@@ -1991,7 +1998,7 @@ fn parse_doc_part_body(raw: &[u8], inherited_prefixes: &[String]) -> Result<CT_B
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) => {
-                prefixes = word_prefixes_at(&element, &prefixes)?;
+                prefixes = word_prefixes_at(&element, &prefixes)?.into_owned();
                 if is_word_element(element.name().as_ref(), b"docPartBody", &prefixes) {
                     return CT_Body::from_xml_with_prefixes_and_owner_bindings_until(
                         &mut reader,
@@ -2003,7 +2010,7 @@ fn parse_doc_part_body(raw: &[u8], inherited_prefixes: &[String]) -> Result<CT_B
                 }
             }
             Event::Empty(element) => {
-                prefixes = word_prefixes_at(&element, &prefixes)?;
+                prefixes = word_prefixes_at(&element, &prefixes)?.into_owned();
                 if is_word_element(element.name().as_ref(), b"docPartBody", &prefixes) {
                     return Ok(CT_Body {
                         content: Vec::new(),

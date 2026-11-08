@@ -15744,6 +15744,314 @@ def test_fx268_splice_fallback_exposes_general_publication_index_work():
     assert rdocx.Document.from_bytes(document.to_bytes()).paragraphs[0].text == 'fallback'
 
 
+@pytest.mark.parametrize('root_w14', [False, True])
+@pytest.mark.parametrize('operation', ['insert', 'remove'])
+def test_fx268_cold_pieces_share_current_immutable_models(operation, root_w14, tmp_path):
+    import rdocx
+    from rdocx import _rdocx
+
+    outputs = getattr(_rdocx, '_word_transaction_outputs', None)
+    if outputs is None:
+        pytest.skip('requires debug observations of actual body model clones')
+    seed = rdocx.Document()
+    seed.add_paragraph('first')
+    rpr = ('<w:rPr><w:rFonts w:ascii="Arial" w:cs="Arial" w:eastAsia="Arial" w:hAnsi="Arial"/>'
+           '<w:b w:val="0"/><w:i w:val="0"/><w:smallCaps w:val="0"/><w:strike w:val="0"/>'
+           '<w:color w:val="000000"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:u w:val="none"/>'
+           '<w:shd w:fill="auto" w:val="clear"/><w:vertAlign w:val="baseline"/><w:rtl w:val="0"/></w:rPr>')
+    body = ''.join('<w:p>' + ''.join(
+        f'<w:r>{rpr}<w:t xml:space="preserve">run {k} of paragraph {i} </w:t></w:r>'
+        for k in range(6)) + '</w:p>' for i in range(24)).encode()
+    def rewrite(name, raw):
+        if name != 'word/document.xml':
+            return raw
+        if root_w14:
+            raw = raw.replace(b'<w:document ', b'<w:document xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" ', 1)
+        return raw.replace(b'<w:sectPr', body + b'<w:sectPr', 1)
+
+    document = _rewrite_package(seed, rewrite)
+    expected = ['first'] + [''.join(f'run {k} of paragraph {i} ' for k in range(6)) for i in range(24)]
+    outputs()
+    if operation == 'insert':
+        result = document.insert_paragraph(10, 'x')
+        expected.insert(10, 'x')
+    else:
+        assert document.remove_content(10)
+        expected.pop(10)
+    observed = outputs()
+    if operation == 'insert':
+        assert result.text == 'x'
+    assert [paragraph.text for paragraph in document.paragraphs] == expected
+    assert document.paragraphs[1].runs[0].font.name == 'Arial'
+    assert document.paragraphs[1].runs[0].bold is False
+    path = tmp_path / f'cold-model-{operation}-{root_w14}.docx'
+    document.save(path)
+    reopened = rdocx.Document.open(path)
+    assert [paragraph.text for paragraph in reopened.paragraphs] == expected
+    assert reopened.paragraphs[1].runs[0].font.name == 'Arial'
+    assert reopened.paragraphs[1].runs[0].bold is False
+    expected_clones = int(operation == 'insert')
+    assert observed['allphase.word_piece_model_clones'][0] == expected_clones, observed
+
+
+@pytest.mark.parametrize('operation', ['run_text', 'tab'])
+def test_fx268_warm_reply_value_reads_follow_live_neighbor_edits(operation, tmp_path):
+    import rdocx
+
+    seed = rdocx.Document()
+    seed.add_paragraph('target')
+    seed.add_table(1, 1).cell(0, 0).text = 'cell neighbor'
+    for index in range(12):
+        seed.add_paragraph(f'neighbor {index}')
+    seed.section(0).header.add_paragraph('header neighbor')
+    parent = seed.add_comment_on_text('target', author='Ada', text='root')
+    document = rdocx.Document.from_bytes(seed.to_bytes())
+    for index in range(2):
+        document.reply_to(parent, author='Ben', text=f'warm {index}', date='2026-10-01T12:00:00Z')
+    held = document.paragraphs[-1]
+    run = held.runs[0]
+    if operation == 'run_text':
+        run.text = 'changed neighbor'
+        expected = 'changed neighbor'
+    else:
+        run.add_tab()
+        expected = 'neighbor 11\t'
+    assert held.text == run.text == document.paragraphs[-1].text == expected
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match=r'^comment id 999999 does not exist$'):
+        document.reply_to(999999, author='Ben', text='refused')
+    assert document.to_bytes() == before
+    assert held.text == run.text == expected
+    reply = document.reply_to(parent, author='Ben', text='after edit', date='2026-10-01T12:00:00Z')
+    with pytest.raises(rdocx.StaleElementError, match='Document.reply_to'):
+        _ = held.text
+    assert document.paragraphs[-1].text == expected
+    assert document.paragraphs[-2].text == 'neighbor 10'
+    assert document.tables[0].cell(0, 0).text == 'cell neighbor'
+    assert document.section(0).header.paragraphs[-1].text == 'header neighbor'
+    current = next(comment for comment in document.comments if comment.id == reply)
+    assert current.parent_id == parent and current.anchor_text == 'target'
+    result = tmp_path / f'warm-values-{operation}.docx'
+    document.save(result)
+    reopened = rdocx.Document.open(result)
+    assert reopened.paragraphs[-1].text == expected
+    assert reopened.tables[0].cell(0, 0).text == 'cell neighbor'
+    saved = next(comment for comment in reopened.comments if comment.id == reply)
+    assert saved.parent_id == parent and saved.anchor_text == 'target'
+
+
+@pytest.mark.parametrize('paragraphs', [12, 36])
+def test_fx268_reply_shares_undeclared_namespace_scopes(paragraphs, tmp_path):
+    import rdocx
+    from rdocx import _rdocx
+
+    outputs = getattr(_rdocx, '_word_transaction_outputs', None)
+    if outputs is None:
+        pytest.skip('requires debug observations of actual namespace binding copies')
+    seed = rdocx.Document()
+    for index in range(paragraphs):
+        paragraph = seed.add_paragraph()
+        for run_index in range(6):
+            paragraph.add_run(f'run {run_index} of paragraph {index} ').bold = False
+    parent = seed.add_comment_on_text('run 0 of paragraph 0 ', author='Ada', text='root')
+    document = rdocx.Document.from_bytes(seed.to_bytes())
+    assert document.comments[0].id == parent
+    expected = [paragraph.text for paragraph in document.paragraphs]
+    held = document.paragraphs[-1]
+    outputs()
+    reply = document.reply_to(parent, author='Ben', text='reply', date='2026-10-01T12:00:00Z')
+    observed = outputs()
+    with pytest.raises(rdocx.StaleElementError, match='Document.reply_to'):
+        _ = held.text
+    assert [paragraph.text for paragraph in document.paragraphs] == expected
+    current = next(comment for comment in document.comments if comment.id == reply)
+    assert current.parent_id == parent and current.text == 'reply'
+    assert current.anchor_text == 'run 0 of paragraph 0 '
+    result = tmp_path / 'namespace-scope-sharing.docx'
+    document.save(result)
+    reopened = rdocx.Document.open(result)
+    assert [paragraph.text for paragraph in reopened.paragraphs] == expected
+    saved = next(comment for comment in reopened.comments if comment.id == reply)
+    assert saved.parent_id == parent and saved.text == 'reply'
+    assert saved.anchor_text == current.anchor_text
+    # Namespace-declaring nodes still copy their inherited scope. Increasing
+    # the plain body must not add a copy for each element or modeled owner.
+    assert observed['allphase.modeled_namespace_scope_copies'] == [8, 572], observed
+
+
+@pytest.mark.parametrize('alias', [False, True])
+def test_fx268_reply_reuses_read_facts_after_namespace_reordering(alias, tmp_path):
+    import re
+    import rdocx
+    from rdocx import _rdocx
+
+    whole = getattr(_rdocx, '_word_whole_body_work', None)
+    if whole is None:
+        pytest.skip('requires actual debug full-inventory producer observations')
+    seed = rdocx.Document()
+    for index in range(12):
+        seed.add_paragraph(f'neighbor {index}')
+    seed.add_table(2, 2).cell(1, 1).text = 'cell neighbor'
+    seed.add_paragraph('picture').add_run('').add_picture(_one_pixel_png(), 'pixel.png')
+    seed.section(0).header.add_paragraph('header neighbor')
+    parent = seed.add_comment_on_text('neighbor 0', author='Ada', text='root')
+
+    def reorder(name, raw):
+        if name != 'word/document.xml':
+            return raw
+        start = raw.index(b'<w:document ')
+        end = raw.index(b'>', start)
+        root = raw[start:end]
+        declaration = re.search(rb' xmlns:w="[^"]*"', root).group()
+        raw = raw[:start] + root.replace(declaration, b'', 1) + declaration + raw[end:]
+        if alias:
+            raw = raw.replace(b'w:', b'q:').replace(b'xmlns:w=', b'xmlns:q=')
+        return raw
+
+    document = _rewrite_package(seed, reorder)
+    assert next(c for c in document.comments if c.id == parent).text == 'root'
+    held = document.paragraphs[1]
+    before_text = [p.text for p in document.paragraphs]
+    before_cell = document.tables[0].cell(1, 1).text
+    whole()
+    reply = document.reply_to(parent, author='Ben', text='reply', date='2026-10-01T12:00:00Z')
+    measured = whole()
+    with pytest.raises(rdocx.StaleElementError, match='Document.reply_to'):
+        _ = held.text
+    assert [p.text for p in document.paragraphs] == before_text
+    assert document.tables[0].cell(1, 1).text == before_cell == 'cell neighbor'
+    assert len(document.pictures()) == 1
+    current = next(c for c in document.comments if c.id == reply)
+    assert current.parent_id == parent and current.text == 'reply'
+    assert current.anchor_text == 'neighbor 0'
+    result = tmp_path / f'namespace-order-{alias}.docx'
+    document.save(result)
+    reopened = rdocx.Document.open(result)
+    assert [p.text for p in reopened.paragraphs] == before_text
+    assert reopened.tables[0].cell(1, 1).text == before_cell
+    saved = next(c for c in reopened.comments if c.id == reply)
+    assert saved.parent_id == parent and saved.text == 'reply'
+    assert saved.anchor_text == 'neighbor 0'
+    # An imported alias gains the fixed writer w binding, so it remains a
+    # full-context fallback. Only the ordinary case changes order alone.
+    assert measured[0] == int(alias), measured
+
+
+@pytest.mark.parametrize('operation', ['cold-insert', 'warm-insert', 'cold-remove', 'warm-remove', 'reply'])
+def test_fx268_conservative_publication_omits_unused_owner_successors(operation):
+    import rdocx
+    from rdocx import _rdocx
+
+    outputs = getattr(_rdocx, '_word_transaction_outputs', None)
+    if outputs is None:
+        pytest.skip('requires actual debug scope-generation allocation counters')
+    seed = rdocx.Document()
+    expected = [f'p{i}' for i in range(8)]
+    for text in expected:
+        seed.add_paragraph(text)
+    if operation == 'reply':
+        parent = seed.add_comment_on_text('p0', author='Ada', text='root')
+    document = rdocx.Document.from_bytes(seed.to_bytes())
+    if operation == 'warm-insert':
+        document.insert_paragraph(3, 'warm')
+        expected.insert(3, 'warm')
+    elif operation == 'warm-remove':
+        document.remove_content(3)
+        expected.pop(3)
+    held = document.paragraphs[0] if operation.startswith('warm') or operation == 'reply' else None
+    outputs()
+    if operation.endswith('insert'):
+        inserted = document.insert_paragraph(3, 'born')
+        expected.insert(3, 'born')
+        label = 'Document.insert_paragraph'
+    elif operation.endswith('remove'):
+        document.remove_content(3)
+        expected.pop(3)
+        label = 'Document.remove_content'
+    else:
+        reply_id = document.reply_to(parent, author='Ben', text='reply')
+        label = 'Document.reply_to'
+    measured = outputs()
+    if operation.endswith('insert'):
+        assert inserted.text == 'born'
+    if held is not None:
+        with pytest.raises(rdocx.StaleElementError, match=label):
+            _ = held.text
+    assert [p.text for p in document.paragraphs] == expected
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert [p.text for p in reopened.paragraphs] == expected
+    if operation == 'reply':
+        reply = next(item for item in reopened.comments if item.id == reply_id)
+        assert reply.parent_id == parent and reply.text == 'reply'
+    assert measured['allphase.scope_generation_allocations'][0] > 0
+    assert measured['allphase.scope_owner_successor_allocations'] == [0, 0], measured
+
+
+@pytest.mark.parametrize('target_kind', ['body', 'cell', 'edited-cell'])
+def test_fx268_cell_picture_shares_current_source_after_live_edits(target_kind, tmp_path):
+    import rdocx
+    from rdocx import _rdocx
+
+    outputs = getattr(_rdocx, '_word_transaction_outputs', None)
+    if outputs is None:
+        pytest.skip('requires actual debug transaction counters')
+    document = rdocx.Document()
+    document.add_paragraph('body')
+    document.add_table(1, 2).cell(0, 1).text = 'selected'
+    declaration = b'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+    document = _rewrite_package(document, lambda name, data: (
+        data.replace(b'<w:document ', b'<w:document ' + declaration, 1)
+        if name == 'word/document.xml' and b'xmlns:w14=' not in data else data
+    ))
+    held = document.paragraphs[0]
+    owner = document
+    expected_text = 'selected'
+    if target_kind != 'body':
+        owner = document.tables[0].cell(0, 1)
+        run = owner.paragraphs[0].runs[0]
+        run.bold = True
+        if target_kind == 'edited-cell':
+            expected_text = 'current selected'
+            run.text = expected_text
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match='image'):
+        owner.add_picture(b'invalid')
+    assert document.to_bytes() == before
+    assert held.text == 'body'
+
+    image = _one_pixel_png()
+    outputs()
+    picture = owner.add_picture(image)
+    measured = outputs()
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    actual = document.pictures()
+    assert len(actual) == 1
+    assert actual[0].bytes == picture.bytes == image
+    package = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(package)
+    saved = reopened.pictures()
+    assert len(saved) == 1
+    expected = picture.location
+    for occurrence in (actual[0], saved[0]):
+        location = occurrence.location
+        assert (location.story.kind, location.story.part_name, location.story.owner_index,
+                location.item_kind, location.index_path) == (
+                    expected.story.kind, expected.story.part_name, expected.story.owner_index,
+                    expected.item_kind, expected.index_path)
+    assert saved[0].bytes == image
+    assert reopened.paragraphs[0].text == 'body'
+    assert reopened.tables[0].cell(0, 0).text == ''
+    cell = reopened.tables[0].cell(0, 1)
+    assert cell.paragraphs[0].text == expected_text
+    if target_kind != 'body':
+        assert cell.paragraphs[0].runs[0].bold
+    (tmp_path / 'picture.docx').write_bytes(package)
+    assert measured['ordinary.assembled_current_writer'][0] == (
+        17 if target_kind == 'body' else 20
+    ), measured
+
+
 @pytest.mark.parametrize('publisher', ['Document.add_picture', 'Cell.add_picture'])
 @pytest.mark.parametrize('paragraphs', [25, 100])
 def test_fx268_picture_normalization_reuses_actual_checked_rounds(publisher, paragraphs):

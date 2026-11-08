@@ -177,7 +177,7 @@ impl CT_Footnotes {
                         || is_word_element(name.as_ref(), b"endnotes", &prefixes)
                     {
                         // Continue into the root element
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                     } else {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }

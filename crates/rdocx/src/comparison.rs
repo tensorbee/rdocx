@@ -1445,7 +1445,7 @@ impl Document {
         let tracked = CT_Document::from_xml(&tracked_xml)?;
         tracked.to_xml()?;
         let mut candidate = original.clone_for_staging();
-        candidate.document = tracked;
+        candidate.document = crate::document::DocumentModel::unproved(tracked);
         candidate
             .package
             .set_part(&candidate.doc_part_name, tracked_xml);
@@ -2262,7 +2262,8 @@ fn remap_equivalent_owner_relationships(
         .ok_or_else(|| Error::Other(format!("missing comparison story {edited_owner}")))?;
     let updated = crate::document::remap_xml_relationship_ids(source, &collision_remap)?;
     if edited_owner == edited.doc_part_name {
-        edited.document = CT_Document::from_xml(&updated)?;
+        edited.document =
+            crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
     }
     edited.package.set_part(edited_owner, updated);
     if let Some(relationships) = edited.package.get_part_rels_mut(edited_owner) {
@@ -3444,7 +3445,7 @@ fn comparison_input(document: &Document) -> Result<Document> {
         .package
         .get_part(&candidate.doc_part_name)
         .ok_or_else(|| Error::Other(format!("missing main story {}", candidate.doc_part_name)))?;
-    candidate.document = CT_Document::from_xml(source)?;
+    candidate.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(source)?);
     Ok(candidate)
 }
 

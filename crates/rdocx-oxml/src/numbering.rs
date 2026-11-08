@@ -626,10 +626,23 @@ fn capture_extra_attributes(
 }
 
 pub(crate) fn namespace_binding(prefix: &str, namespace: &str) -> String {
-    format!("\0{prefix}\0{namespace}")
+    let Some(capacity) = prefix
+        .len()
+        .checked_add(namespace.len())
+        .and_then(|length| length.checked_add(2))
+        .filter(|length| *length <= isize::MAX as usize)
+    else {
+        return format!("\0{prefix}\0{namespace}");
+    };
+    let mut value = String::with_capacity(capacity);
+    value.push('\0');
+    value.push_str(prefix);
+    value.push('\0');
+    value.push_str(namespace);
+    value
 }
 
-fn split_namespace_binding(value: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_namespace_binding(value: &str) -> Option<(&str, &str)> {
     value.strip_prefix('\0')?.split_once('\0')
 }
 
@@ -641,7 +654,40 @@ pub(crate) fn namespace_bindings(scope: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
-pub(crate) fn word_prefixes_at(
+pub(crate) fn word_prefixes_at<'scope>(
+    start: &BytesStart<'_>,
+    inherited: &'scope [String],
+) -> Result<std::borrow::Cow<'scope, [String]>> {
+    let mut prefixes: std::borrow::Cow<'_, [String]> = std::borrow::Cow::Borrowed(inherited);
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let name = attribute.key.as_ref();
+        let prefix = if name == b"xmlns" {
+            b"".as_slice()
+        } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
+            prefix
+        } else {
+            continue;
+        };
+        let prefix = std::str::from_utf8(prefix)?;
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
+        let prefixes = prefixes.to_mut();
+        prefixes.retain(|candidate| {
+            candidate.as_str() != prefix
+                && split_namespace_binding(candidate)
+                    .is_none_or(|(candidate, _)| candidate != prefix)
+        });
+        prefixes.push(namespace_binding(prefix, &value));
+        if value.as_bytes() == W_NS.as_bytes() {
+            prefixes.push(prefix.to_owned());
+        }
+    }
+    Ok(prefixes)
+}
+
+#[cfg(test)]
+fn fx268_legacy_word_prefixes_at(
     start: &BytesStart<'_>,
     inherited: &[String],
 ) -> Result<Vec<String>> {
@@ -874,7 +920,7 @@ fn validate_typed_leaf_prefixes(raw: &[u8], inherited: &[String]) -> Result<()> 
                     }
                 }
                 if is_start {
-                    scope_stack.push(scope);
+                    scope_stack.push(scope.into_owned());
                 }
             }
             Ok(Event::End(_)) => {
@@ -2058,7 +2104,7 @@ fn occurrence_overlay(raw: &[u8], word_prefixes: &[String]) -> Result<Occurrence
         }
     }
     Ok(OccurrenceOverlay {
-        word_prefixes: prefixes,
+        word_prefixes: prefixes.into_owned(),
         modelled,
         extras,
     })
@@ -3256,7 +3302,7 @@ impl CT_Lvl {
                         } else {
                             seen_start = true;
                             lvl.start = parsed;
-                            lvl.start_raw = Some((parsed, raw, prefixes));
+                            lvl.start_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 1;
                     } else if is_word_element(name.as_ref(), b"numFmt", &prefixes) {
@@ -3268,7 +3314,7 @@ impl CT_Lvl {
                         } else {
                             seen_num_fmt = true;
                             lvl.num_fmt.clone_from(&parsed);
-                            lvl.num_fmt_raw = Some((parsed, raw, prefixes));
+                            lvl.num_fmt_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 2;
                     } else if is_word_element(name.as_ref(), b"lvlRestart", &prefixes) {
@@ -3280,7 +3326,7 @@ impl CT_Lvl {
                         } else {
                             seen_restart = true;
                             lvl.restart = parsed;
-                            lvl.restart_raw = Some((parsed, raw, prefixes));
+                            lvl.restart_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 3;
                     } else if is_word_element(name.as_ref(), b"pStyle", &prefixes) {
@@ -3292,7 +3338,7 @@ impl CT_Lvl {
                         }
                         seen_p_style = true;
                         lvl.p_style = value.clone();
-                        lvl.p_style_raw = Some((value, raw, prefixes));
+                        lvl.p_style_raw = Some((value, raw, prefixes.into_owned()));
                         boundary = 4;
                     } else if is_word_element(name.as_ref(), b"isLgl", &prefixes) {
                         let parsed = typed_on_off_value(e, &prefixes)?;
@@ -3302,7 +3348,7 @@ impl CT_Lvl {
                         } else {
                             seen_legal = true;
                             lvl.legal = parsed;
-                            lvl.legal_raw = Some((parsed, raw, prefixes));
+                            lvl.legal_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 5;
                     } else if is_word_element(name.as_ref(), b"suff", &prefixes) {
@@ -3314,7 +3360,7 @@ impl CT_Lvl {
                         } else {
                             seen_suffix = true;
                             lvl.suffix = parsed;
-                            lvl.suffix_raw = Some((parsed, raw, prefixes));
+                            lvl.suffix_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 6;
                     } else if is_word_element(name.as_ref(), b"lvlText", &prefixes) {
@@ -3325,7 +3371,7 @@ impl CT_Lvl {
                         } else {
                             seen_lvl_text = true;
                             lvl.lvl_text.clone_from(&value);
-                            lvl.lvl_text_raw = Some((value, raw, prefixes));
+                            lvl.lvl_text_raw = Some((value, raw, prefixes.into_owned()));
                         }
                         boundary = 7;
                     } else if is_word_element(name.as_ref(), b"lvlJc", &prefixes) {
@@ -3339,7 +3385,7 @@ impl CT_Lvl {
                         } else {
                             seen_lvl_jc = true;
                             lvl.lvl_jc = parsed;
-                            lvl.lvl_jc_raw = Some((parsed, raw, prefixes));
+                            lvl.lvl_jc_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 10;
                     } else if is_word_element(name.as_ref(), b"pPr", &prefixes) {
@@ -3347,7 +3393,7 @@ impl CT_Lvl {
                         let (ppr, has_producer) = ppr_from_raw(&raw, &prefixes)?;
                         lvl.ppr = Some(ppr.clone());
                         if has_producer {
-                            lvl.ppr_raw = Some((ppr, raw, prefixes));
+                            lvl.ppr_raw = Some((ppr, raw, prefixes.into_owned()));
                         }
                         boundary = 11;
                     } else if is_word_element(name.as_ref(), b"rPr", &prefixes) {
@@ -3355,7 +3401,7 @@ impl CT_Lvl {
                         let (rpr, has_producer) = rpr_from_raw(&raw, &prefixes)?;
                         lvl.rpr = Some(rpr.clone());
                         if has_producer {
-                            lvl.rpr_raw = Some((rpr, raw, prefixes));
+                            lvl.rpr_raw = Some((rpr, raw, prefixes.into_owned()));
                         }
                         boundary = 12;
                     } else {
@@ -3377,7 +3423,7 @@ impl CT_Lvl {
                             seen_start = true;
                             lvl.start = parsed;
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.start_raw = Some((parsed, raw, prefixes));
+                                lvl.start_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 1;
@@ -3391,7 +3437,7 @@ impl CT_Lvl {
                             seen_num_fmt = true;
                             lvl.num_fmt.clone_from(&parsed);
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.num_fmt_raw = Some((parsed, raw, prefixes));
+                                lvl.num_fmt_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 2;
@@ -3405,7 +3451,7 @@ impl CT_Lvl {
                             seen_restart = true;
                             lvl.restart = parsed;
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.restart_raw = Some((parsed, raw, prefixes));
+                                lvl.restart_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 3;
@@ -3418,7 +3464,7 @@ impl CT_Lvl {
                         }
                         seen_p_style = true;
                         if typed_leaf_requires_raw(e, &prefixes, false)? {
-                            lvl.p_style_raw = Some((value.clone(), raw, prefixes));
+                            lvl.p_style_raw = Some((value.clone(), raw, prefixes.into_owned()));
                         }
                         lvl.p_style = value;
                         boundary = 4;
@@ -3431,7 +3477,7 @@ impl CT_Lvl {
                             seen_legal = true;
                             lvl.legal = parsed;
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.legal_raw = Some((parsed, raw, prefixes));
+                                lvl.legal_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 5;
@@ -3445,7 +3491,7 @@ impl CT_Lvl {
                             seen_suffix = true;
                             lvl.suffix = parsed;
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.suffix_raw = Some((parsed, raw, prefixes));
+                                lvl.suffix_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 6;
@@ -3458,7 +3504,7 @@ impl CT_Lvl {
                             seen_lvl_text = true;
                             lvl.lvl_text.clone_from(&value);
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.lvl_text_raw = Some((value, raw, prefixes));
+                                lvl.lvl_text_raw = Some((value, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 7;
@@ -3474,7 +3520,7 @@ impl CT_Lvl {
                             seen_lvl_jc = true;
                             lvl.lvl_jc = parsed;
                             if typed_leaf_requires_raw(e, &prefixes, false)? {
-                                lvl.lvl_jc_raw = Some((parsed, raw, prefixes));
+                                lvl.lvl_jc_raw = Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 10;
@@ -3483,7 +3529,7 @@ impl CT_Lvl {
                         let (ppr, has_producer) = ppr_from_raw(&raw, &prefixes)?;
                         lvl.ppr = Some(ppr.clone());
                         if has_producer {
-                            lvl.ppr_raw = Some((ppr, raw, prefixes));
+                            lvl.ppr_raw = Some((ppr, raw, prefixes.into_owned()));
                         }
                         boundary = 11;
                     } else if is_word_element(name.as_ref(), b"rPr", &prefixes) {
@@ -3491,7 +3537,7 @@ impl CT_Lvl {
                         let (rpr, has_producer) = rpr_from_raw(&raw, &prefixes)?;
                         lvl.rpr = Some(rpr.clone());
                         if has_producer {
-                            lvl.rpr_raw = Some((rpr, raw, prefixes));
+                            lvl.rpr_raw = Some((rpr, raw, prefixes.into_owned()));
                         }
                         boundary = 12;
                     } else {
@@ -3852,7 +3898,7 @@ impl CT_AbstractNum {
                         }
                         seen_nsid = true;
                         abs.nsid = value.clone();
-                        abs.nsid_raw = Some((value, raw, prefixes));
+                        abs.nsid_raw = Some((value, raw, prefixes.into_owned()));
                         boundary = 1;
                     } else if is_word_element(name.as_ref(), b"multiLevelType", &prefixes) {
                         let value = typed_leaf_value(e, &prefixes)?;
@@ -3863,7 +3909,7 @@ impl CT_AbstractNum {
                         }
                         seen_multi_level_type = true;
                         abs.multi_level_type = value.clone();
-                        abs.multi_level_type_raw = Some((value, raw, prefixes));
+                        abs.multi_level_type_raw = Some((value, raw, prefixes.into_owned()));
                         boundary = 2;
                     } else if is_word_element(name.as_ref(), b"tmpl", &prefixes) {
                         let value = typed_leaf_value(e, &prefixes)?;
@@ -3874,7 +3920,7 @@ impl CT_AbstractNum {
                         }
                         seen_tmpl = true;
                         abs.tmpl = value.clone();
-                        abs.tmpl_raw = Some((value, raw, prefixes));
+                        abs.tmpl_raw = Some((value, raw, prefixes.into_owned()));
                         boundary = 3;
                     } else if is_word_element(name.as_ref(), b"lvl", &prefixes) {
                         let ilvl = u32_attribute(e, b"ilvl", &prefixes)?;
@@ -3900,7 +3946,7 @@ impl CT_AbstractNum {
                         }
                         seen_nsid = true;
                         if typed_leaf_requires_raw(e, &prefixes, false)? {
-                            abs.nsid_raw = Some((value.clone(), raw, prefixes));
+                            abs.nsid_raw = Some((value.clone(), raw, prefixes.into_owned()));
                         }
                         abs.nsid = value;
                         boundary = 1;
@@ -3913,7 +3959,8 @@ impl CT_AbstractNum {
                         }
                         seen_multi_level_type = true;
                         if typed_leaf_requires_raw(e, &prefixes, false)? {
-                            abs.multi_level_type_raw = Some((value.clone(), raw, prefixes));
+                            abs.multi_level_type_raw =
+                                Some((value.clone(), raw, prefixes.into_owned()));
                         }
                         abs.multi_level_type = value;
                         boundary = 2;
@@ -3926,7 +3973,7 @@ impl CT_AbstractNum {
                         }
                         seen_tmpl = true;
                         if typed_leaf_requires_raw(e, &prefixes, false)? {
-                            abs.tmpl_raw = Some((value.clone(), raw, prefixes));
+                            abs.tmpl_raw = Some((value.clone(), raw, prefixes.into_owned()));
                         }
                         abs.tmpl = value;
                         boundary = 3;
@@ -4154,7 +4201,7 @@ impl CT_NumLvl {
                         } else {
                             seen_start = true;
                             value.start_override = parsed;
-                            value.start_override_raw = Some((parsed, raw, prefixes));
+                            value.start_override_raw = Some((parsed, raw, prefixes.into_owned()));
                         }
                         boundary = 1;
                     } else if is_word_element(element.name().as_ref(), b"lvl", &prefixes) {
@@ -4187,7 +4234,8 @@ impl CT_NumLvl {
                             seen_start = true;
                             value.start_override = parsed;
                             if typed_leaf_requires_raw(element, &prefixes, false)? {
-                                value.start_override_raw = Some((parsed, raw, prefixes));
+                                value.start_override_raw =
+                                    Some((parsed, raw, prefixes.into_owned()));
                             }
                         }
                         boundary = 1;
@@ -4321,7 +4369,7 @@ impl CT_Num {
                             .transpose()?
                             .unwrap_or(0);
                         if typed_leaf_requires_raw(e, &prefixes, false)? {
-                            abstract_num_id_raw = Some((abstract_num_id, raw, prefixes.clone()));
+                            abstract_num_id_raw = Some((abstract_num_id, raw, prefixes.to_vec()));
                         }
                         position = 1;
                     } else if is_word_element(e.name().as_ref(), b"lvlOverride", &prefixes) {
@@ -4346,7 +4394,7 @@ impl CT_Num {
                         }
                         seen_abstract_num_id = true;
                         abstract_num_id = value;
-                        abstract_num_id_raw = Some((value, raw, prefixes));
+                        abstract_num_id_raw = Some((value, raw, prefixes.into_owned()));
                         position = 1;
                     } else if is_word_element(e.name().as_ref(), b"lvlOverride", &prefixes) {
                         let raw = capture_element(reader, e)?;
@@ -4595,7 +4643,7 @@ impl CT_Numbering {
                         position += 1;
                     } else if is_word_element(name.as_ref(), b"numbering", &prefixes) {
                         root_attributes = capture_root_attributes(e)?;
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                     } else {
                         extra_xml.push((
                             root_raw_boundary(name.as_ref(), position, &prefixes),
@@ -4608,7 +4656,7 @@ impl CT_Numbering {
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
                     if is_word_element(name.as_ref(), b"numbering", &prefixes) {
                         root_attributes = capture_root_attributes(e)?;
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                     } else if is_word_element(name.as_ref(), b"abstractNum", &prefixes) {
                         let mut abstract_num =
                             CT_AbstractNum::new(u32_attribute(e, b"abstractNumId", &prefixes)?);
@@ -7261,5 +7309,114 @@ mod tests {
         let output = String::from_utf8(numbering.to_xml().unwrap()).unwrap();
         assert!(output.contains(r#"<w:suff w:val="producer"/>"#));
         assert!(output.contains(r#"<w:lvlJc w:val="producer"/>"#));
+    }
+    #[test]
+    fn namespace_binding_matches_literal_format_and_split_for_opaque_bytes() {
+        for prefix in [
+            "",
+            "w",
+            "foreign",
+            "é",
+            "long_prefix_abcdefghijklmnopqrstuvwxyz",
+            "a\0b",
+            "<&\"'",
+        ] {
+            for namespace in ["", super::W_NS, "urn:foreign", "urn:é<&\"'", "a\0b\0c"] {
+                let expected = format!("\0{prefix}\0{namespace}");
+                let actual = super::namespace_binding(prefix, namespace);
+                assert_eq!(actual.as_bytes(), expected.as_bytes());
+                assert_eq!(
+                    super::split_namespace_binding(&actual),
+                    super::split_namespace_binding(&expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fx268_reader_scope_matches_legacy_values_and_errors() {
+        use quick_xml::events::BytesStart;
+        let scopes = [
+            Vec::new(),
+            vec!["w".to_owned()],
+            vec![
+                "w".to_owned(),
+                format!("\0w\0{}", crate::namespace::W_NS),
+                "\0a\0urn:first".to_owned(),
+                "\0\0urn:default".to_owned(),
+                "a".to_owned(),
+            ],
+            (0..24)
+                .map(|index| format!("\0p{index}\0urn:long:{index}"))
+                .collect(),
+        ];
+        let attributes = [
+            "",
+            " ordinary='value'",
+            " x='1' y='2'",
+            " xmlns=''",
+            " xmlns='urn:foreign'",
+            " xmlns='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:w='urn:foreign'",
+            " xmlns:a='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:é='http://schemas.openxmlformats.org/wordprocessingml/200&#54;/main'",
+            " xmlns:long_prefix_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz='urn:foreign'",
+            " xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:a='urn:second' xmlns:b='urn:third'",
+            " xmlns:a='urn:second' xmlns:a='urn:duplicate'",
+            " ordinary='first' xmlns:a='urn:second' after='last'",
+            " xmlns:a='urn:one&#x26;two'",
+            " xmlns:a='urn:one&amp;two'",
+            " bad xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad",
+            " xmlns:a='&missing;'",
+            " bad='1' bad='2' xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad='1' bad='2'",
+            " xmlns:a='unterminated",
+            " xmlns:a='urn:earlier' bad=unquoted",
+        ];
+        for scope in &scopes {
+            for attributes in attributes {
+                let source = format!("w:x{attributes}");
+                let start = BytesStart::from_content(source, 3);
+                let old = super::fx268_legacy_word_prefixes_at(&start, scope);
+                let new = super::word_prefixes_at(&start, scope);
+                match (old, new) {
+                    (Ok(old), Ok(new)) => {
+                        assert_eq!(old.as_slice(), new.as_ref(), "{attributes:?}");
+                        if !attributes.contains("xmlns") {
+                            assert!(matches!(new, std::borrow::Cow::Borrowed(_)));
+                            assert_eq!(new.as_ptr(), scope.as_ptr());
+                        } else {
+                            assert!(matches!(new, std::borrow::Cow::Owned(_)));
+                        }
+                    }
+                    (Err(old), Err(new)) => assert_eq!(format!("{old:?}"), format!("{new:?}")),
+                    (old, new) => {
+                        panic!("scope result changed for {attributes:?}: {old:?} / {new:?}")
+                    }
+                }
+            }
+        }
+        for earlier_declaration in [false, true] {
+            let mut start = BytesStart::new("w:x");
+            if earlier_declaration {
+                start.push_attribute(("xmlns:a", "urn:earlier"));
+            }
+            start.push_attribute((b"xmlns:\xff".as_slice(), b"urn:invalid".as_slice()));
+            start.push_attribute(("xmlns:later", "&missing;"));
+            let scope = vec!["w".to_owned()];
+            let old = super::fx268_legacy_word_prefixes_at(&start, &scope).unwrap_err();
+            let new = super::word_prefixes_at(&start, &scope).unwrap_err();
+            assert!(matches!(old, crate::error::OxmlError::Utf8(_)));
+            assert!(matches!(new, crate::error::OxmlError::Utf8(_)));
+            assert_eq!(format!("{old:?}"), format!("{new:?}"));
+        }
+        let scope = vec!["w".to_owned(), "\0w\0urn:old".to_owned(), "tail".to_owned()];
+        let result = {
+            let start = BytesStart::from_content("w:x xmlns:w='urn:new'", 3);
+            super::word_prefixes_at(&start, &scope).unwrap()
+        };
+        assert_eq!(result.as_ref(), ["tail", "\0w\0urn:new"]);
     }
 }

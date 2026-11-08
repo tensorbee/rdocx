@@ -747,7 +747,7 @@ impl CT_SdtPr {
         let prefixes = word_prefixes_at(start, inherited)?;
         let mut properties = Self {
             extra_attributes: capture_attributes(start, &prefixes, &[])?,
-            source_prefixes: prefixes.clone(),
+            source_prefixes: prefixes.to_vec(),
             ..Self::default()
         };
         let mut buffer = Vec::new();
@@ -2441,7 +2441,7 @@ impl CT_Sdt {
 
     /// Parse a content control at the reader's current `w:sdt` start.
     pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
-        let prefixes = word_prefixes_at(start, &["w".to_owned()])?;
+        let prefixes = word_prefixes_at(start, &["w".to_owned()])?.into_owned();
         crate::document::admit_word_reader(
             reader,
             &prefixes,
@@ -2597,8 +2597,8 @@ impl CT_Sdt {
             extra_attributes: capture_attributes(start, &prefixes, &[])?,
             content_attributes: Vec::new(),
             slots: Vec::new(),
-            word_prefixes: prefixes.clone(),
-            content_word_prefixes: prefixes.clone(),
+            word_prefixes: prefixes.to_vec(),
+            content_word_prefixes: prefixes.to_vec(),
             inline_run_sources: Vec::new(),
             pending_inline_field_edits: Vec::new(),
         };
@@ -2623,7 +2623,7 @@ impl CT_Sdt {
                             .any(|slot| matches!(slot, RootSlot::Content))
                     {
                         sdt.content_attributes = capture_attributes(&child, &child_prefixes, &[])?;
-                        sdt.content_word_prefixes = child_prefixes.clone();
+                        sdt.content_word_prefixes = child_prefixes.to_vec();
                         sdt.content = parse_content(
                             reader,
                             &child_prefixes,

@@ -571,7 +571,7 @@ impl CT_TblWidth {
     }
 
     pub fn from_xml_attrs(e: &BytesStart) -> Result<Self> {
-        let word_prefixes = word_prefixes_at(e, &["w".to_owned()])?;
+        let word_prefixes = word_prefixes_at(e, &["w".to_owned()])?.into_owned();
         Self::from_xml_attrs_with_prefixes(e, &word_prefixes)
     }
 
@@ -4039,7 +4039,7 @@ mod tests {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref element)) if element.local_name().as_ref() == b"tbl" => {
-                    let prefixes = word_prefixes_at(element, &["w".to_owned()])?;
+                    let prefixes = word_prefixes_at(element, &["w".to_owned()])?.into_owned();
                     let owner_bindings = local_namespace_overrides(element, &["w".to_owned()])?;
                     return CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
                         &mut reader,

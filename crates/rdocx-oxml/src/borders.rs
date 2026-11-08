@@ -741,7 +741,7 @@ impl CT_Tabs {
                         tab.source_occurrence = Some(tabs.len());
                         tabs.push(tab);
                     }
-                    scopes.push(prefixes);
+                    scopes.push(prefixes.into_owned());
                 }
                 Ok(Event::End(ref e)) => {
                     if scopes.len() == 1 && is_word_element(e.name().as_ref(), b"tabs", &scopes[0])

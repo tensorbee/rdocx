@@ -169,7 +169,7 @@ impl CT_RubyPr {
             match reader.read_event_into(&mut buffer)? {
                 Event::Start(element) => {
                     if depth == 0 {
-                        word_prefixes = word_prefixes_at(&element, &word_prefixes)?;
+                        word_prefixes = word_prefixes_at(&element, &word_prefixes)?.into_owned();
                         depth = 1;
                     } else {
                         let prefixes = word_prefixes_at(&element, &word_prefixes)?;
@@ -438,7 +438,7 @@ impl CT_Ruby {
                         if has_foreign_attributes(&element)? {
                             return Ok(None);
                         }
-                        word_prefixes = word_prefixes_at(&element, &word_prefixes)?;
+                        word_prefixes = word_prefixes_at(&element, &word_prefixes)?.into_owned();
                         depth = 1;
                     } else {
                         let prefixes = word_prefixes_at(&element, &word_prefixes)?;
@@ -688,7 +688,7 @@ fn parse_ruby_content(
                     if has_foreign_attributes(&element)? {
                         return Ok(None);
                     }
-                    word_prefixes = word_prefixes_at(&element, &word_prefixes)?;
+                    word_prefixes = word_prefixes_at(&element, &word_prefixes)?.into_owned();
                     depth = 1;
                 } else {
                     let prefixes = word_prefixes_at(&element, &word_prefixes)?;

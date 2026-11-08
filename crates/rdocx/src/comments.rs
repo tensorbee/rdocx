@@ -17,7 +17,7 @@ use rdocx_oxml::text::{CT_P, CT_R, RangeAnchor, RunContent};
 #[cfg(test)]
 use rdocx_oxml::text::{CommentRangeMarker, HyperlinkSpan};
 
-use crate::document::visit_body_paragraphs_mut;
+use crate::document::{CommentParagraphValue, visit_body_paragraphs_mut};
 use crate::{ContentLocation, Document, Error, Result};
 
 #[cfg(test)]
@@ -2044,16 +2044,18 @@ impl Document {
             "comment reply",
             false,
         )?;
-        let refreshed = self
-            .stories()?
-            .into_iter()
-            .find(|candidate| {
-                candidate.kind() == story.kind()
-                    && candidate.part_name() == story.part_name()
-                    && candidate.owner_index() == story.owner_index()
-            })
+        #[cfg(test)]
+        let reply_refresh_before = crate::document::STORY_SOURCE_BUILDS.get();
+        let (mut xml, owner) = self
+            .refreshed_story_owner_span(&story)?
             .ok_or_else(no_range)?;
-        let (mut xml, owner) = self.story_owner_span(&refreshed)?;
+        #[cfg(test)]
+        crate::document::REPLY_SOURCE_READS.with(|counts| {
+            if let Some(mut value) = counts.get() {
+                value[1] += crate::document::STORY_SOURCE_BUILDS.get() - reply_refresh_before;
+                counts.set(Some(value));
+            }
+        });
         let markers = comment_source_markers(&xml)?;
         let selected = |selected_id| {
             markers.iter().find(|marker| {
@@ -3069,7 +3071,7 @@ struct CommentAnchorRead {
     counts: BTreeMap<i32, [usize; 3]>,
     paragraphs: Vec<(
         ContentLocation,
-        CT_P,
+        CommentParagraphValue,
         HashSet<i32>,
         Vec<u8>,
         (usize, usize),
@@ -3090,8 +3092,9 @@ impl CommentAnchorRead {
         let counts = CommentOwnership::marker_counts(&ownership.markers);
         #[cfg(test)]
         let mut parent_read_pass = CommentParentReadPass(false);
-        let paragraphs = source
-            .comment_story_range_paragraphs()?
+        let located = source.comment_story_range_paragraphs()?;
+        let mut values = source.comment_paragraph_read();
+        let paragraphs = located
             .into_iter()
             .map(|(flow, offset, location, xml)| {
                 let ids = comment_source_markers(&xml)?
@@ -3100,14 +3103,8 @@ impl CommentAnchorRead {
                     .collect::<HashSet<_>>();
                 #[cfg(test)]
                 parent_read_pass.paragraph();
-                Ok((
-                    location,
-                    CT_P::from_xml_fragment(&xml)?,
-                    ids,
-                    xml,
-                    flow,
-                    offset,
-                ))
+                let paragraph = values.read(&location, &xml)?;
+                Ok((location, paragraph, ids, xml, flow, offset))
             })
             .collect::<Result<Vec<_>>>()?;
         // Physical order: the source, then the offset in it.
@@ -4920,6 +4917,131 @@ mod tests {
     }
 
     #[test]
+    fn fx268_reply_shares_actual_endpoint_and_refreshed_owner_sources() {
+        let mut seed = Document::new();
+        for text in ["neighbor", "ANCHOR", "after"] {
+            seed.add_paragraph(text);
+        }
+        let root = seed
+            .add_comment_on_text("ANCHOR", 0, "Ada", None, "root", None)
+            .unwrap();
+        let mut reference = seed.clone_for_staging();
+        crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(true);
+        let old = reference.reply_to(root, "Ben", "reply").unwrap();
+        crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(false);
+        crate::document::REPLY_SOURCE_READS.set(Some([0; 2]));
+        let reply = seed.reply_to(root, "Ben", "reply").unwrap();
+        let work = crate::document::REPLY_SOURCE_READS.replace(None).unwrap();
+        assert_eq!(reply, old);
+        assert_eq!(seed.package.parts, reference.package.parts);
+        assert_eq!(
+            seed.comment_anchor(reply).unwrap(),
+            reference.comment_anchor(old).unwrap()
+        );
+        assert_eq!(
+            seed.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("ANCHOR")
+        );
+        let reopened = Document::from_bytes(&seed.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.comments().len(), 2);
+        assert_eq!(
+            reopened.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("ANCHOR")
+        );
+        assert_eq!(
+            work,
+            [1, 1],
+            "actual endpoint and post-refresh source preparations: {work:?}"
+        );
+    }
+
+    #[test]
+    fn fx268_reply_distinct_endpoints_keep_both_reads_and_shared_refresh() {
+        let mut document = Document::new();
+        document.add_paragraph("first");
+        document.add_paragraph("second");
+        let positions = document
+            .story_range_paragraphs()
+            .unwrap()
+            .into_iter()
+            .filter(|(location, _)| location.story().kind() == crate::StoryKind::Body)
+            .map(|(location, _)| location)
+            .collect::<Vec<_>>();
+        let root = document
+            .add_story_comment(
+                StoryRunRange {
+                    start: StoryRunPosition {
+                        location: positions[0].clone(),
+                        run_index: 0,
+                    },
+                    end: StoryRunPosition {
+                        location: positions[1].clone(),
+                        run_index: 1,
+                    },
+                },
+                "Ada",
+                None,
+                "root",
+            )
+            .unwrap();
+        let mut old = document.clone_for_staging();
+        crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(true);
+        let old_reply = old.reply_to(root, "Ben", "reply").unwrap();
+        crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(false);
+        crate::document::REPLY_SOURCE_READS.set(Some([0; 2]));
+        let reply = document.reply_to(root, "Ben", "reply").unwrap();
+        let work = crate::document::REPLY_SOURCE_READS.replace(None).unwrap();
+        assert_eq!(reply, old_reply);
+        assert_eq!(document.package.parts, old.package.parts);
+        assert_eq!(
+            document.comment_anchor(reply).unwrap(),
+            old.comment_anchor(old_reply).unwrap()
+        );
+        assert_eq!(
+            work,
+            [2, 1],
+            "distinct endpoint qualification must remain independent"
+        );
+    }
+
+    #[test]
+    fn fx268_reply_refreshed_owner_keeps_complete_discovery_errors() {
+        let mut document = Document::new();
+        document.add_paragraph("body");
+        document.set_header("header");
+        document.flush_to_package().unwrap();
+        let body = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == crate::StoryKind::Body)
+            .unwrap();
+        let expected = document.story_owner_span(&body).unwrap();
+        assert_eq!(
+            document.refreshed_story_owner_span(&body).unwrap().unwrap(),
+            expected
+        );
+        let part = document
+            .package
+            .parts
+            .keys()
+            .find(|name| name.contains("header") && name.ends_with(".xml"))
+            .unwrap()
+            .clone();
+        document
+            .package
+            .set_part(&part, b"<w:hdr xmlns:w='unterminated".to_vec());
+        let old = document.stories().unwrap_err().to_string();
+        assert_eq!(
+            document
+                .refreshed_story_owner_span(&body)
+                .unwrap_err()
+                .to_string(),
+            old
+        );
+    }
+
+    #[test]
     fn fx268_reply_parent_read_uses_one_all_paragraph_factory_pass() {
         let mut document = Document::new();
         for text in ["neighbor one", "ANCHOR", "neighbor two"] {
@@ -5047,7 +5169,18 @@ mod tests {
                 "mode={mode}",
             );
             drop((current, old));
+            let mut legacy = document.clone_for_staging();
+            crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(true);
+            let legacy_reply = legacy.reply_to(root, "Ben", "reply").unwrap();
+            crate::document::REPLY_FORCE_LEGACY_SOURCE_READS.set(false);
             let reply = document.reply_to(root, "Ben", "reply").unwrap();
+            assert_eq!(reply, legacy_reply, "mode={mode}");
+            assert_eq!(document.package.parts, legacy.package.parts, "mode={mode}");
+            assert_eq!(
+                document.comment_anchor(reply).unwrap(),
+                legacy.comment_anchor(legacy_reply).unwrap(),
+                "mode={mode}"
+            );
             assert_eq!(
                 document.comment_anchor_text(reply).unwrap(),
                 current_anchor.1

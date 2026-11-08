@@ -204,7 +204,22 @@ pub(crate) fn word_transaction_work() -> ([usize; 6], [usize; 8]) {
 #[pyfunction]
 #[pyo3(name = "_word_transaction_outputs")]
 pub(crate) fn word_transaction_outputs() -> std::collections::BTreeMap<String, [usize; 2]> {
-    rdocx::Document::take_transaction_outputs()
+    let mut outputs = rdocx::Document::take_transaction_outputs();
+    let [all, successors] = oxml_py_support::take_scope_generation_work();
+    let model_clones = WORD_PIECE_MODEL_CLONES.swap(0, std::sync::atomic::Ordering::Relaxed);
+    outputs.insert(
+        "allphase.word_piece_model_clones".into(),
+        [
+            model_clones,
+            model_clones * std::mem::size_of::<rdocx_oxml::BodyContent>(),
+        ],
+    );
+    outputs.insert("allphase.scope_generation_allocations".into(), all);
+    outputs.insert(
+        "allphase.scope_owner_successor_allocations".into(),
+        successors,
+    );
+    outputs
 }
 
 /// Actual checked child parser/writer attempts and bytes by normalization round.
@@ -216,8 +231,8 @@ pub(crate) fn scoped_normalization_work() -> std::collections::BTreeMap<String, 
 }
 
 use oxml_py_support::{
-    ContentPath, PathSeg, PreparedRevision, RevisionCounter, RevisionScope, RevisionState,
-    StaleElementError, revision_to_pyerr,
+    ContentPath, PathSeg, PreparedRevision, RevisionCounter, RevisionPreparation, RevisionScope,
+    RevisionState, StaleElementError, revision_to_pyerr,
 };
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -5254,16 +5269,17 @@ fn word_piece_owner_addresses(facts: WordOwnerFacts, sections: usize) -> Vec<Wor
         *ordinal += 1;
         let index = result.len();
         let body_slot = if location.story().kind() == rdocx::StoryKind::Body {
-            let containing = match location.index_path() {
-                [_] => Some(location.clone()),
-                [control, _] => Some(rdocx::ContentLocation::new(
-                    location.story().clone(),
-                    rdocx::StoryItemKind::ContentControl,
-                    vec![*control],
-                )),
+            match location.index_path() {
+                [_] => body_slots.get(&location).copied(),
+                [control, _] => body_slots
+                    .get(&rdocx::ContentLocation::new(
+                        location.story().clone(),
+                        rdocx::StoryItemKind::ContentControl,
+                        vec![*control],
+                    ))
+                    .copied(),
                 _ => None,
-            };
-            containing.and_then(|containing| body_slots.get(&containing).copied())
+            }
         } else {
             None
         };
@@ -5513,8 +5529,12 @@ fn placed_story(story: &rdocx::StoryId, (cells, boxes): (usize, usize)) -> rdocx
     placed
 }
 
+#[cfg(debug_assertions)]
+static WORD_PIECE_MODEL_CLONES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 struct WordBlockPiece {
-    block: rdocx_oxml::BodyContent,
+    block: std::sync::Arc<rdocx_oxml::BodyContent>,
     owners: Option<WordBlockOwners>,
 }
 
@@ -5538,7 +5558,7 @@ fn aligned_block(piece: &WordBlockPiece, block: &rdocx_oxml::BodyContent) -> boo
     if !WORD_GUARDING.with(std::cell::Cell::get) {
         WORD_PIECE_ALIGNMENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    piece.block == *block
+    piece.block.as_ref() == block
 }
 
 fn qualified_block(piece: &WordBlockPiece, block: &rdocx_oxml::BodyContent) -> bool {
@@ -5581,8 +5601,11 @@ impl WordPieces {
         } else {
             None
         };
-        let changed_existing_context = self.context.as_ref().is_some_and(|old| old != &context);
-        let same_context = self.context.as_ref() == Some(&context);
+        let same_context = self
+            .context
+            .as_ref()
+            .is_some_and(|old| old.read_facts_compatible(&context));
+        let changed_existing_context = self.context.is_some() && !same_context;
         let old = if same_context {
             self.blocks.as_slice()
         } else {
@@ -5611,7 +5634,11 @@ impl WordPieces {
                 note_word_piece_read();
                 let owners = word_block_owners(document, block).ok().flatten();
                 pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
-                    block: block.clone(),
+                    block: std::sync::Arc::new({
+                        #[cfg(debug_assertions)]
+                        WORD_PIECE_MODEL_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        block.clone()
+                    }),
                     owners,
                 }));
             }
@@ -5621,7 +5648,7 @@ impl WordPieces {
             let owners = opened_paragraphs
                 .as_ref()
                 .and_then(|facts| facts.get(prefix + offset))
-                .map(|(text, runs)| {
+                .map(|(_, text, runs)| {
                     let story = rdocx::StoryId::new(
                         rdocx::StoryKind::Body,
                         pieces
@@ -5635,7 +5662,18 @@ impl WordPieces {
                 })
                 .or_else(|| word_block_owners(document, block).ok().flatten());
             pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
-                block: block.clone(),
+                block: opened_paragraphs
+                    .as_ref()
+                    .and_then(|facts| facts.get(prefix + offset))
+                    .and_then(|(model, _, _)| model.clone())
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new({
+                            #[cfg(debug_assertions)]
+                            WORD_PIECE_MODEL_CLONES
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            block.clone()
+                        })
+                    }),
                 owners,
             }));
         }
@@ -5649,7 +5687,11 @@ impl WordPieces {
                 note_word_piece_read();
                 let owners = word_block_owners(document, block).ok().flatten();
                 pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
-                    block: block.clone(),
+                    block: std::sync::Arc::new({
+                        #[cfg(debug_assertions)]
+                        WORD_PIECE_MODEL_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        block.clone()
+                    }),
                     owners,
                 }));
             }
@@ -5716,7 +5758,11 @@ impl WordPieces {
         }
         let piece = inserted.map(|owners| {
             std::sync::Arc::new(WordBlockPiece {
-                block: blocks[slot].clone(),
+                block: std::sync::Arc::new({
+                    #[cfg(debug_assertions)]
+                    WORD_PIECE_MODEL_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    blocks[slot].clone()
+                }),
                 owners: Some(owners),
             })
         });
@@ -5800,7 +5846,7 @@ impl WordPieces {
                     })
                 }));
             }
-            if matches!(piece.block, rdocx_oxml::BodyContent::Table(_)) {
+            if matches!(piece.block.as_ref(), rdocx_oxml::BodyContent::Table(_)) {
                 projections.table_slots.push(Some(slot));
             } else {
                 projections
@@ -6866,10 +6912,17 @@ impl PyDocument {
                 .clone(),
         );
         births.push(RevisionScope::Text);
-        let revision = self
-            .revisions
-            .prepare_scopes(operation, &retired, &births)
-            .map_err(revision_to_pyerr)?;
+        let revision = if keep {
+            self.revisions.prepare_scopes(operation, &retired, &births)
+        } else {
+            self.revisions.prepare_revision(
+                Some(operation),
+                &retired,
+                &births,
+                RevisionPreparation::Replacement,
+            )
+        }
+        .map_err(revision_to_pyerr)?;
         let mut states = Vec::new();
         states
             .try_reserve_exact(inserted_scopes + kept_scopes)
@@ -11462,7 +11515,14 @@ impl PyDocument {
         // A run handle also carries the document epoch. Modern publication
         // keeps that epoch with the same local commit Signing uses. A proved
         // run then stays current. An unproved owner state still retires it.
-        let revision = if matches!(
+        let revision = if matches!(publication, WordPublication::Conservative) {
+            self.revisions.prepare_revision(
+                Some(operation),
+                &retired,
+                &births,
+                RevisionPreparation::Replacement,
+            )
+        } else if matches!(
             publication,
             WordPublication::ElementXml(_)
                 | WordPublication::RunText(_)
@@ -12026,11 +12086,11 @@ impl PyDocument {
             .as_ref()
             .map(|revision| revision.born(born).expect("prepared snapshot"));
         let replacement = std::sync::Arc::new(WordBlockPiece {
-            block,
+            block: std::sync::Arc::new(block),
             owners: Some(after),
         });
         let owners = word_owners_with_states(addresses, &states);
-        let rdocx_oxml::BodyContent::Table(table) = &replacement.block else {
+        let rdocx_oxml::BodyContent::Table(table) = replacement.block.as_ref() else {
             unreachable!()
         };
         let native_table = (**table).clone();
@@ -20466,6 +20526,46 @@ fn fx283_dormant_activation_preserves_serial_and_all_factory_ingresses() {
 }
 
 #[test]
+fn fx268_cold_splice_plan_state_after_ensure_and_handle_capture() {
+    Python::initialize();
+    Python::attach(|py| -> PyResult<()> {
+        for count in [250, 1000] {
+            for capture in [false, true] {
+                let mut seed = rdocx::Document::new();
+                seed.add_paragraph("first");
+                let scope = PyDict::new(py);
+                scope.set_item("seed", PyBytes::new(py, &seed.to_bytes().unwrap()))?;
+                let rpr = r#"<w:rPr><w:rFonts w:ascii="Arial" w:cs="Arial" w:eastAsia="Arial" w:hAnsi="Arial"/><w:b w:val="0"/><w:i w:val="0"/><w:smallCaps w:val="0"/><w:strike w:val="0"/><w:color w:val="000000"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:u w:val="none"/><w:shd w:fill="auto" w:val="clear"/><w:vertAlign w:val="baseline"/><w:rtl w:val="0"/></w:rPr>"#;
+                let body = (0..count).map(|i| format!("<w:p>{}</w:p>", (0..6).map(|k| format!("<w:r>{rpr}<w:t xml:space='preserve'>run {k} of paragraph {i} </w:t></w:r>")).collect::<String>())).collect::<String>();
+                scope.set_item("body", body)?;
+                py.run(c"import io,zipfile\nsource=zipfile.ZipFile(io.BytesIO(seed))\noutput=io.BytesIO()\nwith zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:\n    for name in source.namelist():\n        data=source.read(name)\n        if name=='word/document.xml': data=data.replace(b'<w:sectPr',body.encode()+b'<w:sectPr',1)\n        archive.writestr(name,data)\nresult=output.getvalue()", Some(&scope), Some(&scope))?;
+                let bytes=scope.get_item("result")?.unwrap().extract::<Vec<u8>>()?;
+                let native=rdocx::Document::from_bytes(&bytes).unwrap();
+                let document=Py::new(py,PyDocument::from_document(native,py)?)?;
+                document.borrow_mut(py).ensure_word_authority(py)?;
+                word_transaction_work(); word_transaction_outputs(); word_piece_work(); word_splice_work();
+                if capture { let _held=document.bind(py).getattr("paragraphs")?.get_item(20)?; }
+                let capture_work=word_transaction_work();
+                let capture_outputs=word_transaction_outputs();
+                for remove in [false,true] {
+                    let mut borrowed=document.borrow_mut(py);
+                    let inserted=if remove {None} else {
+                        let paragraph=rdocx::Document::detached_text_paragraph("inserted");
+                        let facts=borrowed.inner.direct_body_paragraph_facts(&paragraph).unwrap().unwrap();
+                        Some(SplicedBodyItem::Paragraph(facts.0,facts.1))
+                    };
+                    let plan=borrowed.plan_body_splice(py,BodySplice{slot:10,removed:usize::from(remove),inserted})?;
+                    let is_some=plan.is_some();
+                    if let Some(plan)=plan { let _prepared=borrowed.prepare_body_splice(plan,"diagnostic",&WordPublication::Conservative)?; }
+                    eprintln!("COLD_SPLICE_DIAGNOSTIC count={count} capture={capture} remove={remove} prepared={is_some} capture_work={capture_work:?} capture_outputs={capture_outputs:?} plan_work={:?} plan_outputs={:?} piece_work={} splice_work={:?}",word_transaction_work(),word_transaction_outputs(),word_piece_work(),word_splice_work());
+                }
+            }
+        }
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn fx268_opened_rich_batch_preserves_owners_without_fragment_writers() {
     Python::initialize();
     Python::attach(|py| {
@@ -20487,7 +20587,7 @@ fn fx268_opened_rich_batch_preserves_owners_without_fragment_writers() {
                     .direct_body_paragraph_facts(paragraph)
                     .unwrap()
                     .as_ref(),
-                Some(facts)
+                Some(&(facts.1.clone(), facts.2.clone()))
             );
         }
         let (pieces, _) = WordPieces::default().assemble(&native);
@@ -21057,35 +21157,70 @@ fn fx268_picture_bridge_preserves_binding_publication_and_refusal() {
     Python::attach(|py| -> PyResult<()> {
         let scope = PyDict::new(py);
         py.run(c"import base64\npng=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAIAAeIhvDMAAAAASUVORK5CYII=')", Some(&scope), Some(&scope))?;
-        for cell_target in [false, true] {
+        for (cell_target, text_edit) in [(false, false), (true, false), (true, true)] {
             let mut native = rdocx::Document::new();
             native.add_paragraph("body");
             native.add_table(1, 2).cell(0, 1).unwrap().set_text("selected");
+            scope.set_item("seed", PyBytes::new(py, &native.to_bytes().unwrap()))?;
+            py.run(c"import io,zipfile\nsource=zipfile.ZipFile(io.BytesIO(seed))\noutput=io.BytesIO()\nwith zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:\n    for name in source.namelist():\n        data=source.read(name)\n        if name=='word/document.xml' and b'xmlns:w14=' not in data.split(b'>',1)[0]: data=data.replace(b'<w:document ',b'<w:document xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" ',1)\n        archive.writestr(name,data)\nresult=output.getvalue()", Some(&scope), Some(&scope))?;
+            let bytes = scope.get_item("result")?.unwrap().extract::<Vec<u8>>()?;
+            let native = rdocx::Document::from_bytes(&bytes).unwrap();
             let document = Py::new(py, PyDocument::from_document(native, py)?)?;
             let held = document.bind(py).getattr("paragraphs")?.get_item(0)?;
             let target = if cell_target {
                 let cell = document.bind(py).getattr("tables")?.get_item(0)?.call_method1("cell", (0, 1))?;
-                cell.getattr("paragraphs")?.get_item(0)?.getattr("runs")?.get_item(0)?.setattr("bold", true)?;
+                let run = cell.getattr("paragraphs")?.get_item(0)?.getattr("runs")?.get_item(0)?;
+                run.setattr("bold", true)?;
+                if text_edit { run.setattr("text", "current selected")?; }
                 cell
             } else { document.bind(py).as_any().clone() };
             let before = document.borrow_mut(py).inner.to_bytes().unwrap();
             assert!(target.call_method1("add_picture", (PyBytes::new(py, b"invalid"),)).is_err());
             assert_eq!(document.borrow_mut(py).inner.to_bytes().unwrap(), before);
             assert_eq!(held.getattr("text")?.extract::<String>()?, "body");
+            let legacy_story = {
+                let native = &document.borrow(py).inner;
+                if cell_target {
+                    let slot = native.content_index_of_table(0).unwrap();
+                    let table = native.direct_body_item_location(slot).unwrap().unwrap();
+                    native.story_table_cell(&table, 0, 1).unwrap()
+                } else {
+                    native.stories().unwrap().into_iter()
+                        .find(|story| story.kind() == rdocx::StoryKind::Body).unwrap()
+                }
+            };
+            let image = scope.get_item("png")?.unwrap().extract::<Vec<u8>>()?;
+            let (mut legacy, legacy_location, legacy_inventory) = document.borrow(py).inner
+                .clone_for_staging()
+                .insert_picture_to_story_with_options_and_inventory_owned(
+                    &legacy_story, None, &image, "picture", None, None, None,
+                ).unwrap();
+            word_transaction_work(); word_transaction_outputs();
             target.call_method1("add_picture", (scope.get_item("png")?.unwrap(),))?;
+            let actual_work = word_transaction_work();
+            let actual_outputs = word_transaction_outputs();
+            eprintln!("CELL_PICTURE_BINDING cell={cell_target} text_edit={text_edit} work={actual_work:?} outputs={actual_outputs:?}");
             assert!(held.getattr("text").is_err());
             let actual = document.borrow(py).inner.pictures().unwrap();
+            assert_eq!(actual, legacy_inventory);
+            assert_eq!(actual[0].location, legacy_location);
+            assert_eq!(document.borrow_mut(py).inner.to_bytes().unwrap(), legacy.to_bytes().unwrap());
             assert_eq!(actual.len(), 1);
             let bytes = document.borrow_mut(py).inner.to_bytes().unwrap();
             let reopened = rdocx::Document::from_bytes(&bytes).unwrap();
             assert_eq!(actual, reopened.pictures().unwrap());
             if cell_target {
                 assert_eq!(actual[0].location.story().kind(), rdocx::StoryKind::TableCell);
-                assert_eq!(reopened.table(0).unwrap().cell(0, 1).unwrap().paragraphs().next().unwrap().text(), "selected");
+                assert_eq!(reopened.table(0).unwrap().cell(0, 1).unwrap().paragraphs().next().unwrap().text(), if text_edit { "current selected" } else { "selected" });
                 assert!(reopened.part_xml("/word/document.xml").unwrap().contains("<w:b"));
             } else {
                 assert_eq!(actual[0].location.story().kind(), rdocx::StoryKind::Body);
             }
+            assert_eq!(
+                actual_outputs["ordinary.assembled_current_writer"][0],
+                if cell_target { 20 } else { 18 },
+                "actual initial ordinary output reduction after complete semantics: {actual_outputs:?}"
+            );
         }
         Ok(())
     }).unwrap();

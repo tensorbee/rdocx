@@ -386,7 +386,7 @@ pub(crate) fn modeled_toggle_attributes<'a>(
             Event::Empty(source) => (source, 2),
             _ => continue,
         };
-        let prefixes = word_prefixes_at(&source, &["w".to_owned()])?;
+        let prefixes = word_prefixes_at(&source, &["w".to_owned()])?.into_owned();
         // Actual reader positions select the borrowed physical header. The
         // UTF8 probe selects borrowing only, it never refuses a legacy input.
         let end = reader.buffer_position() as usize - close;
@@ -426,7 +426,35 @@ pub(crate) fn modeled_toggle_attributes<'a>(
     Ok(preserved)
 }
 
-pub(crate) fn word_prefixes_at(
+pub(crate) fn word_prefixes_at<'scope>(
+    start: &BytesStart<'_>,
+    inherited: &'scope [String],
+) -> Result<std::borrow::Cow<'scope, [String]>> {
+    let mut prefixes: std::borrow::Cow<'_, [String]> = std::borrow::Cow::Borrowed(inherited);
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let name = attribute.key.as_ref();
+        let prefix = if name == b"xmlns" {
+            b"".as_slice()
+        } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
+            prefix
+        } else {
+            continue;
+        };
+        let prefix = std::str::from_utf8(prefix)?.to_string();
+        let prefixes = prefixes.to_mut();
+        prefixes.retain(|candidate| candidate != &prefix);
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
+        if value.as_bytes() == W_NS.as_bytes() {
+            prefixes.push(prefix);
+        }
+    }
+    Ok(prefixes)
+}
+
+#[cfg(test)]
+fn fx268_legacy_word_prefixes_at(
     start: &BytesStart<'_>,
     inherited: &[String],
 ) -> Result<Vec<String>> {
@@ -1706,5 +1734,88 @@ mod tests {
             .rtl,
             None
         );
+    }
+    #[test]
+    fn fx268_reader_scope_matches_legacy_values_and_errors() {
+        use quick_xml::events::BytesStart;
+        let scopes = [
+            Vec::new(),
+            vec!["w".to_owned()],
+            vec![
+                "w".to_owned(),
+                format!("\0w\0{}", crate::namespace::W_NS),
+                "\0a\0urn:first".to_owned(),
+                "\0\0urn:default".to_owned(),
+                "a".to_owned(),
+            ],
+            (0..24)
+                .map(|index| format!("\0p{index}\0urn:long:{index}"))
+                .collect(),
+        ];
+        let attributes = [
+            "",
+            " ordinary='value'",
+            " x='1' y='2'",
+            " xmlns=''",
+            " xmlns='urn:foreign'",
+            " xmlns:w='urn:foreign'",
+            " xmlns:a='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:a='urn:second' xmlns:b='urn:third'",
+            " xmlns:a='urn:second' xmlns:a='urn:duplicate'",
+            " ordinary='first' xmlns:a='urn:second' after='last'",
+            " xmlns:a='urn:one&#x26;two'",
+            " xmlns:a='urn:one&amp;two'",
+            " bad xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad",
+            " xmlns:a='&missing;'",
+            " bad='1' bad='2' xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad='1' bad='2'",
+            " xmlns:a='unterminated",
+            " xmlns:a='urn:earlier' bad=unquoted",
+        ];
+        for scope in &scopes {
+            for attributes in attributes {
+                let source = format!("w:x{attributes}");
+                let start = BytesStart::from_content(source, 3);
+                let old = super::fx268_legacy_word_prefixes_at(&start, scope);
+                let new = super::word_prefixes_at(&start, scope);
+                match (old, new) {
+                    (Ok(old), Ok(new)) => {
+                        assert_eq!(old.as_slice(), new.as_ref(), "{attributes:?}");
+                        if !attributes.contains("xmlns") {
+                            assert!(matches!(new, std::borrow::Cow::Borrowed(_)));
+                            assert_eq!(new.as_ptr(), scope.as_ptr());
+                        } else {
+                            assert!(matches!(new, std::borrow::Cow::Owned(_)));
+                        }
+                    }
+                    (Err(old), Err(new)) => assert_eq!(format!("{old:?}"), format!("{new:?}")),
+                    (old, new) => {
+                        panic!("scope result changed for {attributes:?}: {old:?} / {new:?}")
+                    }
+                }
+            }
+        }
+        for earlier_declaration in [false, true] {
+            let mut start = BytesStart::new("w:x");
+            if earlier_declaration {
+                start.push_attribute(("xmlns:a", "urn:earlier"));
+            }
+            start.push_attribute((b"xmlns:\xff".as_slice(), b"urn:invalid".as_slice()));
+            start.push_attribute(("xmlns:later", "&missing;"));
+            let scope = vec!["w".to_owned()];
+            let old = super::fx268_legacy_word_prefixes_at(&start, &scope).unwrap_err();
+            let new = super::word_prefixes_at(&start, &scope).unwrap_err();
+            assert!(matches!(old, crate::error::OxmlError::Utf8(_)));
+            assert!(matches!(new, crate::error::OxmlError::Utf8(_)));
+            assert_eq!(format!("{old:?}"), format!("{new:?}"));
+        }
+        let scope = vec!["w".to_owned(), "\0w\0urn:old".to_owned(), "tail".to_owned()];
+        let result = {
+            let start = BytesStart::from_content("w:x xmlns:w='urn:new'", 3);
+            super::word_prefixes_at(&start, &scope).unwrap()
+        };
+        assert_eq!(result.as_ref(), ["\0w\0urn:old", "tail"]);
     }
 }

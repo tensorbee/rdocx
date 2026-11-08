@@ -304,7 +304,7 @@ impl CT_HdrFtr {
                                 ));
                             }
                         }
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                     } else {
                         // Capture unknown elements as raw XML
                         extra_xml.push(capture_element(&mut reader, e)?);
@@ -814,7 +814,7 @@ fn ancestor_namespace_bindings(source: &[u8], offset: usize) -> Result<Vec<(Stri
         match reader.read_event_into(&mut buffer)? {
             Event::Start(start) => {
                 let inherited = scopes.last().expect("namespace root scope exists");
-                scopes.push(word_prefixes_at(&start, inherited)?);
+                scopes.push(word_prefixes_at(&start, inherited)?.into_owned());
             }
             Event::End(_) => {
                 scopes.pop().ok_or_else(|| {

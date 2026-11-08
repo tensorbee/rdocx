@@ -3761,7 +3761,8 @@ impl Document {
                 let mut projection = original.clone_for_staging();
                 projection.apply_cached_physical_field_updates(&sequence_updates)?;
                 let canonical = projection.main_part_with_body_spans()?.0;
-                projection.document = CT_Document::from_xml(&canonical)?;
+                projection.document =
+                    crate::document::DocumentModel::unproved(CT_Document::from_xml(&canonical)?);
                 Some(projection)
             } else {
                 None
@@ -6260,12 +6261,14 @@ fn import_fragment_content_with_state(
     fragment.document = if let (Some((evaluation, _)), Some(source)) =
         (template.as_mut(), fragment_xml_source.as_ref())
     {
-        fragment_sources
-            .as_mut()
-            .expect("fragment read state")
-            .read_document(&mut evaluation.operation, Arc::clone(source))?
+        crate::document::DocumentModel::unproved(
+            fragment_sources
+                .as_mut()
+                .expect("fragment read state")
+                .read_document(&mut evaluation.operation, Arc::clone(source))?,
+        )
     } else {
-        CT_Document::from_xml(&fragment_xml)?
+        crate::document::DocumentModel::unproved(CT_Document::from_xml(&fragment_xml)?)
     };
     let mut identity_xml = fragment_xml.clone();
     for note in &note_copies {
@@ -6366,12 +6369,14 @@ fn import_fragment_content_with_state(
         )?;
         fragment.document =
             if let (Some((evaluation, _)), Some(source)) = (template.as_mut(), updated_source) {
-                fragment_sources
-                    .as_mut()
-                    .expect("fragment canonical read")
-                    .read_document(&mut evaluation.operation, source)?
+                crate::document::DocumentModel::unproved(
+                    fragment_sources
+                        .as_mut()
+                        .expect("fragment canonical read")
+                        .read_document(&mut evaluation.operation, source)?,
+                )
             } else {
-                CT_Document::from_xml(&updated)?
+                crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?)
             };
     }
     identity_remap.drop_paragraph_identities = true;
@@ -6403,12 +6408,14 @@ fn import_fragment_content_with_state(
     fragment.document = if let (Some((evaluation, _)), Some(source)) =
         (template.as_mut(), fragment_xml_source.as_ref())
     {
-        fragment_sources
-            .as_mut()
-            .expect("fragment read state")
-            .read_document(&mut evaluation.operation, Arc::clone(source))?
+        crate::document::DocumentModel::unproved(
+            fragment_sources
+                .as_mut()
+                .expect("fragment read state")
+                .read_document(&mut evaluation.operation, Arc::clone(source))?,
+        )
     } else {
-        CT_Document::from_xml(&fragment_xml)?
+        crate::document::DocumentModel::unproved(CT_Document::from_xml(&fragment_xml)?)
     };
     let insert_at = document.document.body.content.len();
     let numbering_remap = document.insert_document_fragment_content_staged(
@@ -7042,7 +7049,7 @@ fn remap_rich_body_content(
     occurrence.document.body.content = std::mem::take(content);
     occurrence.document.body.sect_pr = None;
     remap_body_identities(&mut occurrence, &mut document.identifiers, identity_state)?;
-    *content = occurrence.document.body.content;
+    *content = occurrence.document.into_inner().body.content;
     Ok(())
 }
 
@@ -13465,7 +13472,7 @@ fn remap_body_identities(
 ) -> Result<BodyIdentityRemap> {
     let (updated, remap) =
         remap_fragment_xml_identities(&document.document.to_xml()?, identifiers, state, true)?;
-    document.document = CT_Document::from_xml(&updated)?;
+    document.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
     Ok(remap)
 }
 
@@ -23501,11 +23508,13 @@ mod tests {
             body.push_str(&format!(r#"<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>CACHED {index}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>REAL {index}</w:t></w:r></w:p>"#));
         }
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(
-            format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#)
-                .as_bytes(),
-        )
-        .unwrap();
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(
+                format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#)
+                    .as_bytes(),
+            )
+            .unwrap(),
+        );
         NAVIGATION_OWNER_VISITS.set(0);
         let outline = document.numbered_document_outline().unwrap();
         let visits = NAVIGATION_OWNER_VISITS.get();
@@ -23527,7 +23536,7 @@ mod tests {
         const OWNERS: usize = 64;
         let owner = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>CACHED</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr>{}</w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>REAL</w:t></w:r></w:p></w:body></w:document>"#, owner.repeat(OWNERS)).as_bytes()).unwrap();
+        document.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(format!(r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr>{}</w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>REAL</w:t></w:r></w:p></w:body></w:document>"#, owner.repeat(OWNERS)).as_bytes()).unwrap());
         NAVIGATION_OWNER_VISITS.set(0);
         let outline = document.numbered_document_outline().unwrap();
         let visits = NAVIGATION_OWNER_VISITS.get();

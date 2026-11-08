@@ -5036,7 +5036,9 @@ fn scoped_template_initial_revision_and_ruby_keep_real_visible_inputs() {
         rdocx_oxml::namespace::W_NS
     );
     let mut original = Document::new();
-    original.document = rdocx_oxml::document::CT_Document::from_xml(xml.as_bytes()).unwrap();
+    original.document = crate::document::DocumentModel::unproved(
+        rdocx_oxml::document::CT_Document::from_xml(xml.as_bytes()).unwrap(),
+    );
     let data = Value::Null;
     let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
         Vec::new(),

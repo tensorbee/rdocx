@@ -108,7 +108,7 @@ impl CT_WebSettings {
                         if !is_word_element(element.name().as_ref(), b"webSettings", &prefixes) {
                             return Err(OxmlError::MissingElement("webSettings root".to_owned()));
                         }
-                        root_prefixes = prefixes;
+                        root_prefixes = prefixes.into_owned();
                         saw_root = true;
                         depth = usize::from(started);
                         buffer.clear();
@@ -120,7 +120,7 @@ impl CT_WebSettings {
                             // namespace scope must not leak onto its siblings.
                             if started {
                                 divs_depth = Some(depth + 1);
-                                divs_prefixes = prefixes.clone();
+                                divs_prefixes = prefixes.to_vec();
                             }
                         } else {
                             model.absorb(element, &prefixes)?;

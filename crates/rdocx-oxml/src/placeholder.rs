@@ -1738,7 +1738,9 @@ fn remove_emptied_runs_in(
             let quick_xml::events::Event::Start(root) = reader.read_event().ok()? else {
                 return None;
             };
-            word_prefixes_at(&root, &inherited).ok()
+            word_prefixes_at(&root, &inherited)
+                .ok()
+                .map(std::borrow::Cow::into_owned)
         })
         .collect::<Vec<_>>();
     // A wrapper holds only wrappers read after it, so writing them back in
@@ -2917,14 +2919,14 @@ fn scoped_container_starts(raw: &[u8]) -> crate::Result<Vec<ScopedContainerStart
                         start: start.clone().into_owned(),
                         empty: matches!(event, Event::Empty(_)),
                         attributes: crate::text::capture_root_attribute_record(start, &scope)?,
-                        scope: scope.clone(),
+                        scope: scope.to_vec(),
                     });
                     Some(index)
                 } else {
                     parent
                 };
                 if matches!(event, Event::Start(_)) {
-                    stack.push((scope, owner));
+                    stack.push((scope.into_owned(), owner));
                 }
             }
             Event::End(_) => {
@@ -3851,10 +3853,10 @@ fn rewrite_text_boxes_within(
                 )?;
             }
             Ok(Event::Start(e)) => {
-                scopes.push(word_prefixes_at(
-                    &e,
-                    scopes.last().map_or(inherited, Vec::as_slice),
-                )?);
+                scopes.push(
+                    word_prefixes_at(&e, scopes.last().map_or(inherited, Vec::as_slice))?
+                        .into_owned(),
+                );
                 writer.write_event(Event::Start(e))?;
             }
             Ok(Event::End(e)) => {
@@ -3996,7 +3998,7 @@ fn rewrite_notes(
                         inner_buffer.clear();
                     }
                 } else {
-                    scopes.push(prefixes);
+                    scopes.push(prefixes.into_owned());
                     writer.write_event(Event::Start(start))?;
                 }
             }

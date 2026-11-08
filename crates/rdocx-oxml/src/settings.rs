@@ -733,7 +733,7 @@ impl CT_Settings {
                         if !is_word_element(element.name().as_ref(), b"settings", &prefixes) {
                             return Err(OxmlError::MissingElement("settings root".to_owned()));
                         }
-                        root_prefixes = prefixes;
+                        root_prefixes = prefixes.into_owned();
                         saw_root = true;
                         depth = usize::from(started);
                         buffer.clear();
@@ -785,6 +785,7 @@ impl CT_Settings {
                         continue;
                     }
                     if depth == 1 {
+                        let prefixes = prefixes.into_owned();
                         model.absorb_top_level(element, &prefixes, &mut group, depth)?;
                         if !started {
                             // A self-closing group has no children, so its
@@ -3188,7 +3189,7 @@ pub(crate) fn find_top_level_children(
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) if depth == 0 => {
-                root_prefixes = word_prefixes_at(&element, &[])?;
+                root_prefixes = word_prefixes_at(&element, &[])?.into_owned();
                 depth = 1;
             }
             Event::Start(element) if depth == 1 => {
@@ -3233,7 +3234,7 @@ fn rewrite_group_children(
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) if depth == 0 => {
-                prefixes = word_prefixes_at(&element, inherited_prefixes)?;
+                prefixes = word_prefixes_at(&element, inherited_prefixes)?.into_owned();
                 writer.write_event(Event::Start(element.into_owned()))?;
                 depth = 1;
             }
@@ -3339,7 +3340,7 @@ fn rewrite_child_in_raw(
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) if depth == 0 => {
-                prefixes = word_prefixes_at(&element, inherited_prefixes)?;
+                prefixes = word_prefixes_at(&element, inherited_prefixes)?.into_owned();
                 writer.write_event(Event::Start(element.into_owned()))?;
                 depth = 1;
             }
@@ -3464,7 +3465,7 @@ pub(crate) fn rewrite_ordered_child(
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(element) if depth == 0 => {
-                root_prefixes = word_prefixes_at(&element, &[])?;
+                root_prefixes = word_prefixes_at(&element, &[])?.into_owned();
                 let mut root = element.into_owned();
                 ensure_fixed_word_prefix(&mut root)?;
                 writer.write_event(Event::Start(root))?;

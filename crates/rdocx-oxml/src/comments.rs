@@ -91,7 +91,7 @@ impl CT_Comments {
                     let name = element.name();
                     if is_word_element(name.as_ref(), b"comments", &prefixes) {
                         root_attributes = capture_attributes(element, &[], &prefixes)?;
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                         w14_prefixes = namespace_prefixes_at(element, &w14_prefixes, W14_NS)?;
                         saw_root = true;
                     } else if is_word_element(name.as_ref(), b"comment", &prefixes) {

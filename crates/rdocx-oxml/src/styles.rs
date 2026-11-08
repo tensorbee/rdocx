@@ -242,7 +242,7 @@ impl CT_Style {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>, attrs: &BytesStart) -> Result<Self> {
-        let prefixes = word_prefixes_at(attrs, &["w".to_string()])?;
+        let prefixes = word_prefixes_at(attrs, &["w".to_string()])?.into_owned();
         let namespace_bindings = namespace_bindings_at(attrs, &[])?;
         Self::from_xml_with_prefixes(reader, attrs, &prefixes, &namespace_bindings)
     }
@@ -1731,7 +1731,7 @@ impl CT_Styles {
                         )?);
                     } else if is_word_element(name.as_ref(), b"styles", &prefixes) {
                         // Root element, continue
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                         namespace_bindings = namespace_bindings_at(e, &namespace_bindings)?;
                     } else {
                         let bindings = namespace_bindings_at(e, &namespace_bindings)?;
@@ -2284,7 +2284,7 @@ fn serialize_conditional_table_style(conditional: &CT_TblStylePr) -> Result<Vec<
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(ref start) => {
-                prefixes = word_prefixes_at(start, &prefixes)?;
+                prefixes = word_prefixes_at(start, &prefixes)?.into_owned();
                 original_region = get_word_attr(start, b"type", &prefixes)?;
                 break;
             }
@@ -2352,7 +2352,7 @@ fn preserved_conditional_style_children(raw: &[u8]) -> Result<Vec<(u8, Vec<u8>)>
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(ref start) if !inside => {
-                word_prefixes = word_prefixes_at(start, &word_prefixes)?;
+                word_prefixes = word_prefixes_at(start, &word_prefixes)?.into_owned();
                 inside = true;
             }
             Event::Start(ref start) => {
@@ -2431,7 +2431,7 @@ fn preserved_style_attribute(raw: &[u8], local: &[u8]) -> Result<Option<String>>
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(ref start) | Event::Empty(ref start) => {
-                let prefixes = word_prefixes_at(start, &["w".to_owned()])?;
+                let prefixes = word_prefixes_at(start, &["w".to_owned()])?.into_owned();
                 return get_word_attr(start, local, &prefixes);
             }
             Event::Eof => return Ok(None),
@@ -2452,7 +2452,7 @@ fn rewritten_style_scalar_start(
     element: &BytesStart<'_>,
     value: &str,
 ) -> Result<BytesStart<'static>> {
-    let prefixes = word_prefixes_at(element, &["w".to_owned()])?;
+    let prefixes = word_prefixes_at(element, &["w".to_owned()])?.into_owned();
     let element_name = std::str::from_utf8(element.name().as_ref())?.to_owned();
     let mut rewritten = BytesStart::new(element_name.clone());
     let mut wrote_value = false;

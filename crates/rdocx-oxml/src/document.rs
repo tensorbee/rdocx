@@ -9,7 +9,8 @@ use crate::error::{OxmlError, Result};
 use crate::header_footer::{HdrFtrRef, HdrFtrType};
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{
-    local_namespace_overrides, merged_owner_bindings, namespace_bindings, word_prefixes_at,
+    local_namespace_overrides, merged_owner_bindings, namespace_bindings, split_namespace_binding,
+    word_prefixes_at,
 };
 use crate::properties::{
     get_word_val_attr, is_word_attribute, is_word_element, parse_integer_measurement,
@@ -1120,6 +1121,22 @@ impl std::io::BufRead for WordXmlInput<'_> {
     }
 }
 
+#[cfg(test)]
+type AdmissionLocalTrace = Vec<(bool, Vec<u8>)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static ADMISSION_LOCAL_TEST_TRACE: std::cell::RefCell<Option<AdmissionLocalTrace>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+type ContextWeightTrace = Vec<(u8, usize)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static CONTEXT_WEIGHT_TEST_TRACE: std::cell::RefCell<Option<ContextWeightTrace>> = const { std::cell::RefCell::new(None) };
+}
+
 struct WordNamespaceBinding {
     uri: Vec<u8>,
     depth: usize,
@@ -1141,7 +1158,7 @@ struct WordAdmissionFrame {
     ordered_field_charged: bool,
     cost: usize,
     table_depth: usize,
-    local: Vec<u8>,
+    local: std::borrow::Cow<'static, [u8]>,
     paragraph_reader_root: bool,
     ordered_revision_root: bool,
     fact_start: usize,
@@ -1153,8 +1170,16 @@ struct WordAdmissionFrame {
 fn restore_namespace_depths(
     depths: &mut std::collections::HashMap<Vec<u8>, WordNamespaceBinding>,
     undo: Vec<(Vec<u8>, Option<WordNamespaceBinding>)>,
+    copy_scope_weight: &mut Option<usize>,
 ) {
     for (prefix, previous) in undo.into_iter().rev() {
+        *copy_scope_weight = None;
+        #[cfg(test)]
+        CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+            if let Some(trace) = trace {
+                trace.push((b'I', 0));
+            }
+        });
         if let Some(previous) = previous {
             depths.insert(prefix, previous);
         } else {
@@ -1524,17 +1549,33 @@ pub(crate) fn word_model_children_maxima(
                     summaries.insert(key, None);
                 }
                 let children = owner.resource_children();
-                if completed.is_none() {
-                    pending.push(ModelAdmissionStep::Finish(key, local, children.clone()));
+                if completed.is_none() && children.is_empty() {
+                    pending.push(ModelAdmissionStep::Finish(key, local, children));
+                } else if completed.is_none() {
+                    let finish = pending.len();
+                    pending.push(ModelAdmissionStep::Finish(key, local, Vec::new()));
+                    pending.extend(
+                        children
+                            .iter()
+                            .copied()
+                            .map(|child| ModelAdmissionStep::Enter(child, cost, tables)),
+                    );
+                    // Extension only appends. Install the original children
+                    // before the loop can process this Finish or any Enter.
+                    let ModelAdmissionStep::Finish(_, _, retained) = &mut pending[finish] else {
+                        unreachable!("new summary Finish is unchanged while queuing children");
+                    };
+                    *retained = children;
+                } else {
+                    // Preserve the former append/LIFO visitation order. On an
+                    // over-budget memo hit, fitting children are skipped by their
+                    // maxima and the actual first offending entry still refuses.
+                    pending.extend(
+                        children
+                            .into_iter()
+                            .map(|child| ModelAdmissionStep::Enter(child, cost, tables)),
+                    );
                 }
-                // Preserve the former append/LIFO visitation order. On an
-                // over-budget memo hit, fitting children are skipped by their
-                // maxima and the actual first offending entry still refuses.
-                pending.extend(
-                    children
-                        .into_iter()
-                        .map(|child| ModelAdmissionStep::Enter(child, cost, tables)),
-                );
             }
             ModelAdmissionStep::Finish(key, local, children) => {
                 let mut maxima = (0, 0);
@@ -9052,38 +9093,34 @@ pub(crate) fn admit_word_input_with_constructors(
     )?)
 }
 
-fn admit_word_input_classified(
-    xml: WordXmlInput<'_>,
-    prefixes: &[String],
-    consumed_owner: Option<&[u8]>,
-    root_owner: Option<SdtOwner>,
-    constructors: std::sync::Arc<ConstructorFailures>,
-) -> WordSourceResult<AdmittedWordSource> {
-    debug_assert!(consumed_owner.is_none_or(|owner| matches!(owner, b"p" | b"r")));
+fn admission_envelope(prefixes: &[String]) -> WordSourceResult<(Vec<u8>, usize)> {
     // The wrapper supplies only the inherited bindings the actual reader
     // already uses. Declarations in the input still shadow this scope.
     let context_bytes = prefixes
         .iter()
         .try_fold(0usize, |sum, prefix| sum.checked_add(prefix.len()))
         .ok_or_else(|| WordSourceFailure::resource("Word source context byte overflow".into()))?;
-    let mut bindings = namespace_bindings(prefixes);
+    let mut bindings: Vec<(&str, &str)> = prefixes
+        .iter()
+        .filter_map(|value| split_namespace_binding(value))
+        .collect();
     // Context multiplicity belongs to revision identity, not XML attributes
     // on this synthetic envelope. Keep the last identical binding so repeated
     // metadata cannot move an earlier binding past a conflicting later one.
     // Conflicting pairs and the stored input context remain untouched.
     let mut seen = std::collections::HashSet::new();
     bindings.reverse();
-    bindings.retain(|binding| seen.insert(binding.clone()));
+    bindings.retain(|binding| seen.insert(*binding));
     bindings.reverse();
     for prefix in prefixes.iter().filter(|prefix| !prefix.starts_with('\0')) {
-        if !bindings.iter().any(|(name, _)| name == prefix) {
-            bindings.push((prefix.clone(), W_NS.to_owned()));
+        if !bindings.iter().any(|(name, _)| *name == prefix.as_str()) {
+            bindings.push((prefix.as_str(), W_NS));
         }
     }
     let effective_context_bytes = bindings
         .iter()
         .try_fold(0usize, |sum, (prefix, namespace)| {
-            let marker = if namespace == W_NS { prefix.len() } else { 0 };
+            let marker = if *namespace == W_NS { prefix.len() } else { 0 };
             sum.checked_add(prefix.len())
                 .and_then(|sum| sum.checked_add(namespace.len()))
                 .and_then(|sum| sum.checked_add(2))
@@ -9101,10 +9138,28 @@ fn admit_word_input_classified(
             source.extend_from_slice(prefix.as_bytes());
         }
         source.extend_from_slice(b"=\"");
-        source.extend_from_slice(quick_xml::escape::escape(&namespace).as_bytes());
+        source.extend_from_slice(quick_xml::escape::escape(namespace).as_bytes());
         source.push(b'"');
     }
     source.push(b'>');
+    Ok((source, duplicate_context_bytes))
+}
+
+fn admit_word_input_classified(
+    xml: WordXmlInput<'_>,
+    prefixes: &[String],
+    consumed_owner: Option<&[u8]>,
+    root_owner: Option<SdtOwner>,
+    constructors: std::sync::Arc<ConstructorFailures>,
+) -> WordSourceResult<AdmittedWordSource> {
+    debug_assert!(consumed_owner.is_none_or(|owner| matches!(owner, b"p" | b"r")));
+    #[cfg(test)]
+    CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.push((b'B', 0));
+        }
+    });
+    let (source, duplicate_context_bytes) = admission_envelope(prefixes)?;
     let source_start = source.len();
     let mut source_chunks = vec![source.as_slice()];
     source_chunks.extend(xml.chunks());
@@ -9119,6 +9174,7 @@ fn admit_word_input_classified(
     let mut copy_bytes = 0usize;
     let mut namespace_depths: std::collections::HashMap<Vec<u8>, WordNamespaceBinding> =
         std::collections::HashMap::new();
+    let mut copy_scope_weight: Option<usize> = None;
     let mut buffer = Vec::new();
     loop {
         let fact_start = reader.buffer_position() as usize;
@@ -9132,7 +9188,7 @@ fn admit_word_input_classified(
                 let parent_owner = stack.last().and_then(|frame| frame.owner);
                 let in_control_content = stack
                     .last()
-                    .is_some_and(|frame| frame.local == b"sdtContent");
+                    .is_some_and(|frame| frame.local.as_ref() == b"sdtContent");
                 let part_event = constructors
                     .part_events
                     .get(part_event_index)
@@ -9164,6 +9220,13 @@ fn admit_word_input_classified(
                                 "reserved XML namespace binding".into(),
                             )));
                         }
+                        #[cfg(test)]
+                        CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+                            if let Some(trace) = trace {
+                                trace.push((b'I', 0));
+                            }
+                        });
+                        copy_scope_weight = None;
                         let previous = namespace_depths.insert(
                             prefix.clone(),
                             WordNamespaceBinding {
@@ -9192,7 +9255,7 @@ fn admit_word_input_classified(
                     && binding.is_none()
                     && local.as_ref() == b"r"
                     && stack.last().is_some_and(|parent| {
-                        parent.admitted && parent.word && parent.local == b"p"
+                        parent.admitted && parent.word && parent.local.as_ref() == b"p"
                     });
                 let legacy_run_prefix = if fallback_run {
                     Some(prefix.to_vec())
@@ -9244,7 +9307,7 @@ fn admit_word_input_classified(
                     let parent_name = if parent.paragraph_reader_root {
                         b"p".as_slice()
                     } else {
-                        parent.local.as_slice()
+                        parent.local.as_ref()
                     };
                     admitted &= admitted_word_child(parent_name, local.as_ref())
                         && !(parent.ordered_revision_root && local.as_ref() == b"fldSimple");
@@ -9255,9 +9318,9 @@ fn admit_word_input_classified(
                     == b"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
                 {
                     admitted &= stack.len() == 1
-                        || stack
-                            .last()
-                            .is_some_and(|parent| parent.word && parent.local == b"drawing");
+                        || stack.last().is_some_and(|parent| {
+                            parent.word && parent.local.as_ref() == b"drawing"
+                        });
                 }
                 let mc = !stack.is_empty()
                     && decoded_namespace_is(namespace_uri, crate::namespace::MC_NS);
@@ -9266,11 +9329,11 @@ fn admit_word_input_classified(
                 let vml = !stack.is_empty() && namespace_uri == b"urn:schemas-microsoft-com:vml";
                 if mc && let Some(parent) = stack.last() {
                     admitted &= if local.as_ref() == b"AlternateContent" {
-                        (stack.len() == 1 || parent.word && parent.local == b"r")
+                        (stack.len() == 1 || parent.word && parent.local.as_ref() == b"r")
                             && captured_namespace_is(binding, stack.len(), crate::namespace::MC_NS)
                     } else {
                         parent.mc
-                            && parent.local == b"AlternateContent"
+                            && parent.local.as_ref() == b"AlternateContent"
                             && mc_capture_depth.is_some_and(|depth| {
                                 captured_namespace_is(binding, depth, crate::namespace::MC_NS)
                             })
@@ -9283,7 +9346,7 @@ fn admit_word_input_classified(
                     && let Some(parent) = stack.last()
                     && parent.mc
                 {
-                    admitted &= match (parent.local.as_slice(), local.as_ref()) {
+                    admitted &= match (parent.local.as_ref(), local.as_ref()) {
                         (b"Choice", b"drawing") => mc_capture_depth.is_some_and(|depth| {
                             captured_namespace_is(binding, depth, W_NS) || legacy_word
                         }),
@@ -9308,12 +9371,12 @@ fn admit_word_input_classified(
                             | b"arc"
                     );
                     admitted &= parent.word
-                        && matches!(parent.local.as_slice(), b"pict" | b"object")
+                        && matches!(parent.local.as_ref(), b"pict" | b"object")
                         && shape
-                        || parent.vml && parent.local == b"group" && shape
+                        || parent.vml && parent.local.as_ref() == b"group" && shape
                         || parent.vml
                             && matches!(
-                                parent.local.as_slice(),
+                                parent.local.as_ref(),
                                 b"shape"
                                     | b"rect"
                                     | b"roundrect"
@@ -9347,9 +9410,9 @@ fn admit_word_input_classified(
                 {
                     admitted = false;
                 }
-                let direct_drawing = stack
-                    .last()
-                    .is_some_and(|frame| frame.word && frame.local == b"drawing" && frame.admitted);
+                let direct_drawing = stack.last().is_some_and(|frame| {
+                    frame.word && frame.local.as_ref() == b"drawing" && frame.admitted
+                });
                 // Direct CT_Drawing entries choose anchor by local name after
                 // their qualified Word drawing owner has been established.
                 // AlternateContent has its separate qualified owner admission.
@@ -9411,7 +9474,9 @@ fn admit_word_input_classified(
                 let typed_vml_body = admitted
                     && word
                     && local.as_ref() == b"txbxContent"
-                    && stack.last().is_some_and(|frame| frame.local == b"textbox");
+                    && stack
+                        .last()
+                        .is_some_and(|frame| frame.local.as_ref() == b"textbox");
                 let textbox = matches!(event, Event::Start(_))
                     && admitted
                     && (typed_anchor_body || typed_vml_body);
@@ -9429,11 +9494,11 @@ fn admit_word_input_classified(
                     for frame in stack.iter_mut().rev() {
                         if !frame.admitted
                             || !frame.word
-                            || matches!(frame.local.as_slice(), b"r" | b"p" | b"body" | b"tc")
+                            || matches!(frame.local.as_ref(), b"r" | b"p" | b"body" | b"tc")
                         {
                             break;
                         }
-                        if frame.local == b"fldSimple" && !frame.ordered_field_charged {
+                        if frame.local.as_ref() == b"fldSimple" && !frame.ordered_field_charged {
                             path_cost = word_owner_cost(path_cost, 1)
                                 .map_err(WordSourceFailure::Resource)?;
                             frame.cost += 1;
@@ -9484,22 +9549,63 @@ fn admit_word_input_classified(
                 // do not become separate modeled-copy owners through this budget.
                 let copy_fact =
                     copy_owner || stack.last().is_some_and(|frame| frame.admitted) && !admitted;
-                let copy_scope_bytes = namespace_depths
-                    .iter()
-                    .try_fold(0usize, |sum, (prefix, binding)| {
-                        let marker = if decoded_namespace_is(&binding.uri, W_NS) {
-                            prefix.len()
-                        } else {
-                            0
-                        };
-                        sum.checked_add(prefix.len())
-                            .and_then(|sum| sum.checked_add(binding.uri.len()))
-                            .and_then(|sum| sum.checked_add(2))
-                            .and_then(|sum| sum.checked_add(marker))
-                    })
-                    .ok_or_else(|| {
-                        WordSourceFailure::resource("Word local copy context overflow".into())
-                    })?;
+                let copy_scope_bytes = if let Some(bytes) = copy_scope_weight {
+                    #[cfg(test)]
+                    CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+                        if let Some(trace) = trace {
+                            trace.push((b'H', 0));
+                        }
+                    });
+                    bytes
+                } else {
+                    #[cfg(test)]
+                    CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+                        if let Some(trace) = trace {
+                            trace.push((b'F', 0));
+                        }
+                    });
+                    let bytes = namespace_depths
+                        .iter()
+                        .try_fold(0usize, |sum, (prefix, binding)| {
+                            let marker = if decoded_namespace_is(&binding.uri, W_NS) {
+                                prefix.len()
+                            } else {
+                                0
+                            };
+                            sum.checked_add(prefix.len())
+                                .and_then(|sum| sum.checked_add(binding.uri.len()))
+                                .and_then(|sum| sum.checked_add(2))
+                                .and_then(|sum| sum.checked_add(marker))
+                        })
+                        .ok_or_else(|| {
+                            WordSourceFailure::resource("Word local copy context overflow".into())
+                        })?;
+                    copy_scope_weight = Some(bytes);
+                    bytes
+                };
+                #[cfg(test)]
+                CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| {
+                    if let Some(trace) = trace {
+                        // This reference is cfgtest-only and never part of
+                        // the separately built public work meter.
+                        let expected =
+                            namespace_depths
+                                .iter()
+                                .try_fold(0usize, |sum, (prefix, binding)| {
+                                    let marker = if decoded_namespace_is(&binding.uri, W_NS) {
+                                        prefix.len()
+                                    } else {
+                                        0
+                                    };
+                                    sum.checked_add(prefix.len())
+                                        .and_then(|sum| sum.checked_add(binding.uri.len()))
+                                        .and_then(|sum| sum.checked_add(2))
+                                        .and_then(|sum| sum.checked_add(marker))
+                                });
+                        assert_eq!(Some(copy_scope_bytes), expected);
+                        trace.push((b'V', copy_scope_bytes));
+                    }
+                });
                 let next_copy_depth =
                     copy_depth
                         .checked_add(usize::from(copy_owner))
@@ -9582,19 +9688,45 @@ fn admit_word_input_classified(
                         qualified_drawing_depth,
                         cost,
                         table_depth,
-                        local: consumed_owner
-                            .filter(|_| virtual_owner)
-                            .unwrap_or(local.as_ref())
-                            .to_vec(),
+                        local: {
+                            let value = consumed_owner
+                                .filter(|_| virtual_owner)
+                                .unwrap_or(local.as_ref());
+                            match value {
+                                b"p" => std::borrow::Cow::Borrowed(b"p".as_slice()),
+                                b"r" => std::borrow::Cow::Borrowed(b"r".as_slice()),
+                                b"rPr" => std::borrow::Cow::Borrowed(b"rPr".as_slice()),
+                                b"t" => std::borrow::Cow::Borrowed(b"t".as_slice()),
+                                _ => std::borrow::Cow::Owned(value.to_vec()),
+                            }
+                        },
+                    });
+                    #[cfg(test)]
+                    ADMISSION_LOCAL_TEST_TRACE.with_borrow_mut(|trace| {
+                        if let Some(trace) = trace {
+                            let local: &[u8] = stack.last().unwrap().local.as_ref();
+                            trace.push((true, local.to_vec()));
+                        }
                     });
                     controls += usize::from(control);
                     path_cost = next_cost;
                 } else {
-                    restore_namespace_depths(&mut namespace_depths, namespace_undo);
+                    restore_namespace_depths(
+                        &mut namespace_depths,
+                        namespace_undo,
+                        &mut copy_scope_weight,
+                    );
                 }
             }
             Event::End(_) => {
                 if let Some(frame) = stack.pop() {
+                    #[cfg(test)]
+                    ADMISSION_LOCAL_TEST_TRACE.with_borrow_mut(|trace| {
+                        if let Some(trace) = trace {
+                            let local: &[u8] = frame.local.as_ref();
+                            trace.push((false, local.to_vec()));
+                        }
+                    });
                     if frame.copy_fact {
                         let visits = stack
                             .last()
@@ -9620,7 +9752,11 @@ fn admit_word_input_classified(
                     }
                     controls -= usize::from(frame.control);
                     path_cost -= frame.cost;
-                    restore_namespace_depths(&mut namespace_depths, frame.namespace_undo);
+                    restore_namespace_depths(
+                        &mut namespace_depths,
+                        frame.namespace_undo,
+                        &mut copy_scope_weight,
+                    );
                 }
             }
             Event::Eof => break,
@@ -9638,10 +9774,11 @@ fn admit_word_input_classified(
     // Such caller-supplied contexts retain the existing constructor scan until
     // their projected alias actions are represented. Closed source declarations
     // already activate aliases in the original qualifier's scope.
-    let projected_aliases = namespace_bindings(prefixes)
+    let projected_aliases = prefixes
         .iter()
+        .filter_map(|value| split_namespace_binding(value))
         .all(|(prefix, namespace)| {
-            namespace != W_NS || prefixes.iter().any(|alias| alias == prefix)
+            namespace != W_NS || prefixes.iter().any(|alias| alias.as_str() == prefix)
         });
     Ok(AdmittedWordSource {
         work: (copy_nodes, copy_bytes),
@@ -9681,10 +9818,10 @@ pub(crate) fn admit_word_reader(
                     ));
                 }
                 if let Some(namespace) = namespace {
-                    let bindings = namespace_bindings(prefixes);
                     let qualified = if namespace == W_NS {
                         is_word_element(name.as_ref(), owner, prefixes)
                     } else {
+                        let bindings = namespace_bindings(prefixes);
                         name.as_ref()
                             .iter()
                             .position(|byte| *byte == b':')
@@ -13710,7 +13847,7 @@ impl CT_Document {
                             }
                         }
                         document_open = true;
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                         if let Some(ordinary) = &mut ordinary
                             && let Some(origin) = reader_input_origin(xml, &reader)
                         {
@@ -14233,6 +14370,576 @@ pub(crate) fn source_value_is_modeled(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn admission_context_weights_follow_actual_namespace_writes_and_restores() {
+        let word = crate::namespace::W_NS;
+        let long = "urn:long-foreign-".to_owned() + &"x".repeat(1000);
+        let encoded = word.replacen('h', "&#104;", 1);
+        let cases = [
+            (
+                "zero",
+                "<opaque><child/><child><leaf/></child></opaque>".to_owned(),
+            ),
+            (
+                "many",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:a='urn:a' xmlns:b='urn:b'><w:r><w:t>one</w:t></w:r><w:r/><w:r><w:t>two</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "aliases-default",
+                format!(
+                    "<p xmlns='{word}' xmlns:q='{word}' xmlns:x='urn:x'><q:r><q:t>one</q:t></q:r><r><t>two</t></r></p>"
+                ),
+            ),
+            (
+                "shadow-end",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:x='urn:short'><w:r xmlns:x='{long}'><w:t>inner</w:t></w:r><w:r><w:t>outer</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "shadow-empty",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:x='urn:short'><x:opaque xmlns:x='{long}'/><w:r><w:t>outer</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "new-remove",
+                format!(
+                    "<w:p xmlns:w='{word}'><w:r xmlns:x='{long}'><w:t>inner</w:t></w:r><w:r><w:t>outer</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "equal-depth",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:x='urn:same'><w:r xmlns:x='urn:same'><w:t>same</w:t></w:r><w:r><w:t>outer</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "nested-restores",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:x='urn:outer'><w:r xmlns:x='{long}'><w:t xmlns:x='urn:inner'>inner</w:t><w:t>middle</w:t></w:r><w:r><w:t>outer</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "encoded-word",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:q='{encoded}'><w:r><q:t>one</q:t></w:r><w:r xmlns:q='urn:foreign'><w:t>inner</w:t></w:r><w:r><q:t>two</q:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "invalid-escape",
+                format!(
+                    "<w:p xmlns:w='{word}' xmlns:x='urn:&unknown;'><w:r><w:t>one</w:t></w:r><w:r/></w:p>"
+                ),
+            ),
+            (
+                "duplicate",
+                format!(
+                    "<w:p xmlns:w='{word}'><w:r xmlns:x='urn:one' xmlns:x='urn:two'><w:t>bad</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "late-reserved",
+                format!(
+                    "<w:p xmlns:w='{word}'><w:r><w:t>first</w:t></w:r><w:r xmlns:xml='urn:invalid'><w:t>bad</w:t></w:r></w:p>"
+                ),
+            ),
+            (
+                "mismatch",
+                format!("<w:p xmlns:w='{word}'><w:r><w:t>first</w:t></w:r><w:r></w:p>"),
+            ),
+            (
+                "eof",
+                format!("<w:p xmlns:w='{word}'><w:r><w:t>first</w:t></w:r>"),
+            ),
+        ];
+        let mut traces = Vec::new();
+        for (label, xml) in cases {
+            super::CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| *trace = Some(Vec::new()));
+            let result = super::admit_word_input(
+                super::WordXmlInput::Contiguous(xml.as_bytes()),
+                &[],
+                None,
+                None,
+            );
+            let trace = super::CONTEXT_WEIGHT_TEST_TRACE
+                .with_borrow_mut(Option::take)
+                .unwrap();
+            if label == "zero" {
+                assert!(result.is_ok());
+                assert!(trace.iter().any(|(tag, _)| *tag == b'V'));
+                assert!(
+                    trace
+                        .iter()
+                        .filter(|(tag, _)| *tag == b'V')
+                        .all(|(_, value)| *value == 0)
+                );
+            }
+            if !matches!(
+                label,
+                "invalid-escape" | "duplicate" | "late-reserved" | "mismatch" | "eof"
+            ) {
+                assert!(result.is_ok(), "{label}: {result:?}");
+            }
+            assert_eq!(
+                trace
+                    .iter()
+                    .filter(|(tag, _)| matches!(tag, b'F' | b'H'))
+                    .count(),
+                trace.iter().filter(|(tag, _)| *tag == b'V').count()
+            );
+            eprintln!("CONTEXT_OUTCOME {label} {result:?}");
+            let chunks = xml.as_bytes().chunks(1).collect::<Vec<_>>();
+            let pieces =
+                super::admit_word_input(super::WordXmlInput::pieces(&chunks), &[], None, None);
+            assert_eq!(format!("{pieces:?}"), format!("{result:?}"), "{label}");
+            traces.push(trace);
+        }
+        let comments = format!(
+            "<w:comments xmlns:w='{word}' xmlns:x='urn:outer'><w:comment w:id='0' w:author='A' xmlns:x='{long}'><w:p><w:r><w:t>first</w:t></w:r></w:p></w:comment><w:comment w:id='1' w:author='B'><w:p><w:r><w:t>second</w:t></w:r></w:p></w:comment></w:comments>"
+        );
+        super::CONTEXT_WEIGHT_TEST_TRACE.with_borrow_mut(|trace| *trace = Some(Vec::new()));
+        let result = super::admit_reader_source(
+            comments.as_bytes(),
+            super::WordSourceReader::Part(super::PartReaderKind::Comments),
+        );
+        let trace = super::CONTEXT_WEIGHT_TEST_TRACE
+            .with_borrow_mut(Option::take)
+            .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        eprintln!("CONTEXT_OUTCOME part-comments {result:?}");
+        traces.push(trace);
+        // The predecessor has no H arm. The successor must match actual
+        // mutation epochs even when a write leaves the numeric sum unchanged.
+        if traces.iter().flatten().any(|(tag, _)| *tag == b'H') {
+            for trace in traces {
+                let mut valid = false;
+                for (tag, _) in trace {
+                    match tag {
+                        b'B' | b'I' => valid = false,
+                        b'F' => assert!(!valid, "cold fold without a map write"),
+                        b'H' => assert!(valid, "reuse after a map write"),
+                        b'V' => valid = true,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn admission_frames_keep_selected_name_bytes_after_buffer_growth_and_opaque_children() {
+        use quick_xml::events::Event;
+        let word = crate::namespace::W_NS;
+        let long = "large text α ".repeat(4096);
+        let contexts = [
+            (
+                format!(
+                    "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>{long}</w:t></w:r><w:r/><w:r><w:t>last</w:t></w:r></w:p>"
+                ),
+                vec!["w".to_owned()],
+                None,
+            ),
+            (
+                format!(
+                    "<x:p xmlns:x='urn:foreign'><x:rPr><x:pLong><x:空>{long}</x:空></x:pLong></x:rPr><x:P></x:P><x:R></x:R><x:T></x:T><x:r><x:t>last</x:t></x:r></x:p>"
+                ),
+                vec![],
+                None,
+            ),
+            (
+                format!(
+                    "<p xmlns='{word}'><r><rPr><b/></rPr><t>{long}</t></r><r><t>last</t></r></p>"
+                ),
+                vec![],
+                None,
+            ),
+            (
+                format!(
+                    "<q:p xmlns:q='{word}'><q:r><q:rPr/><q:t>{long}</q:t></q:r><q:r xmlns:q='urn:foreign'><q:t>opaque</q:t></q:r><q:r><q:t>last</q:t></q:r></q:p>"
+                ),
+                vec![],
+                None,
+            ),
+            (
+                format!(
+                    "<w:r><w:rPr><w:b/></w:rPr><w:t>{long}</w:t></w:r><w:r><w:t>last</w:t></w:r>"
+                ),
+                vec!["w".to_owned()],
+                Some(b"p".as_slice()),
+            ),
+            (
+                format!(
+                    "<w:rPr><w:b/></w:rPr><w:t>{long}</w:t><x:t xmlns:x='urn:foreign'>opaque</x:t>"
+                ),
+                vec!["w".to_owned()],
+                Some(b"r".as_slice()),
+            ),
+            (
+                format!(
+                    "<w:document xmlns:w='{word}'><w:body><w:p><w:r><w:rPr/><w:t>{long}</w:t></w:r></w:p><w:p><w:r><w:t>last</w:t></w:r></w:p></w:body></w:document>"
+                ),
+                vec![],
+                None,
+            ),
+        ];
+        for (index, (xml, prefixes, consumed)) in contexts.iter().enumerate() {
+            let raw = xml.as_bytes();
+            let (envelope, _) = super::admission_envelope(prefixes).unwrap();
+            let chunks = [envelope.as_slice(), raw, b"</rdocxAdmission>".as_slice()];
+            let mut reader = quick_xml::Reader::from_reader(super::WordXmlInput::pieces(&chunks));
+            let mut buffer = Vec::new();
+            let mut stack = Vec::new();
+            let mut expected: super::AdmissionLocalTrace = Vec::new();
+            loop {
+                match reader.read_event_into(&mut buffer).unwrap() {
+                    Event::Start(element) => {
+                        let local = element.local_name();
+                        let selected = consumed
+                            .filter(|_| stack.is_empty())
+                            .unwrap_or(local.as_ref());
+                        let name = selected.to_vec();
+                        expected.push((true, name.clone()));
+                        stack.push(name);
+                    }
+                    Event::End(_) => expected.push((false, stack.pop().unwrap())),
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            assert!(stack.is_empty());
+            let constructors = super::admit_original_capture_records(
+                super::WordXmlInput::Contiguous(raw),
+                prefixes,
+                None,
+                *consumed,
+            )
+            .unwrap();
+            super::ADMISSION_LOCAL_TEST_TRACE.with_borrow_mut(|trace| *trace = Some(Vec::new()));
+            let actual = super::admit_word_input_classified(
+                super::WordXmlInput::Contiguous(raw),
+                prefixes,
+                *consumed,
+                None,
+                std::sync::Arc::new(constructors),
+            );
+            let trace = super::ADMISSION_LOCAL_TEST_TRACE
+                .with_borrow_mut(Option::take)
+                .unwrap();
+            assert!(actual.is_ok(), "case {index}: {actual:?}");
+            assert_eq!(
+                trace, expected,
+                "actual frame bytes at every push/pop, case {index}"
+            );
+            eprintln!("FRAME_OUTCOME {index} {actual:?}");
+            let pieces = raw.chunks(1).collect::<Vec<_>>();
+            let piecewise = super::admit_word_input(
+                super::WordXmlInput::pieces(&pieces),
+                prefixes,
+                *consumed,
+                None,
+            );
+            assert_eq!(format!("{piecewise:?}"), format!("{actual:?}"));
+        }
+    }
+
+    fn owned_admission_envelope_before_allocation_repair(
+        prefixes: &[String],
+    ) -> super::WordSourceResult<(Vec<u8>, usize)> {
+        // The wrapper supplies only the inherited bindings the actual reader
+        // already uses. Declarations in the input still shadow this scope.
+        let context_bytes = prefixes
+            .iter()
+            .try_fold(0usize, |sum, prefix| sum.checked_add(prefix.len()))
+            .ok_or_else(|| {
+                super::WordSourceFailure::resource("Word source context byte overflow".into())
+            })?;
+        let mut bindings = crate::numbering::namespace_bindings(prefixes);
+        // Context multiplicity belongs to revision identity, not XML attributes
+        // on this synthetic envelope. Keep the last identical binding so repeated
+        // metadata cannot move an earlier binding past a conflicting later one.
+        // Conflicting pairs and the stored input context remain untouched.
+        let mut seen = std::collections::HashSet::new();
+        bindings.reverse();
+        bindings.retain(|binding| seen.insert(binding.clone()));
+        bindings.reverse();
+        for prefix in prefixes.iter().filter(|prefix| !prefix.starts_with('\0')) {
+            if !bindings.iter().any(|(name, _)| name == prefix) {
+                bindings.push((prefix.clone(), crate::namespace::W_NS.to_owned()));
+            }
+        }
+        let effective_context_bytes = bindings
+            .iter()
+            .try_fold(0usize, |sum, (prefix, namespace)| {
+                let marker = if namespace == crate::namespace::W_NS {
+                    prefix.len()
+                } else {
+                    0
+                };
+                sum.checked_add(prefix.len())
+                    .and_then(|sum| sum.checked_add(namespace.len()))
+                    .and_then(|sum| sum.checked_add(2))
+                    .and_then(|sum| sum.checked_add(marker))
+            })
+            .ok_or_else(|| {
+                super::WordSourceFailure::resource("Word effective context byte overflow".into())
+            })?;
+        let duplicate_context_bytes = context_bytes.saturating_sub(effective_context_bytes);
+        let mut source = b"<rdocxAdmission".to_vec();
+        for (prefix, namespace) in bindings {
+            source.extend_from_slice(b" xmlns");
+            if !prefix.is_empty() {
+                source.push(b':');
+                source.extend_from_slice(prefix.as_bytes());
+            }
+            source.extend_from_slice(b"=\"");
+            source.extend_from_slice(quick_xml::escape::escape(&namespace).as_bytes());
+            source.push(b'"');
+        }
+        source.push(b'>');
+        Ok((source, duplicate_context_bytes))
+    }
+
+    fn admission_binding_contexts() -> Vec<Vec<String>> {
+        let binding = crate::numbering::namespace_binding;
+        let word = crate::namespace::W_NS;
+        vec![
+            vec![],
+            vec!["w".into()],
+            vec!["w".into(), "w".into()],
+            vec![binding("q", word)],
+            vec!["q".into(), binding("q", word)],
+            vec![
+                binding("q", "urn:first"),
+                binding("q", "urn:last"),
+                binding("q", "urn:first"),
+            ],
+            vec!["q".into(), binding("q", "urn:foreign"), "w".into()],
+            vec![binding("", word)],
+            vec![binding("", "")],
+            vec![binding("q", ""), binding("q", "")],
+            vec![binding("空", "urn:é&<>\"'"), "w".into()],
+            vec!["\0missing-separator".into(), "\0".into(), "w".into()],
+            vec![binding("q", "urn:extra\0tail"), "w".into()],
+            vec!["".into(), binding("", word), binding("q", word), "q".into()],
+            vec![binding("xml", "urn:invalid"), "w".into()],
+            vec![
+                binding("w", word),
+                binding("w", "urn:foreign"),
+                binding("w", word),
+                "w".into(),
+            ],
+        ]
+    }
+
+    #[test]
+    fn admission_binding_envelope_preserves_last_exact_pair_and_all_context_charges() {
+        for (index, prefixes) in admission_binding_contexts().iter().enumerate() {
+            let old = owned_admission_envelope_before_allocation_repair(prefixes);
+            let new = super::admission_envelope(prefixes);
+            assert_eq!(format!("{new:?}"), format!("{old:?}"), "context {index}");
+        }
+        let binding = crate::numbering::namespace_binding;
+        let (bytes, _) = super::admission_envelope(&[
+            binding("q", "urn:first"),
+            binding("q", "urn:last"),
+            binding("q", "urn:first"),
+        ])
+        .unwrap();
+        assert_eq!(
+            bytes,
+            b"<rdocxAdmission xmlns:q=\"urn:last\" xmlns:q=\"urn:first\">"
+        );
+    }
+
+    #[test]
+    fn admission_binding_allocation_keeps_complete_source_outcomes_and_first_causes() {
+        for (index, prefixes) in admission_binding_contexts().iter().enumerate() {
+            for (role, source, consumed) in [
+                (
+                    "source",
+                    "<w:p><w:r><w:t>kept</w:t><x:raw xmlns:x='urn:x'/></w:r></w:p>",
+                    None,
+                ),
+                (
+                    "paragraph",
+                    "<w:r><w:t>kept</w:t></w:r>",
+                    Some(b"p".as_slice()),
+                ),
+                ("run", "<w:t>kept</w:t>", Some(b"r".as_slice())),
+                (
+                    "fallback",
+                    "<w:sdt><w:sdtContent><w:p><w:r><w:rPr><w:sz w:val='bad'/></w:rPr></w:r></w:p></w:sdtContent></w:sdt>",
+                    None,
+                ),
+                ("malformed", "<w:p><w:r></w:p>", None),
+            ] {
+                let raw = source.as_bytes();
+                let outcome = super::admit_word_input(
+                    super::WordXmlInput::Contiguous(raw),
+                    prefixes,
+                    consumed,
+                    None,
+                );
+                let expected = format!("{outcome:?}");
+                if let Ok(admitted) = &outcome {
+                    let aliases = crate::numbering::namespace_bindings(prefixes).iter().all(
+                        |(prefix, namespace)| {
+                            namespace != crate::namespace::W_NS
+                                || prefixes.iter().any(|alias| alias == prefix)
+                        },
+                    );
+                    assert_eq!(admitted.projected_aliases, aliases);
+                    assert_eq!(
+                        *admitted.source_map,
+                        super::WordSourceMap::original(0..raw.len())
+                    );
+                }
+                let chunks = raw.chunks(1).collect::<Vec<_>>();
+                let piecewise = super::admit_word_input(
+                    super::WordXmlInput::pieces(&chunks),
+                    prefixes,
+                    consumed,
+                    None,
+                );
+                assert_eq!(
+                    format!("{piecewise:?}"),
+                    expected,
+                    "context {index}, {role}"
+                );
+                eprintln!("ADMISSION_OUTCOME context={index} role={role} {expected}");
+            }
+        }
+        let part = format!(
+            "<w:hdr xmlns:w='{}'><w:p/><w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:hdr>",
+            crate::namespace::W_NS
+        );
+        let result = super::admit_reader_source(
+            part.as_bytes(),
+            super::WordSourceReader::Part(super::PartReaderKind::HeaderFooter),
+        );
+        eprintln!("ADMISSION_OUTCOME part {result:?}");
+        assert!(result.is_ok());
+        let prefixes = vec!["w".into()];
+        let boundary = fx211_control_xml(256);
+        let excessive = fx211_control_xml(257);
+        for (label, xml, resource) in [
+            ("boundary", boundary, false),
+            ("resource", excessive, true),
+            ("input", "<w:p xmlns:xml='urn:invalid'/>".into(), false),
+        ] {
+            let result = super::admit_word_input(
+                super::WordXmlInput::Contiguous(xml.as_bytes()),
+                &prefixes,
+                None,
+                None,
+            );
+            eprintln!("ADMISSION_OUTCOME {label} {result:?}");
+            if resource {
+                assert!(matches!(result, Err(super::WordSourceFailure::Resource(_))));
+            } else if label == "input" {
+                assert!(matches!(result, Err(super::WordSourceFailure::Input(_))));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn admission_binding_remaining_reader_preserves_cursor_closes_and_real_admission() {
+        let word = crate::namespace::W_NS;
+        let binding = crate::numbering::namespace_binding;
+        let cases = [
+            (
+                "word",
+                "<w:p><w:r><w:t>kept</w:t></w:r></w:p><w:p/>",
+                vec!["w".into()],
+                Some(word),
+                true,
+            ),
+            (
+                "alias",
+                "<q:p><q:r/></q:p>",
+                vec!["q".into(), binding("q", word)],
+                Some(word),
+                true,
+            ),
+            (
+                "default",
+                "<p><r/></p>",
+                vec!["".into(), binding("", word)],
+                Some(word),
+                true,
+            ),
+            (
+                "shadow",
+                "<w:p><w:r/></w:p>",
+                vec![binding("w", "urn:foreign")],
+                Some(word),
+                false,
+            ),
+            (
+                "foreign",
+                "<x:p><x:opaque/></x:p>",
+                vec![binding("x", "urn:foreign")],
+                Some("urn:foreign"),
+                true,
+            ),
+            (
+                "foreign-mismatch",
+                "<x:p></x:p>",
+                vec![binding("x", "urn:other")],
+                Some("urn:foreign"),
+                false,
+            ),
+            ("none", "<q:p><w:r/></q:p>", vec!["w".into()], None, true),
+            (
+                "wrong-local",
+                "<w:p></w:r>",
+                vec!["w".into()],
+                Some(word),
+                false,
+            ),
+            (
+                "wrong-qualified",
+                "<q:p></x:p>",
+                vec!["q".into(), "x".into()],
+                Some(word),
+                false,
+            ),
+            (
+                "malformed",
+                "<w:p><w:r></w:p>",
+                vec!["w".into()],
+                Some(word),
+                false,
+            ),
+            ("eof", "<w:p><w:r/>", vec!["w".into()], Some(word), false),
+            (
+                "admission-refusal",
+                "<w:p><w:r xmlns:xml='urn:invalid'/></w:p>",
+                vec!["w".into()],
+                Some(word),
+                false,
+            ),
+        ];
+        for (label, xml, prefixes, namespace, success) in cases {
+            let mut reader = quick_xml::Reader::from_reader(xml.as_bytes());
+            reader.read_event().unwrap();
+            let before = reader.buffer_position();
+            let expected_next = format!("{:?}", reader.clone().read_event());
+            let result = super::admit_word_reader(&reader, &prefixes, b"p", namespace);
+            assert_eq!(result.is_ok(), success, "{label}: {result:?}");
+            assert_eq!(reader.buffer_position(), before);
+            assert_eq!(format!("{:?}", reader.read_event()), expected_next);
+            eprintln!("REMAINING_OUTCOME {label} {result:?}");
+        }
+    }
+
     #[test]
     fn template_callback_input_is_once_per_event_without_field_or_json_credit() {
         let mut operation = super::ScopedWordOperation::new(&[]);
@@ -22467,6 +23174,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn model_summary_finish_survives_wide_queue_growth_and_shared_roots() {
+        for count in [0, 1, 513] {
+            let mut body = super::CT_Body::new();
+            for index in 0..count {
+                let mut paragraph = crate::text::CT_P::new();
+                paragraph.add_run(&format!("node {index}"));
+                body.add_paragraph(paragraph);
+            }
+            let mut roots = vec![super::WordOwner::Body(&body)];
+            if let Some(super::BodyContent::Paragraph(paragraph)) = body.content.first() {
+                roots.push(super::WordOwner::Paragraph(paragraph));
+                roots.push(super::WordOwner::Body(&body));
+            }
+            assert_eq!(
+                super::word_model_children_maxima(&roots, 0).unwrap(),
+                (0, 0)
+            );
+            assert_eq!(
+                super::word_model_children_maxima(&roots, 256).unwrap(),
+                (0, 0)
+            );
+            super::admit_word_model_reference(super::WordOwner::Body(&body)).unwrap();
+        }
+
+        let template = crate::content_control::CT_Sdt::from_body_raw(
+            format!(
+                "<w:sdt xmlns:w='{}'><w:sdtContent><w:p/></w:sdtContent></w:sdt>",
+                crate::namespace::W_NS
+            )
+            .as_bytes(),
+            &[],
+        )
+        .unwrap();
+        let mut control = template.clone();
+        for _ in 1..257 {
+            let mut outer = template.clone();
+            outer.content = vec![crate::content_control::SdtContent::ContentControl(control)];
+            control = outer;
+        }
+        let mut body = super::CT_Body::new();
+        for _ in 0..513 {
+            body.add_paragraph(crate::text::CT_P::new());
+        }
+        body.content
+            .push(super::BodyContent::ContentControl(Box::new(control)));
+        let actual = super::admit_word_model(super::WordOwner::Body(&body)).unwrap_err();
+        let reference =
+            super::admit_word_model_reference(super::WordOwner::Body(&body)).unwrap_err();
+        assert_eq!(actual.to_string(), reference.to_string());
     }
 
     #[test]

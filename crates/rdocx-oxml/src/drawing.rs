@@ -1962,7 +1962,7 @@ fn text_box_body(
             "missing text-box body root".into(),
         ));
     };
-    let prefixes = crate::numbering::word_prefixes_at(&root, &["w".to_owned()])?;
+    let prefixes = crate::numbering::word_prefixes_at(&root, &["w".to_owned()])?.into_owned();
     crate::document::CT_Body::from_xml_with_prefixes_and_owner_bindings_until(
         &mut body_reader,
         &prefixes,

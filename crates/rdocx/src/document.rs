@@ -1889,6 +1889,49 @@ impl BodyItemContext {
     pub fn part_name(&self) -> &str {
         &self.part_name
     }
+
+    /// Whether equal eligible body blocks have the same checked read facts.
+    ///
+    /// Exact model writer inputs and body declarations stay ordered. Only
+    /// unique retained root declarations and effective bindings may reorder.
+    /// This is not source, writer or opening identity.
+    pub fn read_facts_compatible(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+        if self.part_name != other.part_name
+            || self.plain_local_edit_blocked != other.plain_local_edit_blocked
+            || [0, 1, 3]
+                .iter()
+                .any(|&index| self.root[index] != other.root[index])
+        {
+            return false;
+        }
+        for context in [self, other] {
+            for entries in &context.root {
+                if entries.iter().enumerate().any(|(index, (name, _))| {
+                    entries[..index]
+                        .iter()
+                        .any(|(previous, _)| previous == name)
+                }) {
+                    return false;
+                }
+            }
+        }
+        [2, 4].iter().all(|&index| {
+            let before = &self.root[index];
+            let after = &other.root[index];
+            before.len() == after.len()
+                && before.iter().all(|entry| {
+                    (entry.0 == "xmlns"
+                        || entry
+                            .0
+                            .strip_prefix("xmlns:")
+                            .is_some_and(|prefix| !prefix.is_empty() && !prefix.contains(':')))
+                        && after.contains(entry)
+                })
+        })
+    }
 }
 
 impl<'a> StoryItemRef<'a> {
@@ -3186,21 +3229,8 @@ fn is_modeled_word_child(parent: Option<&[u8]>, local_name: &[u8]) -> bool {
     }
 }
 
-fn modeled_owner_spans(xml: &[u8]) -> Result<Vec<ModeledOwnerSpan>> {
-    modeled_owner_piece_spans(xml, None)?
-        .ok_or_else(|| Error::Other("modeled namespace owner piece was not eligible".to_owned()))
-}
-
-/// The modeled owner spans of `xml`.
-///
-/// `child` is a body-child slice of a head-child-tail wrapper. `None` means
-/// the slice is ineligible: a word body starts or ends inside it, or the
-/// namespace scope and `inside_body` flag do not return to the values they
-/// had when the slice began. That is the old parser state. A story-owner
-/// scan can still see one editable body around an opaque inner body, so this
-/// check is stricter than that scan. `Err` is a parser failure. The caller
-/// keeps the whole scanner and does not publish an empty span list.
-fn modeled_owner_piece_spans(
+#[cfg(test)]
+fn fx268_legacy_modeled_owner_piece_spans(
     xml: &[u8],
     child: Option<std::ops::Range<usize>>,
 ) -> Result<Option<Vec<ModeledOwnerSpan>>> {
@@ -3302,6 +3332,196 @@ fn modeled_owner_piece_spans(
                             &element, inherited,
                         )?),
                         bindings: Arc::new(bindings),
+                    });
+                }
+            }
+            Event::End(element) => {
+                if in_child && is_word && matches_local_name(element.name().as_ref(), b"body") {
+                    ineligible = true;
+                }
+                depth = depth.saturating_sub(1);
+                scope_stack.pop();
+                if owner_stack
+                    .last()
+                    .is_some_and(|(owner_depth, _)| *owner_depth == depth)
+                {
+                    let (_, index) = owner_stack.pop().expect("checked owner stack");
+                    spans[index].end = end;
+                }
+                if inside_body && is_word && matches_local_name(element.name().as_ref(), b"body") {
+                    inside_body = false;
+                }
+            }
+            Event::Eof => {
+                if spans.iter().any(|span| span.end == 0) {
+                    return Err(Error::Other(
+                        "unterminated modeled namespace owner".to_owned(),
+                    ));
+                }
+                if child.is_some() && (!saw_entry || !saw_exit || ineligible) {
+                    return Ok(None);
+                }
+                return Ok(Some(spans));
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn note_modeled_namespace_scope_copy(bindings: &[(String, String)]) {
+    #[cfg(debug_assertions)]
+    if !STAGING_WORK_PAUSED.with(std::cell::Cell::get) {
+        MODELED_NAMESPACE_SCOPE_COPIES.with(|work| {
+            let [calls, bytes] = work.get();
+            work.set([
+                calls + 1,
+                bytes
+                    + bindings
+                        .iter()
+                        .map(|(name, uri)| name.len() + uri.len())
+                        .sum::<usize>(),
+            ]);
+        });
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = bindings;
+}
+
+/// Keep the exact ordered binding vector when this element declares nothing.
+/// Declaring elements retain the original decoder and retain-then-append policy.
+fn shared_namespace_bindings(
+    element: &BytesStart<'_>,
+    inherited: &Arc<Vec<(String, String)>>,
+) -> Result<Arc<Vec<(String, String)>>> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(rdocx_oxml::OxmlError::from)?;
+        let name = attribute.key.as_ref();
+        if name == b"xmlns" || name.starts_with(b"xmlns:") {
+            note_modeled_namespace_scope_copy(inherited);
+            let mut bindings = inherited.as_ref().clone();
+            apply_namespace_declarations(element, &mut bindings)?;
+            return Ok(Arc::new(bindings));
+        }
+    }
+    Ok(Arc::clone(inherited))
+}
+
+fn modeled_owner_spans(xml: &[u8]) -> Result<Vec<ModeledOwnerSpan>> {
+    modeled_owner_piece_spans(xml, None)?
+        .ok_or_else(|| Error::Other("modeled namespace owner piece was not eligible".to_owned()))
+}
+
+/// The modeled owner spans of `xml`.
+///
+/// `child` is a body-child slice of a head-child-tail wrapper. `None` means
+/// the slice is ineligible: a word body starts or ends inside it, or the
+/// namespace scope and `inside_body` flag do not return to the values they
+/// had when the slice began. That is the old parser state. A story-owner
+/// scan can still see one editable body around an opaque inner body, so this
+/// check is stricter than that scan. `Err` is a parser failure. The caller
+/// keeps the whole scanner and does not publish an empty span list.
+fn modeled_owner_piece_spans(
+    xml: &[u8],
+    child: Option<std::ops::Range<usize>>,
+) -> Result<Option<Vec<ModeledOwnerSpan>>> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut inside_body = false;
+    let mut depth = 0usize;
+    let mut owner_stack = Vec::new();
+    let empty_scope = Arc::new(Vec::new());
+    let mut scope_stack: Vec<Arc<Vec<(String, String)>>> = Vec::new();
+    let mut spans: Vec<ModeledOwnerSpan> = Vec::new();
+    let mut saw_entry = child.is_none();
+    let mut saw_exit = child.is_none();
+    let mut entry_depth = 0usize;
+    let mut entry_scopes = 0usize;
+    let mut entry_inside = false;
+    let mut ineligible = false;
+    loop {
+        let start = reader.buffer_position() as usize;
+        if let Some(child) = &child {
+            if !saw_entry && start >= child.start {
+                saw_entry = true;
+                entry_depth = depth;
+                entry_scopes = scope_stack.len();
+                entry_inside = inside_body;
+                if !inside_body {
+                    ineligible = true;
+                }
+            }
+            if saw_entry && !saw_exit && start >= child.end {
+                saw_exit = true;
+                if depth != entry_depth
+                    || scope_stack.len() != entry_scopes
+                    || inside_body != entry_inside
+                {
+                    ineligible = true;
+                }
+            }
+        }
+        let (namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("invalid nested namespace scope: {error}")))?;
+        let is_word = matches!(
+            namespace,
+            ResolveResult::Bound(Namespace(uri)) if uri == WORD_NAMESPACE.as_bytes()
+        );
+        let end = reader.buffer_position() as usize;
+        let in_child = child
+            .as_ref()
+            .is_some_and(|child| start >= child.start && start < child.end);
+        match event {
+            Event::Start(element) => {
+                let local_name = element.local_name();
+                if in_child && is_word && local_name.as_ref() == b"body" {
+                    ineligible = true;
+                }
+                let inherited = scope_stack.last().unwrap_or(&empty_scope);
+                let bindings = shared_namespace_bindings(&element, inherited)?;
+                if inside_body
+                    && is_word
+                    && let Some(local_name) = modeled_owner_name(local_name.as_ref())
+                {
+                    let index = spans.len();
+                    spans.push(ModeledOwnerSpan {
+                        local_name,
+                        start,
+                        end: 0,
+                        declarations: Arc::new(rebinding_namespace_declarations(
+                            &element, inherited,
+                        )?),
+                        bindings: Arc::clone(&bindings),
+                    });
+                    owner_stack.push((depth, index));
+                }
+                if is_word && local_name.as_ref() == b"body" {
+                    inside_body = true;
+                }
+                scope_stack.push(bindings);
+                depth += 1;
+            }
+            Event::Empty(element) => {
+                let local_name = element.local_name();
+                if in_child && is_word && local_name.as_ref() == b"body" {
+                    ineligible = true;
+                }
+                let inherited = scope_stack.last().unwrap_or(&empty_scope);
+                let bindings = shared_namespace_bindings(&element, inherited)?;
+                if inside_body
+                    && is_word
+                    && let Some(local_name) = modeled_owner_name(local_name.as_ref())
+                {
+                    spans.push(ModeledOwnerSpan {
+                        local_name,
+                        start,
+                        end,
+                        declarations: Arc::new(rebinding_namespace_declarations(
+                            &element, inherited,
+                        )?),
+                        bindings,
                     });
                 }
             }
@@ -7190,6 +7410,7 @@ thread_local! {
     static TRANSACTION_OUTPUTS: std::cell::RefCell<std::collections::BTreeMap<String, [usize; 2]>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     static SCOPED_NORMALIZATION_WORK: std::cell::RefCell<std::collections::BTreeMap<String, [usize; 2]>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     static TRANSACTION_READ_PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static MODELED_NAMESPACE_SCOPE_COPIES: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
 }
 
 #[cfg(test)]
@@ -7232,7 +7453,7 @@ pub(crate) fn note_transaction_buffer(kind: &str, bytes: usize) {
         let prefix = match phase.get() {
             1 => "scoped",
             2 => "picture",
-            _ => return,
+            _ => "ordinary",
         };
         TRANSACTION_OUTPUTS.with(|outputs| {
             let mut outputs = outputs.borrow_mut();
@@ -7714,13 +7935,86 @@ impl LocalCellSource {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static OPENED_VALUE_EQ_CALLS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+/// Owns model value and invalidates clone equality before mutable access.
+#[derive(Clone)]
+pub(crate) struct DocumentModel {
+    value: CT_Document,
+    opening_clone: Option<Arc<()>>,
+}
+
+impl DocumentModel {
+    pub(crate) fn unproved(value: CT_Document) -> Self {
+        Self {
+            value,
+            opening_clone: None,
+        }
+    }
+
+    fn opening_pair(value: CT_Document) -> (Self, Self) {
+        let current = Self {
+            value,
+            opening_clone: Some(Arc::new(())),
+        };
+        let opened = current.clone();
+        (current, opened)
+    }
+
+    fn same_opening_clone(&self, other: &Self) -> bool {
+        self.opening_clone
+            .as_ref()
+            .zip(other.opening_clone.as_ref())
+            .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
+    }
+
+    pub(crate) fn into_inner(self) -> CT_Document {
+        self.value
+    }
+}
+
+impl std::ops::Deref for DocumentModel {
+    type Target = CT_Document;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl std::ops::DerefMut for DocumentModel {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.opening_clone = None;
+        &mut self.value
+    }
+}
+
+impl PartialEq for DocumentModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl std::fmt::Debug for DocumentModel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(formatter)
+    }
+}
+
+impl Default for DocumentModel {
+    fn default() -> Self {
+        Self::unproved(CT_Document::default())
+    }
+}
+
 /// A Word document (.docx file).
 ///
 /// This is the main entry point for reading, creating, and modifying
 /// DOCX documents.
 pub struct Document {
     pub(crate) package: OpcPackage,
-    pub(crate) document: CT_Document,
+    pub(crate) document: DocumentModel,
     /// Namespace declarations on the original document root.
     root_namespace_declarations: Vec<(String, String)>,
     /// Namespace declarations local to the original document body.
@@ -7858,7 +8152,8 @@ struct Parsed {
     body_namespace_bindings: Vec<(String, String)>,
     /// `document.to_xml()` at open. Later reuse must serialize to these bytes.
     serialization_proof: Option<Vec<u8>>,
-    main_document: OnceLock<Option<CT_Document>>,
+    main_document: OnceLock<Option<DocumentModel>>,
+    initial_writer_blocks: Option<std::sync::Weak<Vec<Arc<BodyBlockScan>>>>,
     nested_namespace_owners: OnceLock<Option<Vec<NestedNamespaceOwner>>>,
     /// Actual source reads for this opening, independently of writer reuse.
     source_blocks: OnceLock<Option<MainPartBlocks>>,
@@ -7892,6 +8187,7 @@ impl Parsed {
             body_namespace_bindings,
             serialization_proof,
             main_document: OnceLock::new(),
+            initial_writer_blocks: None,
             nested_namespace_owners: OnceLock::new(),
             source_blocks: OnceLock::new(),
             unchanged_main_part: OnceLock::new(),
@@ -7908,9 +8204,10 @@ impl Parsed {
                 let xml = self.main_part_xml()?;
                 note_staging_work(|work| work.parsed += xml.len());
                 note_reopen_work(|work| work.main_parses += 1);
-                CT_Document::from_xml(xml).ok()
+                CT_Document::from_xml(xml).ok().map(DocumentModel::unproved)
             })
             .as_ref()
+            .map(|model| &**model)
     }
 
     fn nested_namespace_owners(&self) -> Option<&[NestedNamespaceOwner]> {
@@ -8024,6 +8321,8 @@ thread_local! {
     static SCOPED_LITERAL_DELIVERIES: std::cell::RefCell<Option<Vec<(usize, bool, bool)>>> = const { std::cell::RefCell::new(None) };
     static FAIL_NEXT_STAGED_REOPEN: Cell<bool> = const { Cell::new(false) };
     pub(crate) static STORY_SOURCE_BUILDS: Cell<usize> = const { Cell::new(0) };
+    pub(crate) static REPLY_SOURCE_READS: Cell<Option<[usize; 2]>> = const { Cell::new(None) };
+    pub(crate) static REPLY_FORCE_LEGACY_SOURCE_READS: Cell<bool> = const { Cell::new(false) };
     static SELECTOR_PREFLUSH_SOURCE_BUILDS: Cell<Option<usize>> = const { Cell::new(None) };
     static STORY_TEXT_PREFIX_BYTES: Cell<usize> = const { Cell::new(0) };
     static STORY_OWNER_SCANS: Cell<usize> = const { Cell::new(0) };
@@ -8420,7 +8719,7 @@ fn assert_kept_main_document_without_initializing(
     let fresh_matches = fresh.as_ref() == Some(current);
     if let Some(cached) = kept.and_then(|kept| kept.main_document.get()) {
         assert_eq!(
-            cached.as_ref() == Some(current),
+            cached.as_ref().map(|model| &**model) == Some(current),
             fresh_matches,
             "the kept main part parse disagrees with a fresh parse"
         );
@@ -8525,6 +8824,66 @@ fn paragraph_is_plain(paragraph: &CT_P) -> bool {
                     )
                 })
         })
+}
+
+// The finite ordinary value language excludes private read identities.
+fn paragraph_has_finite_plain_properties<'a>(
+    paragraph: &'a CT_P,
+    qualified_properties: &mut Option<&'a rdocx_oxml::properties::CT_RPr>,
+) -> bool {
+    if paragraph.properties.is_some() || !paragraph_is_plain(paragraph) {
+        return false;
+    }
+    for run in &paragraph.runs {
+        if !run.extra_xml_positions.is_empty()
+                        || !run.content.iter().all(|content| matches!(content,
+                            RunContent::Text(text) if text.text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')))
+                    {
+                        return false;
+                    }
+        if let Some(properties) = &run.properties {
+            if *qualified_properties == Some(properties) {
+                continue;
+            }
+            let shading = properties.shading.as_ref().map(|value| {
+                Box::new(rdocx_oxml::properties::CT_Shd {
+                    val: value.val.clone(),
+                    color: value.color.clone(),
+                    fill: value.fill.clone(),
+                    theme_color: value.theme_color.clone(),
+                    theme_tint: value.theme_tint,
+                    theme_shade: value.theme_shade,
+                    theme_fill: value.theme_fill.clone(),
+                    theme_fill_tint: value.theme_fill_tint,
+                    theme_fill_shade: value.theme_fill_shade,
+                    extra_attributes: Vec::new(),
+                })
+            });
+            let allowed = rdocx_oxml::properties::CT_RPr {
+                font_ascii: properties.font_ascii.clone(),
+                font_hansi: properties.font_hansi.clone(),
+                font_east_asia: properties.font_east_asia.clone(),
+                font_cs: properties.font_cs.clone(),
+                bold: properties.bold,
+                italic: properties.italic,
+                small_caps: properties.small_caps,
+                strike: properties.strike,
+                color: properties.color.clone(),
+                sz: properties.sz,
+                sz_cs: properties.sz_cs,
+                underline: properties.underline,
+                shading,
+                vert_align: properties.vert_align.clone(),
+                rtl: properties.rtl,
+                ..Default::default()
+            };
+            if properties != &allowed {
+                return false;
+            }
+            *qualified_properties = Some(properties);
+        }
+    }
+    true
 }
 
 fn direct_body_paragraph_context(_document: &Document) -> EditedParagraphContext {
@@ -8796,7 +9155,9 @@ struct BodyBlockScan {
     /// The body child that an actual writer proved serializes to these bytes.
     /// Layout and source-only read scans leave this empty. Equality with the
     /// live child is not a parsed model.
-    staged: Option<BodyContent>,
+    staged: Option<Arc<BodyContent>>,
+    /// Fixed standalone value keys for one root, not Part-child or Source proof.
+    standalone_value: OnceLock<Arc<Mutex<Option<StandaloneParagraphValue>>>>,
     /// One parse of `bytes` under the root and body bindings recorded with it.
     /// Empty until a read. `None` inside means that read could not prove one child.
     proved: OnceLock<ParsedChild>,
@@ -8820,6 +9181,347 @@ struct BodyBlockScan {
     namespace_spans: OnceLock<Option<NamespaceSpanProof>>,
     decodes: OnceLock<bool>,
     scoped_correspondence: OnceLock<ScopedChildCorrespondence>,
+}
+
+struct StandaloneParagraphValue {
+    keys: StandaloneParagraphKeys,
+    model: std::sync::Weak<BodyContent>,
+}
+
+enum StandaloneParagraphKeys {
+    Paragraph(Vec<u8>),
+    Cells(HashMap<[usize; 3], Vec<u8>>),
+}
+
+#[derive(Clone, Copy)]
+enum StandaloneParagraphSelector {
+    Paragraph,
+    Cell([usize; 3]),
+}
+
+pub(crate) struct CommentParagraphValue {
+    storage: CommentParagraphStorage,
+}
+
+// Keep the actual parsed value inline on misses instead of adding a wrapper allocation.
+#[allow(clippy::large_enum_variant)]
+enum CommentParagraphStorage {
+    Owned(CT_P),
+    Model {
+        root: Arc<BodyContent>,
+        selector: StandaloneParagraphSelector,
+    },
+}
+
+impl std::ops::Deref for CommentParagraphValue {
+    type Target = CT_P;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.storage {
+            CommentParagraphStorage::Owned(paragraph) => paragraph,
+            CommentParagraphStorage::Model { root, selector } => selector
+                .resolve(root)
+                .expect("a paragraph loan retains its validated immutable root and selector"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for CommentParagraphValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, formatter)
+    }
+}
+
+impl StandaloneParagraphSelector {
+    fn resolve(self, model: &BodyContent) -> Option<&CT_P> {
+        match (self, model) {
+            (Self::Paragraph, BodyContent::Paragraph(paragraph)) => Some(paragraph),
+            (Self::Cell([row, cell, content]), BodyContent::Table(table)) => {
+                match table.rows.get(row)?.cells.get(cell)?.content.get(content)? {
+                    CellContent::Paragraph(paragraph) => Some(paragraph),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl StandaloneParagraphKeys {
+    fn key(&self, selector: StandaloneParagraphSelector) -> Option<&[u8]> {
+        match (self, selector) {
+            (Self::Paragraph(xml), StandaloneParagraphSelector::Paragraph) => Some(xml),
+            (Self::Cells(keys), StandaloneParagraphSelector::Cell(selector)) => {
+                keys.get(&selector).map(Vec::as_slice)
+            }
+            _ => None,
+        }
+    }
+}
+
+struct CommentCellValueHint {
+    table: Option<usize>,
+    row: usize,
+    cell: usize,
+    paragraphs: Vec<usize>,
+    next_paragraph: usize,
+}
+
+/// Call-local advisory value storage. It never supplies physical affiliation.
+pub(crate) struct CommentParagraphRead<'a> {
+    main_part: &'a str,
+    candidates: Vec<Arc<BodyBlockScan>>,
+    next_paragraph: usize,
+    tables: Vec<Arc<BodyBlockScan>>,
+    cells: Vec<CommentCellValueHint>,
+}
+
+#[cfg(test)]
+thread_local! {
+    // Actual reader calls, positive hits, key bytes copied, owned clones and model loans.
+    static STANDALONE_VALUE_WORK: std::cell::Cell<[usize; 5]> = const { std::cell::Cell::new([0; 5]) };
+}
+
+impl<'a> CommentParagraphRead<'a> {
+    fn from_blocks(main_part: &'a str, blocks: &[Arc<BodyBlockScan>]) -> Self {
+        let mut candidates = Vec::new();
+        let mut tables = Vec::new();
+        let mut cells = Vec::new();
+        for block in blocks {
+            match block.staged.as_deref() {
+                Some(BodyContent::Paragraph(_)) => candidates.push(Arc::clone(block)),
+                Some(BodyContent::Table(table)) => {
+                    let eligible = table.extra_xml.is_empty()
+                        && table.content_controls.is_empty()
+                        && table.rows.iter().all(|row| {
+                            row.extra_xml.is_empty()
+                                && row.content_controls.is_empty()
+                                && row.cells.iter().all(|cell| {
+                                    cell.extra_xml.is_empty()
+                                        && cell.properties.as_ref().is_none_or(|properties| {
+                                            properties.grid_span.is_none()
+                                                && properties.h_merge.is_none()
+                                                && properties.v_merge.is_none()
+                                        })
+                                        && cell.content.iter().all(|content| {
+                                            matches!(content, CellContent::Paragraph(_))
+                                        })
+                                })
+                        });
+                    let table_index = eligible.then(|| {
+                        let index = tables.len();
+                        tables.push(Arc::clone(block));
+                        index
+                    });
+                    for (row_index, row) in table.rows.iter().enumerate() {
+                        for (cell_index, cell) in row.cells.iter().enumerate() {
+                            cells.push(CommentCellValueHint {
+                                table: table_index,
+                                row: row_index,
+                                cell: cell_index,
+                                paragraphs: if eligible {
+                                    cell.content
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(index, content)| {
+                                            matches!(content, CellContent::Paragraph(_))
+                                                .then_some(index)
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                },
+                                next_paragraph: 0,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self {
+            main_part,
+            candidates,
+            next_paragraph: 0,
+            tables,
+            cells,
+        }
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        location: &ContentLocation,
+        xml: &[u8],
+    ) -> Result<CommentParagraphValue> {
+        let direct = location.story.kind == StoryKind::Body
+            && location.story.part_name == self.main_part
+            && location.story.owner_index == 0
+            && location.item_kind == StoryItemKind::Paragraph
+            && !location.is_end
+            && location.index_path.len() == 1;
+        let selected = if direct {
+            let candidate = self.candidates.get(self.next_paragraph);
+            self.next_paragraph += 1;
+            candidate.map(|block| (block, StandaloneParagraphSelector::Paragraph))
+        } else if location.story.kind == StoryKind::TableCell
+            && location.story.part_name == self.main_part
+            && location.item_kind == StoryItemKind::Paragraph
+            && !location.is_end
+            && location.index_path.len() == 1
+        {
+            self.cells
+                .get_mut(location.story.owner_index)
+                .and_then(|hint| {
+                    let ordinal = hint.next_paragraph;
+                    hint.next_paragraph += 1;
+                    let content = *hint.paragraphs.get(ordinal)?;
+                    Some((
+                        self.tables.get(hint.table?)?,
+                        StandaloneParagraphSelector::Cell([hint.row, hint.cell, content]),
+                    ))
+                })
+        } else {
+            None
+        };
+        let candidate = selected.and_then(|(block, selector)| {
+            let model = block.staged.as_ref()?;
+            Some((block, model, selector, selector.resolve(model)?))
+        });
+        let hit = candidate.is_some_and(|(block, model, selector, _)| {
+            block.standalone_value.get().is_some_and(|cell| {
+                let mut state = cell
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let same_root = state.as_ref().is_some_and(|proof| {
+                    proof
+                        .model
+                        .upgrade()
+                        .is_some_and(|proved| Arc::ptr_eq(&proved, model))
+                });
+                if !same_root {
+                    *state = None;
+                    return false;
+                }
+                state.as_ref().and_then(|proof| proof.keys.key(selector)) == Some(xml)
+            })
+        });
+        if hit && let Some((_, model, selector, _)) = candidate {
+            let value = CommentParagraphValue {
+                storage: CommentParagraphStorage::Model {
+                    root: Arc::clone(model),
+                    selector,
+                },
+            };
+            #[cfg(test)]
+            STANDALONE_VALUE_WORK.with(|work| {
+                let mut value = work.get();
+                value[1] += 1;
+                value[4] += 1;
+                work.set(value);
+            });
+            return Ok(value);
+        }
+        #[cfg(test)]
+        STANDALONE_VALUE_WORK.with(|work| {
+            let mut value = work.get();
+            value[0] += 1;
+            work.set(value);
+        });
+        let parsed = CT_P::from_xml_fragment(xml)?;
+        if let Some((block, model, selector, paragraph)) = candidate {
+            let mut qualified_properties = None;
+            let matches = !holds_field_words(xml)
+                && paragraph_has_finite_plain_properties(paragraph, &mut qualified_properties)
+                && paragraph_has_finite_plain_properties(&parsed, &mut qualified_properties)
+                && paragraph == &parsed;
+            if matches {
+                let key = xml.to_vec();
+                #[cfg(test)]
+                STANDALONE_VALUE_WORK.with(|work| {
+                    let mut value = work.get();
+                    value[2] += key.len();
+                    work.set(value);
+                });
+                let mut proof = StandaloneParagraphValue {
+                    keys: match selector {
+                        StandaloneParagraphSelector::Paragraph => {
+                            StandaloneParagraphKeys::Paragraph(key)
+                        }
+                        StandaloneParagraphSelector::Cell(selector) => {
+                            StandaloneParagraphKeys::Cells(HashMap::from([(selector, key)]))
+                        }
+                    },
+                    model: Arc::downgrade(model),
+                };
+                let mut state = block
+                    .standalone_value
+                    .get_or_init(|| Arc::new(Mutex::new(None)))
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let merged = state
+                    .as_mut()
+                    .filter(|prior| {
+                        prior
+                            .model
+                            .upgrade()
+                            .is_some_and(|root| Arc::ptr_eq(&root, model))
+                    })
+                    .is_some_and(|prior| match (&mut prior.keys, &mut proof.keys) {
+                        (
+                            StandaloneParagraphKeys::Paragraph(old),
+                            StandaloneParagraphKeys::Paragraph(new),
+                        ) => {
+                            *old = std::mem::take(new);
+                            true
+                        }
+                        (
+                            StandaloneParagraphKeys::Cells(old),
+                            StandaloneParagraphKeys::Cells(new),
+                        ) => {
+                            old.extend(std::mem::take(new));
+                            true
+                        }
+                        _ => false,
+                    });
+                if !merged {
+                    *state = Some(proof);
+                }
+            } else if let Some(cell) = block.standalone_value.get() {
+                let mut state = cell
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let empty = state
+                    .as_mut()
+                    .filter(|prior| {
+                        prior
+                            .model
+                            .upgrade()
+                            .is_some_and(|root| Arc::ptr_eq(&root, model))
+                    })
+                    .is_some_and(|prior| match (&mut prior.keys, selector) {
+                        (
+                            StandaloneParagraphKeys::Paragraph(_),
+                            StandaloneParagraphSelector::Paragraph,
+                        ) => true,
+                        (
+                            StandaloneParagraphKeys::Cells(keys),
+                            StandaloneParagraphSelector::Cell(selector),
+                        ) => {
+                            keys.remove(&selector);
+                            keys.is_empty()
+                        }
+                        _ => false,
+                    });
+                if empty {
+                    *state = None;
+                }
+            }
+        }
+        Ok(CommentParagraphValue {
+            storage: CommentParagraphStorage::Owned(parsed),
+        })
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -9208,6 +9910,7 @@ impl BodyBlockScan {
             owners: self.owners.clone(),
             items: self.items.clone(),
             staged: self.staged.clone(),
+            standalone_value: self.standalone_value.clone(),
             proved: OnceLock::new(),
             declares_namespace: self.declares_namespace,
             holds_field_words: self.holds_field_words,
@@ -9411,7 +10114,7 @@ impl PreparedMainRead<'_> {
         else {
             return false;
         };
-        for (block, normal) in held.blocks.iter().zip(&serialized.blocks) {
+        for (block, normal) in held.blocks.iter().zip(serialized.blocks.iter()) {
             if block.bytes == normal.bytes
                 && block.staged.is_some()
                 && normal.staged.is_some()
@@ -9485,7 +10188,7 @@ struct MainPartBlocks {
     head: Vec<u8>,
     root: std::ops::Range<usize>,
     tail: Vec<u8>,
-    blocks: Vec<Arc<BodyBlockScan>>,
+    blocks: Arc<Vec<Arc<BodyBlockScan>>>,
     part: Option<Arc<Vec<u8>>>,
     /// Head and tail parsed with an empty body, when that shell proves.
     frame: std::sync::OnceLock<Option<CT_Document>>,
@@ -9912,7 +10615,7 @@ impl MainPartBlocks {
         let start = self.head.len();
         let mut end = start;
         let mut children = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let next = end.checked_add(block.bytes.len()).ok_or_else(|| {
                 Error::Other("main-part body span exceeds addressable bytes".to_owned())
             })?;
@@ -9925,7 +10628,7 @@ impl MainPartBlocks {
     fn child_starts(&self) -> Option<(Vec<usize>, usize)> {
         let mut at = self.head.len();
         let mut starts = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             starts.push(at);
             at = at.checked_add(block.bytes.len())?;
         }
@@ -9934,7 +10637,7 @@ impl MainPartBlocks {
 
     fn bytes(&self) -> Vec<u8> {
         let mut bytes = self.head.clone();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             bytes.extend_from_slice(&block.bytes);
         }
         bytes.extend_from_slice(&self.tail);
@@ -9971,15 +10674,18 @@ impl MainPartBlocks {
                 let mut bytes = result.blocks.get(index)?.bytes.clone();
                 bytes.get(range.clone())?;
                 bytes.splice(range, value.iter().copied());
-                result.blocks[index] = Arc::new(BodyBlockScan::from_source(bytes));
+                Arc::make_mut(&mut result.blocks)[index] =
+                    Arc::new(BodyBlockScan::from_source(bytes));
             }
         }
         if tail_changed {
-            result.blocks = result
-                .blocks
-                .iter()
-                .map(BodyBlockScan::fresh_context_piece)
-                .collect();
+            result.blocks = Arc::new(
+                result
+                    .blocks
+                    .iter()
+                    .map(BodyBlockScan::fresh_context_piece)
+                    .collect(),
+            );
             let shell = [result.head.as_slice(), result.tail.as_slice()].concat();
             closed_word_body(&shell, result.head.len()..result.head.len())?;
             let frame = CT_Document::from_xml(&shell).ok()?;
@@ -10009,7 +10715,7 @@ impl MainPartBlocks {
         let (_, scopes) = self.proved_document_context(xml)?;
         let mut at = self.head.len();
         let mut ranges = Vec::new();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             #[cfg(test)]
             a9_lookup_candidate("pictures.plain_proof_candidate");
             let end = at.checked_add(block.bytes.len())?;
@@ -10065,7 +10771,7 @@ impl MainPartBlocks {
         {
             return None;
         }
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let read = block.proved.get()?;
             if block.reads_anew()
                 || read.root_declarations != scopes.root_declarations
@@ -10133,7 +10839,7 @@ impl MainPartBlocks {
             return None;
         }
         let scopes = document_namespace_scopes(&xml).ok()?;
-        for block in &mut self.blocks {
+        for block in Arc::make_mut(&mut self.blocks) {
             if block.proved.get().is_none() {
                 Arc::make_mut(block).read_source_child(&self.head, &self.tail, &scopes)?;
             }
@@ -10273,12 +10979,12 @@ impl MainPartBlocks {
         {
             return None;
         }
-        for (item, block) in document.body.content.iter().zip(&self.blocks) {
+        for (item, block) in document.body.content.iter().zip(self.blocks.iter()) {
             #[cfg(test)]
             a9_lookup_candidate("writer_bytes_match.current_child");
             if !item.owner_facts_reusable_by_value()
                 || block.holds_field_words
-                || block.staged.as_ref() != Some(item)
+                || block.staged.as_deref() != Some(item)
             {
                 return None;
             }
@@ -10325,7 +11031,7 @@ impl MainPartBlocks {
             .unwrap_or_default();
         let kept_blocks = kept.map(|kept| kept.blocks.as_slice()).unwrap_or(&[]);
         let aligned =
-            |item: &BodyContent, block: &BodyBlockScan| block.staged.as_ref() == Some(item);
+            |item: &BodyContent, block: &BodyBlockScan| block.staged.as_deref() == Some(item);
         let reusable = |item: &BodyContent, block: &BodyBlockScan| {
             item.owner_facts_reusable_by_value() && !block.holds_field_words
         };
@@ -10347,6 +11053,7 @@ impl MainPartBlocks {
             .chain(kept_blocks[kept_blocks.len() - suffix..].iter().map(Some));
         let mut blocks = Vec::with_capacity(content.len());
         let mut reused = false;
+        let mut all_reused = kept.is_some_and(|record| record.blocks.len() == content.len());
         for (index, (item, block)) in content.iter().zip(reusable_blocks).enumerate() {
             let block = block.filter(|block| reusable(item, block));
             let mut block_source = None;
@@ -10377,6 +11084,7 @@ impl MainPartBlocks {
                 }
                 blocks.push(Arc::clone(block));
             } else {
+                all_reused = false;
                 note_staging_work(|work| work.serialized_children += 1);
                 let xml = if let Some(template) = &mut template
                     && let Some(source) = &template.sources.reader_source
@@ -10422,7 +11130,8 @@ impl MainPartBlocks {
                     bytes: xml,
                     owners: Vec::new(),
                     items: None,
-                    staged: Some(item.clone()),
+                    staged: Some(Arc::new(item.clone())),
+                    standalone_value: OnceLock::new(),
                     proved: OnceLock::new(),
                     declares_namespace,
                     holds_field_words,
@@ -10443,7 +11152,16 @@ impl MainPartBlocks {
             kept_frame,
             template.as_deref_mut(),
         )? {
-            Some(assembled) => {
+            Some(mut assembled) => {
+                // Carry the existing vector only after actual complete reuse.
+                // The normal temporary Vec and all writer checks still ran.
+                if all_reused
+                    && let Some(kept) = kept
+                    && assembled.1.head == kept.head
+                    && assembled.1.tail == kept.tail
+                {
+                    assembled.1.blocks = Arc::clone(&kept.blocks);
+                }
                 if let Some(template) = &mut template {
                     template.sources.blocks =
                         assembled.1.blocks.iter().map(Arc::downgrade).collect();
@@ -10469,7 +11187,7 @@ impl MainPartBlocks {
                         head: Vec::new(),
                         root: 0..0,
                         tail: Vec::new(),
-                        blocks: Vec::new(),
+                        blocks: Arc::new(Vec::new()),
                         part: None,
                         frame: std::sync::OnceLock::new(),
                         nested_namespace_owners: std::sync::OnceLock::new(),
@@ -10580,7 +11298,7 @@ impl MainPartBlocks {
                 head,
                 root,
                 tail,
-                blocks,
+                blocks: Arc::new(blocks),
                 part: None,
                 frame,
                 nested_namespace_owners: std::sync::OnceLock::new(),
@@ -10617,7 +11335,7 @@ impl MainPartBlocks {
             return None;
         }
         let mut cursor = self.head.len();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let end = cursor.checked_add(block.bytes.len())?;
             if doc_xml.get(cursor..end) != Some(block.bytes.as_slice()) {
                 return None;
@@ -10633,7 +11351,7 @@ impl MainPartBlocks {
     fn proved_document(&self, doc_xml: &[u8]) -> Option<CT_Document> {
         let (shell, scopes) = self.proved_document_context(doc_xml)?;
         let mut content = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let child = block.read_child(&self.head, &self.tail, &scopes)?;
             #[cfg(test)]
             match &child {
@@ -10708,7 +11426,7 @@ impl MainPartBlocks {
             return None;
         }
         let mut cursor = self.head.len();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let end = cursor.checked_add(block.bytes.len())?;
             if doc_xml.get(cursor..end) != Some(block.bytes.as_slice()) {
                 return None;
@@ -10733,7 +11451,7 @@ impl MainPartBlocks {
         categories.insert(IdentifierXmlCategory::Bookmark);
         categories.insert(IdentifierXmlCategory::Drawing);
         let mut definitions = Vec::new();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             definitions.extend(block.identifier_definitions(frame, &categories)?);
         }
         Some(ScannedIdentifierPart {
@@ -10785,7 +11503,7 @@ impl MainPartBlocks {
             return None;
         }
         let mut cursor = self.head.len();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let end = cursor.checked_add(block.bytes.len())?;
             if xml.get(cursor..end) != Some(block.bytes.as_slice()) {
                 return None;
@@ -10801,7 +11519,7 @@ impl MainPartBlocks {
             return None;
         }
         let mut facts = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             facts.push(block.canonical_child_facts(&self.head, &self.tail, frame)?);
         }
         Some(facts)
@@ -10863,7 +11581,7 @@ impl MainPartBlocks {
         let facts = self.canonical_child_facts(xml, &[])?;
         let mut drawings = Vec::new();
         let mut cursor = self.head.len();
-        for (child, block) in facts.into_iter().zip(&self.blocks) {
+        for (child, block) in facts.into_iter().zip(self.blocks.iter()) {
             for drawing in &child.drawings {
                 let doc_pr = match &drawing.doc_pr {
                     Some((id, span)) => {
@@ -11006,7 +11724,7 @@ impl MainPartBlocks {
         {
             return;
         }
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             if block.empty_namespace_owner(&policy).is_none() {
                 return;
             }
@@ -11107,7 +11825,7 @@ impl MainPartBlocks {
         if xml.get(..cursor) != Some(self.head.as_slice()) {
             return false;
         }
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let Some(end) = cursor.checked_add(block.bytes.len()) else {
                 return false;
             };
@@ -11144,7 +11862,7 @@ impl MainPartBlocks {
         };
         let mut spans = frame.head_spans.clone();
         let mut cursor = self.head.len();
-        for block in &self.blocks {
+        for block in self.blocks.iter() {
             let proof = block.namespace_span_proof(&self.head, &self.tail, &scopes)?;
             if !Self::namespace_context_matches(
                 &proof.root_declarations,
@@ -11217,8 +11935,8 @@ impl MainPartBlocks {
         {
             return None;
         }
-        for block in self.blocks.iter().chain(&original.blocks) {
-            let item = block.staged.as_ref()?;
+        for block in self.blocks.iter().chain(original.blocks.iter()) {
+            let item = block.staged.as_deref()?;
             if matches!(item, BodyContent::RawXml(_))
                 || !item.owner_facts_reusable_by_value()
                 || block.holds_field_words
@@ -11249,7 +11967,7 @@ impl MainPartBlocks {
         };
         let mut spans = frame.head_spans.clone();
         let mut cursor = self.head.len();
-        for (block, previous) in self.blocks.iter().zip(&original.blocks) {
+        for (block, previous) in self.blocks.iter().zip(original.blocks.iter()) {
             let proof = if block.bytes == previous.bytes {
                 previous.namespace_span_proof(&original.head, &original.tail, &scopes)?
             } else {
@@ -11316,7 +12034,7 @@ impl MainPartBlocks {
         for id in &frame.head_plain_relationship_ids {
             push(id);
         }
-        for (block, previous) in self.blocks.iter().zip(&original.blocks) {
+        for (block, previous) in self.blocks.iter().zip(original.blocks.iter()) {
             let proof = if block.bytes == previous.bytes {
                 previous.canonical_child_facts(&original.head, &original.tail, previous_frame)?
             } else {
@@ -11651,6 +12369,7 @@ impl BodyBlockScan {
             owners: Vec::new(),
             items: None,
             staged: None,
+            standalone_value: OnceLock::new(),
             proved: OnceLock::new(),
             identifier_proof: OnceLock::new(),
             canonical_read: OnceLock::new(),
@@ -11731,7 +12450,8 @@ impl BodyBlockScan {
             body_bindings: scopes.body_bindings.clone(),
             parsed: Some(item.clone()),
         });
-        self.staged = round_trips.then(|| item.clone());
+        self.standalone_value = OnceLock::new();
+        self.staged = round_trips.then(|| Arc::new(item.clone()));
         Some(item)
     }
 
@@ -11739,7 +12459,7 @@ impl BodyBlockScan {
         self.holds_field_words
             || self
                 .staged
-                .as_ref()
+                .as_deref()
                 .is_some_and(|item| !item.owner_facts_reusable_by_value())
     }
 
@@ -12188,6 +12908,7 @@ fn scan_body_block(
             owners,
             items: body_items,
             staged: None,
+            standalone_value: OnceLock::new(),
             proved: OnceLock::new(),
             declares_namespace: bytes_declare_namespace(block.unwrap_or_default()),
             holds_field_words: false,
@@ -12293,6 +13014,7 @@ fn child_scan(
                 .collect()
         }),
         staged: None,
+        standalone_value: OnceLock::new(),
         proved: OnceLock::new(),
         declares_namespace: bytes_declare_namespace(bytes),
         holds_field_words: holds_field_words(bytes),
@@ -12634,7 +13356,7 @@ enum StorySdtContext {
 
 struct XmlElementFrame {
     namespace: StoryNamespace,
-    local_name: Vec<u8>,
+    local_name: Cow<'static, [u8]>,
     is_word: bool,
     full_start: usize,
     owner_kind: Option<StoryKind>,
@@ -12644,6 +13366,16 @@ struct XmlElementFrame {
     word_prefixes: Arc<Vec<String>>,
     opaque: bool,
     typed_sdt_content_seen: bool,
+}
+
+fn story_frame_local_name(value: &[u8]) -> Cow<'static, [u8]> {
+    match value {
+        b"p" => Cow::Borrowed(b"p".as_slice()),
+        b"r" => Cow::Borrowed(b"r".as_slice()),
+        b"rPr" => Cow::Borrowed(b"rPr".as_slice()),
+        b"t" => Cow::Borrowed(b"t".as_slice()),
+        _ => Cow::Owned(value.to_vec()),
+    }
 }
 
 fn xml_decodes(xml: &[u8]) -> bool {
@@ -12863,7 +13595,7 @@ fn story_sdt_context(stack: &[XmlElementFrame]) -> Option<StorySdtContext> {
     if parent.namespace != StoryNamespace::Word {
         return None;
     }
-    match parent.local_name.as_slice() {
+    match parent.local_name.as_ref() {
         b"body" | b"hdr" | b"ftr" | b"footnote" | b"endnote" | b"comment" | b"txbxContent"
         | b"tc" => Some(StorySdtContext::Block),
         b"tbl" => Some(StorySdtContext::Table),
@@ -12887,7 +13619,7 @@ fn story_element_sdt_context(
     match local_name {
         b"sdt" => story_sdt_context(stack),
         b"sdtContent" => stack.last().and_then(|parent| {
-            (parent.namespace == StoryNamespace::Word && parent.local_name == b"sdt")
+            (parent.namespace == StoryNamespace::Word && parent.local_name.as_ref() == b"sdt")
                 .then_some(parent.sdt_context)
                 .flatten()
         }),
@@ -12920,14 +13652,16 @@ fn modeled_story_child(
         return namespace == StoryNamespace::Word;
     };
     match (parent.namespace, namespace) {
-        (StoryNamespace::Word, StoryNamespace::Word) if parent.local_name == b"sdtContent" => {
+        (StoryNamespace::Word, StoryNamespace::Word)
+            if parent.local_name.as_ref() == b"sdtContent" =>
+        {
             modeled_sdt_content_child(parent.sdt_context, local_name)
         }
         (StoryNamespace::Word, StoryNamespace::Word) => {
             modeled_word_child(&parent.local_name, local_name)
         }
         (StoryNamespace::Word, StoryNamespace::Vml) => {
-            matches!(parent.local_name.as_slice(), b"pict" | b"object")
+            matches!(parent.local_name.as_ref(), b"pict" | b"object")
                 && matches!(
                     local_name,
                     b"shape"
@@ -12941,7 +13675,7 @@ fn modeled_story_child(
                         | b"arc"
                 )
         }
-        (StoryNamespace::Vml, StoryNamespace::Vml) => match parent.local_name.as_slice() {
+        (StoryNamespace::Vml, StoryNamespace::Vml) => match parent.local_name.as_ref() {
             b"group" => matches!(
                 local_name,
                 b"shape"
@@ -12959,52 +13693,51 @@ fn modeled_story_child(
             _ => false,
         },
         (StoryNamespace::Vml, StoryNamespace::Word) => {
-            parent.local_name == b"textbox" && local_name == b"txbxContent"
+            parent.local_name.as_ref() == b"textbox" && local_name == b"txbxContent"
         }
         // Word writes a text box twice in a run, as DrawingML in `mc:Choice` and
         // as VML in `mc:Fallback`. One Choice is read, see
         // `modeled_story_event`, and the Fallback stays opaque, so the text box
         // is one story.
         (StoryNamespace::Word, StoryNamespace::MarkupCompatibility) => {
-            parent.local_name == b"r" && local_name == b"AlternateContent"
+            parent.local_name.as_ref() == b"r" && local_name == b"AlternateContent"
         }
         (StoryNamespace::MarkupCompatibility, StoryNamespace::MarkupCompatibility) => {
-            parent.local_name == b"AlternateContent" && local_name == b"Choice"
+            parent.local_name.as_ref() == b"AlternateContent" && local_name == b"Choice"
         }
         (StoryNamespace::MarkupCompatibility, StoryNamespace::Word) => {
-            parent.local_name == b"Choice" && local_name == b"drawing"
+            parent.local_name.as_ref() == b"Choice" && local_name == b"drawing"
         }
         (StoryNamespace::Word, StoryNamespace::WordDrawing) => {
-            parent.local_name == b"drawing" && matches!(local_name, b"inline" | b"anchor")
+            parent.local_name.as_ref() == b"drawing" && matches!(local_name, b"inline" | b"anchor")
         }
         (StoryNamespace::WordDrawing, StoryNamespace::Drawing) => {
-            matches!(parent.local_name.as_slice(), b"inline" | b"anchor")
-                && local_name == b"graphic"
+            matches!(parent.local_name.as_ref(), b"inline" | b"anchor") && local_name == b"graphic"
         }
-        (StoryNamespace::Drawing, StoryNamespace::Drawing) => match parent.local_name.as_slice() {
+        (StoryNamespace::Drawing, StoryNamespace::Drawing) => match parent.local_name.as_ref() {
             b"graphic" => local_name == b"graphicData",
             _ => false,
         },
         (StoryNamespace::Drawing, StoryNamespace::WordShape) => {
-            parent.local_name == b"graphicData" && local_name == b"wsp"
+            parent.local_name.as_ref() == b"graphicData" && local_name == b"wsp"
         }
         (StoryNamespace::Drawing, StoryNamespace::WordGroup) => {
-            parent.local_name == b"graphicData" && local_name == b"wgp"
+            parent.local_name.as_ref() == b"graphicData" && local_name == b"wgp"
         }
         (StoryNamespace::WordGroup, StoryNamespace::WordGroup) => {
-            matches!(parent.local_name.as_slice(), b"wgp" | b"grpSp") && local_name == b"grpSp"
+            matches!(parent.local_name.as_ref(), b"wgp" | b"grpSp") && local_name == b"grpSp"
         }
         (StoryNamespace::WordGroup, StoryNamespace::WordShape) => {
-            matches!(parent.local_name.as_slice(), b"wgp" | b"grpSp") && local_name == b"wsp"
+            matches!(parent.local_name.as_ref(), b"wgp" | b"grpSp") && local_name == b"wsp"
         }
         (StoryNamespace::WordShape, StoryNamespace::WordShape) => {
-            parent.local_name == b"wsp" && local_name == b"txbx"
+            parent.local_name.as_ref() == b"wsp" && local_name == b"txbx"
         }
         (StoryNamespace::WordShape, StoryNamespace::Word) => {
-            parent.local_name == b"txbx" && local_name == b"txbxContent"
+            parent.local_name.as_ref() == b"txbx" && local_name == b"txbxContent"
         }
         (StoryNamespace::Drawing, StoryNamespace::DrawingPicture) => {
-            parent.local_name == b"graphicData" && local_name == b"pic"
+            parent.local_name.as_ref() == b"graphicData" && local_name == b"pic"
         }
         _ => false,
     }
@@ -16297,7 +17030,7 @@ fn set_story_source_xml_in(
         );
         document.plain_local_edit_blocked = blocked;
         document.unsavable_body_edit_cache = unsavable;
-        document.document = parsed;
+        document.document = crate::document::DocumentModel::unproved(parsed);
         document.main_part_blocks = blocks;
         document.package.set_part(part_name, xml);
         document.root_namespace_declarations = namespace_scopes.root_declarations;
@@ -17071,7 +17804,7 @@ fn admit_story_sdt_content_slot(
     let Some(parent) = stack.last_mut() else {
         return true;
     };
-    if parent.namespace != StoryNamespace::Word || parent.local_name != b"sdt" {
+    if parent.namespace != StoryNamespace::Word || parent.local_name.as_ref() != b"sdt" {
         return true;
     }
     if empty || parent.typed_sdt_content_seen {
@@ -17231,13 +17964,13 @@ fn scoped_alternate_text_box_copies(xml: &[u8]) -> Result<Vec<PairedTextBoxCopy>
                     && matches!(local, b"Choice" | b"Fallback")
                     && stack.last().is_some_and(|parent| {
                         parent.namespace == StoryNamespace::MarkupCompatibility
-                            && parent.local_name == b"AlternateContent"
+                            && parent.local_name.as_ref() == b"AlternateContent"
                     });
                 let branch_content = namespace == StoryNamespace::Word
                     && matches!(local, b"drawing" | b"pict")
                     && stack.last().is_some_and(|parent| {
                         parent.namespace == StoryNamespace::MarkupCompatibility
-                            && matches!(parent.local_name.as_slice(), b"Choice" | b"Fallback")
+                            && matches!(parent.local_name.as_ref(), b"Choice" | b"Fallback")
                     });
                 let modeled = stack.last().is_none_or(|parent| !parent.opaque)
                     && (alternate_branch
@@ -17252,14 +17985,14 @@ fn scoped_alternate_text_box_copies(xml: &[u8]) -> Result<Vec<PairedTextBoxCopy>
                     };
                     for (index, alternate) in stack.iter().enumerate() {
                         if alternate.namespace != StoryNamespace::MarkupCompatibility
-                            || alternate.local_name != b"AlternateContent"
+                            || alternate.local_name.as_ref() != b"AlternateContent"
                             || alternate.opaque
                         {
                             continue;
                         }
                         if let Some(branch) = stack.get(index + 1)
                             && branch.namespace == StoryNamespace::MarkupCompatibility
-                            && matches!(branch.local_name.as_slice(), b"Choice" | b"Fallback")
+                            && matches!(branch.local_name.as_ref(), b"Choice" | b"Fallback")
                         {
                             copies.push(PairedTextBoxCopy {
                                 alternate: alternate.full_start,
@@ -17273,7 +18006,7 @@ fn scoped_alternate_text_box_copies(xml: &[u8]) -> Result<Vec<PairedTextBoxCopy>
                     let sdt_context = story_element_sdt_context(&stack, namespace, local);
                     stack.push(XmlElementFrame {
                         namespace,
-                        local_name: local.to_vec(),
+                        local_name: story_frame_local_name(local),
                         is_word: namespace == StoryNamespace::Word,
                         full_start: before,
                         owner_kind: None,
@@ -17487,7 +18220,7 @@ fn paired_text_box_projection(
                     let sdt_context = story_element_sdt_context(&stack, namespace, local);
                     stack.push(XmlElementFrame {
                         namespace,
-                        local_name: local.to_vec(),
+                        local_name: story_frame_local_name(local),
                         is_word: namespace == StoryNamespace::Word,
                         full_start: before,
                         owner_kind: None,
@@ -17567,7 +18300,7 @@ fn template_direct_table_children(
                 if let Some(parent) = stack.last().filter(|parent| {
                     !parent.opaque
                         && parent.namespace == StoryNamespace::Word
-                        && parent.local_name == b"tbl"
+                        && parent.local_name.as_ref() == b"tbl"
                 }) && !(namespace == StoryNamespace::Word
                     && matches!(local, b"tblPr" | b"tblGrid"))
                 {
@@ -17585,7 +18318,7 @@ fn template_direct_table_children(
                     let sdt_context = story_element_sdt_context(&stack, namespace, local);
                     stack.push(XmlElementFrame {
                         namespace,
-                        local_name: local.to_vec(),
+                        local_name: story_frame_local_name(local),
                         is_word: namespace == StoryNamespace::Word,
                         full_start: before,
                         owner_kind: None,
@@ -18323,7 +19056,9 @@ fn story_enclosing_run_source(
     stack: &[XmlElementFrame],
 ) -> Result<Option<StoryFieldRun>> {
     let Some((index, frame)) = stack.iter().enumerate().rev().find(|(_, frame)| {
-        !frame.opaque && frame.namespace == StoryNamespace::Word && frame.local_name == b"r"
+        !frame.opaque
+            && frame.namespace == StoryNamespace::Word
+            && frame.local_name.as_ref() == b"r"
     }) else {
         return Ok(None);
     };
@@ -18335,10 +19070,12 @@ fn story_enclosing_run_source(
 
 fn complex_field_scan_context(stack: &[XmlElementFrame]) -> bool {
     stack.iter().any(|frame| {
-        !frame.opaque && frame.namespace == StoryNamespace::Word && frame.local_name == b"r"
-    }) && !stack
-        .iter()
-        .any(|frame| frame.namespace == StoryNamespace::Word && frame.local_name == b"fldSimple")
+        !frame.opaque
+            && frame.namespace == StoryNamespace::Word
+            && frame.local_name.as_ref() == b"r"
+    }) && !stack.iter().any(|frame| {
+        frame.namespace == StoryNamespace::Word && frame.local_name.as_ref() == b"fldSimple"
+    })
 }
 
 fn scan_complex_field_marker(
@@ -18409,7 +19146,9 @@ fn push_complex_field_instruction(
     text: &str,
 ) {
     let modeled_instruction = stack.last().is_some_and(|frame| {
-        !frame.opaque && frame.namespace == StoryNamespace::Word && frame.local_name == b"instrText"
+        !frame.opaque
+            && frame.namespace == StoryNamespace::Word
+            && frame.local_name.as_ref() == b"instrText"
     });
     if modeled_instruction
         && let Some(field) = fields.last_mut()
@@ -18560,7 +19299,7 @@ fn accepted_story_text_visible(stack: &[XmlElementFrame]) -> bool {
     !stack.iter().any(|frame| {
         !frame.opaque
             && frame.namespace == StoryNamespace::Word
-            && matches!(frame.local_name.as_slice(), b"del" | b"moveFrom")
+            && matches!(frame.local_name.as_ref(), b"del" | b"moveFrom")
     })
 }
 
@@ -18632,7 +19371,7 @@ pub(crate) fn scan_story_owners_with_special(
         match event {
             Event::Start(element) => {
                 let is_word = is_word_namespace;
-                let local_name = element.local_name().as_ref().to_vec();
+                let local_name = story_frame_local_name(element.local_name().as_ref());
                 let sdt_context = story_element_sdt_context(&stack, namespace_kind, &local_name);
                 let direct_owner_child =
                     stack.last().is_some_and(|frame| frame.owner_kind.is_some());
@@ -19551,11 +20290,11 @@ fn scan_story_control_paragraphs(xml: &[u8], control: &StoryItemSpan) -> Result<
         }
         match event {
             Event::Start(ref element) | Event::Empty(ref element) => {
-                let local = element.local_name().as_ref().to_vec();
+                let local = story_frame_local_name(element.local_name().as_ref());
                 let empty = matches!(event, Event::Empty(_));
                 let is_word = namespace == StoryNamespace::Word;
                 let root = stack.is_empty();
-                if root && (!is_word || local != b"sdt") {
+                if root && (!is_word || local.as_ref() != b"sdt") {
                     return Err(Error::Other(
                         "control paragraph source has no qualified selected control".into(),
                     ));
@@ -19563,16 +20302,16 @@ fn scan_story_control_paragraphs(xml: &[u8], control: &StoryItemSpan) -> Result<
                 // Only this control's direct paragraphs belong to this inventory.
                 // Descendants of another control cannot contribute, typed or raw.
                 let opaque = !root
-                    && ((is_word && local == b"sdt")
+                    && ((is_word && local.as_ref() == b"sdt")
                         || opaque_story_event(
                             &mut stack, namespace, &local, element, empty, xml, before, after,
                         )?);
                 let direct_content = stack.last().is_some_and(|parent| {
                     !parent.opaque
                         && parent.namespace == StoryNamespace::Word
-                        && parent.local_name == b"sdtContent"
+                        && parent.local_name.as_ref() == b"sdtContent"
                 });
-                if !opaque && is_word && local == b"p" && direct_content {
+                if !opaque && is_word && local.as_ref() == b"p" && direct_content {
                     paragraphs.push(
                         before..if empty {
                             after
@@ -19728,15 +20467,16 @@ fn scan_story_items(
         match event {
             Event::Start(element) => {
                 let is_word = is_word_namespace;
-                let local_name = element.local_name().as_ref().to_vec();
-                let sdt_context = if stack.is_empty() && is_word && local_name == b"sdtContent" {
-                    Some(StorySdtContext::Block)
-                } else {
-                    story_element_sdt_context(&stack, namespace_kind, &local_name)
-                };
+                let local_name = story_frame_local_name(element.local_name().as_ref());
+                let sdt_context =
+                    if stack.is_empty() && is_word && local_name.as_ref() == b"sdtContent" {
+                        Some(StorySdtContext::Block)
+                    } else {
+                        story_element_sdt_context(&stack, namespace_kind, &local_name)
+                    };
                 let depth = stack.len();
                 let in_nested_owner = stack.iter().skip(1).any(|frame| {
-                    frame.is_word && matches!(frame.local_name.as_slice(), b"tc" | b"txbxContent")
+                    frame.is_word && matches!(frame.local_name.as_ref(), b"tc" | b"txbxContent")
                 });
                 #[cfg(test)]
                 FX211_PROFILE_CONTEXT.set(if in_nested_owner { 1 } else { 2 });
@@ -19760,7 +20500,7 @@ fn scan_story_items(
                         direct_story_item_kind(is_word, &local_name)
                     })
                 } else if !in_nested_owner && !child_opaque && is_word {
-                    match local_name.as_slice() {
+                    match local_name.as_ref() {
                         b"sdt" => Some(StoryItemKind::ContentControl),
                         b"fldSimple" => Some(StoryItemKind::Field),
                         // A drawing in `mc:Choice` is read only for the text
@@ -19782,7 +20522,7 @@ fn scan_story_items(
                 if !opaque
                     && !in_nested_owner
                     && is_word
-                    && local_name.as_slice() == b"fldChar"
+                    && local_name.as_ref() == b"fldChar"
                     && complex_field_scan_context(&stack)
                     && let Some(run) = story_enclosing_run_source(xml, &stack)?
                 {
@@ -19836,7 +20576,7 @@ fn scan_story_items(
                     story_element_sdt_context(&stack, namespace_kind, local_name.as_ref());
                 let depth = stack.len();
                 let in_nested_owner = stack.iter().skip(1).any(|frame| {
-                    frame.is_word && matches!(frame.local_name.as_slice(), b"tc" | b"txbxContent")
+                    frame.is_word && matches!(frame.local_name.as_ref(), b"tc" | b"txbxContent")
                 });
                 #[cfg(test)]
                 FX211_PROFILE_CONTEXT.set(if in_nested_owner { 1 } else { 2 });
@@ -19920,7 +20660,7 @@ fn scan_story_items(
                 };
                 if !frame.opaque
                     && frame.namespace == StoryNamespace::Word
-                    && frame.local_name == b"p"
+                    && frame.local_name.as_ref() == b"p"
                 {
                     paragraphs.push((frame.full_start..after, frame.word_prefixes.clone()));
                     complex_fields.clear();
@@ -20040,7 +20780,7 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
         match event {
             Event::Start(element) => {
                 let depth = stack.len();
-                let local_name = element.local_name().as_ref().to_vec();
+                let local_name = story_frame_local_name(element.local_name().as_ref());
                 let opaque = if stack.is_empty() && item.kind == StoryItemKind::ContentControl {
                     false
                 } else {
@@ -20058,14 +20798,14 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                 if !opaque
                     && depth > 0
                     && is_word_namespace
-                    && matches!(local_name.as_slice(), b"tc" | b"txbxContent" | b"sdt")
+                    && matches!(local_name.as_ref(), b"tc" | b"txbxContent" | b"sdt")
                 {
                     nested_owner_depth += 1;
                 }
                 if !opaque
                     && nested_owner_depth == 0
                     && is_word_namespace
-                    && local_name == b"hyperlink"
+                    && local_name.as_ref() == b"hyperlink"
                 {
                     let (rel_id, anchor) = story_hyperlink_attributes(&reader, &element)?;
                     open_links.push((before, rel_id, anchor));
@@ -20130,7 +20870,7 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                 if !frame.opaque
                     && nested_owner_depth == 0
                     && frame.namespace == StoryNamespace::Word
-                    && frame.local_name == b"hyperlink"
+                    && frame.local_name.as_ref() == b"hyperlink"
                 {
                     let (start, rel_id, anchor) = open_links.pop().ok_or_else(|| {
                         Error::Other("story hyperlink has no matching start".to_owned())
@@ -20144,7 +20884,7 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                 if !frame.opaque
                     && !stack.is_empty()
                     && frame.namespace == StoryNamespace::Word
-                    && matches!(frame.local_name.as_slice(), b"tc" | b"txbxContent" | b"sdt")
+                    && matches!(frame.local_name.as_ref(), b"tc" | b"txbxContent" | b"sdt")
                 {
                     nested_owner_depth = nested_owner_depth.saturating_sub(1);
                 }
@@ -20478,7 +21218,7 @@ fn bookmark_marker_spans(xml: &[u8]) -> Result<Vec<BookmarkMarkerSpan>> {
         let after = reader.buffer_position() as usize;
         match event {
             Event::Start(ref element) | Event::Empty(ref element) => {
-                let local = element.local_name().as_ref().to_vec();
+                let local = story_frame_local_name(element.local_name().as_ref());
                 let empty = matches!(event, Event::Empty(_));
                 let modeled = stack.last().is_none_or(|parent| !parent.opaque)
                     && modeled_story_event(
@@ -20487,7 +21227,7 @@ fn bookmark_marker_spans(xml: &[u8]) -> Result<Vec<BookmarkMarkerSpan>> {
                 if modeled
                     && accepted_story_text_visible(&stack)
                     && namespace == StoryNamespace::Word
-                    && matches!(local.as_slice(), b"bookmarkStart" | b"bookmarkEnd")
+                    && matches!(local.as_ref(), b"bookmarkStart" | b"bookmarkEnd")
                 {
                     let mut id = None;
                     for attribute in element.attributes() {
@@ -20529,7 +21269,7 @@ fn bookmark_marker_spans(xml: &[u8]) -> Result<Vec<BookmarkMarkerSpan>> {
                             }
                         }
                         markers.push(BookmarkMarkerSpan {
-                            start: local == b"bookmarkStart",
+                            start: local.as_ref() == b"bookmarkStart",
                             id,
                             span: before..end,
                         });
@@ -20811,14 +21551,14 @@ fn story_item_text(
         match event {
             Event::Start(element) => {
                 let depth = element_stack.len();
-                let local_name = element.local_name().as_ref().to_vec();
+                let local_name = story_frame_local_name(element.local_name().as_ref());
                 #[cfg(test)]
                 FX211_PROFILE_CONTEXT.set(if nested_owner_depth > 0 { 4 } else { 3 });
                 // Reuse only controls independently admitted in this operation's
                 // owner inventory. A typed parent can still retain untyped raw
                 // descendants, which must follow ordinary qualification.
                 let qualified_control = namespace_kind == StoryNamespace::Word
-                    && local_name == b"sdt"
+                    && local_name.as_ref() == b"sdt"
                     && !element_stack.last().is_some_and(|frame| frame.opaque)
                     && modeled_story_child(&element_stack, namespace_kind, &local_name)
                     && (if !item.complex_field && before == 0 {
@@ -20869,7 +21609,7 @@ fn story_item_text(
                 if !opaque
                     && story_field_marker_tracked(item, before, nested_owner_depth, &element_stack)
                     && is_word_namespace
-                    && local_name == b"fldChar"
+                    && local_name.as_ref() == b"fldChar"
                 {
                     let marker = complex_field_marker(&reader, &element)?;
                     if item.complex_field {
@@ -20883,7 +21623,7 @@ fn story_item_text(
                 if !opaque
                     && depth > 0
                     && is_word_namespace
-                    && matches!(local_name.as_slice(), b"tc" | b"txbxContent")
+                    && matches!(local_name.as_ref(), b"tc" | b"txbxContent")
                 {
                     nested_owner_depth += 1;
                 }
@@ -20893,7 +21633,7 @@ fn story_item_text(
                     && nested_owner_depth == 0
                     && is_word_namespace
                 {
-                    if local_name == b"t" {
+                    if local_name.as_ref() == b"t" {
                         in_text += 1;
                         pieces.push((fields.context(), StoryTextPiece::Text(String::new())));
                     } else if let Some(piece) =
@@ -21071,7 +21811,7 @@ fn push_story_text(pieces: &mut [(StoryFieldContext, StoryTextPiece)], value: &s
 fn story_run_child(stack: &[XmlElementFrame]) -> bool {
     stack
         .last()
-        .is_some_and(|frame| !frame.opaque && frame.is_word && frame.local_name == b"r")
+        .is_some_and(|frame| !frame.opaque && frame.is_word && frame.local_name.as_ref() == b"r")
 }
 
 /// The text a visible Word element adds when it is run content other than
@@ -21227,7 +21967,7 @@ fn replace_story_item_text(source: &[u8], item: &StoryItemSpan, value: &str) -> 
                             .to_owned(),
                     );
                 }
-                let local_name = element.local_name().as_ref().to_vec();
+                let local_name = story_frame_local_name(element.local_name().as_ref());
                 let opaque =
                     if element_stack.is_empty() && item.kind == StoryItemKind::ContentControl {
                         false
@@ -21246,7 +21986,7 @@ fn replace_story_item_text(source: &[u8], item: &StoryItemSpan, value: &str) -> 
                 if !opaque
                     && story_field_marker_tracked(item, before, nested_owner_depth, &element_stack)
                     && is_word_namespace
-                    && local_name == b"fldChar"
+                    && local_name.as_ref() == b"fldChar"
                 {
                     let marker = complex_field_marker(&reader, &element)?;
                     track_story_field_marker(
@@ -21262,7 +22002,7 @@ fn replace_story_item_text(source: &[u8], item: &StoryItemSpan, value: &str) -> 
                 if !opaque
                     && depth > 0
                     && is_word_namespace
-                    && matches!(local_name.as_slice(), b"tc" | b"txbxContent")
+                    && matches!(local_name.as_ref(), b"tc" | b"txbxContent")
                 {
                     nested_owner_depth += 1;
                 }
@@ -21270,7 +22010,7 @@ fn replace_story_item_text(source: &[u8], item: &StoryItemSpan, value: &str) -> 
                     && complex_field_text_visible(item, &complex_results)
                     && nested_owner_depth == 0
                     && is_word_namespace
-                    && local_name == b"t"
+                    && local_name.as_ref() == b"t"
                 {
                     texts.push(StoryTextElement {
                         context: fields.context(),
@@ -21289,7 +22029,7 @@ fn replace_story_item_text(source: &[u8], item: &StoryItemSpan, value: &str) -> 
                     && nested_owner_depth == 0
                     && is_word_namespace
                     && story_run_child(&element_stack)
-                    && matches!(local_name.as_slice(), b"tab" | b"br" | b"cr")
+                    && matches!(local_name.as_ref(), b"tab" | b"br" | b"cr")
                 {
                     removed_start = Some((element_stack.len(), before, fields.context()));
                 }
@@ -24230,7 +24970,7 @@ impl Document {
         });
         Document {
             package,
-            document,
+            document: crate::document::DocumentModel::unproved(document),
             root_namespace_declarations: Vec::new(),
             body_namespace_declarations: Vec::new(),
             body_namespace_bindings: Vec::new(),
@@ -24366,11 +25106,17 @@ impl Document {
         TRANSACTION_WORK.with(|work| work.replace([0; 6]))
     }
 
-    /// Actual phase outputs by provenance, as call and byte counts. Debug only.
+    /// Actual ordinary and phase outputs by provenance, as call and byte counts. Debug only.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn take_transaction_outputs() -> std::collections::BTreeMap<String, [usize; 2]> {
-        TRANSACTION_OUTPUTS.with(|outputs| std::mem::take(&mut *outputs.borrow_mut()))
+        let mut outputs =
+            TRANSACTION_OUTPUTS.with(|outputs| std::mem::take(&mut *outputs.borrow_mut()));
+        outputs.insert(
+            "allphase.modeled_namespace_scope_copies".into(),
+            MODELED_NAMESPACE_SCOPE_COPIES.with(|work| work.replace([0; 2])),
+        );
+        outputs
     }
 
     /// Actual scoped child parser/writer rounds, calls and bytes. Debug only.
@@ -24518,13 +25264,16 @@ impl Document {
                     let source = template.document_source(&self.document)?;
                     let source =
                         crate::field::patch_bookmark_source(template.operation, source, &remap)?;
-                    self.document = template
-                        .sources
-                        .read_document(template.operation, Arc::new(source))?;
+                    self.document = crate::document::DocumentModel::unproved(
+                        template
+                            .sources
+                            .read_document(template.operation, Arc::new(source))?,
+                    );
                 } else {
                     let updated =
                         crate::field::patch_bookmark_ids(&self.document.to_xml()?, &remap)?;
-                    self.document = CT_Document::from_xml(&updated)?;
+                    self.document =
+                        crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
                 }
             } else {
                 visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
@@ -24583,13 +25332,16 @@ impl Document {
         if let Some(template) = template {
             let source = template.document_source(&self.document)?;
             let source = crate::field::patch_bookmark_source(template.operation, source, &remap)?;
-            self.document = template
-                .sources
-                .read_document(template.operation, Arc::new(source))?;
+            self.document = crate::document::DocumentModel::unproved(
+                template
+                    .sources
+                    .read_document(template.operation, Arc::new(source))?,
+            );
         } else {
             let xml = self.document.to_xml()?;
             let updated = crate::field::patch_bookmark_ids(&xml, &remap)?;
-            self.document = CT_Document::from_xml(&updated)?;
+            self.document =
+                crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
         }
         for (old, new) in remap {
             let old = old.parse::<i32>().expect("bookmark remap key is numeric");
@@ -24731,7 +25483,7 @@ impl Document {
                 {
                     // The live model may differ, but these retained source
                     // bytes still have the exact parse from their opening.
-                    parsed == &self.document
+                    parsed == &*self.document
                 } else if let Some(proved) = self
                     .main_part_blocks
                     .as_ref()
@@ -24741,7 +25493,7 @@ impl Document {
                     without_staging_work(|| {
                         let fresh = CT_Document::from_xml(source).ok();
                         assert_eq!(
-                            fresh.as_ref() == Some(&self.document),
+                            fresh.as_ref() == Some(&*self.document),
                             proved,
                             "the proved main part disagrees with a fresh parse"
                         );
@@ -24752,7 +25504,7 @@ impl Document {
                     eprintln!("FX211_DRAWING_STAGE opaque-reparse-before");
                     note_staging_work(|work| work.parsed += source.len());
                     let matches =
-                        CT_Document::from_xml(source).ok().as_ref() == Some(&self.document);
+                        CT_Document::from_xml(source).ok().as_ref() == Some(&*self.document);
                     #[cfg(test)]
                     eprintln!("FX211_DRAWING_STAGE opaque-reparse-after");
                     matches
@@ -25027,7 +25779,7 @@ impl Document {
         if kept.root_namespace_declarations != self.root_namespace_declarations
             || kept.body_namespace_declarations != self.body_namespace_declarations
             || kept.body_namespace_bindings != self.body_namespace_bindings
-            || kept.main_document() != Some(&self.document)
+            || kept.main_document() != Some(&*self.document)
         {
             return false;
         }
@@ -25213,10 +25965,10 @@ impl Document {
                 {
                     parsed
                 } else if let Some(parsed) = kept.as_deref().and_then(Parsed::main_document) {
-                    parsed == &self.document
+                    parsed == &*self.document
                 } else {
                     note_staging_work(|work| work.parsed += xml.len());
-                    CT_Document::from_xml(xml).ok().as_ref() == Some(&self.document)
+                    CT_Document::from_xml(xml).ok().as_ref() == Some(&*self.document)
                 };
                 matches
                     && self
@@ -25641,9 +26393,11 @@ impl Document {
                 })?;
                 let source =
                     apply_borrowed_template_source_edits(writer.operation, &source, drawing_edits)?;
-                self.document = writer
-                    .sources
-                    .read_document(writer.operation, Arc::new(source))?;
+                self.document = crate::document::DocumentModel::unproved(
+                    writer
+                        .sources
+                        .read_document(writer.operation, Arc::new(source))?,
+                );
                 self.main_part_blocks = None;
                 self.main_body_scans
                     .lock()
@@ -25661,7 +26415,7 @@ impl Document {
                         self.source_blocks_in(blocks.part.as_deref()?, blocks.clone(), &updated)
                     })
                 {
-                    self.document = parsed;
+                    self.document = crate::document::DocumentModel::unproved(parsed);
                     if let Some(writer) = template.as_deref_mut() {
                         writer.sources.model_lineage_valid = false;
                     }
@@ -25673,7 +26427,8 @@ impl Document {
                         .serialized = Some(record);
                 } else {
                     note_staging_work(|work| work.parsed += updated.len());
-                    self.document = CT_Document::from_xml(&updated)?;
+                    self.document =
+                        crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
                     if let Some(writer) = template.as_deref_mut() {
                         writer.sources.model_lineage_valid = false;
                     }
@@ -25709,9 +26464,11 @@ impl Document {
                     let source = apply_template_source_edits(writer.operation, source, edits)?;
                     let retained = writer.operation.repeat_source(&source)?;
                     let bytes = writer.operation.finish_source(retained)?;
-                    self.document = writer
-                        .sources
-                        .read_document(writer.operation, Arc::new(source))?;
+                    self.document = crate::document::DocumentModel::unproved(
+                        writer
+                            .sources
+                            .read_document(writer.operation, Arc::new(source))?,
+                    );
                     self.package.set_part(&owner, bytes);
                     let bytes = self
                         .package
@@ -25756,7 +26513,7 @@ impl Document {
                             &nested_image_relationship_ids,
                             &canonical_drawing_ids,
                         )? {
-                            self.document = document;
+                            self.document = crate::document::DocumentModel::unproved(document);
                             self.package.set_part(&owner, xml);
                             self.main_part_blocks = None;
                         }
@@ -25819,9 +26576,11 @@ impl Document {
                     &self.body_namespace_bindings,
                 )?;
                 let source = apply_template_source_edits(writer.operation, source, edits)?;
-                self.document = writer
-                    .sources
-                    .read_document(writer.operation, Arc::new(source))?;
+                self.document = crate::document::DocumentModel::unproved(
+                    writer
+                        .sources
+                        .read_document(writer.operation, Arc::new(source))?,
+                );
                 self.main_part_blocks = None;
                 self.main_body_scans
                     .lock()
@@ -25847,7 +26606,7 @@ impl Document {
                 });
                 if let Some((document, mut record)) = fast {
                     if let Some(document) = document {
-                        self.document = document;
+                        self.document = crate::document::DocumentModel::unproved(document);
                     }
                     record.part = None;
                     self.main_body_scans
@@ -25861,7 +26620,8 @@ impl Document {
                         &self.body_namespace_bindings,
                     )?;
                     note_staging_work(|work| work.parsed += updated.len());
-                    self.document = CT_Document::from_xml(&updated)?;
+                    self.document =
+                        crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
                 }
             }
         }
@@ -26853,7 +27613,11 @@ impl Document {
         // Every branch above obtained an actual parse of these exact source
         // bytes, either fresh or from a qualified source proof. Keep it at
         // this opening instead of parsing a fresh source a second time later.
-        parsed_record.main_document = OnceLock::from(Some(document.clone()));
+        parsed_record.initial_writer_blocks = serialized_blocks
+            .as_ref()
+            .map(|record| Arc::downgrade(&record.blocks));
+        let (document, opening_document) = DocumentModel::opening_pair(document);
+        parsed_record.main_document = OnceLock::from(Some(opening_document));
         let parsed = Some(Arc::new(parsed_record));
         let local_cell_source = LocalCellSource::classified(
             &package,
@@ -27990,7 +28754,7 @@ impl Document {
                 // The canonical spans must point at the exact canonical
                 // blocks. This holds for every child, including a direct
                 // paragraph whose root keeps a foreign `w` binding.
-                for (range, block) in children.iter().zip(&record.blocks) {
+                for (range, block) in children.iter().zip(record.blocks.iter()) {
                     assert_eq!(
                         xml.get(range.clone()),
                         Some(block.bytes.as_slice()),
@@ -28008,7 +28772,7 @@ impl Document {
                         children.len(),
                         "serialized pieces changed the body spans"
                     );
-                    for (public_range, block) in public_children.iter().zip(&record.blocks) {
+                    for (public_range, block) in public_children.iter().zip(record.blocks.iter()) {
                         if !root_declares_foreign_word(&block.bytes) {
                             assert_eq!(
                                 public.get(public_range.clone()),
@@ -28087,11 +28851,13 @@ impl Document {
             head,
             root: record.root,
             tail: record.tail,
-            blocks: record
-                .blocks
-                .iter()
-                .map(BodyBlockScan::fresh_context_piece)
-                .collect(),
+            blocks: Arc::new(
+                record
+                    .blocks
+                    .iter()
+                    .map(BodyBlockScan::fresh_context_piece)
+                    .collect(),
+            ),
             part: Some(Arc::new(current.clone())),
             frame: OnceLock::from(Some(shell)),
             nested_namespace_owners: OnceLock::new(),
@@ -28167,6 +28933,7 @@ impl Document {
             }
             // The proof above is an actual read under the producer scope.
             // Canonical serialization remains a separate authority.
+            block.standalone_value = OnceLock::new();
             block.staged = None;
             blocks.push(Arc::new(block));
             at = item.full.end;
@@ -28175,7 +28942,7 @@ impl Document {
             head,
             root,
             tail,
-            blocks,
+            blocks: Arc::new(blocks),
             part: Some(Arc::new(source.to_vec())),
             frame: OnceLock::from(Some(frame)),
             nested_namespace_owners: OnceLock::new(),
@@ -28206,7 +28973,7 @@ impl Document {
             let lexical_and_private = record
                 .blocks
                 .iter()
-                .zip(&normal.blocks)
+                .zip(normal.blocks.iter())
                 .zip(&self.document.body.content)
                 .all(|((left, right), item)| {
                     scoped_normalization_reuse_allowed(&record, normal, left, right, item)
@@ -28242,7 +29009,7 @@ impl Document {
                 }
             }
         }
-        for children in record.blocks.iter().zip(&normal.blocks) {
+        for children in record.blocks.iter().zip(normal.blocks.iter()) {
             let seed = producer_scoped_normalization_seed(
                 &record, normal, children.0, children.1, &scopes,
             );
@@ -28303,7 +29070,7 @@ impl Document {
         }
         let mut boundaries = Vec::with_capacity(record.blocks.len() + 1);
         boundaries.push(head);
-        for block in &record.blocks {
+        for block in record.blocks.iter() {
             boundaries.push(boundaries.last()?.checked_add(block.bytes.len())?);
         }
         if boundaries.last().copied()? != content_end {
@@ -28360,7 +29127,7 @@ impl Document {
         }
         parsed.body.content.splice(first..last, items);
         parsed.validate_resource_limits().ok()?;
-        record.blocks.splice(first..last, replacement_blocks);
+        Arc::make_mut(&mut record.blocks).splice(first..last, replacement_blocks);
         record.part = Some(Arc::clone(xml));
         record.nested_namespace_owners = OnceLock::new();
         if !record.part_partition_matches(xml) {
@@ -28401,10 +29168,10 @@ impl Document {
             })
             .and_then(Parsed::main_document)
         {
-            return parsed == &self.document;
+            return parsed == &*self.document;
         }
         note_staging_work(|work| work.parsed += source.len());
-        CT_Document::from_xml(source).ok().as_ref() == Some(&self.document)
+        CT_Document::from_xml(source).ok().as_ref() == Some(&*self.document)
     }
 
     /// Same temporary record for a document that is not `self.document`.
@@ -29139,7 +29906,7 @@ impl Document {
                     "the retained source parse disagrees with a fresh parse"
                 );
             });
-            parsed == &self.document
+            parsed == &*self.document
         } else if let Some(proved) = existing_document_xml.and_then(|xml| {
             self.main_part_blocks
                 .as_ref()
@@ -29149,7 +29916,7 @@ impl Document {
             without_staging_work(|| {
                 let fresh = existing_document_xml.and_then(|xml| CT_Document::from_xml(xml).ok());
                 assert_eq!(
-                    fresh.as_ref() == Some(&self.document),
+                    fresh.as_ref() == Some(&*self.document),
                     proved,
                     "the proved existing part disagrees with a fresh parse"
                 );
@@ -29166,7 +29933,7 @@ impl Document {
             eprintln!("FX211_FLUSH_STAGE reparse-after");
             #[cfg(test)]
             eprintln!("FX211_FLUSH_STAGE equality-before");
-            let unchanged = parsed.as_ref() == Some(&self.document);
+            let unchanged = parsed.as_ref() == Some(&*self.document);
             #[cfg(test)]
             eprintln!("FX211_FLUSH_STAGE equality-after");
             #[cfg(test)]
@@ -30715,10 +31482,26 @@ impl Document {
             }
             return Ok(());
         }
+        #[cfg(test)]
+        let reply_endpoint_before = STORY_SOURCE_BUILDS.get();
         let (source, start_item) = self.story_range_paragraph_source(start)?;
         let part_name = source.part_name.clone();
         let source_xml = source.xml.into_owned();
-        let (_, end_item) = self.story_range_paragraph_source(end)?;
+        let same_endpoint = start == end;
+        #[cfg(test)]
+        let same_endpoint = same_endpoint && !REPLY_FORCE_LEGACY_SOURCE_READS.get();
+        let end_item = if same_endpoint {
+            start_item.clone()
+        } else {
+            self.story_range_paragraph_source(end)?.1
+        };
+        #[cfg(test)]
+        REPLY_SOURCE_READS.with(|counts| {
+            if let Some(mut value) = counts.get() {
+                value[0] += STORY_SOURCE_BUILDS.get() - reply_endpoint_before;
+                counts.set(Some(value));
+            }
+        });
         if start_item.full.start > end_item.full.start {
             return Err(Error::Other(format!(
                 "{label} range endpoints must be ordered in one story owner"
@@ -30736,12 +31519,14 @@ impl Document {
         };
         let mut first = read_paragraph(&start_item)?;
         let mut last = if start_item.full == end_item.full {
-            first.clone()
+            None
         } else {
-            read_paragraph(&end_item)?
+            Some(read_paragraph(&end_item)?)
         };
-        for (boundary, index, paragraph) in [("start", start_run, &first), ("end", end_run, &last)]
-        {
+        for (boundary, index, paragraph) in [
+            ("start", start_run, &first),
+            ("end", end_run, last.as_ref().unwrap_or(&first)),
+        ] {
             let count = paragraph.accepted_run_paths().len();
             if index > count {
                 return Err(Error::Other(format!(
@@ -30766,14 +31551,15 @@ impl Document {
                 .map_err(|error| {
                     Error::Other(format!("{label} range cannot be anchored: {error}"))
                 })?;
-            last.anchor_accepted_range(None, Some(end_run), anchor)
+            last.as_mut()
+                .expect("distinct endpoint was parsed")
+                .anchor_accepted_range(None, Some(end_run), anchor)
                 .map_err(|error| {
                     Error::Other(format!("{label} range cannot be anchored: {error}"))
                 })?;
         }
-        let same_paragraph = start_item.full == end_item.full;
         let mut edits = vec![(start_item.full, first)];
-        if !same_paragraph {
+        if let Some(last) = last {
             edits.push((end_item.full, last));
         }
         edits.sort_by_key(|item| std::cmp::Reverse(item.0.start));
@@ -31490,6 +32276,50 @@ impl Document {
         Ok((source.xml.into_owned(), owner.full))
     }
 
+    /// Refresh an owner by its complete kind/part/index selector after a
+    /// mutation, discovering every story before qualifying the selected span.
+    pub(crate) fn refreshed_story_owner_span(
+        &self,
+        previous: &StoryId,
+    ) -> Result<Option<(Vec<u8>, Range<usize>)>> {
+        #[cfg(test)]
+        if REPLY_FORCE_LEGACY_SOURCE_READS.get() {
+            let Some(refreshed) = self.stories()?.into_iter().find(|candidate| {
+                candidate.kind == previous.kind
+                    && candidate.part_name == previous.part_name
+                    && candidate.owner_index == previous.owner_index
+            }) else {
+                return Ok(None);
+            };
+            return self.story_owner_span(&refreshed).map(Some);
+        }
+        let (sources, content, children) = self.spanned_story_sources()?;
+        let main = self
+            .main_story_layout(&sources[0].xml, &content, &children, false)
+            .ok();
+        let borrowed = sources
+            .iter()
+            .map(|source| StorySource {
+                root_kind: source.root_kind,
+                part_name: source.part_name.clone(),
+                xml: Cow::Borrowed(source.xml.as_ref()),
+            })
+            .collect();
+        let Some(refreshed) = Self::stories_in_sources(borrowed, main, children.len())?
+            .into_iter()
+            .find(|candidate| {
+                candidate.kind == previous.kind
+                    && candidate.part_name == previous.part_name
+                    && candidate.owner_index == previous.owner_index
+            })
+        else {
+            return Ok(None);
+        };
+        let (source, owner, _) =
+            self.story_source_owner_and_layout_in(&refreshed, false, sources, &content, &children)?;
+        Ok(Some((source.xml.into_owned(), owner.full)))
+    }
+
     /// Accepted content controls, non-preserved carriers, and text-box owners.
     ///
     /// Ranges come from the story-item scan. Controls are already deduplicated
@@ -31850,6 +32680,18 @@ impl Document {
         Ok(restored)
     }
 
+    /// Snapshot advisory paragraph values once after checked source traversal.
+    pub(crate) fn comment_paragraph_read(&self) -> CommentParagraphRead<'_> {
+        let scans = self
+            .main_body_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let blocks =
+            offered_canonical_blocks(scans.serialized.as_ref().or(self.main_part_blocks.as_ref()))
+                .map_or(&[][..], |record| record.blocks.as_slice());
+        CommentParagraphRead::from_blocks(&self.doc_part_name, blocks)
+    }
+
     /// The checked range paragraphs in story order, each with its flow, as
     /// the source index and flow that `story_range_paragraph_sources` gives,
     /// and its offset in that source, which orders the paragraphs of a flow.
@@ -32045,13 +32887,23 @@ impl Document {
     #[doc(hidden)]
     pub fn direct_body_item_location(&self, slot: usize) -> Result<Option<ContentLocation>> {
         let (xml, content, children) = self.main_part_with_body_spans()?;
-        let Ok(layout) = self.main_story_layout(&xml, &content, &children, true) else {
+        self.direct_body_item_location_in(&xml, &content, &children, slot)
+    }
+
+    fn direct_body_item_location_in(
+        &self,
+        xml: &[u8],
+        content: &Range<usize>,
+        children: &[Range<usize>],
+        slot: usize,
+    ) -> Result<Option<ContentLocation>> {
+        let Ok(layout) = self.main_story_layout(xml, content, children, true) else {
             #[cfg(any(test, debug_assertions))]
             note_main_body_block_scans(children.len());
-            return full_direct_body_item_location(&xml, &self.doc_part_name, slot);
+            return full_direct_body_item_location(xml, &self.doc_part_name, slot);
         };
         let owner = layout
-            .owner(&xml, StoryKind::Body, 0)?
+            .owner(xml, StoryKind::Body, 0)?
             .ok_or_else(|| Error::Other("main document body owner was not found".to_owned()))?;
         let story = StoryId {
             kind: StoryKind::Body,
@@ -32059,7 +32911,7 @@ impl Document {
             owner_index: 0,
             fingerprint: owner.fingerprint,
         };
-        let located = layout.direct_body_item(&xml, slot, true).map(|item| {
+        let located = layout.direct_body_item(xml, slot, true).map(|item| {
             item.map(|(index, item)| ContentLocation::new(story, item.kind, vec![index]))
         });
         #[cfg(debug_assertions)]
@@ -32068,12 +32920,12 @@ impl Document {
                 #[cfg(test)]
                 {
                     a9_without_lookup_work(|| {
-                        full_direct_body_item_location(&xml, &self.doc_part_name, slot)
+                        full_direct_body_item_location(xml, &self.doc_part_name, slot)
                     })
                 }
                 #[cfg(not(test))]
                 {
-                    full_direct_body_item_location(&xml, &self.doc_part_name, slot)
+                    full_direct_body_item_location(xml, &self.doc_part_name, slot)
                 }
             });
             match (&located, &whole) {
@@ -32094,6 +32946,59 @@ impl Document {
             }
         }
         located
+    }
+
+    /// Resolve a physical direct-body cell from the actual current main output.
+    /// Current writer proof shares that output. Other cases keep the full lookup.
+    #[doc(hidden)]
+    pub fn direct_body_cell_story(
+        &self,
+        slot: usize,
+        row: usize,
+        cell: usize,
+    ) -> Result<Option<StoryId>> {
+        let (xml, content, children) = self.main_part_with_body_spans()?;
+        let Some(location) = self.direct_body_item_location_in(&xml, &content, &children, slot)?
+        else {
+            return Ok(None);
+        };
+        // This proof describes the actual current writer bytes above. It is
+        // not an input/read receipt and never grants scoped Source credit.
+        let same_current_writer = {
+            let scans = self
+                .main_body_scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            offered_canonical_blocks(scans.serialized.as_ref())
+                .is_some_and(|record| record.writer_bytes_match(&self.document, &xml) == Some(true))
+        };
+        if !same_current_writer || location.item_kind != StoryItemKind::Table || location.is_end {
+            return self.story_table_cell(&location, row, cell).map(Some);
+        }
+        // The old second source preparation also collects related sources.
+        // Preserve those relationship/part errors before owner/item lookup.
+        let mut sources = vec![StorySource {
+            root_kind: StoryKind::Body,
+            part_name: self.doc_part_name.clone(),
+            xml: Cow::Borrowed(xml.as_slice()),
+        }];
+        sources.extend(self.related_story_sources()?);
+        let (source, owner, layout) = self.story_source_owner_and_layout_in(
+            &location.story,
+            true,
+            sources,
+            &content,
+            &children,
+        )?;
+        let item = Self::story_item_span(source.xml.as_ref(), &owner, layout.as_ref(), &location)?;
+        let owner =
+            physical_table_cell_owner(source.xml.as_ref(), source.root_kind, &item, row, cell)?;
+        Ok(Some(StoryId {
+            kind: owner.kind,
+            part_name: source.part_name,
+            owner_index: owner.owner_index,
+            fingerprint: owner.fingerprint,
+        }))
     }
 
     /// Materialize every story item after building each package source once.
@@ -34462,7 +35367,15 @@ impl Document {
     #[allow(clippy::type_complexity)] // Existing paragraph text and run-path facts, in physical slot order.
     pub fn opened_plain_body_paragraph_facts(
         &self,
-    ) -> Result<Option<Vec<(String, Vec<rdocx_oxml::text::AcceptedRunPath>)>>> {
+    ) -> Result<
+        Option<
+            Vec<(
+                Option<Arc<BodyContent>>,
+                String,
+                Vec<rdocx_oxml::text::AcceptedRunPath>,
+            )>,
+        >,
+    > {
         let Some(kept) = self.kept_main_part() else {
             return Ok(None);
         };
@@ -34471,69 +35384,285 @@ impl Document {
             || kept.root_namespace_declarations != self.root_namespace_declarations
             || kept.body_namespace_declarations != self.body_namespace_declarations
             || kept.body_namespace_bindings != self.body_namespace_bindings
-            || kept.main_document() != Some(&self.document)
         {
             return Ok(None);
         }
-        self.document.validate_resource_limits()?;
-        let mut facts = Vec::with_capacity(self.document.body.content.len());
-        for item in &self.document.body.content {
-            let BodyContent::Paragraph(paragraph) = item else {
-                return Ok(None);
-            };
-            if paragraph.properties.is_some() || !paragraph_is_plain(paragraph) {
-                return Ok(None);
+        let Some(opened) = kept.main_document() else {
+            return Ok(None);
+        };
+        let CT_Document {
+            body:
+                rdocx_oxml::document::CT_Body {
+                    content: current,
+                    sect_pr: current_section,
+                },
+            extra_namespaces: current_namespaces,
+            background_xml: current_background,
+            background_extra_xml: current_background_extra,
+            root_attributes: current_attributes,
+        } = &*self.document;
+        let CT_Document {
+            body:
+                rdocx_oxml::document::CT_Body {
+                    content: opened_content,
+                    sect_pr: opened_section,
+                },
+            extra_namespaces: opened_namespaces,
+            background_xml: opened_background,
+            background_extra_xml: opened_background_extra,
+            root_attributes: opened_attributes,
+        } = opened;
+        if (
+            current_section,
+            current_namespaces,
+            current_background,
+            current_background_extra,
+            current_attributes,
+        ) != (
+            opened_section,
+            opened_namespaces,
+            opened_background,
+            opened_background_extra,
+            opened_attributes,
+        ) || current.len() != opened_content.len()
+        {
+            return Ok(None);
+        }
+        let same_opening = kept
+            .main_document
+            .get()
+            .and_then(Option::as_ref)
+            .is_some_and(|opened| self.document.same_opening_clone(opened));
+        // Compare and qualify each physical item while its values are in use.
+        // Every opening item must match before any finite result or fallback.
+        let facts = {
+            let scans = self
+                .main_body_scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut models = offered_canonical_blocks(
+                scans.serialized.as_ref().or(self.main_part_blocks.as_ref()),
+            )
+            .filter(|record| record.blocks.len() == current.len());
+            let staged_origin = same_opening
+                && models.is_some_and(|record| {
+                    kept.initial_writer_blocks
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                        .is_some_and(|opening| Arc::ptr_eq(&opening, &record.blocks))
+                });
+            let mut qualified_properties: Option<&rdocx_oxml::properties::CT_RPr> = None;
+            let mut facts = Some(Vec::with_capacity(current.len()));
+            for (slot, (item, opened_item)) in current.iter().zip(opened_content).enumerate() {
+                let mut qualify = || {
+                    let BodyContent::Paragraph(paragraph) = item else {
+                        return None;
+                    };
+                    if !paragraph_has_finite_plain_properties(paragraph, &mut qualified_properties)
+                    {
+                        return None;
+                    }
+                    // These are the same finite writer-invariant facts.
+                    let length = paragraph
+                        .runs
+                        .iter()
+                        .flat_map(|run| &run.content)
+                        .try_fold(0usize, |length, content| match content {
+                            RunContent::Text(text) => length.checked_add(text.text.len()),
+                            _ => None,
+                        })
+                        .filter(|length| *length <= isize::MAX as usize);
+                    let text = length
+                        .map(|length| {
+                            let mut text = String::with_capacity(length);
+                            for run in &paragraph.runs {
+                                for content in &run.content {
+                                    let RunContent::Text(content) = content else {
+                                        return paragraph.accepted_text();
+                                    };
+                                    text.push_str(&content.text);
+                                }
+                            }
+                            text
+                        })
+                        .unwrap_or_else(|| paragraph.accepted_text());
+                    Some((text, paragraph.accepted_run_paths()))
+                };
+                // Only proved plain values may omit equality. Unsupported
+                // equality can itself read XML and retains its original order.
+                let early = (same_opening && facts.is_some()).then(&mut qualify);
+                let finite_origin = early.as_ref().is_some_and(Option::is_some);
+                if !finite_origin && {
+                    #[cfg(test)]
+                    OPENED_VALUE_EQ_CALLS.with(|work| {
+                        let mut value = work.get();
+                        value[0] += 1;
+                        work.set(value);
+                    });
+                    item != opened_item
+                } {
+                    return Ok(None);
+                }
+                if let Some(record) = models
+                    && !(finite_origin && staged_origin)
+                    && {
+                        #[cfg(test)]
+                        if record.blocks[slot].staged.is_some() {
+                            OPENED_VALUE_EQ_CALLS.with(|work| {
+                                let mut value = work.get();
+                                value[1] += 1;
+                                work.set(value);
+                            });
+                        }
+                        record.blocks[slot].staged.as_deref() != Some(item)
+                    }
+                {
+                    models = None;
+                }
+                let Some(values) = facts.as_mut() else {
+                    continue;
+                };
+                let finite = early.unwrap_or_else(qualify);
+                match finite {
+                    Some((text, runs)) => values.push((None, text, runs)),
+                    None => facts = None,
+                }
             }
-            for run in &paragraph.runs {
-                if !run.extra_xml_positions.is_empty()
+            // Only a complete record alignment may lend any model value.
+            if let (Some(values), Some(record)) = (facts.as_mut(), models) {
+                for ((model, _, _), block) in values.iter_mut().zip(record.blocks.iter()) {
+                    *model = block.staged.clone();
+                }
+            }
+            facts
+        };
+        // The finite graph has exact resource maxima (0, 0). Unsupported
+        // payloads retain the full guard, after the complete opening check
+        // and after releasing the temporary writer-record lock.
+        if facts.is_none() {
+            self.document.validate_resource_limits()?;
+        }
+        Ok(facts)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    fn fx268_legacy_opened_plain_body_paragraph_facts(
+        &self,
+    ) -> Result<
+        Option<
+            Vec<(
+                Option<Arc<BodyContent>>,
+                String,
+                Vec<rdocx_oxml::text::AcceptedRunPath>,
+            )>,
+        >,
+    > {
+        let Some(kept) = self.kept_main_part() else {
+            return Ok(None);
+        };
+        if self.plain_local_edit_blocked
+            || kept.serialization_proof.is_none()
+            || kept.root_namespace_declarations != self.root_namespace_declarations
+            || kept.body_namespace_declarations != self.body_namespace_declarations
+            || kept.body_namespace_bindings != self.body_namespace_bindings
+            || kept.main_document() != Some(&*self.document)
+        {
+            return Ok(None);
+        }
+        // Successful finite payloads contain only Body/Paragraph/Run/Text
+        // resource owners, all with exact (weighted, table) maxima (0, 0).
+        // Every post-opening miss still runs the original full guard.
+        let facts = (|| {
+            // Some valid openings have only the full writer proof, with no
+            // retained block record. That does not invalidate their read facts.
+            let scans = self
+                .main_body_scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let models = offered_canonical_blocks(
+                scans.serialized.as_ref().or(self.main_part_blocks.as_ref()),
+            )
+            .filter(|record| {
+                record.blocks.len() == self.document.body.content.len()
+                    && record
+                        .blocks
+                        .iter()
+                        .zip(&self.document.body.content)
+                        .all(|(block, item)| block.staged.as_deref() == Some(item))
+            });
+            let mut qualified_properties: Option<&rdocx_oxml::properties::CT_RPr> = None;
+            let mut facts = Vec::with_capacity(self.document.body.content.len());
+            for (slot, item) in self.document.body.content.iter().enumerate() {
+                let BodyContent::Paragraph(paragraph) = item else {
+                    return None;
+                };
+                if paragraph.properties.is_some() || !paragraph_is_plain(paragraph) {
+                    return None;
+                }
+                for run in &paragraph.runs {
+                    if !run.extra_xml_positions.is_empty()
                     || !run.content.iter().all(|content| matches!(content,
                         RunContent::Text(text) if text.text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b' ')))
                 {
-                    return Ok(None);
+                    return None;
                 }
-                if let Some(properties) = &run.properties {
-                    let shading = properties.shading.as_ref().map(|value| {
-                        Box::new(rdocx_oxml::properties::CT_Shd {
-                            val: value.val.clone(),
-                            color: value.color.clone(),
-                            fill: value.fill.clone(),
-                            theme_color: value.theme_color.clone(),
-                            theme_tint: value.theme_tint,
-                            theme_shade: value.theme_shade,
-                            theme_fill: value.theme_fill.clone(),
-                            theme_fill_tint: value.theme_fill_tint,
-                            theme_fill_shade: value.theme_fill_shade,
-                            extra_attributes: Vec::new(),
-                        })
-                    });
-                    let allowed = rdocx_oxml::properties::CT_RPr {
-                        font_ascii: properties.font_ascii.clone(),
-                        font_hansi: properties.font_hansi.clone(),
-                        font_east_asia: properties.font_east_asia.clone(),
-                        font_cs: properties.font_cs.clone(),
-                        bold: properties.bold,
-                        italic: properties.italic,
-                        small_caps: properties.small_caps,
-                        strike: properties.strike,
-                        color: properties.color.clone(),
-                        sz: properties.sz,
-                        sz_cs: properties.sz_cs,
-                        underline: properties.underline,
-                        shading,
-                        vert_align: properties.vert_align.clone(),
-                        rtl: properties.rtl,
-                        ..Default::default()
-                    };
-                    if properties != &allowed {
-                        return Ok(None);
+                    if let Some(properties) = &run.properties {
+                        if qualified_properties == Some(properties) {
+                            continue;
+                        }
+                        let shading = properties.shading.as_ref().map(|value| {
+                            Box::new(rdocx_oxml::properties::CT_Shd {
+                                val: value.val.clone(),
+                                color: value.color.clone(),
+                                fill: value.fill.clone(),
+                                theme_color: value.theme_color.clone(),
+                                theme_tint: value.theme_tint,
+                                theme_shade: value.theme_shade,
+                                theme_fill: value.theme_fill.clone(),
+                                theme_fill_tint: value.theme_fill_tint,
+                                theme_fill_shade: value.theme_fill_shade,
+                                extra_attributes: Vec::new(),
+                            })
+                        });
+                        let allowed = rdocx_oxml::properties::CT_RPr {
+                            font_ascii: properties.font_ascii.clone(),
+                            font_hansi: properties.font_hansi.clone(),
+                            font_east_asia: properties.font_east_asia.clone(),
+                            font_cs: properties.font_cs.clone(),
+                            bold: properties.bold,
+                            italic: properties.italic,
+                            small_caps: properties.small_caps,
+                            strike: properties.strike,
+                            color: properties.color.clone(),
+                            sz: properties.sz,
+                            sz_cs: properties.sz_cs,
+                            underline: properties.underline,
+                            shading,
+                            vert_align: properties.vert_align.clone(),
+                            rtl: properties.rtl,
+                            ..Default::default()
+                        };
+                        if properties != &allowed {
+                            return None;
+                        }
+                        qualified_properties = Some(properties);
                     }
                 }
+                // In this grammar the real writer emits one t per Text and the
+                // parser reads it unchanged. Formatting never changes run paths.
+                facts.push((
+                    models.and_then(|record| record.blocks[slot].staged.clone()),
+                    paragraph.accepted_text(),
+                    paragraph.accepted_run_paths(),
+                ));
             }
-            // In this grammar the real writer emits one t per Text and the
-            // parser reads it unchanged. Formatting never changes run paths.
-            facts.push((paragraph.accepted_text(), paragraph.accepted_run_paths()));
+            Some(facts)
+        })();
+        if facts.is_none() {
+            self.document.validate_resource_limits()?;
         }
-        Ok(Some(facts))
+        Ok(facts)
     }
 
     /// The number of body story items that the direct body child at `slot`
@@ -36013,7 +37142,8 @@ impl Document {
             item_start..new_item_end,
         )?;
         if source.part_name == candidate.doc_part_name {
-            candidate.document = CT_Document::from_xml(&updated)?;
+            candidate.document =
+                crate::document::DocumentModel::unproved(CT_Document::from_xml(&updated)?);
             candidate.flush_to_package()?;
         } else {
             candidate.package.set_part(&source.part_name, updated);
@@ -38657,9 +39787,9 @@ impl Document {
         }
         let item = BodyContent::Paragraph(Box::new(Self::detached_text_paragraph("")));
         let mut block = BodyBlockScan::from_source(self.document.body_item_xml(&item).ok()?);
-        block.staged = Some(item);
+        block.staged = Some(Arc::new(item));
         note_staging_work(|work| work.serialized_children += 1);
-        let mut blocks = record.blocks.clone();
+        let mut blocks = record.blocks.as_ref().clone();
         blocks.push(Arc::new(block));
         let (probe, mut proof) = MainPartBlocks::assemble(
             &self.document,
@@ -44331,8 +45461,9 @@ impl Document {
             return None;
         }
         self.invalidate_layout();
+        let document = &mut *self.document;
         let mut remaining = index;
-        for content in &mut self.document.body.content {
+        for content in &mut document.body.content {
             if let BodyContent::Paragraph(paragraph) = content
                 && let Some(inner) = paragraph
                     .properties
@@ -44349,7 +45480,7 @@ impl Document {
                 remaining -= 1;
             }
         }
-        self.document.body.sect_pr.as_mut().map(|inner| Section {
+        document.body.sect_pr.as_mut().map(|inner| Section {
             ordinal: index,
             is_final: has_final_body_owner && index + 1 == count,
             inner,
@@ -48060,10 +49191,12 @@ impl Document {
                     .ok_or_else(|| {
                         Error::Other(format!("cell {table}:{row}:{cell} is out of range"))
                     })?;
-                let mut found = candidate
-                    .content_index_of_table(table)
-                    .and_then(|slot| candidate.direct_body_item_location(slot).ok().flatten())
-                    .and_then(|location| candidate.story_table_cell(&location, row, cell).ok());
+                let mut found = candidate.content_index_of_table(table).and_then(|slot| {
+                    candidate
+                        .direct_body_cell_story(slot, row, cell)
+                        .ok()
+                        .flatten()
+                });
                 // Tables inside controlled content retain the legacy modeled
                 // pointer correspondence, including its failure behavior.
                 if found.is_none() {
@@ -48561,7 +49694,7 @@ impl Document {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut input = TemplateWordRecordInputs::default();
         for record in scans.serialized.iter().chain(self.main_part_blocks.iter()) {
-            for block in &record.blocks {
+            for block in record.blocks.iter() {
                 input
                     .blocks
                     .entry(Arc::as_ptr(block) as usize)
@@ -49506,7 +50639,8 @@ impl Document {
             let (changed, n) = placeholder::replace_regex_in_xml_part(&xml, re, replacement)?;
             if changed != xml {
                 if part_name == self.doc_part_name {
-                    self.document = CT_Document::from_xml(&changed)?;
+                    self.document =
+                        crate::document::DocumentModel::unproved(CT_Document::from_xml(&changed)?);
                 }
                 self.package.set_part(&part_name, changed);
             }
@@ -49599,7 +50733,8 @@ impl Document {
         // Re-parse so the in-memory model reflects the edited markup; otherwise
         // the next flush would write the pre-replacement document back out.
         if changed && let Some(doc_xml) = self.package.get_part(&self.doc_part_name) {
-            self.document = CT_Document::from_xml(doc_xml)?;
+            self.document =
+                crate::document::DocumentModel::unproved(CT_Document::from_xml(doc_xml)?);
         }
 
         Ok(count
@@ -49767,7 +50902,8 @@ impl Document {
 
         // Re-parse document from the (possibly modified) package XML
         if changed && let Some(doc_xml) = self.package.get_part(&self.doc_part_name) {
-            self.document = CT_Document::from_xml(doc_xml)?;
+            self.document =
+                crate::document::DocumentModel::unproved(CT_Document::from_xml(doc_xml)?);
         }
 
         Ok(count
@@ -50406,7 +51542,7 @@ impl Document {
 
         (
             rdocx_html::HtmlInput {
-                document: self.document.clone(),
+                document: (self.document.clone()).into_inner(),
                 styles: CT_Styles::clone(&self.styles),
                 numbering: self.numbering.clone(),
                 images,
@@ -51149,7 +52285,7 @@ impl Document {
             sequence_snapshot: None,
             revision_view: rdocx_layout::RevisionView::Accepted,
             revision_style: rdocx_layout::RevisionStyle::Plain,
-            document,
+            document: (document).into_inner(),
             automatic_hyphenation: self
                 .settings
                 .as_ref()
@@ -54364,7 +55500,8 @@ mod tests {
     fn issue437_controlled_and_nested_cell_routes_keep_physical_selection() {
         let source = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>before</w:t></w:r></w:p><w:sdt><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p><w:r><w:t>after</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(source).unwrap();
+        document.document =
+            crate::document::DocumentModel::unproved(CT_Document::from_xml(source).unwrap());
         let bytes = document.to_bytes().unwrap();
         let mut document = Document::from_bytes(&bytes).unwrap();
         FX282_CELL_EDITS.set([0, 0]);
@@ -54604,7 +55741,9 @@ mod tests {
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>outer before</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="nested table"/></w:sdtPr><w:sdtContent><w:tbl><w:tblPr>{sentinel}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>controlled table</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt><w:p><w:r><w:t>outer after</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
         );
         let mut seed = Document::new();
-        seed.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        seed.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(xml.as_bytes()).unwrap(),
+        );
         let bytes = seed.to_bytes().unwrap();
         for target in 0..3 {
             let mut document = Document::from_bytes(&bytes).unwrap();
@@ -55963,7 +57102,7 @@ mod tests {
             .unwrap()
             .set_text("changed last child")
             .unwrap();
-        candidates.push(changed.document);
+        candidates.push((changed.document).into_inner());
         let mut changed = parsed.clone();
         changed
             .root_attributes
@@ -56015,6 +57154,76 @@ mod tests {
         assert!(
             std::ptr::eq(borrowed, cached),
             "a qualified read cloned the entire parsed child"
+        );
+    }
+
+    #[test]
+    fn modeled_namespace_scope_sharing_matches_original_policy() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let cases = [
+            "<w:p/>",
+            "<w:p><w:r><w:t>one</w:t></w:r></w:p><w:p/>",
+            "<w:p xmlns:q='urn:one'><w:r xmlns:q='urn:two'><w:t>nested</w:t></w:r><w:r q:id='after'/></w:p><w:p/>",
+            "<w:p xmlns:q='urn:one'><w:r xmlns:q='urn:one'/></w:p>",
+            "<w:p xmlns='urn:foreign'><w:r xmlns=''/></w:p>",
+            "<w:p xmlns:w='urn:foreign'><w:r/></w:p>",
+            "<w:p xmlns:q='urn:a&amp;b' q:id='one'/>",
+            "<w:p xmlns:q='urn:a&#x20;b' q:id='one'/>",
+            "<w:custom><w:body><w:p/></w:body></w:custom>",
+            "<w:p one='1' one='2'/>",
+            "<w:p one/>",
+            "<w:p xmlns:q='&unknown;'/>",
+            "<w:p xmlns:q='one' xmlns:q='two'/>",
+            "<w:p><w:r></w:p>",
+            "<w:p>",
+        ];
+        let shape = |value: Result<Option<Vec<ModeledOwnerSpan>>>| match value {
+            Ok(value) => format!("OK:{value:?}"),
+            Err(error) => format!("ERR:{error:?}"),
+        };
+        for body in cases {
+            let head = format!(
+                "<q:document xmlns:q='{word}' xmlns:w='{word}' xmlns:unused='urn:unused'><q:body>"
+            );
+            let tail = "</q:body></q:document>";
+            let xml = format!("{head}{body}{tail}");
+            for child in [None, Some(head.len()..head.len() + body.len())] {
+                let expected =
+                    fx268_legacy_modeled_owner_piece_spans(xml.as_bytes(), child.clone());
+                let actual = modeled_owner_piece_spans(xml.as_bytes(), child.clone());
+                assert_eq!(
+                    shape(actual),
+                    shape(expected),
+                    "body={body} child={child:?}"
+                );
+            }
+        }
+        for body in ["", "<p/>", "<p><r/></p><p/>"] {
+            let xml = format!("<document xmlns='{word}'><body>{body}</body></document>");
+            assert_eq!(
+                shape(modeled_owner_piece_spans(xml.as_bytes(), None)),
+                shape(fx268_legacy_modeled_owner_piece_spans(xml.as_bytes(), None))
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_namespace_scope_copies_follow_declarations() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let body =
+            "<w:p><w:r><w:rPr><w:b w:val='0'/></w:rPr><w:t>text</w:t></w:r></w:p>".repeat(12);
+        let xml = format!(
+            "<w:document xmlns:w='{word}' xmlns:unused='urn:unused'><w:body>{body}</w:body></w:document>"
+        );
+        let expected = fx268_legacy_modeled_owner_piece_spans(xml.as_bytes(), None).unwrap();
+        MODELED_NAMESPACE_SCOPE_COPIES.with(|work| work.set([0; 2]));
+        let actual = modeled_owner_piece_spans(xml.as_bytes(), None).unwrap();
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(actual.as_ref().unwrap().len(), 24);
+        let work = MODELED_NAMESPACE_SCOPE_COPIES.with(std::cell::Cell::get);
+        assert_eq!(
+            work[1], 0,
+            "unchanged inherited vectors were deep-copied: {work:?}"
         );
     }
 
@@ -56443,7 +57652,7 @@ mod tests {
                     rejections += 1;
                     let kind = block
                         .staged
-                        .as_ref()
+                        .as_deref()
                         .map(|item| match item {
                             BodyContent::Paragraph(_) => "paragraph",
                             BodyContent::Table(_) => "table",
@@ -57484,6 +58693,154 @@ mod tests {
         let document = Document::from_bytes(output.get_ref()).unwrap();
         document.serialized_main_part().unwrap();
         document
+    }
+
+    #[test]
+    fn cell_initial_owner_reuses_one_actual_current_main_output() {
+        let mut document = writer_comparison_document(
+            "<w:p><w:r><w:t>neighbor</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>alpha</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            true,
+        );
+        let before = document.to_bytes().unwrap();
+        let _ = Document::take_transaction_work();
+        let _ = Document::take_transaction_outputs();
+        let phase = TransactionReadPhase::enter(1);
+        let actual = document.direct_body_cell_story(1, 0, 0).unwrap().unwrap();
+        drop(phase);
+        let work = Document::take_transaction_work();
+        let outputs = Document::take_transaction_outputs();
+        let location = document.direct_body_item_location(1).unwrap().unwrap();
+        let reference = document.story_table_cell(&location, 0, 0).unwrap();
+        assert_eq!(actual, reference);
+        assert_eq!(document.to_bytes().unwrap(), before);
+        assert_eq!(actual.kind, StoryKind::TableCell);
+        assert_eq!(work[1], 1, "actual outputs: {outputs:?}; work={work:?}");
+    }
+
+    #[test]
+    fn cell_initial_owner_preserves_proof_misses_and_current_mutations() {
+        let table =
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>alpha</w:t></w:r></w:p></w:tc></w:tr></w:tbl>";
+        for (label, body, w14, proof_off) in [
+            ("plain", table.to_owned(), true, false),
+            ("no-w14", table.to_owned(), false, false),
+            ("proof-off", table.to_owned(), true, true),
+            (
+                "field",
+                format!(
+                    "<w:p><w:fldSimple w:instr=' PAGE '><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>{table}"
+                ),
+                true,
+                false,
+            ),
+            (
+                "raw",
+                format!("<w:custom xmlns:x='urn:retained'><x:value/></w:custom>{table}"),
+                true,
+                false,
+            ),
+            (
+                "alias",
+                table
+                    .replace("w:", "q:")
+                    .replace("<q:tbl>", &format!("<q:tbl xmlns:q='{W_NS}'>")),
+                true,
+                false,
+            ),
+        ] {
+            let mut document = writer_comparison_document(&body, w14);
+            let slot = document.content_index_of_table(0).unwrap();
+            let before = document.to_bytes().unwrap();
+            let _off = proof_off.then(CanonicalBlockProofOff::enter);
+            let location = document.direct_body_item_location(slot).unwrap().unwrap();
+            let reference = document.story_table_cell(&location, 0, 0).unwrap();
+            let _ = Document::take_transaction_work();
+            let phase = TransactionReadPhase::enter(1);
+            let actual = document
+                .direct_body_cell_story(slot, 0, 0)
+                .unwrap()
+                .unwrap();
+            drop(phase);
+            let work = Document::take_transaction_work();
+            eprintln!(
+                "CELL_INITIAL_SOURCE label={label} outputs={} bytes={}",
+                work[1], work[2]
+            );
+            assert_eq!(actual, reference, "{label}");
+            assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+            if matches!(label, "no-w14" | "proof-off" | "field") {
+                assert_eq!(work[1], 2, "{label}: {work:?}");
+            }
+            for (row, cell) in [(1, 0), (0, 1)] {
+                assert_eq!(
+                    document
+                        .direct_body_cell_story(slot, row, cell)
+                        .unwrap_err()
+                        .to_string(),
+                    document
+                        .story_table_cell(&location, row, cell)
+                        .unwrap_err()
+                        .to_string(),
+                    "{label}"
+                );
+            }
+        }
+        for text in ["alpha", "changed"] {
+            let mut document = owned_transaction_seed();
+            document
+                .table_mut(0)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                .set_text(text);
+            let location = document.direct_body_item_location(1).unwrap().unwrap();
+            assert_eq!(
+                document.direct_body_cell_story(1, 0, 0).unwrap().unwrap(),
+                document.story_table_cell(&location, 0, 0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cell_initial_owner_keeps_related_errors_and_live_bold_source() {
+        let mut document = owned_transaction_seed();
+        document
+            .table_mut(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .paragraph_mut(0)
+            .unwrap()
+            .run_mut(0)
+            .unwrap()
+            .set_bold(true);
+        let location = document.direct_body_item_location(1).unwrap().unwrap();
+        assert_eq!(
+            document.direct_body_cell_story(1, 0, 0).unwrap().unwrap(),
+            document.story_table_cell(&location, 0, 0).unwrap()
+        );
+        document.set_header("related");
+        document.prepare_staged_package().unwrap();
+        let location = document.direct_body_item_location(1).unwrap().unwrap();
+        let part = document
+            .related_story_sources()
+            .unwrap()
+            .into_iter()
+            .find(|source| source.root_kind == StoryKind::Header)
+            .unwrap()
+            .part_name;
+        document.package.remove_part(&part);
+        // The complete related collection still happens before invalid cell coordinates.
+        assert_eq!(
+            document
+                .direct_body_cell_story(1, 9, 0)
+                .unwrap_err()
+                .to_string(),
+            document
+                .story_table_cell(&location, 9, 0)
+                .unwrap_err()
+                .to_string()
+        );
     }
 
     fn owned_transaction_seed() -> Document {
@@ -58823,11 +60180,13 @@ mod tests {
             None
         );
         let missing = MainPartBlocks {
-            blocks: record
-                .blocks
-                .iter()
-                .map(BodyBlockScan::fresh_context_piece)
-                .collect(),
+            blocks: Arc::new(
+                record
+                    .blocks
+                    .iter()
+                    .map(BodyBlockScan::fresh_context_piece)
+                    .collect(),
+            ),
             ..record.clone()
         };
         assert!(
@@ -58854,7 +60213,7 @@ mod tests {
             .push(("probe".into(), "changed".into()));
         let (new_xml, mut published) = MainPartBlocks::assemble(
             &frame,
-            record.blocks.clone(),
+            record.blocks.as_ref().clone(),
             None,
             Some((&record.head, &record.tail)),
         )
@@ -59095,11 +60454,13 @@ mod tests {
             Some(expected.clone())
         );
         let missing = MainPartBlocks {
-            blocks: record
-                .blocks
-                .iter()
-                .map(BodyBlockScan::fresh_context_piece)
-                .collect(),
+            blocks: Arc::new(
+                record
+                    .blocks
+                    .iter()
+                    .map(BodyBlockScan::fresh_context_piece)
+                    .collect(),
+            ),
             ..record.clone()
         };
         assert!(missing.blocks.iter().all(|block| block.staged.is_some()));
@@ -59149,7 +60510,7 @@ mod tests {
             }
             let (new_xml, mut published) = MainPartBlocks::assemble(
                 &changed,
-                record.blocks.clone(),
+                record.blocks.as_ref().clone(),
                 None,
                 Some((&record.head, &record.tail)),
             )
@@ -59335,7 +60696,7 @@ mod tests {
         let (_, scopes) = record
             .cached_document_read_context(&xml, &expected)
             .unwrap();
-        for block in &record.blocks {
+        for block in record.blocks.iter() {
             let direct = block
                 .proved
                 .get()
@@ -59368,7 +60729,8 @@ mod tests {
                         Arc::clone(block)
                     }
                 })
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             ..record.clone()
         };
         let mut current = before.clone();
@@ -59418,7 +60780,7 @@ mod tests {
             .push(("xmlns:foreign".into(), "urn:new".into()));
         let (changed_xml, mut published) = MainPartBlocks::assemble(
             &changed_frame,
-            record.blocks.clone(),
+            record.blocks.as_ref().clone(),
             None,
             Some((&record.head, &record.tail)),
         )
@@ -59612,7 +60974,7 @@ mod tests {
             body_bindings: actual.body_bindings.clone(),
             parsed: None,
         });
-        bad.blocks[index] = Arc::new(last);
+        Arc::make_mut(&mut bad.blocks)[index] = Arc::new(last);
         let mut mismatch = document.document.clone();
         mismatch.body.content.remove(0);
         assert_eq!(bad.proved_document_matches(&source, &mismatch), None);
@@ -59765,7 +61127,7 @@ mod tests {
         let index = bad.blocks.len() - 1;
         let mut last = bad.blocks[index].fresh_context_piece();
         Arc::get_mut(&mut last).unwrap().staged = None;
-        bad.blocks[index] = last;
+        Arc::make_mut(&mut bad.blocks)[index] = last;
         let _ = Document::take_scoped_normalization_work();
         assert!(document.producer_source_blocks(&canonical, &bad).is_some());
         let counts = Document::take_scoped_normalization_work();
@@ -60157,7 +61519,7 @@ mod tests {
             .unwrap();
         let uncached = a9_lookup_sample(|| {
             for _ in 0..3 {
-                for block in &record.blocks {
+                for block in record.blocks.iter() {
                     assert!(!holds_field_words(&block.bytes));
                 }
             }
@@ -60297,7 +61659,7 @@ mod tests {
         let reframed = with_fields
             .edited(&[(tail_at, tail_at, b" ".to_vec())])
             .unwrap();
-        for (before, after) in with_fields.blocks.iter().zip(&reframed.blocks) {
+        for (before, after) in with_fields.blocks.iter().zip(reframed.blocks.iter()) {
             assert_eq!(before.bytes, after.bytes);
             assert_eq!(before.holds_field_words, after.holds_field_words);
             assert!(!Arc::ptr_eq(before, after));
@@ -60858,7 +62220,8 @@ mod tests {
             .unwrap()
             .clone();
         proof.spans[0].end = crossing.blocks[0].bytes.len() + 1;
-        Arc::make_mut(&mut crossing.blocks[0]).namespace_spans = OnceLock::from(Some(proof));
+        Arc::make_mut(&mut Arc::make_mut(&mut crossing.blocks)[0]).namespace_spans =
+            OnceLock::from(Some(proof));
         assert!(
             record
                 .masked_query_namespace_spans(&xml, &crossing)
@@ -62370,7 +63733,10 @@ mod tests {
                 .into_bytes();
             let expected = CT_Document::from_xml(&removed).unwrap();
             set_story_source_xml(&mut document, &main, removed).unwrap();
-            assert_eq!(document.document, expected);
+            assert_eq!(
+                document.document,
+                crate::document::DocumentModel::unproved(expected)
+            );
             assert_eq!(document.paragraphs().len(), count);
         }
         #[cfg(debug_assertions)]
@@ -62493,7 +63859,8 @@ mod tests {
             .collect();
         let poisoned = previous[0].fresh_context_piece();
         fail_context(&poisoned);
-        document.main_part_blocks.as_mut().unwrap().blocks[0] = Arc::clone(&poisoned);
+        Arc::make_mut(&mut document.main_part_blocks.as_mut().unwrap().blocks)[0] =
+            Arc::clone(&poisoned);
         document.document.background_xml = Some(br#"<w:background w:color="FF0000"/>"#.to_vec());
         #[cfg(debug_assertions)]
         let _ = take_staging_work();
@@ -62572,7 +63939,7 @@ mod tests {
             "the same frame reused the current pieces"
         );
         let stable = &document.main_part_blocks.as_ref().unwrap().blocks;
-        for (before, after) in held.iter().zip(stable) {
+        for (before, after) in held.iter().zip(stable.iter()) {
             assert!(Arc::ptr_eq(before, after));
         }
         assert!(
@@ -62586,6 +63953,7 @@ mod tests {
             owners: Vec::new(),
             items: None,
             staged: None,
+            standalone_value: OnceLock::new(),
             proved: OnceLock::new(),
             declares_namespace: false,
             holds_field_words: false,
@@ -63743,12 +65111,16 @@ mod tests {
         let alias = format!(
             "<q:document xmlns:q=\"{W_NS}\"><q:body><q:p><q:r><q:t>alias</q:t></q:r></q:p></q:body></q:document>"
         );
-        document.document = CT_Document::from_xml(alias.as_bytes()).expect("alias");
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(alias.as_bytes()).expect("alias"),
+        );
         assert_old_body_result(&document);
         let defaults = format!(
             "<document xmlns=\"{W_NS}\"><body><p><r><t>defaults</t></r></p></body></document>"
         );
-        document.document = CT_Document::from_xml(defaults.as_bytes()).expect("defaults");
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(defaults.as_bytes()).expect("defaults"),
+        );
         assert_old_body_result(&document);
     }
 
@@ -64486,7 +65858,9 @@ mod tests {
                 "<w:document xmlns:w='{WORD_NAMESPACE}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><w:body>{content}<w:sectPr/></w:body></w:document>"
             );
             let mut document = Document::new();
-            document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            document.document = crate::document::DocumentModel::unproved(
+                CT_Document::from_xml(xml.as_bytes()).unwrap(),
+            );
             fx237_assert_combined_inventory(&document);
             if content.contains("r:id='missing'") {
                 assert!(document.story_link_snapshots().is_err());
@@ -64527,7 +65901,9 @@ mod tests {
             let xml = format!(
                 "<w:document xmlns:w='{WORD_NAMESPACE}'><w:body>{content}<w:sectPr/></w:body></w:document>"
             );
-            document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            document.document = crate::document::DocumentModel::unproved(
+                CT_Document::from_xml(xml.as_bytes()).unwrap(),
+            );
             fx237_assert_combined_inventory(&document);
             let actual = document.story_table_cell_snapshots().unwrap();
             let mut expected = HashMap::new();
@@ -66264,7 +67640,7 @@ mod tests {
                 let parsed = CT_Document::from_xml(source.as_bytes()).unwrap();
                 eprintln!("FX211_CLONE equal-parse-after");
                 eprintln!("FX211_CLONE equal-before");
-                assert!(parsed == document.document);
+                assert!(parsed == *document.document);
                 eprintln!("FX211_CLONE equal-after");
                 drop(parsed);
                 eprintln!("FX211_CLONE equal-drop-after");
@@ -72523,8 +73899,9 @@ mod tests {
             r#"<w:settings xmlns:w="{word}" xmlns:m="{math}"><m:mathPr><m:mathFont m:val="Caladea"/><m:jc m:val="right"/><m:preSp m:val="80"/><m:postSp m:val="120"/></m:mathPr></w:settings>"#
         );
         let mut document = Document::new();
-        document.document =
-            CT_Document::from_xml(document_xml.as_bytes()).expect("document parses");
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(document_xml.as_bytes()).expect("document parses"),
+        );
         document.settings =
             Some(CT_Settings::from_xml(settings_xml.as_bytes()).expect("math settings parse"));
 
@@ -76767,7 +78144,7 @@ mod tests {
         );
         assert_eq!(notes.to_bytes().unwrap(), before);
         let mut field = Document::new();
-        field.document=CT_Document::from_xml(format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>{{% if include %}}</w:t></w:r></w:p><w:p><w:r><w:t>{{% endif %}}</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#).as_bytes()).unwrap();
+        field.document=crate::document::DocumentModel::unproved(CT_Document::from_xml(format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>{{% if include %}}</w:t></w:r></w:p><w:p><w:r><w:t>{{% endif %}}</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#).as_bytes()).unwrap());
         let before = field.to_bytes().unwrap();
         let mut calls = 0;
         assert!(
@@ -77930,7 +79307,8 @@ mod tests {
     fn repeated_table_level_controls_use_the_row_loop_scope() {
         let xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>{% for item in items %}</w:t></w:r></w:p></w:tc></w:tr><w:sdt><w:sdtPr><w:tag w:val="row-control"/></w:sdtPr><w:sdtContent><w:tr><w:tc><w:p><w:r><w:t>control {{ item.name }}</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt><w:tr><w:tc><w:p><w:r><w:t>row {{ item.name }}</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>{% endfor %}</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#;
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(xml).unwrap();
+        document.document =
+            crate::document::DocumentModel::unproved(CT_Document::from_xml(xml).unwrap());
 
         assert_eq!(
             document
@@ -79145,7 +80523,9 @@ mod tests {
         );
         let xml = format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#);
         let mut document = Document::new();
-        document.document = rdocx_oxml::document::CT_Document::from_xml(xml.as_bytes()).unwrap();
+        document.document = crate::document::DocumentModel::unproved(
+            rdocx_oxml::document::CT_Document::from_xml(xml.as_bytes()).unwrap(),
+        );
         assert_eq!(document.paragraphs().len(), 7);
         assert_eq!(
             paragraph_visibility_from_main_source(
@@ -83210,6 +84590,140 @@ mod tests {
     }
 
     #[test]
+    fn body_item_read_context_accepts_only_unique_retained_namespace_reordering() {
+        let pairs = |first: &str, second: &str| {
+            vec![
+                (first.to_owned(), "urn:first".to_owned()),
+                (second.to_owned(), "urn:second".to_owned()),
+            ]
+        };
+        let original = BodyItemContext {
+            part_name: "/word/document.xml".into(),
+            root: [
+                pairs("xmlns:a", "xmlns:b"),
+                pairs("a:mode", "b:mode"),
+                pairs("xmlns", "xmlns:a"),
+                pairs("xmlns:c", "xmlns:d"),
+                pairs("xmlns", "xmlns:a"),
+            ],
+            plain_local_edit_blocked: true,
+        };
+        let mut reordered = original.clone();
+        reordered.root[2].reverse();
+        reordered.root[4].reverse();
+        assert_ne!(original, reordered, "source/writer equality stays exact");
+        assert!(original.read_facts_compatible(&reordered));
+        assert!(reordered.read_facts_compatible(&original));
+        for count in [0, 1, 2] {
+            let mut small = original.clone();
+            small.root[2].truncate(count);
+            small.root[4].truncate(count);
+            let mut other = small.clone();
+            other.root[2].reverse();
+            other.root[4].reverse();
+            assert!(small.read_facts_compatible(&other), "count={count}");
+        }
+        for index in 0..5 {
+            for change in 0..5 {
+                let mut other = reordered.clone();
+                match change {
+                    0 => other.root[index][0].0.push('x'),
+                    1 => other.root[index][0].1.push('x'),
+                    2 => {
+                        other.root[index].pop();
+                    }
+                    3 => other.root[index].push(other.root[index][0].clone()),
+                    _ => other.root[index][0].0 = "XMLNS:changed".into(),
+                }
+                assert!(
+                    !original.read_facts_compatible(&other),
+                    "index={index} change={change}"
+                );
+                assert!(
+                    !other.read_facts_compatible(&original),
+                    "reverse index={index} change={change}"
+                );
+            }
+            let mut other = original.clone();
+            other.root[index].reverse();
+            assert_eq!(
+                original.read_facts_compatible(&other),
+                matches!(index, 2 | 4)
+            );
+            // An unchanged duplicate in another collection cannot enable the
+            // newly admitted order-only branch, on either side.
+            let mut duplicate = original.clone();
+            duplicate.root[index].push(duplicate.root[index][0].clone());
+            assert!(duplicate.read_facts_compatible(&duplicate));
+            let mut changed = duplicate.clone();
+            changed.root[2].reverse();
+            changed.root[4].reverse();
+            assert!(
+                !duplicate.read_facts_compatible(&changed),
+                "duplicate index={index}"
+            );
+            assert!(!changed.read_facts_compatible(&duplicate));
+        }
+        for change in [0, 1] {
+            let mut other = reordered.clone();
+            if change == 0 {
+                other.part_name.push('x');
+            } else {
+                other.plain_local_edit_blocked = false;
+            }
+            assert!(!original.read_facts_compatible(&other));
+            assert!(!other.read_facts_compatible(&original));
+        }
+        let mut non_namespace = original.clone();
+        non_namespace.root[2][0].0 = "not-a-declaration".into();
+        let mut changed = non_namespace.clone();
+        changed.root[2].reverse();
+        assert!(!non_namespace.read_facts_compatible(&changed));
+    }
+
+    #[test]
+    fn body_item_owner_facts_ignore_only_retained_declaration_order() {
+        let original = issue407_document(&issue407_varied_body(""), false);
+        let mut reordered = original.clone_for_staging();
+        reordered.root_namespace_declarations.reverse();
+        reordered.body_namespace_bindings.reverse();
+        assert_ne!(original.body_item_context(), reordered.body_item_context());
+        assert!(
+            original
+                .body_item_context()
+                .read_facts_compatible(&reordered.body_item_context())
+        );
+        for item in original.body_children() {
+            let before = original.body_item_owners(item).unwrap();
+            let after = reordered.body_item_owners(item).unwrap();
+            let snapshots = |items: &[StoryItemSnapshot]| {
+                items
+                    .iter()
+                    .map(|item| {
+                        (
+                            item.location().clone(),
+                            item.direct_body_index(),
+                            item.is_direct_child(),
+                            item.text().map(str::to_owned),
+                            item.xml().to_vec(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(snapshots(&before.snapshots), snapshots(&after.snapshots));
+            assert_eq!(before.cells, after.cells);
+            assert_eq!(before.paragraphs, after.paragraphs);
+            assert_eq!(format!("{:?}", before.links), format!("{:?}", after.links));
+            assert_eq!(before.cell_stories, after.cell_stories);
+            assert_eq!(before.text_boxes, after.text_boxes);
+            assert_eq!(before.paragraph_routes, after.paragraph_routes);
+            assert_eq!(before.tables, after.tables);
+            assert_eq!(before.cell_paragraphs, after.cell_paragraphs);
+            assert_eq!(before.holds_field, after.holds_field);
+        }
+    }
+
+    #[test]
     fn word_owner_piece_sources_match_the_full_physical_inventory() {
         type TableShape = (Vec<oxml_core::Twips>, Vec<Vec<(usize, Vec<String>)>>);
         fn table_shape(table: &rdocx_oxml::table::CT_Tbl) -> TableShape {
@@ -84342,13 +85856,1826 @@ mod tests {
         assert_eq!(current, baseline, "serialization must stay equal");
         let kept = document.kept_main_part().expect("opened main");
         let parsed = kept.main_document().expect("cached parse");
-        assert_ne!(parsed, &document.document, "parsed model must differ");
+        assert_ne!(parsed, &*document.document, "parsed model must differ");
         assert!(!document.opened_main_still_serializes());
         let mut disabled = document.clone_for_staging();
         disabled.parsed = None;
         let cached = document.clone_for_staging().to_bytes().unwrap();
         let old = disabled.to_bytes().unwrap();
         assert_eq!(cached, old);
+    }
+
+    fn fx268_assert_opened_scheduling_matches_legacy(
+        document: &Document,
+    ) -> std::result::Result<Option<()>, String> {
+        let expected = document.fx268_legacy_opened_plain_body_paragraph_facts();
+        let actual = document.opened_plain_body_paragraph_facts();
+        match (expected, actual) {
+            (Ok(expected), Ok(actual)) => {
+                assert_eq!(actual, expected, "complete facts and loan availability");
+                if let (Some(expected), Some(actual)) = (&expected, &actual) {
+                    for ((old_model, _, _), (new_model, _, _)) in expected.iter().zip(actual) {
+                        if let (Some(old_model), Some(new_model)) = (old_model, new_model) {
+                            assert!(
+                                Arc::ptr_eq(old_model, new_model),
+                                "actual writer loan identity"
+                            );
+                        }
+                    }
+                }
+                Ok(actual.map(|_| ()))
+            }
+            (Err(expected), Err(actual)) => {
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                Err(format!("{actual:?}"))
+            }
+            (expected, actual) => panic!("scheduling changed refusal: {expected:?} -> {actual:?}"),
+        }
+    }
+
+    #[test]
+    fn finite_opening_text_materialization_matches_complete_legacy_facts() {
+        let many = format!(
+            "<w:p>{}</w:p>",
+            (0..64)
+                .map(|index| format!("<w:r><w:t>{index} </w:t><w:t>X</w:t></w:r>"))
+                .collect::<String>()
+        );
+        let expected_many = (0..64)
+            .map(|index| format!("{index} X"))
+            .collect::<String>();
+        for (body, expected, runs) in [
+            ("<w:p></w:p>".to_owned(), String::new(), 0),
+            ("<w:p><w:r></w:r></w:p>".to_owned(), String::new(), 1),
+            ("<w:p><w:r><w:t></w:t></w:r></w:p>".to_owned(), String::new(), 1),
+            (
+                r#"<w:p><w:r><w:t xml:space="preserve"> A  </w:t><w:t>B0</w:t><w:t></w:t></w:r><w:r></w:r><w:r><w:t xml:space="preserve"> C </w:t></w:r></w:p>"#.to_owned(),
+                " A  B0 C ".to_owned(),
+                3,
+            ),
+            (
+                "<w:p><w:r><w:t>&#65;&#x20;0</w:t></w:r></w:p>".to_owned(),
+                "A 0".to_owned(),
+                1,
+            ),
+            (
+                "<w:p><w:r><w:rPr><w:b w:val=\"0\"/><w:sz w:val=\"20\"/></w:rPr><w:t>Az09</w:t></w:r></w:p>".to_owned(),
+                "Az09".to_owned(),
+                1,
+            ),
+            (many, expected_many, 64),
+        ] {
+            let document = issue407_document(&body, false);
+            for with_writer in [false, true] {
+                if with_writer {
+                    document.story_part_sources().unwrap();
+                }
+                assert_eq!(fx268_assert_opened_scheduling_matches_legacy(&document), Ok(Some(())), "{body} writer={with_writer}");
+                let facts = document.opened_plain_body_paragraph_facts().unwrap().unwrap();
+                assert_eq!(facts.len(), 1, "{body}");
+                assert_eq!(facts[0].1, expected, "{body}");
+                assert_eq!(facts[0].2.len(), runs, "{body}");
+                for (index, path) in facts[0].2.iter().enumerate() {
+                    assert_eq!(path.segments(), &[rdocx_oxml::text::AcceptedRunPathSegment::Run(index)]);
+                }
+            }
+        }
+        for body in [
+            "<w:p><w:r><w:t>é</w:t></w:r></w:p>",
+            "<w:p><w:r><w:tab/><w:t>A</w:t></w:r></w:p>",
+            "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>A</w:t></w:r></w:p>",
+        ] {
+            let document = issue407_document(body, false);
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(None),
+                "{body}"
+            );
+        }
+    }
+
+    fn standalone_value_fixture(body: &str) -> (Document, ContentLocation, Vec<u8>) {
+        let document = issue407_document(body, false);
+        let (_, _, location, xml) = document
+            .comment_story_range_paragraphs()
+            .unwrap()
+            .into_iter()
+            .find(|(_, _, location, _)| {
+                location.story.kind == StoryKind::Body
+                    && location.story.owner_index == 0
+                    && location.index_path.len() == 1
+            })
+            .unwrap();
+        (document, location, xml)
+    }
+
+    #[test]
+    fn standalone_value_hits_do_not_deep_clone_the_proved_paragraph() {
+        let (document, location, xml) =
+            standalone_value_fixture("<w:p><w:r><w:t>clone saved</w:t></w:r></w:p>");
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        let first = document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        let second = document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        let first: &CT_P = &first;
+        let second: &CT_P = &second;
+        assert_eq!(
+            first, second,
+            "actual returned reader values must agree first"
+        );
+        let work = STANDALONE_VALUE_WORK.with(std::cell::Cell::get);
+        assert_eq!(work[0], 1, "one genuine first read");
+        assert_eq!(work[1], 1, "one exact proved hit");
+        assert_eq!(work[3], 0, "the hit must not deep-clone its paragraph");
+    }
+
+    #[test]
+    fn standalone_value_loans_hold_exact_snapshots_without_retaining_cache_authority() {
+        let (document, location, xml) =
+            standalone_value_fixture("<w:p><w:r><w:t>old snapshot</w:t></w:r></w:p>");
+        let block = document.comment_paragraph_read().candidates[0].clone();
+        let first = standalone_value_read_block(block.clone(), &location, &xml).unwrap();
+        assert!(matches!(&first.storage, CommentParagraphStorage::Owned(_)));
+        let loan = standalone_value_read_block(block.clone(), &location, &xml).unwrap();
+        let CommentParagraphStorage::Model { root, .. } = &loan.storage else {
+            panic!("proved hit must lend the immutable selected root");
+        };
+        let weak = Arc::downgrade(root);
+        let cell = block.standalone_value.get().unwrap().clone();
+
+        let replacement_xml = String::from_utf8(xml.clone())
+            .unwrap()
+            .replace("old snapshot", "new snapshot");
+        let mut replacement = (*block).clone();
+        replacement.staged = Some(Arc::new(BodyContent::Paragraph(Box::new(
+            CT_P::from_xml_fragment(replacement_xml.as_bytes()).unwrap(),
+        ))));
+        let replacement = Arc::new(replacement);
+        let changed =
+            standalone_value_read_block(replacement.clone(), &location, replacement_xml.as_bytes())
+                .unwrap();
+        assert!(matches!(
+            &changed.storage,
+            CommentParagraphStorage::Owned(_)
+        ));
+        let changed_loan =
+            standalone_value_read_block(replacement.clone(), &location, replacement_xml.as_bytes())
+                .unwrap();
+        let CommentParagraphStorage::Model {
+            root: changed_root, ..
+        } = &changed_loan.storage
+        else {
+            panic!("the replacement needs its own first read before lending");
+        };
+        assert!(!Arc::ptr_eq(root, changed_root));
+        assert_eq!(loan.accepted_text(), "old snapshot");
+        assert_eq!(changed_loan.accepted_text(), "new snapshot");
+        *cell.lock().unwrap() = None;
+        drop(replacement);
+        drop(block);
+        drop(document);
+        assert!(
+            weak.upgrade().is_some(),
+            "the returned loan owns its old snapshot"
+        );
+        assert_eq!(loan.accepted_text(), "old snapshot");
+        drop(loan);
+        assert!(
+            weak.upgrade().is_none(),
+            "neither parsed values nor the cleared cache own that root"
+        );
+        assert_eq!(changed_loan.accepted_text(), "new snapshot");
+        drop(changed_loan);
+    }
+
+    #[test]
+    fn standalone_table_loans_share_one_root_and_release_it_after_the_last_selector() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let block = document.comment_paragraph_read().tables[0].clone();
+        let mut loans = Vec::new();
+        for (index, (location, xml)) in paragraphs.iter().take(2).enumerate() {
+            let first = standalone_table_read_at(block.clone(), location, index, xml).unwrap();
+            assert!(matches!(&first.storage, CommentParagraphStorage::Owned(_)));
+            let loan = standalone_table_read_at(block.clone(), location, index, xml).unwrap();
+            assert_eq!(*loan, *first);
+            loans.push(loan);
+        }
+        let CommentParagraphStorage::Model { root: first, .. } = &loans[0].storage else {
+            panic!("first model loan")
+        };
+        let CommentParagraphStorage::Model { root: second, .. } = &loans[1].storage else {
+            panic!("second model loan")
+        };
+        assert!(
+            Arc::ptr_eq(first, second),
+            "two selectors retain one existing table allocation"
+        );
+        let weak = Arc::downgrade(first);
+        let cell = block.standalone_value.get().unwrap().clone();
+        drop(block);
+        drop(document);
+        assert_eq!(loans[0].accepted_text(), "Alpha");
+        assert_eq!(loans[1].accepted_text(), "Beta");
+        drop(loans.pop());
+        assert!(
+            weak.upgrade().is_some(),
+            "one remaining selector still owns the table"
+        );
+        drop(loans);
+        assert!(
+            weak.upgrade().is_none(),
+            "the metadata cell retains only a Weak root"
+        );
+        assert!(
+            cell.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .model
+                .upgrade()
+                .is_none()
+        );
+    }
+
+    fn standalone_value_read_block(
+        block: Arc<BodyBlockScan>,
+        location: &ContentLocation,
+        xml: &[u8],
+    ) -> Result<CommentParagraphValue> {
+        CommentParagraphRead::from_blocks(&location.story.part_name, &[block]).read(location, xml)
+    }
+
+    #[test]
+    fn standalone_value_actual_read_then_hit_and_complete_key_replacement() {
+        let (document, location, xml) = standalone_value_fixture(&issue407_runs(1));
+        let expected = CT_P::from_xml_fragment(&xml).unwrap();
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        assert_eq!(
+            *document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            *document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [1, 1, xml.len(), 0, 1]
+        );
+        let alternate = String::from_utf8(xml.clone())
+            .unwrap()
+            .replacen("run 0", "&#114;un 0", 1)
+            .into_bytes();
+        assert_ne!(alternate, xml);
+        assert_eq!(
+            *document
+                .comment_paragraph_read()
+                .read(&location, &alternate)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            *document
+                .comment_paragraph_read()
+                .read(&location, &alternate)
+                .unwrap(),
+            expected
+        );
+        let work = STANDALONE_VALUE_WORK.with(std::cell::Cell::get);
+        assert_eq!(work, [2, 2, xml.len() + alternate.len(), 0, 2]);
+        let snapshot = document.comment_paragraph_read();
+        let block = &snapshot.candidates[0];
+        let proof = block.standalone_value.get().unwrap().lock().unwrap();
+        assert_eq!(
+            proof
+                .as_ref()
+                .unwrap()
+                .keys
+                .key(StandaloneParagraphSelector::Paragraph),
+            Some(alternate.as_slice())
+        );
+        assert!(Arc::ptr_eq(
+            &proof.as_ref().unwrap().model.upgrade().unwrap(),
+            block.staged.as_ref().unwrap()
+        ));
+        drop(proof);
+        document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[0],
+            3,
+            "only one positive key survives"
+        );
+    }
+
+    #[test]
+    fn standalone_table_values_read_first_then_hit_each_physical_selector() {
+        let document = issue407_document(
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w='1000' w:type='dxa'/></w:tcPr><w:p><w:r><w:t>Alpha</w:t></w:r></w:p><w:p><w:r><w:t>Beta</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Gamma</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            false,
+        );
+        let paragraphs = document
+            .comment_story_range_paragraphs()
+            .unwrap()
+            .into_iter()
+            .filter(|(_, _, location, _)| location.story.kind == StoryKind::TableCell)
+            .map(|(_, _, location, xml)| {
+                let expected = CT_P::from_xml_fragment(&xml).unwrap();
+                (location, xml, expected)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paragraphs.len(), 3);
+        assert_eq!(paragraphs[0].0.index_path, [1]);
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        for _ in 0..2 {
+            let mut reader = document.comment_paragraph_read();
+            for (location, xml, expected) in &paragraphs {
+                assert_eq!(&*reader.read(location, xml).unwrap(), expected);
+            }
+        }
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [
+                3,
+                3,
+                paragraphs.iter().map(|(_, xml, _)| xml.len()).sum(),
+                0,
+                3
+            ],
+            "each physical selector needs a real first read and its own warm key"
+        );
+        let reader = document.comment_paragraph_read();
+        assert_eq!(reader.tables.len(), 1);
+        let state = reader.tables[0]
+            .standalone_value
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap();
+        let StandaloneParagraphKeys::Cells(keys) = &state.as_ref().unwrap().keys else {
+            panic!("table selector map");
+        };
+        assert_eq!(keys.len(), 3);
+        assert!(keys.capacity() >= 3);
+        assert!(keys.contains_key(&[0, 0, 0]));
+        assert!(keys.contains_key(&[0, 0, 1]));
+        assert!(keys.contains_key(&[0, 1, 0]));
+        eprintln!(
+            "STANDALONE_TABLE_STORAGE roots=1 keys={} map_capacity={} key_lengths={:?} key_capacities={:?} value_size={} keys_enum_size={} hint_size={}",
+            keys.len(),
+            keys.capacity(),
+            keys.values().map(Vec::len).collect::<Vec<_>>(),
+            keys.values().map(Vec::capacity).collect::<Vec<_>>(),
+            std::mem::size_of::<StandaloneParagraphValue>(),
+            std::mem::size_of::<StandaloneParagraphKeys>(),
+            std::mem::size_of::<CommentCellValueHint>(),
+        );
+    }
+
+    #[test]
+    fn native_story_frame_consumers_preserve_complete_outcomes() {
+        let wrapped = |body: &str| {
+            format!(
+                "<w:body xmlns:w='{W_NS}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' xmlns:wp='http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:wps='http://schemas.microsoft.com/office/word/2010/wordprocessingShape' xmlns:v='urn:schemas-microsoft-com:vml'>{body}</w:body>"
+            )
+        };
+        let ordinary = wrapped(
+            "<w:p><w:pPr><w:tabs><w:tab w:val='left' w:pos='720'/></w:tabs></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Alpha</w:t><w:tab/><w:br/><w:t>Beta</w:t></w:r></w:p><w:p/><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr><w:tr/></w:tbl>",
+        );
+        let controls = wrapped(
+            "<w:sdt><w:sdtContent><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:sdtContent><w:sdtContent><w:p><w:r><w:t>Opaque</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p><w:sdt><w:sdtContent><w:r><w:t>Inline</w:t></w:r></w:sdtContent></w:sdt></w:p><w:tbl><w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc><w:p/></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt></w:tbl>",
+        );
+        let annotations = wrapped(
+            "<w:p><w:bookmarkStart w:id='7' w:name='Here'/><w:hyperlink r:id='rId9' w:anchor='Here'><w:r><w:t>Link</w:t></w:r></w:hyperlink><w:bookmarkEnd w:id='7'></w:bookmarkEnd><w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>DATE</w:instrText></w:r><w:r><w:fldChar w:fldCharType='separate'/><w:t>Result</w:t></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r><w:del><w:r><w:delText>Gone</w:delText></w:r></w:del><w:ins><w:r><w:t>New</w:t></w:r></w:ins></w:p>",
+        );
+        let paired = wrapped(
+            "<w:p><w:r><mc:AlternateContent><mc:Choice Requires='wps'><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>",
+        );
+        let large = wrapped(&format!(
+            "<w:p probe='{}'><w:r><w:rPr/><w:t>After buffer growth</w:t></w:r></w:p><q:résumé xmlns:q='urn:q'><q:p/><q:r/><q:rPr/><q:t/><q:paragraph/><q:R/></q:résumé><w:p><w:r><w:t>Tail</w:t></w:r></w:p>",
+            "x".repeat(16384)
+        ));
+        let mut fixtures = vec![
+            ("empty", wrapped("")),
+            ("ordinary", ordinary.clone()),
+            (
+                "aliases",
+                ordinary.replace("w:", "q:").replace("xmlns:w=", "xmlns:q="),
+            ),
+            (
+                "default",
+                ordinary.replace("w:", "").replace("xmlns:w=", "xmlns="),
+            ),
+            (
+                "shadow",
+                wrapped(
+                    "<w:p xmlns:w='urn:foreign'><w:r><w:t>Foreign</w:t></w:r></w:p><w:p><w:r><w:t>Word</w:t></w:r></w:p>",
+                ),
+            ),
+            ("controls", controls),
+            ("annotations", annotations),
+            ("paired", paired),
+            ("large-unknown-case-unicode", large),
+            ("bad-close", wrapped("<w:p><w:r><w:t>Text</w:t></w:q>")),
+            ("bad-attribute", wrapped("<w:p broken='x><w:r/></w:p>")),
+            (
+                "entity-policy",
+                wrapped("<w:p><w:r><w:t>&bogus;</w:t></w:r></w:p>"),
+            ),
+            (
+                "duplicate-bookmark-id",
+                wrapped("<w:p><w:bookmarkStart w:id='1' w:id='2'/></w:p>"),
+            ),
+            (
+                "bookmark-child",
+                wrapped("<w:p><w:bookmarkStart w:id='1'><w:r/></w:bookmarkStart></w:p>"),
+            ),
+        ];
+        let incomplete = wrapped("<w:p><w:r><w:t>EOF</w:t></w:r></w:p>");
+        fixtures.push(("eof", incomplete[..incomplete.len() - 9].to_owned()));
+        let mut calls = [0usize; 10];
+        for (label, xml) in fixtures {
+            let bytes = xml.as_bytes();
+            A9_LOOKUP_WORK.with(|work| *work.borrow_mut() = (true, BTreeMap::new()));
+            let mut outcomes = Vec::new();
+            calls[0] += 1;
+            outcomes.push(format!(
+                "copies {:?}",
+                scoped_alternate_text_box_copies(bytes)
+                    .map(|copies| copies
+                        .into_iter()
+                        .map(|copy| (copy.alternate, copy.branch, copy.range))
+                        .collect::<Vec<_>>())
+                    .map_err(|error| format!("{error:?}"))
+            ));
+            calls[2] += 1;
+            outcomes.push(format!(
+                "table-children {:?}",
+                template_direct_table_children(bytes).map_err(|error| format!("{error:?}"))
+            ));
+            calls[7] += 1;
+            outcomes.push(format!(
+                "bookmarks {:?}",
+                bookmark_marker_spans(bytes)
+                    .map(|markers| markers
+                        .into_iter()
+                        .map(|marker| (marker.start, marker.id, marker.span))
+                        .collect::<Vec<_>>())
+                    .map_err(|error| format!("{error:?}"))
+            ));
+            calls[3] += 1;
+            match scan_story_owners_with_special(bytes, StoryKind::Body, false) {
+                Ok(owners) => {
+                    outcomes.push(format!(
+                        "owners {:?}",
+                        owners
+                            .iter()
+                            .map(|owner| (
+                                owner.kind,
+                                owner.owner_index,
+                                owner.full.clone(),
+                                owner.fingerprint
+                            ))
+                            .collect::<Vec<_>>()
+                    ));
+                    for owner in &owners {
+                        calls[5] += 1;
+                        let mut field_ranges = Vec::new();
+                        match scan_story_items(bytes, owner, Some(&mut field_ranges)) {
+                            Ok(items) => {
+                                outcomes.push(format!(
+                                    "items {:?} fields {:?}",
+                                    items
+                                        .iter()
+                                        .map(|item| (
+                                            item.kind,
+                                            item.full.clone(),
+                                            item.scan.clone(),
+                                            item.direct_owner_child,
+                                            item.complex_field,
+                                            item.complex_ancestors.clone()
+                                        ))
+                                        .collect::<Vec<_>>(),
+                                    field_ranges
+                                ));
+                                for item in &items {
+                                    calls[6] += 1;
+                                    outcomes.push(format!(
+                                        "links {:?}",
+                                        scan_story_item_links(bytes, item)
+                                            .map(|links| links
+                                                .into_iter()
+                                                .map(|link| (link.full, link.rel_id, link.anchor))
+                                                .collect::<Vec<_>>())
+                                            .map_err(|error| format!("{error:?}"))
+                                    ));
+                                    calls[8] += 1;
+                                    outcomes.push(format!(
+                                        "text {:?}",
+                                        story_item_text(bytes, item, &items, 0..bytes.len(), 0)
+                                            .map_err(|error| format!("{error:?}"))
+                                    ));
+                                    calls[9] += 1;
+                                    outcomes.push(format!(
+                                        "replacement {:?}",
+                                        replace_story_item_text(bytes, item, "Changed")
+                                            .map_err(|error| format!("{error:?}"))
+                                    ));
+                                    if item.kind == StoryItemKind::ContentControl {
+                                        calls[4] += 1;
+                                        outcomes.push(format!(
+                                            "control {:?}",
+                                            scan_story_control_paragraphs(bytes, item)
+                                                .map_err(|error| format!("{error:?}"))
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(error) => outcomes.push(format!("items-error {error:?}")),
+                        }
+                    }
+                }
+                Err(error) => outcomes.push(format!("owners-error {error:?}")),
+            }
+            let work = A9_LOOKUP_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()).1);
+            eprintln!("NATIVE_FRAME_OUTCOME {label} {outcomes:?} work={work:?}");
+        }
+        let textbox = format!(
+            "<w:txbxContent xmlns:w='{W_NS}'><w:p><w:r><w:rPr/><w:t>Visible</w:t></w:r></w:p><w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:txbxContent>"
+        );
+        calls[1] += 1;
+        let projection =
+            paired_text_box_projection(textbox.as_bytes(), 0..textbox.len(), None).unwrap();
+        assert!(projection.signature.iter().any(|value| value == "Visible"));
+        eprintln!(
+            "NATIVE_FRAME_OUTCOME textbox {:?}",
+            (projection.signature, projection.slots)
+        );
+        let notes = format!(
+            "<w:footnotes xmlns:w='{W_NS}'><w:footnote w:id='-1' w:type='separator'><w:p/></w:footnote><w:footnote w:id='2'><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>"
+        );
+        for include in [false, true] {
+            calls[3] += 1;
+            let owners =
+                scan_story_owners_with_special(notes.as_bytes(), StoryKind::Footnote, include)
+                    .unwrap();
+            assert_eq!(owners.len(), if include { 2 } else { 1 });
+            eprintln!(
+                "NATIVE_FRAME_OUTCOME notes-{include} {:?}",
+                owners
+                    .iter()
+                    .map(|owner| (
+                        owner.kind,
+                        owner.owner_index,
+                        owner.full.clone(),
+                        owner.fingerprint
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let invalid = b"<w:\xff xmlns:w='urn:q'></w:\xff>";
+        let item = StoryItemSpan {
+            kind: StoryItemKind::Paragraph,
+            full: 0..invalid.len(),
+            scan: 0..invalid.len(),
+            direct_owner_child: true,
+            complex_field: false,
+            complex_ancestors: Vec::new(),
+            sdt_context: None,
+        };
+        let failure = replace_story_item_text(invalid, &item, "Changed").unwrap_err();
+        calls[9] += 1;
+        eprintln!("NATIVE_FRAME_OUTCOME invalid-root-utf8 {failure:?}");
+        assert!(
+            calls.iter().all(|count| *count > 0),
+            "all ten actual consumers must run"
+        );
+        eprintln!(
+            "NATIVE_FRAME_CONSUMERS {calls:?} frame_size={}",
+            std::mem::size_of::<XmlElementFrame>()
+        );
+    }
+
+    fn standalone_table_fixture() -> (Document, Vec<(ContentLocation, Vec<u8>)>) {
+        let document = issue407_document(
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w='1000' w:type='dxa'/></w:tcPr><w:p><w:r><w:t>Alpha</w:t></w:r></w:p><w:p><w:r><w:t>Beta</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Gamma</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            false,
+        );
+        let paragraphs = document
+            .comment_story_range_paragraphs()
+            .unwrap()
+            .into_iter()
+            .filter(|(_, _, location, _)| location.story.kind == StoryKind::TableCell)
+            .map(|(_, _, location, xml)| (location, xml))
+            .collect();
+        (document, paragraphs)
+    }
+
+    fn standalone_table_read_at(
+        block: Arc<BodyBlockScan>,
+        location: &ContentLocation,
+        ordinal: usize,
+        xml: &[u8],
+    ) -> Result<CommentParagraphValue> {
+        let mut reader = CommentParagraphRead::from_blocks(&location.story.part_name, &[block]);
+        if let Some(hint) = reader.cells.get_mut(location.story.owner_index) {
+            hint.next_paragraph = ordinal;
+        }
+        reader.read(location, xml)
+    }
+
+    #[test]
+    fn standalone_table_keys_replace_remove_only_the_selected_key_and_preserve_errors() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let reader = document.comment_paragraph_read();
+        let block = reader.tables[0].clone();
+        let (first, xml) = &paragraphs[0];
+        let expected = CT_P::from_xml_fragment(xml).unwrap();
+        let alternate = String::from_utf8(xml.clone())
+            .unwrap()
+            .replacen("Alpha", "&#65;lpha", 1)
+            .into_bytes();
+        let bad = String::from_utf8(xml.clone())
+            .unwrap()
+            .replacen("</w:p>", "</w:q>", 1)
+            .into_bytes();
+        let expected_error =
+            CT_P::from_xml_fragment(&bad).map_err(|error| Error::from(error).to_string());
+        assert!(expected_error.is_err());
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        for (index, (location, xml)) in paragraphs.iter().enumerate() {
+            standalone_table_read_at(block.clone(), location, usize::from(index == 1), xml)
+                .unwrap();
+        }
+        assert_eq!(
+            *standalone_table_read_at(block.clone(), first, 0, &alternate).unwrap(),
+            expected
+        );
+        assert_eq!(
+            *standalone_table_read_at(block.clone(), first, 0, &alternate).unwrap(),
+            expected
+        );
+        assert_eq!(
+            standalone_table_read_at(block.clone(), first, 0, &bad)
+                .map_err(|error| error.to_string())
+                .as_deref(),
+            expected_error.as_ref()
+        );
+        assert_eq!(
+            *standalone_table_read_at(block.clone(), first, 0, &alternate).unwrap(),
+            expected
+        );
+        let different = String::from_utf8(xml.clone())
+            .unwrap()
+            .replacen("Alpha", "Different", 1)
+            .into_bytes();
+        standalone_table_read_at(block.clone(), first, 0, &different).unwrap();
+        for (index, (location, xml)) in paragraphs.iter().enumerate().skip(1) {
+            standalone_table_read_at(block.clone(), location, usize::from(index == 1), xml)
+                .unwrap();
+        }
+        let work = STANDALONE_VALUE_WORK.with(std::cell::Cell::get);
+        assert_eq!(
+            work,
+            [
+                6,
+                4,
+                paragraphs.iter().map(|(_, xml)| xml.len()).sum::<usize>() + alternate.len(),
+                0,
+                4
+            ]
+        );
+        let state = block.standalone_value.get().unwrap().lock().unwrap();
+        let StandaloneParagraphKeys::Cells(keys) = &state.as_ref().unwrap().keys else {
+            panic!("cell keys")
+        };
+        assert_eq!(keys.len(), 2);
+        assert!(!keys.contains_key(&[0, 0, 0]));
+        assert_eq!(keys.get(&[0, 0, 1]), Some(&paragraphs[1].1));
+        assert_eq!(keys.get(&[0, 1, 0]), Some(&paragraphs[2].1));
+        drop(state);
+        let unknown_entity = String::from_utf8(xml.clone())
+            .unwrap()
+            .replacen("Alpha", "&bogus;", 1)
+            .into_bytes();
+        let expected_unknown = CT_P::from_xml_fragment(&unknown_entity)
+            .map_err(|error| Error::from(error).to_string());
+        assert_eq!(
+            standalone_table_read_at(block, first, 0, &unknown_entity)
+                .map_err(|error| error.to_string())
+                .as_deref(),
+            expected_unknown.as_ref()
+        );
+    }
+
+    #[test]
+    fn standalone_table_wrong_hints_miss_and_incidental_equal_values_have_no_affiliation() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let (location, xml) = &paragraphs[0];
+        let expected = CT_P::from_xml_fragment(xml).unwrap();
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        for wrong in 0..5 {
+            let mut reader = document.comment_paragraph_read();
+            match wrong {
+                0 => reader.cells[0].paragraphs[0] = 1,
+                1 => reader.cells[0].paragraphs[0] = usize::MAX,
+                2 => reader.cells[0].row = usize::MAX,
+                3 => reader.cells[0].table = Some(usize::MAX),
+                _ => reader.cells.clear(),
+            }
+            assert_eq!(*reader.read(location, xml).unwrap(), expected);
+        }
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [5, 0, 0, 0, 0]
+        );
+        let mut block = (*document.comment_paragraph_read().tables[0]).clone();
+        let mut root = block.staged.as_ref().unwrap().as_ref().clone();
+        let BodyContent::Table(table) = &mut root else {
+            panic!("table")
+        };
+        table.rows[0].cells[1].content[0] = CellContent::Paragraph(expected.clone());
+        block.staged = Some(Arc::new(root));
+        block.standalone_value = OnceLock::new();
+        let block = Arc::new(block);
+        let mut shifted = location.clone();
+        shifted.story.owner_index = 1;
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        for _ in 0..2 {
+            assert_eq!(
+                *standalone_table_read_at(block.clone(), &shifted, 0, xml).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [1, 1, xml.len(), 0, 1]
+        );
+        assert_eq!(
+            location.story.owner_index, 0,
+            "the original source location is not remapped"
+        );
+        assert_eq!(
+            document
+                .comment_story_range_paragraphs()
+                .unwrap()
+                .into_iter()
+                .find(|(_, _, at, _)| at == location)
+                .unwrap()
+                .3,
+            *xml
+        );
+    }
+
+    #[test]
+    fn standalone_table_model_domain_and_private_selected_leaf_keep_real_reads() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let block = document.comment_paragraph_read().tables[0].clone();
+        let control_document =
+            issue407_document("<w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt>", false);
+        let control = control_document
+            .document
+            .body
+            .content
+            .iter()
+            .find_map(|item| match item {
+                BodyContent::ContentControl(control) => Some(control.as_ref().clone()),
+                _ => None,
+            })
+            .unwrap();
+        for excluded in 0..10 {
+            let mut changed = (*block).clone();
+            let mut root = changed.staged.as_ref().unwrap().as_ref().clone();
+            let BodyContent::Table(table) = &mut root else {
+                panic!("table")
+            };
+            match excluded {
+                0 => table
+                    .extra_xml
+                    .push((0, b"<q:raw xmlns:q='urn:q'/>".to_vec())),
+                1 => table.rows[0]
+                    .extra_xml
+                    .push((0, b"<q:raw xmlns:q='urn:q'/>".to_vec())),
+                2 => table.rows[0].cells[0]
+                    .extra_xml
+                    .push((0, b"<q:raw xmlns:q='urn:q'/>".to_vec())),
+                3 => table.rows[0].cells[0]
+                    .content
+                    .push(CellContent::Table(CT_Tbl::new())),
+                4 => {
+                    table.rows[0].cells[0]
+                        .properties
+                        .as_mut()
+                        .unwrap()
+                        .grid_span = Some(2)
+                }
+                5 => {
+                    table.rows[0].cells[0].properties.as_mut().unwrap().h_merge =
+                        Some("restart".into())
+                }
+                6 => {
+                    table.rows[0].cells[0].properties.as_mut().unwrap().v_merge =
+                        Some(VMerge::Restart)
+                }
+                7 => table.content_controls.push((0, 0, control.clone())),
+                8 => table.rows[0].content_controls.push((0, 0, control.clone())),
+                _ => table.rows[0].cells[0]
+                    .content
+                    .push(CellContent::ContentControl(control.clone())),
+            }
+            changed.staged = Some(Arc::new(root));
+            changed.standalone_value = OnceLock::new();
+            let changed = Arc::new(changed);
+            assert!(
+                CommentParagraphRead::from_blocks(
+                    &document.doc_part_name,
+                    std::slice::from_ref(&changed)
+                )
+                .tables
+                .is_empty()
+            );
+            STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+            for _ in 0..2 {
+                standalone_table_read_at(changed.clone(), &paragraphs[0].0, 0, &paragraphs[0].1)
+                    .unwrap();
+            }
+            assert_eq!(
+                STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+                [2, 0, 0, 0, 0],
+                "excluded model {excluded}"
+            );
+        }
+        let private_xml = format!("<w:p xmlns:w='{W_NS}'><w:fldSimple w:instr='DATE'><w:r><w:t>cached</w:t></w:r></w:fldSimple></w:p>").into_bytes();
+        let private = CT_P::from_xml_fragment(&private_xml).unwrap();
+        let mut changed = (*block).clone();
+        let mut root = changed.staged.as_ref().unwrap().as_ref().clone();
+        let BodyContent::Table(table) = &mut root else {
+            panic!("table")
+        };
+        table.rows[0].cells[1].content[0] = CellContent::Paragraph(private);
+        changed.staged = Some(Arc::new(root));
+        changed.standalone_value = OnceLock::new();
+        let changed = Arc::new(changed);
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        for _ in 0..2 {
+            standalone_table_read_at(changed.clone(), &paragraphs[0].0, 0, &paragraphs[0].1)
+                .unwrap();
+        }
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+            [1, 1],
+            "private sibling is not compared"
+        );
+        let first =
+            standalone_table_read_at(changed.clone(), &paragraphs[2].0, 0, &private_xml).unwrap();
+        let second = standalone_table_read_at(changed, &paragraphs[2].0, 0, &private_xml).unwrap();
+        let (RunContent::Field(first), RunContent::Field(second)) =
+            (&first.runs[0].content[0], &second.runs[0].content[0])
+        else {
+            panic!("fields")
+        };
+        assert!(first.source_owner_id().is_some());
+        assert_ne!(first.source_owner_id(), second.source_owner_id());
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+            [3, 1]
+        );
+    }
+
+    #[test]
+    fn standalone_table_actual_staged_replacement_detaches_keys_and_releases_roots() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let reader = document.comment_paragraph_read();
+        let block = reader.tables[0].clone();
+        for (index, (location, xml)) in paragraphs.iter().enumerate() {
+            standalone_table_read_at(block.clone(), location, usize::from(index == 1), xml)
+                .unwrap();
+        }
+        let cell = block.standalone_value.get().unwrap().clone();
+        let weak_cell = Arc::downgrade(&cell);
+        let held_root = block.staged.as_ref().unwrap().clone();
+        let weak_root = Arc::downgrade(&held_root);
+        let refreshed = block.fresh_context_piece();
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        standalone_table_read_at(refreshed.clone(), &paragraphs[0].0, 0, &paragraphs[0].1).unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+            [0, 1]
+        );
+        let record = document
+            .main_body_scans
+            .lock()
+            .unwrap()
+            .serialized
+            .as_ref()
+            .unwrap()
+            .clone();
+        let scopes = document_namespace_scopes(&document.document.to_xml().unwrap()).unwrap();
+        let mut replacement = (*block).clone();
+        replacement.proved = OnceLock::new();
+        assert!(
+            replacement
+                .read_source_child(&record.head, &record.tail, &scopes)
+                .is_some()
+        );
+        assert!(replacement.standalone_value.get().is_none());
+        assert!(!Arc::ptr_eq(
+            replacement.staged.as_ref().unwrap(),
+            &held_root
+        ));
+        let mut removal = (*block).clone();
+        removal.bytes = String::from_utf8(removal.bytes)
+            .unwrap()
+            .replacen("w:w=\"1000\"", "w:w='1000'", 1)
+            .into_bytes();
+        assert_ne!(removal.bytes, block.bytes);
+        removal.proved = OnceLock::new();
+        assert!(
+            removal
+                .read_source_child(&record.head, &record.tail, &scopes)
+                .is_some()
+        );
+        assert!(removal.staged.is_none());
+        assert!(removal.standalone_value.get().is_none());
+        {
+            let state = cell.lock().unwrap();
+            let StandaloneParagraphKeys::Cells(keys) = &state.as_ref().unwrap().keys else {
+                panic!("old keys")
+            };
+            assert_eq!(keys.len(), 3, "held old snapshot retains only its own keys");
+        }
+        drop(removal);
+        drop(replacement);
+        drop(record);
+        drop(refreshed);
+        drop(block);
+        drop(reader);
+        drop(document);
+        assert!(weak_root.upgrade().is_some(), "positive held-root control");
+        drop(held_root);
+        assert!(weak_root.upgrade().is_none(), "keys retain no AST");
+        drop(cell);
+        assert!(
+            weak_cell.upgrade().is_none(),
+            "last cell drops its map and keys"
+        );
+    }
+
+    #[test]
+    fn standalone_table_parallel_selectors_roots_and_poison_keep_one_active_root() {
+        let (document, paragraphs) = standalone_table_fixture();
+        let block = document.comment_paragraph_read().tables[0].clone();
+        std::thread::scope(|scope| {
+            let threads = paragraphs
+                .iter()
+                .enumerate()
+                .map(|(index, (location, xml))| {
+                    let block = block.clone();
+                    scope.spawn(move || {
+                        standalone_table_read_at(block, location, usize::from(index == 1), xml)
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for (thread, (_, xml)) in threads.into_iter().zip(&paragraphs) {
+                assert_eq!(
+                    *thread.join().unwrap(),
+                    CT_P::from_xml_fragment(xml).unwrap()
+                );
+            }
+        });
+        let cell = block.standalone_value.get().unwrap().clone();
+        let mut other = (*block).clone();
+        other.staged = Some(Arc::new(block.staged.as_ref().unwrap().as_ref().clone()));
+        let other = Arc::new(other);
+        assert!(!Arc::ptr_eq(
+            block.staged.as_ref().unwrap(),
+            other.staged.as_ref().unwrap()
+        ));
+        std::thread::scope(|scope| {
+            let threads = [block.clone(), other.clone()]
+                .into_iter()
+                .map(|block| {
+                    let paragraphs = &paragraphs;
+                    scope.spawn(move || {
+                        for _ in 0..3 {
+                            for (index, (location, xml)) in paragraphs.iter().enumerate() {
+                                assert_eq!(
+                                    *standalone_table_read_at(
+                                        block.clone(),
+                                        location,
+                                        usize::from(index == 1),
+                                        xml
+                                    )
+                                    .unwrap(),
+                                    CT_P::from_xml_fragment(xml).unwrap()
+                                );
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        });
+        {
+            let state = cell.lock().unwrap();
+            let proof = state.as_ref().unwrap();
+            let root = proof.model.upgrade().unwrap();
+            assert!(
+                Arc::ptr_eq(&root, block.staged.as_ref().unwrap())
+                    || Arc::ptr_eq(&root, other.staged.as_ref().unwrap())
+            );
+            let StandaloneParagraphKeys::Cells(keys) = &proof.keys else {
+                panic!("table keys")
+            };
+            assert!(keys.len() <= 3);
+            assert!(keys.keys().all(|selector| {
+                StandaloneParagraphSelector::Cell(*selector)
+                    .resolve(&root)
+                    .is_some()
+            }));
+        }
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _guard = cell.lock().unwrap();
+                panic!("poison table value metadata");
+            })
+            .is_err()
+        );
+        standalone_table_read_at(block.clone(), &paragraphs[0].0, 0, &paragraphs[0].1).unwrap();
+        let state = cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(Arc::ptr_eq(
+            &state.as_ref().unwrap().model.upgrade().unwrap(),
+            block.staged.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn standalone_value_changed_full_keys_keep_original_first_errors_and_no_negative_cache() {
+        let (document, location, xml) = standalone_value_fixture(&issue407_runs(1));
+        document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        let text = String::from_utf8(xml.clone()).unwrap();
+        let variants = [
+            format!("<!--prefix-->{text}"),
+            format!("{text}<!--trailing-->"),
+            text.replacen("<w:p", "<w:p xmlns:q='urn:q'", 1),
+            text.replacen("<w:p", "<w:p xmlns='urn:foreign'", 1),
+            text.replacen("<w:p", "<w:p probe='changed'", 1),
+            text.replace("w:", "q:").replace("xmlns:w=", "xmlns:q="),
+            text.replacen(
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "urn:foreign",
+                1,
+            ),
+            text.replacen("run 0", "run &bogus;", 1),
+            text.replacen("</w:p>", "</w:q>", 1),
+            format!("{text}<w:p"),
+        ];
+        for changed in variants {
+            assert_ne!(changed.as_bytes(), xml);
+            let expected = CT_P::from_xml_fragment(changed.as_bytes())
+                .map_err(|error| Error::from(error).to_string());
+            STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+            let actual = document
+                .comment_paragraph_read()
+                .read(&location, changed.as_bytes())
+                .map_err(|error| error.to_string());
+            assert_eq!(actual.as_deref(), expected.as_ref());
+            assert_eq!(
+                STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+                [1, 0]
+            );
+            // A bad or successful alternate key cannot poison the later valid key.
+            document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap();
+            let before_second = STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[1];
+            if expected.is_err() {
+                assert_eq!(before_second, 1, "reader errors retain the prior valid key");
+            }
+            document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap();
+            assert_eq!(
+                STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[1],
+                before_second + 1
+            );
+        }
+        let mut other = location.clone();
+        other.story.kind = StoryKind::Header;
+        let mut missing = document.comment_paragraph_read();
+        missing.candidates.clear();
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        missing.read(&location, &xml).unwrap();
+        document
+            .comment_paragraph_read()
+            .read(&other, &xml)
+            .unwrap();
+        let mut nested = location.clone();
+        nested.index_path.push(0);
+        document
+            .comment_paragraph_read()
+            .read(&nested, &xml)
+            .unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [3, 0, 0, 0, 0]
+        );
+        let source_only = Arc::new(BodyBlockScan::from_source(xml.clone()));
+        standalone_value_read_block(source_only, &location, &xml).unwrap();
+        {
+            let _off = CanonicalBlockProofOff::enter();
+            assert!(document.comment_paragraph_read().candidates.is_empty());
+            document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap();
+        }
+        document.main_body_scans.lock().unwrap().serialized = None;
+        assert!(document.comment_paragraph_read().candidates.is_empty());
+        document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+            [6, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn standalone_value_unsupported_payloads_always_read_and_keep_field_source_identity() {
+        for body in [
+            "<w:p><w:fldSimple w:instr='DATE'><w:ins w:id='1' w:author='Ada'><w:r><w:t>cached</w:t></w:r></w:ins></w:fldSimple></w:p>",
+            "<w:p><w:bookmarkStart w:id='1' w:name='here'/><w:r><w:t>text</w:t></w:r><w:bookmarkEnd w:id='1'/></w:p>",
+            "<w:p><w:pPr><w:tabs><w:tab w:val='left' w:pos='720'/></w:tabs></w:pPr><w:r><w:tab/></w:r></w:p>",
+            "<w:p><x:raw xmlns:x='urn:x'/><w:r><w:t>text</w:t></w:r></w:p>",
+        ] {
+            let (document, location, xml) = standalone_value_fixture(body);
+            STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+            let first = document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap();
+            let second = document
+                .comment_paragraph_read()
+                .read(&location, &xml)
+                .unwrap();
+            assert_eq!(*first, *second);
+            assert_eq!(
+                STANDALONE_VALUE_WORK.with(std::cell::Cell::get),
+                [2, 0, 0, 0, 0]
+            );
+            if let Some(RunContent::Field(field)) =
+                first.runs.first().and_then(|run| run.content.first())
+            {
+                let RunContent::Field(other) = &second.runs[0].content[0] else {
+                    panic!("field");
+                };
+                assert!(field.source_owner_id().is_some());
+                assert_ne!(
+                    field.source_owner_id(),
+                    other.source_owner_id(),
+                    "fresh actual readers retain separate source identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_value_context_sharing_model_cow_and_weak_lifetime() {
+        let (document, location, xml) = standalone_value_fixture(&issue407_runs(1));
+        document
+            .comment_paragraph_read()
+            .read(&location, &xml)
+            .unwrap();
+        let snapshot = document.comment_paragraph_read();
+        let block = snapshot.candidates[0].clone();
+        let cell = block.standalone_value.get().unwrap().clone();
+        let weak = Arc::downgrade(block.staged.as_ref().unwrap());
+        let refreshed = block.fresh_context_piece();
+        STANDALONE_VALUE_WORK.with(|work| work.set([0; 5]));
+        standalone_value_read_block(refreshed.clone(), &location, &xml).unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+            [0, 1]
+        );
+        let mut replacement = (*block).clone();
+        let model = replacement.staged.as_mut().unwrap();
+        let same_value = model.as_ref().clone();
+        *Arc::make_mut(model) = same_value;
+        assert!(!Arc::ptr_eq(model, block.staged.as_ref().unwrap()));
+        standalone_value_read_block(Arc::new(replacement), &location, &xml).unwrap();
+        assert_eq!(
+            STANDALONE_VALUE_WORK.with(std::cell::Cell::get)[..2],
+            [1, 1]
+        );
+        drop(refreshed);
+        drop(block);
+        drop(snapshot);
+        drop(document);
+        assert!(weak.upgrade().is_none());
+        assert!(
+            cell.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .model
+                .upgrade()
+                .is_none(),
+            "cell retains no AST payload"
+        );
+    }
+
+    #[test]
+    fn standalone_value_parallel_misses_and_poison_keep_one_positive_key() {
+        let (document, location, xml) = standalone_value_fixture(&issue407_runs(1));
+        let block = document.comment_paragraph_read().candidates[0].clone();
+        let expected = CT_P::from_xml_fragment(&xml).unwrap();
+        std::thread::scope(|scope| {
+            let mut threads = Vec::new();
+            for _ in 0..2 {
+                let block = block.clone();
+                let location = &location;
+                let xml = &xml;
+                threads.push(
+                    scope.spawn(move || standalone_value_read_block(block, location, xml).unwrap()),
+                );
+            }
+            for thread in threads {
+                assert_eq!(*thread.join().unwrap(), expected);
+            }
+        });
+        let cell = block.standalone_value.get().unwrap();
+        let stopped = std::panic::catch_unwind(|| {
+            let _guard = cell.lock().unwrap();
+            panic!("poison value memo");
+        });
+        assert!(stopped.is_err());
+        assert_eq!(
+            *standalone_value_read_block(block.clone(), &location, &xml).unwrap(),
+            expected
+        );
+        let proof = cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            proof
+                .as_ref()
+                .unwrap()
+                .keys
+                .key(StandaloneParagraphSelector::Paragraph),
+            Some(xml.as_slice())
+        );
+    }
+
+    #[test]
+    fn opening_writer_vector_survives_real_binding_preparation_but_not_truncation_or_frame_change()
+    {
+        let document = issue407_document(&issue407_runs(3), false);
+        document.story_part_sources().unwrap();
+        OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+        assert_eq!(
+            fx268_assert_opened_scheduling_matches_legacy(&document),
+            Ok(Some(()))
+        );
+        assert_eq!(OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get), [0, 0]);
+        let scans = document.main_body_scans.lock().unwrap();
+        let kept = scans.serialized.as_ref().unwrap();
+        let duplicate = vec![document.document.body.content[0].clone(); 3];
+        let (_, initial) = MainPartBlocks::serialize(&document.document, &duplicate, None).unwrap();
+        let (bytes, shortened) =
+            MainPartBlocks::serialize(&document.document, &duplicate[..2], Some(&initial)).unwrap();
+        assert_eq!(shortened.blocks.len(), 2);
+        assert!(!Arc::ptr_eq(&initial.blocks, &shortened.blocks));
+        assert_eq!(CT_Document::from_xml(&bytes).unwrap().body.content.len(), 2);
+        let mut changed = (*document.document).clone();
+        changed.root_attributes.push(("probe".into(), "new".into()));
+        let (_, reframed) =
+            MainPartBlocks::serialize(&changed, &changed.body.content, Some(kept)).unwrap();
+        assert!(!Arc::ptr_eq(&kept.blocks, &reframed.blocks));
+    }
+
+    #[test]
+    fn opening_model_proof_clones_and_unknown_replacements_keep_value_semantics() {
+        for count in [0, 1, 12] {
+            let mut document = issue407_document(&issue407_runs(count), false);
+            let opening = document
+                .parsed
+                .as_ref()
+                .unwrap()
+                .main_document
+                .get()
+                .unwrap()
+                .as_ref()
+                .unwrap();
+            assert!(document.document.same_opening_clone(opening));
+            let candidate = document.clone_for_staging();
+            assert!(candidate.document.same_opening_clone(opening));
+            assert_eq!(
+                format!("{:?}", document.document),
+                format!("{:?}", &*document.document)
+            );
+            OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(Some(()))
+            );
+            assert_eq!(OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get), [0, 0]);
+            let independent = DocumentModel::unproved((*document.document).clone());
+            assert_eq!(document.document, independent);
+            assert!(!document.document.same_opening_clone(&independent));
+            document.document = independent;
+            OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(Some(()))
+            );
+            assert_eq!(
+                OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get),
+                [count, count]
+            );
+        }
+        let left = DocumentModel::unproved(CT_Document::new());
+        let right = left.clone();
+        assert!(
+            !left.same_opening_clone(&right),
+            "unknown/unknown is not proof"
+        );
+        let (left, _) = DocumentModel::opening_pair(CT_Document::new());
+        let (right, _) = DocumentModel::opening_pair(CT_Document::new());
+        assert_eq!(left, right);
+        assert!(
+            !left.same_opening_clone(&right),
+            "independent tokens are not proof"
+        );
+    }
+
+    #[test]
+    fn opening_model_proof_mutable_access_and_candidate_rollback_invalidate_only_the_mutated_value()
+    {
+        let original = issue407_document(&issue407_runs(3), false);
+        for mode in 0..8 {
+            let mut candidate = original.clone_for_staging();
+            match mode {
+                0 => {
+                    let _: &mut CT_Document = &mut candidate.document;
+                }
+                1 => {
+                    candidate.document.body.content[1] = BodyContent::Paragraph(Box::new(
+                        Document::detached_text_paragraph("changed"),
+                    ))
+                }
+                2 => candidate.document.body.sect_pr = None,
+                3 => candidate
+                    .document
+                    .extra_namespaces
+                    .push(("xmlns:q".into(), "urn:q".into())),
+                4 => candidate.document.background_xml = Some(b"<w:background/>".to_vec()),
+                5 => candidate
+                    .document
+                    .background_extra_xml
+                    .push(b"<w:background/>".to_vec()),
+                6 => candidate
+                    .document
+                    .root_attributes
+                    .push(("probe".into(), "changed".into())),
+                _ => {
+                    let callback = |value: &mut CT_Document| value.body.content.clear();
+                    callback(&mut candidate.document);
+                }
+            }
+            assert!(candidate.document.opening_clone.is_none());
+            assert!(original.document.opening_clone.is_some());
+            assert!(fx268_assert_opened_scheduling_matches_legacy(&candidate).is_ok());
+            drop(candidate);
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&original),
+                Ok(Some(()))
+            );
+        }
+        let mut candidate = original.clone_for_staging();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: &mut CT_Document = &mut candidate.document;
+            panic!("candidate callback stops after mutable access");
+        }));
+        assert!(stopped.is_err());
+        assert!(candidate.document.opening_clone.is_none());
+        assert!(original.document.opening_clone.is_some());
+    }
+
+    #[test]
+    fn opening_model_proof_opening_mutation_and_writer_vector_cow_take_full_fallback() {
+        let mut document = issue407_document(&issue407_runs(3), false);
+        {
+            let kept = Arc::get_mut(document.parsed.as_mut().unwrap()).unwrap();
+            let opening = kept.main_document.get_mut().unwrap().as_mut().unwrap();
+            let _: &mut CT_Document = opening;
+            assert!(opening.opening_clone.is_none());
+        }
+        OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+        assert_eq!(
+            fx268_assert_opened_scheduling_matches_legacy(&document),
+            Ok(Some(()))
+        );
+        assert_eq!(OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get), [3, 3]);
+        for shared in [false, true] {
+            let document = issue407_document(&issue407_runs(3), false);
+            let mut scans = document.main_body_scans.lock().unwrap();
+            let record = scans.serialized.as_mut().unwrap();
+            let held = shared.then(|| Arc::clone(&record.blocks));
+            let weak = Arc::downgrade(&record.blocks);
+            let before = Arc::as_ptr(&record.blocks);
+            Arc::make_mut(&mut record.blocks).swap(0, 1);
+            assert_ne!(Arc::as_ptr(&record.blocks), before);
+            assert_eq!(weak.upgrade().is_some(), shared);
+            if let Some(held) = held {
+                assert_eq!(held.len(), 3);
+            }
+            drop(scans);
+            OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(Some(()))
+            );
+            let calls = OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get);
+            assert_eq!(calls[0], 0);
+            assert!(calls[1] > 0, "changed vector must execute staged fallback");
+        }
+    }
+
+    #[test]
+    fn opening_model_proof_keeps_unsupported_field_revision_equality_work() {
+        let body = r#"<w:p><w:fldSimple w:instr="DATE"><w:ins w:id="1" w:author="Ada"><w:r><w:t>cached</w:t></w:r></w:ins></w:fldSimple></w:p>"#;
+        let document = issue407_document(body, false);
+        let BodyContent::Paragraph(paragraph) = &document.document.body.content[0] else {
+            panic!("paragraph");
+        };
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("field");
+        };
+        let ordered = field.stored_ordered_result().unwrap();
+        assert!(ordered.runs.is_empty());
+        assert_eq!(ordered.revisions.len(), 1);
+        OPENED_VALUE_EQ_CALLS.with(|work| work.set([0; 2]));
+        assert_eq!(
+            fx268_assert_opened_scheduling_matches_legacy(&document),
+            Ok(None)
+        );
+        assert_eq!(
+            OPENED_VALUE_EQ_CALLS.with(std::cell::Cell::get)[0],
+            1,
+            "unsupported Field equality retains its actual XML-reader path"
+        );
+    }
+
+    #[test]
+    fn opened_fact_scheduling_matches_legacy_proofs_and_payloads() {
+        for root_w14 in [false, true] {
+            for count in [0, 1, 12] {
+                let document = issue407_document(&issue407_runs(count), root_w14);
+                assert_eq!(
+                    fx268_assert_opened_scheduling_matches_legacy(&document),
+                    Ok(Some(()))
+                );
+            }
+            let rich_prefix = issue407_runs(2);
+            for (body, eligible) in [
+                (
+                    "<w:p><w:r><w:rPr><w:b w:val='0'/></w:rPr><w:t>one</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>two</w:t></w:r></w:p>",
+                    true,
+                ),
+                (
+                    "<w:p><w:pPr><w:jc w:val='center'/></w:pPr><w:r><w:t>props</w:t></w:r></w:p>",
+                    false,
+                ),
+                (
+                    "<w:p><w:r><w:rPr><w:lang w:val='en-US'/></w:rPr><w:t>late</w:t></w:r></w:p>",
+                    false,
+                ),
+                (
+                    "<w:p><w:r><w:rPr><x:raw xmlns:x='urn:x'/></w:rPr><w:t>raw</w:t></w:r></w:p>",
+                    false,
+                ),
+                ("<w:p><w:r><w:t>tab</w:t><w:tab/></w:r></w:p>", false),
+                (
+                    "<w:p><w:fldSimple w:instr='PAGE'><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>",
+                    false,
+                ),
+                ("<w:p><w:r><w:t>not ascii é</w:t></w:r></w:p>", false),
+            ] {
+                let document = issue407_document(&format!("{rich_prefix}{body}"), root_w14);
+                assert_eq!(
+                    fx268_assert_opened_scheduling_matches_legacy(&document),
+                    Ok(eligible.then_some(())),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opened_fact_scheduling_rejects_complete_metadata_and_late_model_changes() {
+        for component in 0..6 {
+            let mut document = issue407_document(&issue407_runs(3), false);
+            match component {
+                0 => document.document.body.sect_pr = None,
+                1 => document
+                    .document
+                    .extra_namespaces
+                    .push(("xmlns:new".into(), "urn:new".into())),
+                2 => {
+                    document.document.background_xml =
+                        Some(b"<w:background w:color='123456'/>".to_vec())
+                }
+                3 => document
+                    .document
+                    .background_extra_xml
+                    .push(b"<x:background/>".to_vec()),
+                4 => document
+                    .document
+                    .root_attributes
+                    .push(("mc:Ignorable".into(), "new".into())),
+                _ => document
+                    .document
+                    .body
+                    .content
+                    .push(BodyContent::Paragraph(Box::new(
+                        Document::detached_text_paragraph("new"),
+                    ))),
+            }
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(None),
+                "component {component}"
+            );
+        }
+        for slot in [0, 1, 2] {
+            let mut document = issue407_document(&issue407_runs(3), false);
+            document.document.body.content[slot] =
+                BodyContent::Paragraph(Box::new(Document::detached_text_paragraph("changed")));
+            let models = document
+                .main_body_scans
+                .lock()
+                .unwrap()
+                .serialized
+                .as_ref()
+                .unwrap()
+                .blocks
+                .iter()
+                .map(|block| Arc::clone(block.staged.as_ref().unwrap()))
+                .collect::<Vec<_>>();
+            let counts = models.iter().map(Arc::strong_count).collect::<Vec<_>>();
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(None)
+            );
+            assert_eq!(
+                models.iter().map(Arc::strong_count).collect::<Vec<_>>(),
+                counts,
+                "no prefix model loan escapes slot {slot}"
+            );
+        }
+        for guard in 0..6 {
+            let mut document = issue407_document(&issue407_runs(3), false);
+            match guard {
+                0 => document.parsed = None,
+                1 => {
+                    Arc::get_mut(document.parsed.as_mut().unwrap())
+                        .unwrap()
+                        .serialization_proof = None
+                }
+                2 => document
+                    .root_namespace_declarations
+                    .push(("xmlns:new".into(), "urn:new".into())),
+                3 => document
+                    .body_namespace_declarations
+                    .push(("xmlns:new".into(), "urn:new".into())),
+                4 => document.plain_local_edit_blocked = true,
+                _ => document
+                    .package
+                    .set_part(&document.doc_part_name.clone(), b"<changed/>".to_vec()),
+            }
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(None),
+                "guard {guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn opened_fact_scheduling_keeps_all_model_loans_optional() {
+        for alteration in 0..8 {
+            let mut document = issue407_document(&issue407_runs(3), false);
+            {
+                let mut scans = document.main_body_scans.lock().unwrap();
+                match alteration {
+                    0 => scans.serialized = None,
+                    1 => {
+                        Arc::make_mut(&mut scans.serialized.as_mut().unwrap().blocks).pop();
+                    }
+                    2..=4 => {
+                        let slot = alteration - 2;
+                        Arc::make_mut(
+                            &mut Arc::make_mut(&mut scans.serialized.as_mut().unwrap().blocks)
+                                [slot],
+                        )
+                        .staged = Some(Arc::new(BodyContent::Paragraph(Box::new(
+                            Document::detached_text_paragraph("other"),
+                        ))));
+                    }
+                    _ => {
+                        let slot = alteration - 5;
+                        Arc::make_mut(
+                            &mut Arc::make_mut(&mut scans.serialized.as_mut().unwrap().blocks)
+                                [slot],
+                        )
+                        .staged = None;
+                    }
+                }
+            }
+            document.main_part_blocks = None;
+            assert_eq!(
+                fx268_assert_opened_scheduling_matches_legacy(&document),
+                Ok(Some(()))
+            );
+            let facts = document
+                .opened_plain_body_paragraph_facts()
+                .unwrap()
+                .unwrap();
+            assert_eq!(facts.len(), 3);
+            assert!(
+                facts.iter().all(|(model, _, _)| model.is_none()),
+                "no partial loan for alteration {alteration}"
+            );
+        }
+    }
+
+    #[test]
+    fn opened_fact_scheduling_preserves_opening_mismatch_before_resource_error() {
+        let xml = format!(
+            "<w:document xmlns:w='{W_NS}'><w:body><w:sdt><w:sdtPr/><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:body></w:document>"
+        );
+        let parsed = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let BodyContent::ContentControl(template) = &parsed.body.content[0] else {
+            panic!("control")
+        };
+        let mut nested = template.as_ref().clone();
+        for _ in 0..256 {
+            let mut outer = template.as_ref().clone();
+            outer.content = vec![SdtContent::ContentControl(nested)];
+            nested = outer;
+        }
+        let unsupported =
+            "<w:p><w:pPr><w:jc w:val='center'/></w:pPr><w:r><w:t>first</w:t></w:r></w:p>";
+        let mut document = issue407_document(&format!("{unsupported}{}", issue407_runs(2)), false);
+        // Internal fault control, not a valid public mutation or opening proof.
+        // The first equal paragraph is finite-ineligible, but a later opening
+        // mismatch must still return None before recovering any resource error.
+        document.document.body.content[2] = BodyContent::ContentControl(Box::new(nested));
+        let expected_error = document.document.validate_resource_limits().unwrap_err();
+        assert_eq!(
+            fx268_assert_opened_scheduling_matches_legacy(&document),
+            Ok(None)
+        );
+        // Force the same over-budget model into the cached opening to isolate
+        // the later authoritative fallback. This is synthetic internal state.
+        let current = document.document.clone();
+        Arc::get_mut(document.parsed.as_mut().unwrap())
+            .unwrap()
+            .main_document = OnceLock::from(Some(current));
+        assert_eq!(
+            fx268_assert_opened_scheduling_matches_legacy(&document),
+            Err(format!("{:?}", Error::from(expected_error)))
+        );
+    }
+
+    #[test]
+    fn opened_plain_batch_lends_only_current_model_values() {
+        for root_w14 in [false, true] {
+            for count in [0, 1, 12] {
+                let document = issue407_document(&issue407_runs(count), root_w14);
+                document.document.validate_resource_limits().unwrap();
+                let batch = document
+                    .opened_plain_body_paragraph_facts()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(batch.len(), document.body_children().len());
+                for ((model, text, runs), (slot, current)) in batch
+                    .iter()
+                    .zip(document.body_children().iter().enumerate())
+                {
+                    let model = model
+                        .as_ref()
+                        .expect("actual retained current writer model");
+                    assert_eq!(model.as_ref(), current);
+                    let scans = document.main_body_scans.lock().unwrap();
+                    assert!(Arc::ptr_eq(
+                        model,
+                        scans.serialized.as_ref().unwrap().blocks[slot]
+                            .staged
+                            .as_ref()
+                            .unwrap()
+                    ));
+                    drop(scans);
+                    let BodyContent::Paragraph(paragraph) = current else {
+                        panic!("plain batch")
+                    };
+                    assert_eq!(
+                        document.direct_body_paragraph_facts(paragraph).unwrap(),
+                        Some((text.clone(), runs.clone()))
+                    );
+                }
+                let old_source = Arc::downgrade(
+                    document
+                        .package
+                        .get_part_shared(&document.doc_part_name)
+                        .unwrap(),
+                );
+                drop(document);
+                assert!(
+                    old_source.upgrade().is_none(),
+                    "model values retained old package bytes"
+                );
+                assert_eq!(batch.len(), count, "held values survive their document");
+            }
+        }
+        let opened = || issue407_document(&issue407_runs(2), true);
+        let mut missing = opened();
+        missing.main_part_blocks = None;
+        missing.main_body_scans.lock().unwrap().serialized = None;
+        let batch = missing
+            .opened_plain_body_paragraph_facts()
+            .unwrap()
+            .unwrap();
+        assert!(batch.iter().all(|(model, _, _)| model.is_none()));
+        let unequal = opened();
+        let mut scans = unequal.main_body_scans.lock().unwrap();
+        let record = scans.serialized.as_mut().unwrap();
+        Arc::make_mut(&mut Arc::make_mut(&mut record.blocks)[0]).staged = Some(Arc::new(
+            BodyContent::Paragraph(Box::new(Document::detached_text_paragraph("other"))),
+        ));
+        drop(scans);
+        let batch = unequal
+            .opened_plain_body_paragraph_facts()
+            .unwrap()
+            .unwrap();
+        assert!(batch.iter().all(|(model, _, _)| model.is_none()));
+    }
+
+    #[test]
+    fn opened_plain_batch_fallback_keeps_resource_refusal() {
+        let mut document = issue407_document("<w:p><w:r><w:t>one</w:t></w:r></w:p>", false);
+        let xml = format!(
+            "<w:document xmlns:w='{W_NS}'><w:body><w:sdt><w:sdtPr/><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:body></w:document>"
+        );
+        let parsed = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let BodyContent::ContentControl(template) = &parsed.body.content[0] else {
+            panic!("control")
+        };
+        let mut nested = template.as_ref().clone();
+        for _ in 0..256 {
+            let mut outer = template.as_ref().clone();
+            outer.content = vec![SdtContent::ContentControl(nested)];
+            nested = outer;
+        }
+        document.document.body.content = vec![BodyContent::ContentControl(Box::new(nested))];
+        let expected = document.document.validate_resource_limits().unwrap_err();
+        // Internal fault control only: force the post-opening eligibility miss.
+        // This is not evidence of a valid public opening or Source receipt.
+        let current = document.document.clone();
+        Arc::get_mut(document.parsed.as_mut().unwrap())
+            .unwrap()
+            .main_document = OnceLock::from(Some(current));
+        document.main_part_blocks = None;
+        let actual = document.opened_plain_body_paragraph_facts().unwrap_err();
+        assert_eq!(
+            format!("{actual:?}"),
+            format!("{:?}", Error::from(expected))
+        );
     }
 
     #[test]
@@ -86331,7 +89658,9 @@ mod reader_fact_tests {
             rdocx_oxml::namespace::W_NS
         );
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(xml.as_bytes()).unwrap(),
+        );
         let baseline = document.to_bytes().unwrap();
         let baseline_opened = Document::from_bytes(&baseline).unwrap();
         assert_eq!(
@@ -86423,7 +89752,7 @@ mod reader_fact_tests {
 
         let unsupported = r#"<w:fldSimple w:instr=" QUOTE &quot;unfinished "><w:r><w:t>stored</w:t></w:r></w:fldSimple>"#;
         let mut preserved = Document::new();
-        preserved.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="{}"><w:body><w:p>{unsupported}</w:p></w:body></w:document>"#, rdocx_oxml::namespace::W_NS).as_bytes()).unwrap();
+        preserved.document = crate::document::DocumentModel::unproved(CT_Document::from_xml(format!(r#"<w:document xmlns:w="{}"><w:body><w:p>{unsupported}</w:p></w:body></w:document>"#, rdocx_oxml::namespace::W_NS).as_bytes()).unwrap());
         let bytes = preserved.to_bytes().unwrap();
         let reopened = Document::from_bytes(&bytes).unwrap();
         assert!(
@@ -86438,7 +89767,9 @@ mod reader_fact_tests {
     fn revision_reader_exposes_tracked_insertion_paragraph_items() {
         let xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:ins w:id="7" w:author="Ada"><w:r><w:t>before</w:t></w:r><w:hyperlink r:id="rId9"><w:r><w:t>linked</w:t></w:r></w:hyperlink></w:ins></w:p></w:body></w:document>"#;
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(xml).expect("document parses");
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(xml).expect("document parses"),
+        );
         let crate::BodyItemRef::Paragraph(paragraph) =
             document.body_items().next().expect("paragraph body item")
         else {
@@ -86465,7 +89796,9 @@ mod reader_fact_tests {
     fn reader_resolves_complex_field_display_segment_properties() {
         let xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let mut document = Document::new();
-        document.document = CT_Document::from_xml(xml).expect("document parses");
+        document.document = crate::document::DocumentModel::unproved(
+            CT_Document::from_xml(xml).expect("document parses"),
+        );
         let paragraph = document.paragraph(0).expect("paragraph");
         let run = paragraph.runs().next().expect("field run");
         let crate::RunItemRef::Field(field) = run.items().next().expect("field item") else {
@@ -89934,7 +93267,8 @@ fn scoped_template_actual_toc_reparse_forwards_reader_facts_into_next_main_write
         r#"<w:document xmlns:w="{}"><w:body><w:p><w:bookmarkStart w:id="5" w:name="_TocNative"/><w:r><w:t>A&amp;B</w:t></w:r><w:bookmarkEnd w:id="5"/></w:p></w:body></w:document>"#,
         rdocx_oxml::namespace::W_NS
     );
-    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    original.document =
+        crate::document::DocumentModel::unproved(CT_Document::from_xml(xml.as_bytes()).unwrap());
     let (mut current, lineage) = crate::template::TemplateWordLineage::clone_for_staging(&original);
     current.identifiers.bookmark_ids.extend([5, 50]);
     current.identifiers.authored_toc_bookmark_ids.insert(5);
@@ -90392,10 +93726,12 @@ fn scoped_template_returned_field_preparation_uses_same_operation_before_next_wr
             lineage: &lineage,
             sources: &mut sources,
         };
-        current.document = context
-            .sources
-            .read_document(context.operation, Arc::new(source))
-            .unwrap();
+        current.document = crate::document::DocumentModel::unproved(
+            context
+                .sources
+                .read_document(context.operation, Arc::new(source))
+                .unwrap(),
+        );
     }
     let mut ordinary = current.clone_for_staging();
     ordinary.prepare_staged_package().unwrap();
@@ -90588,7 +93924,9 @@ fn scoped_glossary_omission_keeps_body_and_recursive_selected_note_sources() {
                     )
                     .unwrap(),
             );
-            current.document = operation.source_document(&source).unwrap();
+            current.document = crate::document::DocumentModel::unproved(
+                operation.source_document(&source).unwrap(),
+            );
             let mut sources = TemplateMainSources::from_fragment_read(
                 &current.package,
                 &main,
@@ -90707,7 +94045,8 @@ fn scoped_glossary_omission_preserves_opaque_marker_refusal_and_held_state() {
             )
             .unwrap(),
     );
-    current.document = operation.source_document(&source).unwrap();
+    current.document =
+        crate::document::DocumentModel::unproved(operation.source_document(&source).unwrap());
     let mut sources = TemplateMainSources::from_fragment_read(
         &current.package,
         &main,
@@ -90758,7 +94097,8 @@ fn scoped_template_revision_installer_prepares_sibling_fields_without_losing_oth
         rdocx_oxml::namespace::W_NS
     );
     let mut original = Document::new();
-    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    original.document =
+        crate::document::DocumentModel::unproved(CT_Document::from_xml(xml.as_bytes()).unwrap());
     let BodyContent::Paragraph(paragraph) = &mut original.document.body.content[0] else {
         panic!("paragraph")
     };
@@ -90873,7 +94213,8 @@ fn scoped_template_revision_installer_noop_keeps_model_and_exact_slot_guard() {
         rdocx_oxml::namespace::W_NS
     );
     let mut original = Document::new();
-    original.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    original.document =
+        crate::document::DocumentModel::unproved(CT_Document::from_xml(xml.as_bytes()).unwrap());
     let data = serde_json::Value::Null;
     let mut operation = rdocx_oxml::document::ScopedWordOperation::with_template_word_inputs(
         vec![],

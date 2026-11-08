@@ -808,9 +808,8 @@ impl RootAttributePlan {
         for attribute in start.attributes() {
             let attribute = attribute?;
             let name = attribute.key.as_ref();
-            let value = attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?
-                .into_owned();
+            let value =
+                attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
             // A namespace declaration is not retained for its own sake. The loop
             // below re-declares exactly the prefixes these attributes use, and the
             // alias machinery declares the rest on the elements that use them, so
@@ -818,6 +817,7 @@ impl RootAttributePlan {
             if namespace_declaration(name) {
                 continue;
             }
+            let value = value.into_owned();
             let namespace = root_attribute_namespace(name, bindings)?;
             let local = name.rsplit(|byte| *byte == b':').next().unwrap_or(name);
             for prefix in root_attribute_value_prefixes(namespace, local, &value) {
@@ -10462,18 +10462,20 @@ impl CT_R {
         let mut retained_bindings = Vec::new();
         // Canonical w is supplied by the generated run itself. Recording it
         // would introduce a synthetic raw slot and break source fixed points.
-        let external_bindings = namespace_bindings(word_prefixes)
-            .into_iter()
-            .filter(|(prefix, uri)| prefix != "w" || uri != crate::namespace::W_NS)
-            .collect::<Vec<_>>();
-        for raw in &extra_xml {
-            for binding in external_bindings_used_by_raw(raw, &external_bindings)? {
-                if !retained_bindings.contains(&binding) {
-                    retained_bindings.push(binding);
+        if !extra_xml.is_empty() {
+            let external_bindings = namespace_bindings(word_prefixes)
+                .into_iter()
+                .filter(|(prefix, uri)| prefix != "w" || uri != crate::namespace::W_NS)
+                .collect::<Vec<_>>();
+            for raw in &extra_xml {
+                for binding in external_bindings_used_by_raw(raw, &external_bindings)? {
+                    if !retained_bindings.contains(&binding) {
+                        retained_bindings.push(binding);
+                    }
                 }
             }
         }
-        let drawing_bindings = namespace_bindings(word_prefixes);
+        let mut drawing_bindings = None;
         for drawing in content.iter().filter_map(|item| match item {
             RunContent::Drawing(drawing) => Some(drawing),
             _ => None,
@@ -10490,7 +10492,9 @@ impl CT_R {
                         .and_then(|anchor| anchor.raw_xml.as_deref()),
                 )
             {
-                for binding in external_bindings_used_by_raw(raw, &drawing_bindings)? {
+                let bindings =
+                    drawing_bindings.get_or_insert_with(|| namespace_bindings(word_prefixes));
+                for binding in external_bindings_used_by_raw(raw, bindings)? {
                     if !retained_bindings.contains(&binding) {
                         retained_bindings.push(binding);
                     }
@@ -11659,7 +11663,7 @@ fn parse_simple_field_body(
                 if !is_word_element(start.name().as_ref(), b"fldSimple", &prefixes) {
                     return Ok(None);
                 }
-                return parse_empty_simple_field(&start, raw, prefixes, mapped);
+                return parse_empty_simple_field(&start, raw, prefixes.into_owned(), mapped);
             }
             Event::Eof => return Ok(None),
             _ => {}
@@ -11722,7 +11726,7 @@ fn parse_simple_field_body(
             Vec::new(),
             dirty,
             FieldForm::Simple,
-            (raw.to_vec(), prefixes),
+            (raw.to_vec(), prefixes.into_owned()),
             Some(metadata),
         );
         field.ordered_result = Some(OrderedFieldResult {
@@ -11797,7 +11801,7 @@ fn parse_simple_field_body(
             Vec::new(),
             dirty,
             FieldForm::Simple,
-            (raw.to_vec(), prefixes),
+            (raw.to_vec(), prefixes.into_owned()),
             Some(metadata),
         );
         field.parsed_cached_comment_ranges = paragraph.comment_ranges;
@@ -11884,7 +11888,7 @@ fn parse_simple_field_body(
         cached_segments,
         dirty,
         FieldForm::Simple,
-        (raw.to_vec(), prefixes.clone()),
+        (raw.to_vec(), prefixes.to_vec()),
         Some(metadata),
     );
     // Keep physical facts even when opaque source children have a legacy
@@ -12548,6 +12552,7 @@ pub(crate) fn source_has_ordered_field_owner(raw: &[u8], inherited: &[String]) -
                             owner,
                             mark_content,
                         } => {
+                            let prefixes = prefixes.into_owned();
                             if mark_content && let Some(parent) = stack.last_mut() {
                                 parent.3 = true;
                             }
@@ -12604,7 +12609,7 @@ fn simple_result_ownership(
                         result_seen,
                         false,
                     ) {
-                        SimpleOwnershipAction::Root => contexts.push(current),
+                        SimpleOwnershipAction::Root => contexts.push(current.into_owned()),
                         SimpleOwnershipAction::LeadingData => {
                             reader.read_to_end_into(element.name(), &mut Vec::new())?;
                             start = reader.buffer_position() as usize;
@@ -12614,7 +12619,7 @@ fn simple_result_ownership(
                         } => {
                             result_seen = true;
                             ordered |= child_ordered;
-                            contexts.push(current);
+                            contexts.push(current.into_owned());
                         }
                         SimpleOwnershipAction::Consume {
                             ordered: child_ordered,
@@ -12899,6 +12904,7 @@ fn parse_legacy_form_data(
                     String::from_utf8_lossy(local_name(element.name().as_ref())).into_owned()
                 });
                 stack.push(local.clone());
+                let local_prefixes = local_prefixes.into_owned();
                 prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
                 let depth = stack.len() - 1;
                 if local.as_deref() == Some("fldChar")
@@ -13712,7 +13718,10 @@ fn complex_field_events(
                 && matches_local_name(root.name().as_ref(), b"r")
                 && !element_prefix_has_binding(root.name().as_ref(), &prefixes)
             {
-                prefixes_with_assumed_word_owner(root.name().as_ref(), &prefixes)?
+                Cow::Owned(prefixes_with_assumed_word_owner(
+                    root.name().as_ref(),
+                    &prefixes,
+                )?)
             } else {
                 prefixes
             }
@@ -14797,7 +14806,7 @@ pub(crate) fn inline_field_paragraph_from_facts(
                             raw_before: before,
                             projected_run_index: accepted,
                             tracked_run_index: tracked,
-                            word_prefixes: scope,
+                            word_prefixes: scope.into_owned(),
                             has_child_content: raw_element_has_child_content(&raw),
                         });
                     }
@@ -16736,7 +16745,7 @@ fn field_span_is_bare(raw: &[u8], word_prefixes: &[String]) -> bool {
                     if !is_word_element(element.name().as_ref(), b"r", &prefixes) {
                         return false;
                     }
-                    run_prefixes = Some(prefixes);
+                    run_prefixes = Some(prefixes.into_owned());
                 } else if marker(&element, &prefixes, "begin") {
                     break true;
                 } else if is_word_element(element.name().as_ref(), b"rPr", &prefixes) {
@@ -17324,7 +17333,8 @@ fn is_run_wrapper(raw: &[u8]) -> bool {
     let Ok(Event::Start(start)) = reader.read_event_into(&mut buffer) else {
         return false;
     };
-    let Ok(prefixes) = word_prefixes_at(&start, &["w".to_owned()]) else {
+    let inherited = ["w".to_owned()];
+    let Ok(prefixes) = word_prefixes_at(&start, &inherited) else {
         return false;
     };
     is_word_element(start.name().as_ref(), b"smartTag", &prefixes)
@@ -21335,7 +21345,7 @@ impl CT_P {
                     {
                         let recovered = !is_word_element(name.as_ref(), b"r", &prefixes);
                         let prefixes = if recovered {
-                            prefixes_with_assumed_word_owner(name.as_ref(), &prefixes)?
+                            Cow::Owned(prefixes_with_assumed_word_owner(name.as_ref(), &prefixes)?)
                         } else {
                             prefixes
                         };
@@ -21685,7 +21695,7 @@ impl CT_P {
                             raw_before: raw_xml_count_at(&extra_xml, runs.len()),
                             projected_run_index: projected_run_count,
                             tracked_run_index: tracked_run_count,
-                            word_prefixes: prefixes.clone(),
+                            word_prefixes: prefixes.to_vec(),
                             has_child_content: raw_element_has_child_content(&raw),
                         });
                         extra_xml.push((runs.len(), raw));
@@ -21791,7 +21801,7 @@ impl CT_P {
                             raw_before: raw_xml_count_at(&extra_xml, runs.len()),
                             projected_run_index: projected_run_count,
                             tracked_run_index: tracked_run_count,
-                            word_prefixes: prefixes.clone(),
+                            word_prefixes: prefixes.to_vec(),
                             has_child_content: false,
                         });
                         extra_xml.push((runs.len(), capture_empty_element(e)?));
@@ -21801,8 +21811,13 @@ impl CT_P {
                             facts.field_input(reader, event_start..reader.buffer_position(), &raw)
                         });
                         let field = if source_facts.is_none() {
-                            parse_empty_simple_field(e, &raw, prefixes, mapped.as_ref())?
-                                .map(|(field, _)| field)
+                            parse_empty_simple_field(
+                                e,
+                                &raw,
+                                prefixes.into_owned(),
+                                mapped.as_ref(),
+                            )?
+                            .map(|(field, _)| field)
                         } else {
                             source_facts
                                 .as_deref_mut()
@@ -22009,7 +22024,7 @@ impl CT_P {
                 .retain(|(_, _, raw)| !is_xml_whitespace(raw));
         }
 
-        let inherited_bindings = namespace_bindings(word_prefixes);
+        let mut inherited_bindings = None;
         let mut equations = Vec::new();
         for run_index in 0..=runs.len() {
             for (raw_before, raw) in extra_xml
@@ -22018,7 +22033,9 @@ impl CT_P {
                 .map(|(_, raw)| raw)
                 .enumerate()
             {
-                if let Some(equation) = OfficeMath::from_raw(raw, &inherited_bindings)? {
+                let bindings =
+                    inherited_bindings.get_or_insert_with(|| namespace_bindings(word_prefixes));
+                if let Some(equation) = OfficeMath::from_raw(raw, bindings)? {
                     equations.push((run_index, raw_before, equation));
                 }
             }
@@ -23362,7 +23379,7 @@ fn source_contains_own_bookmark(raw: &[u8], prefixes: &[String], name: &str) -> 
                     return Ok(true);
                 }
                 if matches!(event, Event::Start(_)) {
-                    contexts.push(current);
+                    contexts.push(current.into_owned());
                 }
             }
             Event::End(_) => {
@@ -23558,7 +23575,7 @@ fn ordered_simple_flag_source_edits<'a>(
                     &element,
                     contexts.last().map(Vec::as_slice).unwrap_or(word_prefixes),
                 )?;
-                contexts.push(current);
+                contexts.push(current.into_owned());
             }
             Event::Empty(element) => {
                 word_prefixes_at(
@@ -24330,6 +24347,7 @@ fn write_legacy_form_source<W: std::io::Write>(
                     writer.write_event(Event::Start(element.clone()))?;
                 }
                 stack.push(local.clone());
+                let local_prefixes = local_prefixes.into_owned();
                 prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
                 if local.as_deref() == Some("fldChar")
                     && !begin_seen
@@ -25636,7 +25654,7 @@ fn find_cached_field_source(
                 .iter()
                 .any(|local| is_word_element(element.name().as_ref(), local, &prefixes));
                 if wrapper {
-                    scopes.push(prefixes);
+                    scopes.push(prefixes.into_owned());
                 } else {
                     reader.read_to_end_into(element.name(), &mut Vec::new())?;
                 }
@@ -25969,7 +25987,7 @@ fn update_simple_field_source<'a>(
                         }
                     }
                     contexts.push(FieldRewriteContext {
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         word_run: false,
                         canonical_end: (!foreign_word_binding).then_some("w:fldSimple"),
                     });
@@ -25993,7 +26011,7 @@ fn update_simple_field_source<'a>(
                             writer.write_event(Event::Start(element))?;
                         }
                         contexts.push(FieldRewriteContext {
-                            prefixes,
+                            prefixes: prefixes.into_owned(),
                             word_run: false,
                             canonical_end: None,
                         });
@@ -26021,7 +26039,7 @@ fn update_simple_field_source<'a>(
                         writer.write_event(Event::Start(element))?;
                     }
                     contexts.push(FieldRewriteContext {
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         word_run,
                         canonical_end: None,
                     });
@@ -26215,7 +26233,7 @@ fn update_complex_instruction_source(
                         && is_word_element(element.name().as_ref(), b"r", &prefixes);
                     writer.write_event(Event::Start(element))?;
                     contexts.push(FieldRewriteContext {
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         word_run,
                         canonical_end: None,
                     });
@@ -26398,7 +26416,7 @@ fn cached_field_source(
                     }
                 } else {
                     contexts.push(FieldRewriteContext {
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         word_run,
                         canonical_end: None,
                     });
@@ -26878,7 +26896,7 @@ fn update_complex_field_source(
                             &work.field_xml_emission(),
                         )?;
                         contexts.push(FieldRewriteContext {
-                            prefixes,
+                            prefixes: prefixes.into_owned(),
                             word_run: false,
                             canonical_end: None,
                         });
@@ -26913,7 +26931,7 @@ fn update_complex_field_source(
                     } else {
                         writer.write_event(Event::Start(element))?;
                         contexts.push(FieldRewriteContext {
-                            prefixes,
+                            prefixes: prefixes.into_owned(),
                             word_run: false,
                             canonical_end: None,
                         });
@@ -26953,7 +26971,7 @@ fn update_complex_field_source(
                         source_run_output = Some((run_start, writer.get_ref().len()));
                     }
                     contexts.push(FieldRewriteContext {
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         word_run,
                         canonical_end: None,
                     });
@@ -28252,14 +28270,14 @@ fn field_lock_owner<'a>(
                         start,
                         end: reader.buffer_position() as usize,
                         element: element.clone(),
-                        prefixes,
+                        prefixes: prefixes.into_owned(),
                         empty: matches!(event, Event::Empty(_)),
                     }));
                 }
                 if matches!(event, Event::Start(_)) {
                     let word_run = contexts.is_empty()
                         && is_word_element(element.name().as_ref(), b"r", &prefixes);
-                    contexts.push((prefixes, word_run));
+                    contexts.push((prefixes.into_owned(), word_run));
                 }
             }
             Event::End(_) => {
@@ -28906,7 +28924,7 @@ fn bookmark_marker_projection_from_raw(
             raw_before,
             projected_run_index,
             tracked_run_index,
-            word_prefixes: prefixes,
+            word_prefixes: prefixes.into_owned(),
             has_child_content,
         });
     }
@@ -38880,6 +38898,40 @@ mod tests {
     }
 
     #[test]
+    fn discarded_namespace_values_keep_decoder_errors_before_later_attributes() {
+        for (raw, first) in [
+            (
+                br#"<p xmlns:unused="&broken;" plain="&later;"/>"#.as_slice(),
+                "broken",
+            ),
+            (
+                br#"<p plain="&earlier;" xmlns:unused="&broken;"/>"#.as_slice(),
+                "earlier",
+            ),
+        ] {
+            let mut reader = quick_xml::Reader::from_reader(raw);
+            let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else {
+                panic!("root")
+            };
+            let error = super::RootAttributePlan::read(&element, &[])
+                .err()
+                .expect("even unused declarations must decode");
+            assert!(error.to_string().contains(first), "{error}");
+        }
+
+        let mut reader = quick_xml::Reader::from_reader(
+            br#"<p xmlns="urn:unused" xmlns:q="urn:&amp;owned" plain="A&amp;B"/>"#.as_slice(),
+        );
+        let quick_xml::events::Event::Empty(element) = reader.read_event().unwrap() else {
+            panic!("root")
+        };
+        let plan = super::RootAttributePlan::read(&element, &[]).unwrap();
+        assert_eq!(plan.attributes, vec![("plain".into(), "A&B".into())]);
+        assert!(plan.used_prefixes.is_empty());
+        assert!(plan.emit_in(&[], None).unwrap().is_some());
+    }
+
+    #[test]
     fn direct_root_plan_preserves_real_namespace_resolver_limits_and_spelling() {
         let mut records = vec![
             r#"<rdocxRootAttributes m:Ignorable="missing" xmlns:m="http://schemas.openxmlformats.org/markup-compatibility/200&#54;"/>"#.to_owned(),
@@ -43119,7 +43171,9 @@ mod tests {
                 _ => buffer.clear(),
             }
         };
-        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()])
+            .unwrap()
+            .into_owned();
         let mut paragraph = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
 
         assert_eq!(paragraph.bookmark_markers.len(), 2);
@@ -44407,7 +44461,9 @@ mod tests {
         let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
             panic!("reparsed paragraph start")
         };
-        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()])
+            .unwrap()
+            .into_owned();
         let reparsed = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
         let RunContent::Field(field) = &reparsed.runs[0].content[0] else {
             panic!("reparsed legacy field")
@@ -44449,7 +44505,9 @@ mod tests {
         let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
             panic!("reparsed paragraph start")
         };
-        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()])
+            .unwrap()
+            .into_owned();
         let reparsed = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
         let RunContent::Field(field) = &reparsed.runs[0].content[0] else {
             panic!("reparsed legacy field")

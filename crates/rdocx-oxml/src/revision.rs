@@ -2150,7 +2150,7 @@ fn revision_scope_at(
         let attribute = attribute?;
         let name = attribute.key.as_ref();
         if name == b"xmlns" || name.starts_with(b"xmlns:") {
-            return Ok(Arc::new(word_prefixes_at(start, inherited)?));
+            return Ok(Arc::new(word_prefixes_at(start, inherited)?.into_owned()));
         }
     }
     Ok(Arc::clone(inherited))

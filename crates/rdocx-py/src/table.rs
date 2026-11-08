@@ -2204,7 +2204,31 @@ impl PyCell {
             .map(rdocx::Length::emu);
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
+        let story = if current_related.is_none() {
+            // Preserve the direct-table lookup's current error and work ordering.
+            crate::document::note_fx260_word(document.inner.content_count().max(1));
+            let slot = document
+                .inner
+                .content_index_of_table(table)
+                .ok_or_else(|| {
+                    rdocx_to_pyerr(
+                        py,
+                        rdocx::Error::Other("table has no checked direct physical owner".into()),
+                    )
+                })?;
+            document
+                .inner
+                .direct_body_cell_story(slot, row, cell)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+                .ok_or_else(|| {
+                    rdocx_to_pyerr(
+                        py,
+                        rdocx::Error::Other("table has no checked physical source owner".into()),
+                    )
+                })?
+        } else {
+            self.physical_story(py, &document.inner, &current_related, table, row, cell)?
+        };
         let candidate = document.inner.clone_for_staging();
         let (candidate, location, pictures) = candidate
             .insert_picture_to_story_with_options_and_inventory_owned(

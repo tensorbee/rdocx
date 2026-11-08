@@ -537,7 +537,7 @@ impl Document {
         if resolved > 0 {
             let staged = CT_Document::from_xml(&output)?;
             staged.to_xml()?;
-            candidate.document = staged;
+            candidate.document = crate::document::DocumentModel::unproved(staged);
             candidate.package.set_part(&candidate.doc_part_name, output);
         }
 
