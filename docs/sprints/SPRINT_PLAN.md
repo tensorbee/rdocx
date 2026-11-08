@@ -3526,19 +3526,25 @@ Numerical performance targets and unfinished performance/RSS/history/calibration
 
 F-X284 owns the opening review, F-X285 owns carried numerical criteria including F-X268/F-X282/F-X283, and F-X286 owns carried A7/Q18/Q22memory/retention/equivalence/calibration qualification and prioritized memory work. Original workloads, thresholds and prior failed evidence remain unchanged. Issues437and445remain open while their carried criteria are unmet. Historical F-X268completion is not reset. These are planned successor stories, not started work or completion credit.
 
-Correctness, live/held handles, last-loan lifetime tests, Source/resource limits, atomic refusal/security, hash/pixel behavior, actual applicable native/oracle proof, installed runtime/typing, strict SemVer, verified packages/archives and hosted-source proof remain release gates. Numerical and memory carry does not turn unrelated failures into exceptions. Publication still requires sprint close and separate final approval at the exact reviewed main SHA.
+Outside the separately approved two-case Word-save carry to F-X287 and seven-case ordinary-frame carry to F-X288, correctness, live/held handles, last-loan lifetime tests, Source/resource limits, atomic refusal/security, hash/pixel behavior, actual applicable native/oracle proof, installed runtime/typing, strict SemVer, verified packages/archives and hosted-source proof remain release gates. Numerical and memory carry does not turn unrelated failures into exceptions. Publication still requires sprint close and separate final approval at the exact reviewed main SHA.
 
 #### Sprint S96.1, Optimization Sprint
 
-**Goal**: review actual performance and memory first, then implement the highest-value measured improvements without extending S96 release preparation. Preserve existing API, output, Source/resource and ownership contracts. No implementation starts before the opening review and approved designs. Estimates and any delivery split follow that review, with no invented completion date or new RSS ceiling.
+**Goal**: review actual performance and memory first, then implement the highest-value measured improvements and repair the separately carried Word-save note-comparison gaps and seven ordinary furniture-frame differences. Preserve existing API, output, Source/resource and ownership contracts. No implementation starts before the opening review and approved designs. F-X287 and F-X288 remain pending their own designs. Estimates and any delivery split follow review, with no invented completion date or new RSS ceiling.
 
 | F-ID | Title | Size |
 |------|-------|------|
 | F-X284 | Review performance and memory and rank optimization work | M |
 | F-X285 | Complete carried numerical performance targets | L |
 | F-X286 | Qualify and reduce memory footprint and retained history | L |
+| F-X287 | Repair note comparison after Word-save normalization | L |
+| F-X288 | Repair seven native ordinary furniture-frame differences | L |
 
 Run F-X284first. Its authenticated baseline and ranked findings determine the bounded work in F-X285andF-X286. Those two may use separate claimed worktrees only where resources do not overlap. Share one final integrated qualification. Keep the original79flat/5linear/Issue407andIssue437/445protocols, every failed observation, actual Native/Python consumers and A7/Q18/Q22policy. The memory input is openly reconstructed, not recovered historical bytes. No default threshold reduction, skipped Source reader or hidden warmup is approved. Correctness and ownership/resource checks accompany every optimization. Keep Issues377,437and445open as appropriate to their remaining scope.
+
+F-X287 owns only the user-approved note-plus-body-text and mixed-author Word-save carry. Restore affected original45A/14G outcomes, retain failed/refused and successful partial-marker-loss observations, and leave Issue430 open until qualified. Q-A430-28 stays separate. F-X287 is pending design and coordinates exclusive Word source ownership with optimization work. It creates no current completion credit or broad native waiver.
+
+F-X288 owns only the user-approved seven-case ordinary header/footer frame carry: six0.551202pt edge errors against the unchanged0.5pt criterion and the explicit-text footer off-page frame/144pt following-flow difference. Preserve failed observations, nominal source fonts and authored offsets. Issue424 stays open. F-X288 is pending design, unclaimed and not completed. General body frames, drop caps and the separate row-split disposition are outside its scope. All other native, runtime, safety and release gates remain required.
 
 #### Sprint S97, Fillable PDF forms
 

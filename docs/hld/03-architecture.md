@@ -1583,7 +1583,7 @@ Listing and id, author and date scopes still operate on revision elements.
 Selection of some, but not all, elements of one definition's custody unit refuses
 atomically. Shared references belong to the same definition unit.
 
-While any unit remains pending, resolved units retain zero-width tombstones.
+Within the positively admitted custody grammar, resolved units retain zero-width tombstones while any unit remains pending.
 A valid body pair without a note pair has no surviving note-owner identity.
 It stays a tombstone in an open part or completed imported metadata in a settled
 part. A following reference or revision wrapper cannot identify its former owner.
@@ -1610,6 +1610,8 @@ by Word in an already completed part is preserved when untouched and retired
 before editing its owner or part or emitting new custody there. Ignored notes
 retain original bytes and cannot supply a dangling new body reference. Endnote
 topology retains its existing refusal while ordinary text edits remain supported.
+
+Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair inside a revision and drop its note counterpart. Such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
 
 Inputs may hold existing modeled revisions, such as the redline of an
 earlier comparison. A story owner that holds one, a paragraph, table, or

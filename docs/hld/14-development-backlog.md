@@ -8745,7 +8745,7 @@ Finish every criterion of Issue 425 using the current own commits of PR 427, not
 **Test gate**: regression
 
 Deliver the complete already admitted Issue430 contract as a child of F-X272.
-Cover all five issue rows, all45supporting acceptance rows and14evidence gates:
+Cover all five issue rows within all45acceptance rows and14evidence gates:
 normal-note identity, added/removed referenced definitions, source-preserved
 unused/invalid/opaque notes, coherent ignored stories, following-paragraph
 alignment, persistent standard-bookmark custody, per-element selectors,
@@ -8753,6 +8753,7 @@ partial-unit atomic refusal, mixed open transactions, settlement cleanup and
 accept/reject destination restoration across reopen. Preserve the approved
 bounded unchanged prior-revision owner policy and all existing public APIs.
 The one-release Q-A430-28 native exception remains unproved, never passed.
+The separately user-approved Word-save carry assigns only the observed note-plus-body-text and mixed-author native gaps to pending S96.1 F-X287. The original45A/14G requirements remain repair acceptance and Issue430 stays open. All other native and product gates remain unchanged.
 Its actual completed LOCAL checkpoint may supply F-X277b and F-X280b only
 for their specified note identity and reserved custody prerequisites. Whole
 F-X272 and umbrella completion still require all actual final acceptance.
@@ -9067,3 +9068,29 @@ Own the numerical acceptance carried from F-X268, F-X282andF-X283under Q-S96-16.
 **Spec reference**: 03-architecture.md retained ownership, 04-opc-and-packaging.md Source limits, 10-bindings-spec.md binding ownership, and 12-testing-strategy.md memory evidence.
 
 Own unfinished F-X268A7/Q18/Q22qualification and the review-ranked memory work. Preserve the concrete omission endpoint registry, actual missing-payload fallbacks, all mandatory identifiers/provenance, Native/Python consumers, ordinary/private calibration, three fresh alternating pairs, raw current/peak units and equal-terminal N/4Nhistory/last-owner release proof. First adopt the precise current-source baseline and openly reconstructed20k6fixture contract in the existing F-X268plan, with full semantic admission/reopen checks. The interrupted debug smoke is not completed qualification. No new RSS ceiling, Source allowance, hidden retained candidates/loans or shadow AST is approved. Preserve every original failed/unperformed outcome. Review determines an honest implementation split before claim.
+
+### F-X287, Repair note comparison after Word-save normalization
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X272a
+**Test gate**: differential
+**Spec reference**: 03-architecture.md comparison custody, 10-bindings-spec.md normal-footnote comparison and resolution, and 12-testing-strategy.md explicit release exceptions and native evidence.
+
+Pending design and unclaimed. Resolve the user-approved carry for note-plus-body-text and mixed-author Word-save note histories while preserving the original45A/14G acceptance requirements and all unaffected supported note behavior. Restore successful current-source resolution and unrelated comparison for the authenticated native middle save. Restore mixed-author destination and open-marker lifetime behavior through both author orders, accept/reject choices and reopens, including the successful first-author action that retires markers while another author remains pending. Each failed action must remain atomic relative to its immediate prior state. Do not hide earlier successful changes by calling the whole sequence unchanged.
+
+Use the retained RC3 middle and mixed native/runtime packets as failing inputs, not a passed baseline. Keep exact source/output hashes, native version, selector outcomes, held handles, cache/package/relationship/part inventories and original errors. Include a different invariant discriminator during design. No guard relaxation, adjacency-based lost-owner inference, skipped reader, API narrowing or success through deleting native markers is approved. Preserve the exact independent Q-A430-28 unproved exception. Issue430 remains open until the carried requirements are actually qualified. No new plan, claim, source implementation, review-cap reset or completion follows from registration.
+
+### F-X288, Repair seven native ordinary furniture-frame differences
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md ordinary header/footer frames, furniture placement and same-story wrapping, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+Pending design and unclaimed. Own only the seven user-approved F273 A3 failures: header and footer margin/omitted/page controls at0.551202pt measured edge error and the explicit-text footer control with off-page frame paint and144pt following-flow difference. Restore affected original native matching requirements with the unchanged0.5pt criterion, exact page/text inventories and qualified fonts. Keep Issue424 open until these requirements are actually qualified. Preserve every original failed observation and its exact source/native artifact identity.
+
+Design must distinguish the small metric differences from the footer placement/wrap invariant. Preserve nominal11pt/16pt source fonts, authored offsets, grouping, actual owner/anchor presence and one coherent prepared rectangle for paint and applicable obstacles. A universal footer clamp, font-size substitution or offset fudge is not approved. Include a different invariant discriminator and preserve previously qualified page-offset and same-story controls. Do not broaden general body-frame or drop-cap support, alter Source/resource limits, or waive schema/other native checks. The separate row-split23/17 versus26/14 disposition is outside this story.
+
+Use the retained anchor-eight, remaining24 and footer-and-row source-triage packets under `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh` as failed inputs and source facts, not a passed baseline. The normal design, claim, implementation, independent review and qualification lifecycle remains required. Coordinate exclusive Word layout source ownership with other S96.1 work. Registration creates no new plan, claim, status reset, peer-cap reset, completion credit or public API change.

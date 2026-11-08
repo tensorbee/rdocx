@@ -41,6 +41,10 @@ Roman formatting remains bounded to1through3999 and alphabetic formatting to4096
 
 The same-owner physical-reference native footnote case remains unproved under the narrow approved Q-A430-28 exception. It is not a passed Word observation. All other applicable native, schema, binding, CLI and package gates remain required. Footnotes with absent type are normal regardless of ID. Changed empty or unknown types refuse atomically while untouched imported records remain preserved. Comparison ownership while revisions remain unresolved uses hidden standard Word bookmarks and does not promise unrestricted native Word Compare parity.
 
+After Word saves a comparison that adds a note alongside new body text, later resolution or comparison can refuse. Some mixed-author Word-saved histories also refuse rejection or retire custody markers during partial resolution while another author remains pending. Failed calls preserve their immediate input state, while earlier successful changes remain. [Issue430](https://github.com/tensorbee/rdocx/issues/430) stays open, with a fix planned for S96.1.
+
+Some positioned header/footer frames differ from Word by about 0.55 pt. In a tested text-anchored footer, the frame falls outside the page and following footer text wraps differently. [Issue424](https://github.com/tensorbee/rdocx/issues/424) stays open, with a fix planned for S96.1. These measured limitations do not establish general Word layout parity.
+
 The rendering refinements cover the approved fixtures and retain documented residuals for imported numbering, unsupported formatting, automatic-colour calibration, font coverage and general native layout. Stored validation is a bounded subset, not complete OOXML schema validation. Literal `_x0001_`, valid opaque XML and binary payloads remain preserved. Source preservation is not sanitization.
 
 ### Performance and memory limitations

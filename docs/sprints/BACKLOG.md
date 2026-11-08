@@ -866,6 +866,8 @@ HLD14 contract before adopting contributor changes.
 | F-X284 | Review performance and memory and rank optimization work | S96.1 | M | pending |
 | F-X285 | Complete carried numerical performance targets | S96.1 | L | pending |
 | F-X286 | Qualify and reduce memory footprint and retained history | S96.1 | L | pending |
+| F-X287 | Repair note comparison after Word-save normalization | S96.1 | L | pending |
+| F-X288 | Repair seven native ordinary furniture-frame differences | S96.1 | L | pending |
 
 <!-- AUTOGEN:backlog-MX END -->
 
@@ -945,3 +947,17 @@ fresh Word and final union acceptance. B retains comparison composition and F272
 ## S96 release carry to S96.1, Q-S96-16
 
 User-approved on2026-11-08. S96 releases reviewed implemented behavior with explicit known limitations. F-X284starts the successor with an authenticated performance/memory review. F-X285owns numerical F-X268flat/linear/407and F-X282A282-1toA282-3andF-X283A283-1toA283-4qualification that remains unmet or unperformed, preserving each original criterion rather than inventing replacements. Non-numerical correctness and structural/ownership obligations remain S96gates. F-X286owns unfinished F-X268A7/Q18/Q22memory/RSS/equivalence/calibration/history qualification and review-ranked memory improvements. No failed/pending check becomes passed. Historical F-X268stays done, successor stories stay pending, and no current completion count is changed by this planning entry. Issues437/445remain open while their carried criteria are unmet. S97and later sprint numbering are preserved.
+
+## Approved Word-save limitation carry to S96.1
+
+The user approved releasing with both observed Word-save limitations and a fix story in S96.1. Pending F-X287 owns repair and native qualification of note-plus-body-text saves and mixed-author note histories. Issue430 remains open. This carry does not turn a failed or unperformed native check into a pass, reset F-X272/F-X272a provider status or peer caps, or waive any other native, schema, binding, CLI, Source/resource, package or release gate. Q-A430-28 remains a separate exact unproved exception.
+
+The note-plus-body-text middle save opens, lists revisions and no-op serializes with member bytes preserved, but Accept All, Reject All and unrelated body comparison refuse with `body custody pair is inside a revision`. The mixed pending and A-already-accepted saves refuse B rejection with `cannot remove the final paragraph mark`. Each failed action is atomic relative to its immediate pre-action state. Earlier successful actions remain committed. In the fully pending mixed input, resolving A first can return successfully and retire all custody markers while B revisions remain pending. That successful marker loss does not satisfy the open-lifetime preservation requirement. The B-already-accepted intermediate has the separately recorded successful A destinations, which do not qualify the other mixed inputs.
+
+F-X287 requires the normal design, claim, implementation, review and qualification lifecycle. No design plan is created by this registration, and no status, delivery count or historical provider completion is reset. The original45A/14G matrices remain its affected repair obligations, not completed or removed rows. The actual RC3 evidence remains at `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/native-middle-rc3-runtime-probe-1/RESULT.json` and `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/native-mixed-rc3-runtime-probe-1/CORRECTED_RESULT.json`. Their original failures, `RESULT.json`, transport receipts, intermediate packages and `FAILED_ACTION_ATOMICITY.json` remain preserved. The mixed graph correction changes only the definition inventory reader, not product outcomes or bytes.
+
+## Approved seven-case ordinary-frame release carry
+
+F-X288 owns only the user-approved seven-case ordinary header/footer frame carry: six0.551202pt edge errors against the unchanged0.5pt criterion and the explicit-text footer off-page frame/144pt following-flow difference. Preserve failed observations, nominal source fonts and authored offsets. Issue424 stays open. F-X288 is pending design, unclaimed and not completed. General body frames, drop caps and the separate row-split disposition are outside its scope. All other native, runtime, safety and release gates remain required.
+
+The exact seven F273 A3 cases and immutable evidence paths are retained in the operative F-X273/F-X275 plan sections. This explicit release exception does not relabel failed0.5pt comparisons as passes or infer a matching source-supported oracle disposition. No new plan, claim, provider-status change, completion count or peer-cap reset follows from this registration.

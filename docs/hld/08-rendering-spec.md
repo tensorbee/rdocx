@@ -2108,6 +2108,19 @@ and zero height is automatic. Explicit values remain authoritative. Imported
 attributes are unchanged. Drop and margin drop-cap modes keep the existing
 unsupported fallback and do not enter ordinary positioned frame layout.
 
+Native Word parity is not qualified for seven observed ordinary furniture-frame
+cases. The margin, omitted and page vertical-anchor controls in both header and
+footer have a0.551202pt maximum measured edge difference, exceeding the
+unchanged0.5pt criterion. In the explicit-text-anchor footer control, the
+library frame lies outside the page and following ordinary footer text stays
+144pt left of Word's position. Same-story flow ignoring frame obstacles is the
+current mechanism, with that observed failure rather than a general Word
+compatibility guarantee. Authored offsets and nominal11pt/16pt source fonts
+remain authoritative. Pending S96.1 F-X288 owns the user-approved seven-case
+release carry, and Issue424 remains open. This boundary does not extend to
+body frames or drop caps, alter the original failed measurements, or waive
+other native/schema qualification. Row-split differences are separate.
+
 Pinned LibreOffice 26.2.5.2 can position the main story differently for selected
 first/even stories, floating furniture tables, omitted frame anchors and
 Center/Bottom or exact tbRl body alignment. These controls retain the qualified

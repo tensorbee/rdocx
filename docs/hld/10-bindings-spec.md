@@ -3041,8 +3041,8 @@ date selectors compare each element's metadata. A partial custody-unit selection
 refuses atomically, including when a token happens to equal an unrelated id.
 No selector treats the token as a request to select the unit.
 
-Accept restores edited note identities, reference inventory, special records
-and part presence. Reject restores the original destination. Creating a part
+For positively admitted custody states, accept restores edited note identities,
+reference inventory, special records and part presence. Reject restores the original destination. Creating a part
 carries the actual edited special inventory, including none. An open creation
 unwinds to absence after its final owned note is rejected unless retained
 unowned content requires the part. Resolved units keep tombstones while another
@@ -3066,6 +3066,9 @@ custody. Ignored footnote stories retain original parts and refuse body changes
 that would leave a missing note target. Endnote text comparison remains
 supported, while new endnote topology remains refused. These operations use
 existing held-handle invalidation and leave all live state unchanged on refusal.
+
+Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair inside a revision and drop its note counterpart. Such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
+
 Word and character revisions group changed stretches as deletions followed by
 insertions. Whitespace between changes folds, while a non-whitespace anchor
 folds only when its joined word count is strictly shorter than both changed

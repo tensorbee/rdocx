@@ -5384,7 +5384,7 @@ class SprintWorkflowTests(unittest.TestCase):
             ("linux-aarch64", "ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz"),
             ("linux-musl-x86_64", "ubuntu-24.04", "x86_64-unknown-linux-musl", "tar.gz"),
             ("macos-x86_64", "macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
-            ("macos-arm64", "macos-14", "aarch64-apple-darwin", "tar.gz"),
+            ("macos-arm64", "macos-26", "aarch64-apple-darwin", "tar.gz"),
             ("windows-x86_64", "windows-2025", "x86_64-pc-windows-msvc", "zip"),
         )
         rows = tuple(
@@ -9203,6 +9203,11 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assert_rust_release_assets_contract(publish)
 
         mutations = {
+            "retired-macos-arm64": publish.replace(
+                "runner: macos-26, target: aarch64-apple-darwin, archive: tar.gz",
+                "runner: macos-14, target: aarch64-apple-darwin, archive: tar.gz",
+                1,
+            ),
             "missing-target": publish.replace(
                 "          - { label: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }\n",
                 "",

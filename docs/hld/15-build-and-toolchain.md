@@ -1100,7 +1100,11 @@ optimized-size gates remain local.
 **A dedicated Python artifact workflow.** Its product matrix is the Cartesian
 product of `rdocx` and `rpptx` with manylinux_2_28 x86_64 and aarch64,
 musllinux_1_2 x86_64, macOS x86_64 and arm64, and Windows x86_64. A second
-two-package job builds the source distributions. Native cells install wheels
+two-package job builds the source distributions. Both macOS ARM64 wheel and
+CLI routes use macos-26 with the existing aarch64-apple-darwin target. GitHub
+retired macos-14 on2026-11-02, as its [runner retirement notice](https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/) records. The runner change does not change the required
+macosx_11_0_arm64 wheel platform or remove native install, runtime, typing,
+archive and attestation checks. Native cells install wheels
 into fresh environments and run the exact positive family priority and
 compatibility inventory, followed by exact mypy and stubtest gates. Each
 musllinux cell performs a fresh Alpine install and runs the same family
