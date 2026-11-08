@@ -48,7 +48,7 @@ The ordinary owned graph is defined by `crates/rdocx-oxml/src/table.rs:3366`, ro
 
 ## Concrete state and snapshot arrangement
 
-Use a private concrete selector enum for root Paragraph versus Cell([usize;3]). The root remains an existing immutable Arc<BodyContent>. One positive state has one Weak root and one private key enum:
+Use a private concrete selector enum for root `Paragraph` versus `Cell([usize;3])`. The root remains an existing immutable Arc<BodyContent>. One positive state has one Weak root and one private key enum:
 
 ```rust
 enum StandaloneParagraphKeys {

@@ -8950,7 +8950,7 @@ Provider edges are none. F-X276, F-X278 and F-X280 are resource predecessors. Cl
 
 Complete Issue 437 and PR 443 final outcomes for edit cost across styles, body and cells. Historical PR head `6dc9ed82a3c8257e187c26de8060389d472f8060`, captured 2026-10-31T16:56:34Z. `run.text`, `try_replace_text`, `add_row`, `clone_row` and a cell paragraph setter cost at most 3 times more with a 419 KB styles part than with a 6 KB one, and the equal-model flush risk is proved or explicitly refused. A setter on a cell paragraph or run costs at most 3 times more in row 40 than row 1, and at most 3 times more with 2000 body paragraphs than without, measured at the issue script boundary: the cell-place check is cold with three calls and the first included, and the body check is warm with one untimed call on each document. Warming the cell-place check is rejected because it weakens the reported first-operation cost contract, and counter evidence may complement but not replace the timing row. Filling a table cell by cell is flat per call, at most 2 times from 30 to 120 cells.
 
-Provider edges are none. Clean Base and the F-X272 measurement base are resource bases. HLD03, HLD10 and HLD12 are assessed. Hash unchanged. The F-X268 79 flat-cost gates, saved bytes and hash 49 are re-run in the final union.
+Provider edges are none. Clean Base and the F-X272 measurement base are resource bases. HLD03, HLD10 and HLD12 are assessed. Hash unchanged. Q-S96-16carries numerical performance qualification to S96.1 F-X285. Current correctness, saved bytes and hash49remain release gates. Original numerical criteria below remain unchanged for that successor.
 
 ### F-X283, Bound whole-cell setters and Python open-replace-save cost
 
@@ -9036,3 +9036,34 @@ code, without claiming its formal final gate complete. No comparison/import
 lease. B retains P1/P2/C6 COMPOSITION and actual F272 prerequisite. On adoption
 parent completion requires F272 and A/B/C/D. Original caps and all final/native
 riders remain. No approval, claim or provider completion from this registration.
+
+
+### F-X284, Review performance and memory and rank optimization work
+
+**Sprint**: S96.1
+**Size**: M
+**Depends on**: none
+**Test gate**: authenticated performance and memory review with a ranked, reproducible worklist.
+**Spec reference**: 03-architecture.md ownership and caching, 04-opc-and-packaging.md Source/resource limits, 10-bindings-spec.md actual public consumers, and 12-testing-strategy.md measurement and evidence.
+
+Begin the Optimization Sprint by reviewing the actual released source/artifacts and retained failed/unqualified observations. Separate elapsed timings, structural work, allocations, retained capacity, current/peak RSS and ownership history. Rank bottlenecks and memory costs using repeatable Native/Python/CLI workloads and explicit confidence limits. Produce bounded candidate designs and realistic qualification sequencing before implementation. Existing reports are inputs, not a new passed baseline or permission to skip readers. Q-S96-16carries optimization work without changing safety/API/output contracts.
+
+### F-X285, Complete carried numerical performance targets
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X284
+**Test gate**: original complete numerical protocols with source/artifact identity and retained raw observations.
+**Spec reference**: 03-architecture.md bounded operations, 10-bindings-spec.md public workloads, and 12-testing-strategy.md unchanged performance protocols.
+
+Own the numerical acceptance carried from F-X268, F-X282andF-X283under Q-S96-16. Preserve79flat/5linear/Issue407andthe exact Issue437/445sizes, cold/warm boundaries, ratios, clocks, aggregation and thresholds. Begin from released-source measurements, including the latest historical76/79snapshot and its reply/Documentpicture/Cellpicture misses. Optimize measured producers without weakening Source/Field/resource, saved output, callbacks or handle publication. Do not retry unchanged artifacts for favorable values or claim that historical passes qualify new source. Retain Issue437/445until their actual criteria pass. Review determines whether concrete children are needed before claim.
+
+### F-X286, Qualify and reduce memory footprint and retained history
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X284
+**Test gate**: complete approved A7/Q18/Q22equivalence, calibration, paired RSS/history and lifetime observations.
+**Spec reference**: 03-architecture.md retained ownership, 04-opc-and-packaging.md Source limits, 10-bindings-spec.md binding ownership, and 12-testing-strategy.md memory evidence.
+
+Own unfinished F-X268A7/Q18/Q22qualification and the review-ranked memory work. Preserve the concrete omission endpoint registry, actual missing-payload fallbacks, all mandatory identifiers/provenance, Native/Python consumers, ordinary/private calibration, three fresh alternating pairs, raw current/peak units and equal-terminal N/4Nhistory/last-owner release proof. First adopt the precise current-source baseline and openly reconstructed20k6fixture contract in the existing F-X268plan, with full semantic admission/reopen checks. The interrupted debug smoke is not completed qualification. No new RSS ceiling, Source allowance, hidden retained candidates/loans or shadow AST is approved. Preserve every original failed/unperformed outcome. Review determines an honest implementation split before claim.

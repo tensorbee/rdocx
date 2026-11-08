@@ -825,3 +825,8 @@ enabledN100observation under the stricter600second guard may be reused only
 when the unchanged consumer authenticates the same source, artifact, fixture
 and complete semantic record. The failed no-Weak row never authorizes N400.
 Any new operational stop remains incomplete. No future success is asserted.
+
+
+## Approved S96 release scope, Q-S96-16
+
+The user approved releasing implemented, reviewed behavior with a known-limitations note and S96.1 Optimization Sprint. Numerical acceptance in this plan remains unchanged but carries to F-X285after F-X284's performance/memory review. Any unperformed memory qualification carries to F-X286. Correctness, saved bytes, first-handle activation, held/fresh ownership, atomic refusal, Source/resource/security and applicable final artifact/typing/native/package gates remain current. Do not mark failed/unperformed numerical rows passed or close the issue while carried criteria remain unmet. This overrides earlier numerical release-blocking wording only.

@@ -863,6 +863,9 @@ HLD14 contract before adopting contributor changes.
 | F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | in-progress |
 | F-X282 | Bound edit cost across styles, body and cells | S96 | M | in-progress |
 | F-X283 | Bound whole-cell setters and Python open-replace-save cost | S96 | L | in-progress |
+| F-X284 | Review performance and memory and rank optimization work | S96.1 | M | pending |
+| F-X285 | Complete carried numerical performance targets | S96.1 | L | pending |
+| F-X286 | Qualify and reduce memory footprint and retained history | S96.1 | L | pending |
 
 <!-- AUTOGEN:backlog-MX END -->
 
@@ -937,3 +940,8 @@ No claim, approval, provider completion or review-cap reset is recorded here.
 F-X279d is integrated as reviewed at f89a8c9f after clean independent pass2,
 Root final review and source reconciliation. Delivery stays in-progress pending
 fresh Word and final union acceptance. B retains comparison composition and F272.
+
+
+## S96 release carry to S96.1, Q-S96-16
+
+User-approved on2026-11-08. S96 releases reviewed implemented behavior with explicit known limitations. F-X284starts the successor with an authenticated performance/memory review. F-X285owns numerical F-X268flat/linear/407and F-X282A282-1toA282-3andF-X283A283-1toA283-4qualification that remains unmet or unperformed, preserving each original criterion rather than inventing replacements. Non-numerical correctness and structural/ownership obligations remain S96gates. F-X286owns unfinished F-X268A7/Q18/Q22memory/RSS/equivalence/calibration/history qualification and review-ranked memory improvements. No failed/pending check becomes passed. Historical F-X268stays done, successor stories stay pending, and no current completion count is changed by this planning entry. Issues437/445remain open while their carried criteria are unmet. S97and later sprint numbering are preserved.

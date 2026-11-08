@@ -267,6 +267,7 @@ The final integrated union runs genuine API acquisition once for the required na
 
 ## HLD impact
 
+- docs/hld/12-testing-strategy.md, approved Q-S96-16 numerical and memory-qualification carry with retained correctness/release gates.
 - docs/hld/10-bindings-spec.md, current family identity, public nominal dependency reach, packaging and CI compatibility proof.
 - docs/hld/14-development-backlog.md, current F-X275 title/scope only, preserving completed history.
 - docs/hld/15-build-and-toolchain.md, strict SemVer release policy, actual native CI limits, selected-family preflight and H/R/M evidence reuse.
@@ -853,3 +854,23 @@ memory riders, complete union verification and final sprint review remain
 pending. Newly observed native anchor and exact-line baseline comparisons
 are unresolved, with original failures and source provenance retained.
 No feature state, pending array, delivery ledger or review cap is reset.
+
+
+## Approved release scope amendment, Q-S96-16
+
+Q-S96-16 is answered by the user on2026-11-08: prepare the best current release with a known-limitations note, then start S96.1 Optimization Sprint with a performance and memory review. S97 AcroForms and later sprint numbers stay unchanged. Finish the bounded namespace changes already implemented, validate them, then freeze. Do not open more optimization investigations or wait for another numerical performance pass before S96 closure.
+
+Numerical performance targets and unfinished performance/RSS/history/calibration qualification move to S96.1. Failed measurements remain failed and unperformed checks remain unqualified. Latest complete ordinary benchmark evidence before the final namespace allocation wave is76/79flat, all5linear and bothIssue407protocols passing. Reply, Document.add_picture and Cell.add_picture miss their flat limits. No final post-wave timing or memory guarantee is claimed.
+
+F-X284 owns the opening review, F-X285 owns carried numerical criteria including F-X268/F-X282/F-X283, and F-X286 owns carried A7/Q18/Q22memory/retention/equivalence/calibration qualification and prioritized memory work. Original workloads, thresholds and prior failed evidence remain unchanged. Issues437and445remain open while their carried criteria are unmet. Historical F-X268completion is not reset. These are planned successor stories, not started work or completion credit.
+
+Correctness, live/held handles, last-loan lifetime tests, Source/resource limits, atomic refusal/security, hash/pixel behavior, actual applicable native/oracle proof, installed runtime/typing, strict SemVer, verified packages/archives and hosted-source proof remain release gates. Numerical and memory carry does not turn unrelated failures into exceptions. Publication still requires sprint close and separate final approval at the exact reviewed main SHA.
+
+This is the operative exception to earlier promises to finish numerical and memory qualification before this release. All compatible/yanked/equal API baselines, selected-family contribution inventory, strict SemVer/native authority, actual final-source CI/build-only rehearsal, installed typing/runtime, verified archive bounds and separate exact-main-SHAapproval remain mandatory. Failed numeric evidence stays failed and no unperformed memory result is manufactured. Completion must name carried F-X285/F-X286criteria and leave related issues open. This amendment does not imply release completion or authorize tags, publication or the optional OPCyank. HLD impact for this amendment also includes docs/hld/12-testing-strategy.md and14-development-backlog.md.
+
+
+## Current release freeze source availability, 2026-11-08
+
+Under Q-S96-16, Root freezes the reviewed bounded reader and namespace repairs and the separately labelled ordinary-frame behavior repair. The existing consumed F271 checkpoint at a13b12927af21290ba0ea9eb512cc7f2639b9102 authorizes only a clean canonical sprint/s96 source push without force and exact-source normal CI. Support14 and Root32 are clean. Current namespace local evidence is23Rust and42installed Python passes, with full workspace Clippy passing. The final workspace run is in progress after actual missing-tool and sandbox native-conversion failures, which remain preserved. Four network-dependent policy tests pass after restoring access to their pinned public inputs.
+
+Existing F275 progress and S96run state bind the frozen source, reviews, actual local checks, remote/ref/workflow bytes and intended normal routing before the push. Current complete workspace, hash/pixel, installed/typing, applicable native/SDK, verified archives, hosted CI and signed native authority remain required. Historical H11 success does not qualify this successor. Build-only26payload rehearsal waits for actual complete successful exact-source normal CI. Numerical and unfinished memory qualification alone are carried to S96.1. No completion, dependency unblock, main merge, tag, external comment or publication is authorized by this checkpoint.

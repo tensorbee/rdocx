@@ -1,5 +1,7 @@
 # 12, Testing strategy
 
+S96 release acceptance records the approved Q-S96-16 numerical and unfinished memory-qualification carry to S96.1 Optimization Sprint. Original measurement protocols and failed/unperformed outcomes remain intact. Current correctness, ownership/resource safety, actual native/oracle applicability, installed typing/runtime and package/release checks remain gates. The successor starts with an authenticated review before optimization or a new baseline claim.
+
 ## Styles and cell edit performance contract
 
 The styles regression records actual parse and serialization work after an

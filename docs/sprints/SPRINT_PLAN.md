@@ -3518,6 +3518,28 @@ Q-S96-07 is answered. This answer opens no other product choice.
 
 No design plan is approved or created by this registration. Each eventual `## Design` pass writes one existing `.claude/plans/F-X276-design.md` through `F-X283-design.md`, each with `## Spec reference` naming HLD sections rather than whole documents, `## Consumer map`, `## Behavior contracts and evidence`, `## Dependency readiness` that keeps provider edges and resource barriers separate, `## Acceptance criteria` with one numbered row per A-ID and the wrong implementation each rejects, `## Test matrix`, `## Test plan` using existing test carriers with no new test binary, `## Implementation checklist`, `## HLD impact` from the inventory above, `## Risk routing`, `## Hash harness`, and `## Open questions` recording answered Q-S96-07 where the font policy applies. Each plan also carries raw-XML verbatim preservation, `xsd:sequence` child order, and the named final rider debt. Public API additions are additive within the approved feature scope and enter the strict SemVer baseline. No new crate, module or source file is proposed. If a design needs a new source file, it must name the exact path and reason and request explicit repository permission. A new trait needs two existing implementers today, a new generic parameter needs two actual instantiations today, and a new feature flag needs a named current consumer. Two consumers of one trait implementation do not justify a trait. F-X275 remains reviewed and open pending the final union, and all accepted API additions enter its existing strict SemVer baseline and release notes. No donor source, donor CI or donor measurement is adopted as acceptance. F-X276 preparation V4 was accepted by the Codex preparation pass2 as a basis for later canonical design adoption, subject to normal contract approval and a clean-Base claim. That acceptance is not implementation, microscope or feature acceptance. No canonical design, approval or claim follows from this intake. F-X272 source peer2 increment was rejected and remains neither done nor accepted.
 
+##### S96 release scope amendment, 2026-11-08
+
+Q-S96-16 is answered by the user on2026-11-08: prepare the best current release with a known-limitations note, then start S96.1 Optimization Sprint with a performance and memory review. S97 AcroForms and later sprint numbers stay unchanged. Finish the bounded namespace changes already implemented, validate them, then freeze. Do not open more optimization investigations or wait for another numerical performance pass before S96 closure.
+
+Numerical performance targets and unfinished performance/RSS/history/calibration qualification move to S96.1. Failed measurements remain failed and unperformed checks remain unqualified. Latest complete ordinary benchmark evidence before the final namespace allocation wave is76/79flat, all5linear and bothIssue407protocols passing. Reply, Document.add_picture and Cell.add_picture miss their flat limits. No final post-wave timing or memory guarantee is claimed.
+
+F-X284 owns the opening review, F-X285 owns carried numerical criteria including F-X268/F-X282/F-X283, and F-X286 owns carried A7/Q18/Q22memory/retention/equivalence/calibration qualification and prioritized memory work. Original workloads, thresholds and prior failed evidence remain unchanged. Issues437and445remain open while their carried criteria are unmet. Historical F-X268completion is not reset. These are planned successor stories, not started work or completion credit.
+
+Correctness, live/held handles, last-loan lifetime tests, Source/resource limits, atomic refusal/security, hash/pixel behavior, actual applicable native/oracle proof, installed runtime/typing, strict SemVer, verified packages/archives and hosted-source proof remain release gates. Numerical and memory carry does not turn unrelated failures into exceptions. Publication still requires sprint close and separate final approval at the exact reviewed main SHA.
+
+#### Sprint S96.1, Optimization Sprint
+
+**Goal**: review actual performance and memory first, then implement the highest-value measured improvements without extending S96 release preparation. Preserve existing API, output, Source/resource and ownership contracts. No implementation starts before the opening review and approved designs. Estimates and any delivery split follow that review, with no invented completion date or new RSS ceiling.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X284 | Review performance and memory and rank optimization work | M |
+| F-X285 | Complete carried numerical performance targets | L |
+| F-X286 | Qualify and reduce memory footprint and retained history | L |
+
+Run F-X284first. Its authenticated baseline and ranked findings determine the bounded work in F-X285andF-X286. Those two may use separate claimed worktrees only where resources do not overlap. Share one final integrated qualification. Keep the original79flat/5linear/Issue407andIssue437/445protocols, every failed observation, actual Native/Python consumers and A7/Q18/Q22policy. The memory input is openly reconstructed, not recovered historical bytes. No default threshold reduction, skipped Source reader or hidden warmup is approved. Correctness and ownership/resource checks accompany every optimization. Keep Issues377,437and445open as appropriate to their remaining scope.
+
 #### Sprint S97, Fillable PDF forms
 
 
