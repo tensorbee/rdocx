@@ -898,6 +898,11 @@ hanging precedence for that same-element case. ODT run properties stay on
 `CT_RPr::merge_from` and do not move when only `w:ind` changes. Twip unit
 rounding is unchanged.
 
+For example, numbering-level `left=1440, hanging=360` followed by direct
+paragraph `left=0, firstLine=720` places the number 36 pt past the page margin.
+Wrapped text starts at the margin because the direct first-line value clears
+the inherited hanging value.
+
 ## Word automatic text colour
 
 Run colour follows the resolved inheritance cascade. An effective `auto`

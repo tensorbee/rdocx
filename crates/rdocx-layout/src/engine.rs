@@ -27498,6 +27498,65 @@ mod tests {
     }
 
     #[test]
+    fn issue433_direct_first_line_replaces_numbering_level_hanging() {
+        // Exact numbering/indent values and repeated text from the reporter's
+        // 2026-11-08 follow-up. Style-only coverage misses this inheritance path.
+        let mut input = make_input_with_text("");
+        input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="90"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="90"><w:abstractNumId w:val="90"/></w:num></w:numbering>"#).unwrap());
+        let text = "A numbered paragraph long enough to wrap onto several lines, so that where the second line starts can be compared with where the first line and its number start. ".repeat(2);
+        let paragraph = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="90"/></w:numPr><w:ind w:left="0" w:firstLine="720"/></w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+        );
+        input.document = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
+            paragraph.repeat(3)
+        ).as_bytes()).unwrap();
+        let output = deterministic_layout(&input);
+        assert_eq!(output.pages.len(), 1);
+        let mut markers = Vec::new();
+        let mut text_lines: Vec<(f64, f64)> = Vec::new();
+        oxml_layout::walk(&output.pages[0].elements, &mut |element, transform| {
+            if let PositionedElement::Text(run) = element {
+                let origin = transform.apply(run.origin);
+                if matches!(run.text.as_str(), "1." | "2." | "3.") {
+                    markers.push((run.text.clone(), origin));
+                } else if !run.text.trim().is_empty() {
+                    if let Some((_, left)) = text_lines
+                        .iter_mut()
+                        .find(|(y, _)| (*y - origin.y).abs() < 0.05)
+                    {
+                        *left = left.min(origin.x);
+                    } else {
+                        text_lines.push((origin.y, origin.x));
+                    }
+                }
+            }
+        });
+        assert_eq!(markers.len(), 3, "{markers:?}");
+        for (index, (text, origin)) in markers.iter().enumerate() {
+            assert_eq!(text, &format!("{}.", index + 1));
+            assert!((origin.x - 108.0).abs() < 0.05, "{markers:?}");
+            let first_line = text_lines
+                .iter()
+                .find(|(y, _)| (*y - origin.y).abs() < 0.05)
+                .expect("number and first text share a baseline");
+            assert!((first_line.1 - 144.0).abs() < 0.05, "{text_lines:?}");
+        }
+        let wrapped: Vec<_> = text_lines
+            .iter()
+            .filter(|(y, _)| !markers.iter().any(|(_, point)| (*y - point.y).abs() < 0.05))
+            .collect();
+        assert!(
+            wrapped.len() >= 3,
+            "each paragraph must wrap: {text_lines:?}"
+        );
+        assert!(
+            wrapped.iter().all(|(_, x)| (*x - 72.0).abs() < 0.05),
+            "{wrapped:?}"
+        );
+    }
+
+    #[test]
     fn issue433_tb_rl_paragraph_merge_clears_the_absent_sibling() {
         // The vertical-text arm merges numbering and direct properties through
         // the same first-line pair rule. A later level that sets either
