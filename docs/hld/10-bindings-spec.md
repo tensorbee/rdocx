@@ -3057,7 +3057,11 @@ resolution counts. Genuine admitted textbox and structural revisions still do.
 Reopen
 reads the same persisted units and part-presence votes without chronology or
 process-local history. Imported Word-completed markers stay exact when untouched
-and retire before an affected comparison edits their owner or part or adds
+through an unrelated scoped paragraph replacement and comparison, including a
+terminal body pair with no surviving note counterpart. Complete removal of a
+comparison-owned footnotes part also retires its settings references while
+preserving other note policy. Completed markers retire before an affected
+comparison edits their owner or part or adds
 custody. Ignored footnote stories retain original parts and refuse body changes
 that would leave a missing note target. Endnote text comparison remains
 supported, while new endnote topology remains refused. These operations use

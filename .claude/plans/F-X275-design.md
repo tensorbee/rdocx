@@ -267,6 +267,8 @@ The final integrated union runs genuine API acquisition once for the required na
 
 ## HLD impact
 
+- docs/hld/03-architecture.md, preserved completed body-marker identity in final native follow-up integration.
+- docs/hld/04-opc-and-packaging.md, exact settings-reference retirement when the footnotes part is removed.
 - docs/hld/12-testing-strategy.md, approved Q-S96-16 numerical and memory-qualification carry with retained correctness/release gates.
 - docs/hld/10-bindings-spec.md, current family identity, public nominal dependency reach, packaging and CI compatibility proof.
 - docs/hld/14-development-backlog.md, current F-X275 title/scope only, preserving completed history.
@@ -873,4 +875,25 @@ This is the operative exception to earlier promises to finish numerical and memo
 
 Under Q-S96-16, Root freezes the reviewed bounded reader and namespace repairs and the separately labelled ordinary-frame behavior repair. The existing consumed F271 checkpoint at a13b12927af21290ba0ea9eb512cc7f2639b9102 authorizes only a clean canonical sprint/s96 source push without force and exact-source normal CI. Support14 and Root32 are clean. Current namespace local evidence is23Rust and42installed Python passes, with full workspace Clippy passing. The final workspace run is in progress after actual missing-tool and sandbox native-conversion failures, which remain preserved. Four network-dependent policy tests pass after restoring access to their pinned public inputs.
 
+### Registry request pacing repair
+
+Actual hosted acquisition made23crates.io API requests in2.76seconds. The official rust-lang/crates.io data-access policy at blobad99031d94658e4238f9043e2746be43f1378d75 requires at most one API request per second. The later e430Linux request failed403on its first registry URL. Its particular refusal cause is unproved, and a local200with the same User-Agent does not qualify hosted execution.
+
+Root approves bounded transport remediation within A5/A7/A9. One private urllib request-processing handler waits1.05seconds before each HTTPS crates.io API request, including redirects, in both existing acquisition and publication-verification openers. Non-API static archives, GitHub and PyPI do not acquire this delay. Keep existing native HTTPS redirect refusal and publication redirect behavior. Retain failures and forbid success through retries, dropped baselines or changed expectations. No public CLI or product contract changes.
+
+The three existing native producer jobs run in order Linux, Mac, Windows. Each successor retains its original route and uses always() so a failed producer does not erase another host's required observation. Signing and deciding dependencies still require all three. The orchestrator waits for all prior attempts to be terminal before dispatching a coherent successor. This bounds simultaneous registry callers in the release route without a shared GitHub concurrency group that would cancel pending host jobs. No claim covers unrelated external clients.
+
+Discriminating local transport tests observe actual request timing with a simulated clock, API redirects from API and non-API URLs, failed responses and non-API traffic. Workflow mutation controls reject removed ordering or failed-predecessor suppression. Existing publication file-integrity controls remain mandatory. HLD15 records this concrete routing and policy. Independent bounded review, focused policy checks and actual final-source hosted execution remain due. Existing review counters, native failures and every final acceptance gate are retained.
+
 Existing F275 progress and S96run state bind the frozen source, reviews, actual local checks, remote/ref/workflow bytes and intended normal routing before the push. Current complete workspace, hash/pixel, installed/typing, applicable native/SDK, verified archives, hosted CI and signed native authority remain required. Historical H11 success does not qualify this successor. Build-only26payload rehearsal waits for actual complete successful exact-source normal CI. Numerical and unfinished memory qualification alone are carried to S96.1. No completion, dependency unblock, main merge, tag, external comment or publication is authorized by this checkpoint.
+
+
+## Fresh native follow-up corrective integration
+
+Fresh Word16.114.4saves discharge no failed destination check. The four explicit native All results validate in both SDK views, but their actual installed G09/G12 follow-ups expose two existing correctness failures. F275 A6 final product acceptance retains A430-35/A430-41 and G430-09/G430-12 from the approved F272a contract. Root repairs this integrated provider behavior under F275 final qualification. Historical F272/F272a provider completion records and their final rider debt are not reset or treated as fresh acceptance.
+
+An unrelated payment replacement must preserve the unchanged seller paragraph's terminal completed B-only bookmark as an exact direct paragraph boundary. Keep inside-revision refusal, unmatched-B ownership limits and completed-marker retirement on genuine owner/part edits or new custody. Do not infer a lost owner from adjacency or delete the marker to make comparison pass. The new local discriminator uses actual Word metadata, terminal B placement, a special-only part, public scoped replacement and word-granularity comparison. Matched B/N and existing malformed/opaque/atomic controls remain required.
+
+When the existing absence predicate removes the last footnotes part, remove its document-settings special-reference edges in the same unpublished transaction. Preserve numbering/placement policy, endnote settings, foreign lookalikes and opaque unrelated records. Cover both typed empty references and preserved nonempty aliased Word reference roots using existing namespace machinery. Do not retain the part to conceal dangling edges or clear all note policy. Add an accepted retained-part control and rerun the exact actual native pending/resolved inputs through fresh installed output and complete SDK views.
+
+The first new Rust regression attempt had an introduced nonexistent paragraph-method compile error. The corrected source-stable cohort actually reports56passes and2failures at the intended terminal-marker and dangling-settings assertions. Raw failures, native files, tool identities and subsequent repair receipts stay separate. HLD03/04/10 receive the corresponding existing-intent clarification before final verification, in addition to HLD15 pacing. Independent review and affected current-source runtime/archive/hosted gates remain due. No numerical carry waives these failures and no new feature or public signature is added.

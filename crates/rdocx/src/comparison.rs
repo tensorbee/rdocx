@@ -4477,6 +4477,7 @@ struct NoteMarker {
     family: char,
     part: String,
     span: Range<usize>,
+    paragraph: Range<usize>,
     pair_id: i32,
     owner: Option<i32>,
     reference: Option<i32>,
@@ -4717,6 +4718,7 @@ fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
                 family,
                 part: part.clone(),
                 span: node.start..end.end,
+                paragraph: tree.elements[paragraph].start..tree.elements[paragraph].end,
                 pair_id,
                 owner,
                 reference,
@@ -5169,6 +5171,53 @@ fn remove_footnotes_part(document: &mut Document, name: &str) -> Result<()> {
         });
     }
     remove_unshared_note_targets(document, vec![name.to_owned()], Some(name))?;
+    let settings_part = document
+        .package
+        .get_part_rels(&document.doc_part_name)
+        .into_iter()
+        .flat_map(|relationships| &relationships.items)
+        .find(|relationship| {
+            relationship.rel_type == rel_types::SETTINGS
+                && crate::document::relationship_is_internal(relationship)
+        })
+        .map(|relationship| {
+            OpcPackage::resolve_rel_target(&document.doc_part_name, &relationship.target)
+        });
+    if let Some(part) = settings_part {
+        let source = document
+            .package
+            .get_part(&part)
+            .ok_or_else(|| Error::Other(format!("missing settings part: {part}")))?;
+        let tree = crate::revision::XmlTree::parse(source)?;
+        let root = &tree.elements[tree.root];
+        let mut removals = tree
+            .elements
+            .iter()
+            .filter(|node| {
+                root.word
+                    && root.local == "settings"
+                    && node.word
+                    && node.local == "footnote"
+                    && node.parent.is_some_and(|parent| {
+                        let properties = &tree.elements[parent];
+                        properties.word
+                            && properties.local == "footnotePr"
+                            && properties.parent == Some(tree.root)
+                    })
+            })
+            .map(|node| node.start..node.end)
+            .collect::<Vec<_>>();
+        if !removals.is_empty() {
+            removals.sort_by_key(|range| range.start);
+            let mut updated = source.to_vec();
+            for range in removals.into_iter().rev() {
+                updated.drain(range);
+            }
+            let settings = rdocx_oxml::settings::CT_Settings::from_xml(&updated)?;
+            document.package.set_part(&part, updated);
+            document.settings = Some(settings);
+        }
+    }
     document.footnotes = rdocx_oxml::footnotes::CT_Footnotes::new();
     document.footnotes_part_name = None;
     document.footnotes_dirty = false;
@@ -5287,7 +5336,33 @@ fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document)
                 None
             }
         } else {
-            None
+            let right_marker = note_markers(edited)?
+                .into_iter()
+                .find(|marker| marker.token == unit.token && marker.family == 'B');
+            left.iter().find(|other| {
+                other.owner.is_none()
+                    && other.token == unit.token
+                    && other.original == unit.original
+                    && other.edited == unit.edited
+                    && right_marker.as_ref().is_some_and(|right| {
+                        left_markers.iter().any(|left| {
+                            left.token == other.token
+                                && left.family == 'B'
+                                && left.part == right.part
+                                && left.pair_id == right.pair_id
+                                && left.span.start - left.paragraph.start
+                                    == right.span.start - right.paragraph.start
+                                && original
+                                    .package
+                                    .get_part(&left.part)
+                                    .map(|source| &source[left.paragraph.clone()])
+                                    == edited
+                                        .package
+                                        .get_part(&right.part)
+                                        .map(|source| &source[right.paragraph.clone()])
+                        })
+                    })
+            })
         };
         if let Some(other) = same {
             if unit.original != other.original || unit.edited != other.edited {

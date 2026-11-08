@@ -1587,6 +1587,10 @@ While any unit remains pending, resolved units retain zero-width tombstones.
 A valid body pair without a note pair has no surviving note-owner identity.
 It stays a tombstone in an open part or completed imported metadata in a settled
 part. A following reference or revision wrapper cannot identify its former owner.
+Collision reconciliation preserves a completed body pair when its token, bits,
+pair id, part and exact source paragraph boundary agree between inputs. This
+does not reconstruct a missing note owner. An unrelated paragraph edit keeps
+that unchanged boundary direct and exact.
 Positively bound units still require exact normal definition and reference
 ownership, matching token and bits, valid pair cardinality and no duplicate
 binding. A note pair without its body pair refuses. Identical bytes can represent

@@ -37846,6 +37846,152 @@ fn issue430_comparison_preserves_prior_custody_against_unrelated_edit() {
 }
 
 #[test]
+fn issue430_comparison_preserves_terminal_completed_body_markers_after_unrelated_edit() {
+    for bits in ["01", "10"] {
+        let marker = format!(
+            r#"<w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF1P{bits}B"/><w:bookmarkEnd w:id="0"/>"#
+        );
+        let body = format!(
+            r#"<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="6F9BD752" w14:textId="7789695B" w:rsidR="00FF51D7" w:rsidRDefault="00000000"><w:r><w:t>seller</w:t></w:r>{marker}</w:p>{}"#,
+            issue430_p("payment", None)
+        );
+        let notes = r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"#;
+        let mut original = issue430_fixture(&body, Some(notes));
+        let mut edited = issue430_roundtrip(&mut original);
+        let location = edited.paragraph_story_location(1).unwrap().unwrap();
+        assert_eq!(
+            edited
+                .try_replace_text_at(&location, "payment", "payment changed", Some(1))
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        original
+            .compare_with_options(
+                &edited,
+                "unrelated",
+                ISSUE430_DATE,
+                &rdocx::ComparisonOptions {
+                    granularity: rdocx::ComparisonGranularity::Word,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for accept in [true, false] {
+            let mut result = issue430_roundtrip(&mut original);
+            if accept {
+                result.accept_all().unwrap();
+            } else {
+                result.reject_all().unwrap();
+            }
+            let package = issue430_package(&mut result);
+            let main =
+                std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+            assert!(main.contains(&marker), "{main}");
+            assert_eq!(result.paragraph(0).unwrap().text(), "seller");
+            assert_eq!(
+                result.paragraph(1).unwrap().text(),
+                if accept { "payment changed" } else { "payment" }
+            );
+            assert!(package.contains_part("/word/footnotes.xml"));
+        }
+    }
+}
+
+#[test]
+fn issue430_settings_cleanup_preserves_property_root_namespace_and_policy() {
+    for accept in [true, false] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let mut package = issue430_package(&mut pending);
+        let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap().replace("</w:footnotes>", r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote></w:footnotes>"#);
+        package.set_part("/word/footnotes.xml", notes.into_bytes());
+        let foreign = r#"<q:footnote xmlns:q="urn:producer" q:id="99"></q:footnote>"#;
+        let opening = format!(
+            r#"<w:footnotePr xmlns:q="{ISSUE430_WORD}" xmlns:x="urn:producer" x:flag="exact">"#
+        );
+        package.set_part("/word/settings.xml", format!(r#"<w:settings xmlns:w="{ISSUE430_WORD}">{opening}<w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/><w:footnote w:id="-1"/><q:footnote q:id="0"></q:footnote>{foreign}<x:keep/></w:footnotePr><w:endnotePr><w:numStart w:val="8"/></w:endnotePr></w:settings>"#).into_bytes());
+        if !package
+            .get_part_rels("/word/document.xml")
+            .unwrap()
+            .items
+            .iter()
+            .any(|rel| rel.rel_type == rel_types::SETTINGS)
+        {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::SETTINGS, "settings.xml");
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+        if accept {
+            pending.accept_all().unwrap();
+        } else {
+            pending.reject_all().unwrap();
+        }
+        let mut reopened = issue430_roundtrip(&mut pending);
+        let package = issue430_package(&mut reopened);
+        let settings = package.get_part("/word/settings.xml").unwrap();
+        let model = rdocx_oxml::settings::CT_Settings::from_xml(settings).unwrap();
+        let properties = model.footnote_properties().unwrap();
+        assert_eq!(properties.num_fmt.as_deref(), Some("lowerRoman"));
+        assert_eq!(properties.num_start, Some(3));
+        assert_eq!(model.endnote_properties().unwrap().num_start, Some(8));
+        let raw = std::str::from_utf8(settings).unwrap();
+        assert!(raw.contains(&opening), "{raw}");
+        assert!(raw.contains("urn:producer"));
+        assert!(raw.contains(foreign), "{raw}");
+        if accept {
+            assert_eq!(properties.special_references, vec![-1]);
+            assert!(raw.contains("q:id=\"0\""));
+        } else {
+            assert!(properties.special_references.is_empty(), "{raw}");
+            assert!(!raw.contains("<w:footnote "), "{raw}");
+            assert!(!raw.contains("q:id=\"0\""), "{raw}");
+            assert!(!package.contains_part("/word/footnotes.xml"));
+        }
+    }
+}
+
+#[test]
+fn issue430_settings_cleanup_ignores_nested_opaque_property_scopes() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let mut package = issue430_package(&mut pending);
+    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap().replace("</w:footnotes>", r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote></w:footnotes>"#);
+    package.set_part("/word/footnotes.xml", notes.into_bytes());
+    let opaque = format!(
+        r#"<x:opaque xmlns:x="urn:opaque"><w:settings><w:footnotePr xmlns:q="{ISSUE430_WORD}"><q:footnote q:id="123"></q:footnote></w:footnotePr></w:settings></x:opaque>"#
+    );
+    let foreign = r#"<q:footnote q:id="99"></q:footnote>"#;
+    package.set_part("/word/settings.xml", format!(r#"<w:settings xmlns:w="{ISSUE430_WORD}">{opaque}<w:footnotePr xmlns:q="urn:producer"><w:footnote w:id="-1"/>{foreign}</w:footnotePr></w:settings>"#).into_bytes());
+    if !package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .any(|rel| rel.rel_type == rel_types::SETTINGS)
+    {
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::SETTINGS, "settings.xml");
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+    pending.reject_all().unwrap();
+    let package = issue430_package(&mut pending);
+    let raw = std::str::from_utf8(package.get_part("/word/settings.xml").unwrap()).unwrap();
+    assert!(raw.contains(&opaque), "{raw}");
+    assert!(raw.contains(foreign), "{raw}");
+    assert!(
+        raw.contains(r#"<w:footnotePr xmlns:q="urn:producer">"#),
+        "{raw}"
+    );
+    assert!(!raw.contains(r#"<w:footnote w:id="-1""#), "{raw}");
+    assert!(!package.contains_part("/word/footnotes.xml"));
+}
+
+#[test]
 fn issue430_comparison_preserves_and_retires_imported_word_resolved_markers() {
     let body_mark =
         r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P01B"/><w:bookmarkEnd w:id="80"/>"#;

@@ -1834,6 +1834,10 @@ referenced notes remain. Unowned invalid and opaque records keep the part.
 With no retained normal definition or unowned record, an open original-absent
 or edited-absent vote removes the part. Otherwise imported specials remain.
 Removing a part removes its main relationship, override and own relationships.
+Footnotes-part removal also removes the document-settings references to its
+special records, including preserved aliased Word reference roots. Numbering
+and placement policy, endnote settings and foreign or unrelated opaque children
+remain. The actual property-owner namespace scope identifies these edges.
 Definition-owned relationships and targets are removed only after checking
 remaining references and package-wide sharing. Unrelated relationships retain
 their ids and order. Settlement retires every library pair, while tombstones
