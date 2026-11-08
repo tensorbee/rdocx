@@ -731,8 +731,14 @@ internal pins require it, each with its own approval at reviewed main.
 External release actions remain owned by `/release`.
 
 Strict SemVer runs in three fixed native jobs on Linux x86_64, Mac arm64 and
-Windows x86_64 with Rust1.97.1 and official archive/executable pins. Existing
-CI signing uses only fixed completed producer artifacts, binding target, job
+Windows x86_64 with Rust1.97.1 and official archive/executable pins. The
+native producers execute in that order, including after a predecessor failure,
+to serialize their registry clients. The acquisition and publication-verification
+clients wait1.05seconds before every crates.io API request, including redirects.
+Static archive, GitHub and PyPI requests retain their existing behavior. A release
+successor starts only after every preceding attempt is terminal. HTTP refusal
+remains a failed required acquisition, never a compatibility success.
+Existing CI signing uses only fixed completed producer artifacts, binding target, job
 ID and native wrapper digest in the signed subject name. Certificate source,
 workflow, immutable repository IDs and run attempt are independently checked.
 OIDC and attestation write permissions belong only to the signing job. The

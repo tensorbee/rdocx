@@ -953,7 +953,8 @@ jobs:
 
   semver-macos:
     name: SemVer native (macos-arm64)
-    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    needs: semver-linux
+    if: always() && github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
     runs-on: macos-26
     permissions:
       contents: read
@@ -1039,7 +1040,8 @@ jobs:
 
   semver-windows:
     name: SemVer native (windows-x86_64)
-    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    needs: semver-macos
+    if: always() && github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
     runs-on: windows-2025
     permissions:
       contents: read

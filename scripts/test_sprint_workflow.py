@@ -342,6 +342,62 @@ class SprintWorkflowTests(unittest.TestCase):
         data,process,expected=self._semver_attestation_fixture();data[0]['verificationResult'].pop('signature')
         with self.assertRaises(ValueError):check(data,process,expected)
 
+    def test_semver_api_requests_are_paced_through_redirects_and_failures(self):
+        clock = [0.0]
+        requests = []
+        api = 'https://crates.io/api/v1/crates/'
+        routes = {
+            api+'first/versions': (302, api+'second/versions'),
+            'https://example.org/redirect': (302, api+'third/versions'),
+            api+'blocked/versions': (403, None),
+        }
+
+        class Transport(workflow.urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                from urllib.response import addinfourl
+                requests.append((request.full_url, clock[0]))
+                code, location = routes.get(request.full_url, (200, None))
+                headers = {'location': location} if location else {}
+                response = addinfourl(io.BytesIO(b'{}'), headers, request.full_url, code)
+                response.msg = 'synthetic response'
+                return response
+
+        build = workflow.urllib.request.build_opener
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(workflow.urllib.request, 'build_opener',
+                             side_effect=lambda *handlers: build(*handlers, Transport())), \
+                patch.object(workflow.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)):
+            root = Path(directory)
+            workflow._semver_http(api+'first/versions', root/'first.json')
+            workflow._semver_http('https://example.org/redirect', root/'redirect.json')
+            with self.assertRaisesRegex(ValueError, 'failed/incomplete'):
+                workflow._semver_http(api+'blocked/versions', root/'blocked.json')
+            self.assertEqual(json.loads((root/'blocked.json.http.json').read_text())['status'], 403)
+            self.assertEqual((root/'blocked.json').read_bytes(), b'{}')
+            workflow._semver_http(api+'last/versions', root/'last.json')
+            before = clock[0]
+            workflow._semver_http('https://static.crates.io/crates/demo/demo.crate', root/'static')
+            workflow._semver_http('https://pypi.org/pypi/rdocx/json', root/'pypi')
+            self.assertEqual(clock[0], before)
+        starts = [at for url, at in requests if url.startswith(api)]
+        self.assertEqual(len(starts), 5)
+        self.assertTrue(all(b-a >= 1 for a, b in zip(starts, starts[1:])), requests)
+
+    def test_semver_native_registry_callers_are_serial_without_skipping_failed_successors(self):
+        text = (workflow.REPO/'.github/workflows/ci.yml').read_text()
+        def check(source):
+            for successor, predecessor in [('semver-macos', 'semver-linux'),
+                                            ('semver-windows', 'semver-macos')]:
+                block = self.yaml_block(source, '  '+successor+':')
+                self.assertIn('needs: '+predecessor, block)
+                self.assertRegex(block, r'if: always\(\) && github.repository')
+        check(text)
+        for old, new in [('needs: semver-linux', 'needs: changes'),
+                         ('needs: semver-macos', 'needs: changes'),
+                         ('if: always() && github.repository', 'if: github.repository')]:
+            with self.subTest(mutation=old), self.assertRaises(AssertionError):
+                check(text.replace(old, new))
+
     def test_semver_archive_authenticates_before_extraction_and_preserves_failed_bytes(self):
         import gzip
         def package(name='demo-1.2.3/Cargo.toml',kind=tarfile.REGTYPE):
@@ -8119,6 +8175,7 @@ class SprintWorkflowTests(unittest.TestCase):
 
     def test_published_unified_release_requires_exact_registry_files(self) -> None:
         from hashlib import sha256
+        from urllib.response import addinfourl
         from urllib.request import Request
 
         workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
@@ -8135,8 +8192,11 @@ class SprintWorkflowTests(unittest.TestCase):
             (assets / name).write_bytes(name.encode())
             expected[name] = sha256(name.encode()).hexdigest()
 
-            def registry_response(request: Request, timeout: int) -> object:
-                self.assertEqual(timeout, 30)
+            clock = [0.0]
+            requests = []
+            def registry_response(request: Request) -> object:
+                self.assertEqual(request.timeout, 30)
+                requests.append((request.full_url, clock[0]))
                 if "pypi.org" in request.full_url:
                     result = {"urls": [
                         {"filename": filename, "digests": {"sha256": digest}}
@@ -8144,13 +8204,30 @@ class SprintWorkflowTests(unittest.TestCase):
                     ]}
                 else:
                     result = {"version": {"num": version}}
-                return contextlib.closing(io.BytesIO(json.dumps(result).encode()))
+                redirect = 'crates.io' in request.full_url and '?' not in request.full_url
+                response = addinfourl(io.BytesIO(json.dumps(result).encode()),
+                                      {'location': request.full_url+'?redirected=1'} if redirect else {},
+                                      request.full_url, 302 if redirect else 200)
+                response.msg = 'synthetic registry response'
+                return response
 
-            with patch.object(workflow.urllib.request, "urlopen", registry_response):
+            class Transport(workflow.urllib.request.HTTPSHandler):
+                def https_open(self, request):
+                    return registry_response(request)
+
+            build = workflow.urllib.request.build_opener
+            def make_opener(*handlers):
+                return build(*handlers, Transport())
+
+            with patch.object(workflow.urllib.request, "build_opener", side_effect=make_opener), \
+                    patch.object(workflow.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)):
                 result = workflow.verify_published_unified_release(f"v{version}", assets)
             self.assertEqual(result["distribution"], "rdocx")
+            starts = [at for url, at in requests if 'crates.io' in url]
+            self.assertEqual(len(starts), 2*len(workflow.RELEASE_CRATES['rdocx']))
+            self.assertTrue(all(b-a >= 1 for a, b in zip(starts, starts[1:])), requests)
             expected[name] = "0" * 64
-            with patch.object(workflow.urllib.request, "urlopen", registry_response):
+            with patch.object(workflow.urllib.request, "build_opener", side_effect=make_opener):
                 with patch.object(workflow.time, "sleep", return_value=None):
                     with self.assertRaisesRegex(ValueError, "PyPI exact files=False"):
                         workflow.verify_published_unified_release(f"v{version}", assets)

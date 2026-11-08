@@ -2220,6 +2220,16 @@ def _semver_inventory_files(root):
     return inventory
 
 
+class _CratesIoApiPacing(urllib.request.BaseHandler):
+    """Apply the registry's one-request-per-second limit, including redirects."""
+
+    def https_request(self, request):
+        url = urllib.parse.urlsplit(request.full_url)
+        if url.hostname in ('crates.io', 'www.crates.io') and url.path.startswith('/api/'):
+            time.sleep(1.05)
+        return request
+
+
 def _semver_http(url, destination):
     """Retain actual HTTPS response, including errors, before JSON interpretation."""
     destination = Path(destination)
@@ -2234,7 +2244,7 @@ def _semver_http(url, destination):
     row = {'url': url, 'utc': datetime.now(timezone.utc).isoformat().replace('+00:00','Z'), 'complete': False}
     try:
         request = urllib.request.Request(url, headers={'User-Agent':'rdocx-semver-policy (tensorbee/rdocx)','Accept':'application/json'})
-        response = urllib.request.build_opener(HTTPSOnly()).open(request, timeout=60)
+        response = urllib.request.build_opener(HTTPSOnly(), _CratesIoApiPacing()).open(request, timeout=60)
         with response, destination.open('xb') as output:
             row.update(status=response.status, final_url=response.geturl())
             shutil.copyfileobj(response, output)
@@ -3827,7 +3837,7 @@ def verify_published_unified_release(tag: str, directory: Path) -> dict[str, obj
 
     def fetch_json(url: str) -> dict[str, object]:
         request = urllib.request.Request(url, headers={"User-Agent": "rdocx-release/1"})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.build_opener(_CratesIoApiPacing()).open(request, timeout=30) as response:
             value = json.load(response)
         if not isinstance(value, dict):
             raise ValueError(f"invalid registry response from {url}")
