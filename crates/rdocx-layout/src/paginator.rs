@@ -7097,15 +7097,34 @@ fn render_frame_blocks(
     let mut y = 0.0;
     for (paragraph, facts) in blocks.iter().zip(facts) {
         y += facts.flow_gap;
-        layers.append(&mut place_cell_anchored(
-            &paragraph.anchored,
-            Some(&facts.paint),
-            geometry,
-            &frame,
-            y,
-            paragraph.indent_left,
-            media,
-        )?)?;
+        if facts.paint.anchors.len() != paragraph.anchored.len() {
+            return Err(oxml_layout::LayoutError::Layout(
+                "Word anchor producer count mismatch".into(),
+            ));
+        }
+        for (index, anchor) in paragraph.anchored.iter().enumerate() {
+            let mut positioned = anchored_rect(anchor, geometry, &frame, y, paragraph.indent_left);
+            // Word uses the ordinary furniture frame as the origin for page
+            // offsets inside that frame. Alignment keeps its existing basis.
+            if anchor.rel_h == ST_RelativeFromH::Page && anchor.align_h.is_none() {
+                positioned.x += rect.x;
+            }
+            if anchor.rel_v == ST_RelativeFromV::Page && anchor.align_v.is_none() {
+                positioned.y += rect.y;
+            }
+            let mut produced = anchored_elements(
+                anchor,
+                AnchorPaintOwner::Word(&facts.paint.anchors[index]),
+                positioned,
+                geometry,
+                media,
+            )?;
+            if anchor.behind_doc {
+                layers.behind.append(&mut produced)?;
+            } else {
+                layers.front.append(&mut produced)?;
+            }
+        }
         let mut painted = render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
@@ -10654,6 +10673,28 @@ mod tests {
             panic!("behind anchor remains marked content");
         };
         assert!(matches!(children[0], PositionedElement::FilledRect { .. }));
+
+        let mut page_anchor = anchor(false);
+        page_anchor.rel_h = ST_RelativeFromH::Page;
+        page_anchor.rel_v = ST_RelativeFromV::Page;
+        let page_paint = place_cell_anchored(
+            &[page_anchor],
+            None,
+            &page,
+            &cell,
+            30.0,
+            12.0,
+            &HashMap::new(),
+        )
+        .expect("true cell Page offsets retain the section-page origin");
+        let page_elements = page_paint.front.into_parts().unwrap().0;
+        let PositionedElement::MarkedContent { children, .. } = &page_elements[0] else {
+            panic!("cell page anchor retains marked content");
+        };
+        let PositionedElement::FilledRect { rect, .. } = children[0] else {
+            panic!("cell page stamp rectangle");
+        };
+        assert_eq!((rect.x, rect.y), (5.0, 4.0));
 
         // A same-page late note inserts into each saved physical layer, ahead
         // of front furniture and the front page border, with exact companions.

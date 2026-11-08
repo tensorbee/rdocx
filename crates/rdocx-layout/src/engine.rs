@@ -32731,25 +32731,124 @@ mod tests {
                 {
                     rectangles.push((
                         *color,
-                        transform
-                            .apply(Point {
-                                x: rect.x,
-                                y: rect.y,
-                            })
-                            .y,
+                        transform.apply(Point {
+                            x: rect.x,
+                            y: rect.y,
+                        }),
                     ));
                 }
             },
         );
         assert_eq!(rectangles.len(), 2, "frame anchors occur exactly once");
         assert!(
-            rectangles.contains(&(Color::from_hex("112233"), 120.0)),
-            "page anchor keeps written page basis: {rectangles:?}"
+            rectangles
+                .iter()
+                .any(|(color, p)| *color == Color::from_hex("112233")
+                    && p.x == 140.0
+                    && p.y == 300.0),
+            "page offsets use the actual ordinary frame origin: {rectangles:?}"
         );
         assert!(
-            rectangles.contains(&(Color::from_hex("445566"), 185.0)),
+            rectangles
+                .iter()
+                .any(|(color, p)| *color == Color::from_hex("445566")
+                    && p.x == 140.0
+                    && p.y == 185.0),
             "paragraph anchor follows framed paragraph: {rectangles:?}"
         );
+    }
+
+    #[test]
+    fn issue424_frame_page_offset_axes_keep_unframed_and_alignment_policy() {
+        for footer in [false, true] {
+            for (framed, shifted, align_h, align_v) in [
+                (true, false, false, false),
+                (true, true, false, false),
+                (false, false, false, false),
+                (true, false, true, false),
+                (true, false, false, true),
+                (true, false, true, true),
+            ] {
+                let frame = if !framed {
+                    String::new()
+                } else {
+                    format!(
+                        r#"<w:framePr w:w="3600" w:hAnchor="page" w:vAnchor="page" w:x="{}" w:y="{}"/>"#,
+                        if shifted { 1800 } else { 1200 },
+                        if shifted { 4800 } else { 3600 }
+                    )
+                };
+                let mut page = issue424_shape_anchor("page", 1524000, "112233", 1);
+                if align_h {
+                    page = page.replace(
+                        "<wp:posOffset>1016000</wp:posOffset>",
+                        "<wp:align>center</wp:align>",
+                    );
+                }
+                if align_v {
+                    page = page.replace(
+                        "<wp:posOffset>1524000</wp:posOffset>",
+                        "<wp:align>center</wp:align>",
+                    );
+                }
+                let content = format!(
+                    r#"<w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_A</w:t></w:r>{page}{}</w:p>"#,
+                    issue424_shape_anchor("paragraph", 63500, "445566", 0)
+                );
+                let input = if footer {
+                    issue424_furniture_input("", &content)
+                } else {
+                    issue424_furniture_input(&content, "")
+                };
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let mut rectangles = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::FilledRect { rect, color } = element
+                            && (*color == Color::from_hex("112233")
+                                || *color == Color::from_hex("445566"))
+                        {
+                            assert_eq!((rect.width, rect.height), (10.0, 10.0));
+                            rectangles.push((
+                                *color,
+                                transform.apply(Point {
+                                    x: rect.x,
+                                    y: rect.y,
+                                }),
+                            ));
+                        }
+                    },
+                );
+                assert_eq!(rectangles.len(), 2, "each producer paints once");
+                let (_, actual) = rectangles
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("112233"))
+                    .unwrap();
+                let origin = if framed {
+                    if shifted {
+                        (90.0, 240.0)
+                    } else {
+                        (60.0, 180.0)
+                    }
+                } else {
+                    (0.0, 0.0)
+                };
+                assert_eq!(actual.x, if align_h { 301.0 } else { origin.0 + 80.0 });
+                assert_eq!(actual.y, if align_v { 391.0 } else { origin.1 + 120.0 });
+                if framed {
+                    let (_, paragraph) = rectangles
+                        .iter()
+                        .find(|(color, _)| *color == Color::from_hex("445566"))
+                        .unwrap();
+                    assert_eq!(
+                        (paragraph.x, paragraph.y),
+                        (origin.0 + 80.0, origin.1 + 5.0)
+                    );
+                    assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+                }
+            }
+        }
     }
 
     #[test]

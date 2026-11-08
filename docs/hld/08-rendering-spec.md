@@ -2064,7 +2064,13 @@ margins, including zero, clear actual selected flow. A negative side uses its
 absolute written distance and permits overlap.
 
 Written, mirrored section geometry remains the reference for page and margin
-anchors, furniture and page/text borders. The effective body band controls
+anchors, furniture and page/text borders, except explicit page-offset axes
+inside ordinary positioned header/footer paragraph frames. Those offsets use
+the actual frame origin independently per axis, matching the qualified native
+Word frame controls. Paragraph axes retain their actual paragraph origin.
+Page alignment retains its existing section-page basis pending native alignment
+qualification. Unframed and table-cell page anchors retain section-page offsets.
+The effective body band controls
 body fit, columns, vertical alignment, line numbers and note reservations.
 Paragraph-relative anchors use their actual owner origin, including owners
 inside table cells and ordinary frames. Positioned tables, frames and drawings
