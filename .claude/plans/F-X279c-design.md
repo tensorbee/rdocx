@@ -273,3 +273,12 @@ Normal claim and scoped implementation are complete. Actual native evidence and
 final integrated acceptance remain pending. If clean-helper inspection
 fails during implementation, report the missing seam rather than inventing a
 new API, relaxing A279-2 or consuming unfinished C1.
+
+
+## Fresh native Word pin reconciliation, 2026-11-08
+
+The user requires fresh native checks before release. Actual running Word is16.114.4(26110224), with bundle16.114.26110224. The current existing Rust generator emits the unchanged exact03ca23e64efcb01433b403db1f63712851dd37ec1bb4cb89eb6c4b9f00e140d3minimal-profile candidate. Its historical16.114.1guard actually fails after the candidate digest passes. That failed observation remains retained. SDK3.0.1Microsoft365 validates the exact candidate with zero errors and unchanged input.
+
+CUA opens a hash-identical work copy on Word16.114.4without repair. The resolved Ada Lovelace thread contains Please verify this sentence. and Ben replies Verified and ready. Reopen thread is present. Selecting the thread visually highlights exactly Review this sentence. Closing only that generated window returns to the prior DocStage without a save prompt. Original and work bytes remain03ca. No Word save/reopen or initials avatar observation is claimed. Structured observation and exact packages are durable in the current release freeze native-refresh packet.
+
+Only after those actual observations, the integrator refreshes the two existing test-only version/build pins to16.114.4and16.114.26110224. The candidate pin and generator stay unchanged. Both rebuilt existing comments::tests::word_ guards pass with include-ignored and zero skips. The refresh adds no production behavior or HLD intent. B crossing-range composition, other native/schema cases and remaining integrated/hosted/release gates retain their own evidence and remain pending until observed. No feature completion or publication approval follows.

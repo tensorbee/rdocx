@@ -5778,8 +5778,8 @@ mod tests {
         }
     }
 
-    const WORD_VERSION: &str = "16.114.1";
-    const WORD_BUILD: &str = "16.114.26102031";
+    const WORD_VERSION: &str = "16.114.4";
+    const WORD_BUILD: &str = "16.114.26110224";
     const WORD_COMMENT_CANDIDATE_SHA256: &str =
         "03ca23e64efcb01433b403db1f63712851dd37ec1bb4cb89eb6c4b9f00e140d3";
 
