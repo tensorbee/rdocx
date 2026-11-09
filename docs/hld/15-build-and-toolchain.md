@@ -912,6 +912,16 @@ the filtered product jobs skip, yet the same stable aggregate gate reports.
 The scheduled path skips change detection and requires supply-chain success.
 Unfiltered jobs retain their ordinary triggers.
 
+**Original Linux font entry points.** The Ubuntu Test job runs the original
+Issue433 DejaVu Sans fixture through a freshly built release CLI and installed
+release wheel. The same60paragraph document is compared across CLI convert,
+Python PDF, page count and layout for omitted, empty and one-font folders.
+Explicit system opt-in is a separate control. The job requires installed
+DejaVu Sans, checks installed wheel members and RECORD hashes, retains the
+artifact/font/input identities and six finite outcomes, and preserves the
+actual output on failure. This is functional agreement, not a performance or
+native Word layout baseline. Ordinary complete binding suites remain separate.
+
 **Optional final Linux performance gates.** The registered CI workflow can add
 one F283 benchmark job to an ordinary manual final CI invocation. Its native
 Ubuntu24.04 x86_64 host uses CPython3.12.13 and read-only repository content and

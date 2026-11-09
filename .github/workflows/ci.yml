@@ -204,7 +204,7 @@ jobs:
             cmake g++ ninja-build pkg-config \
             libfontconfig1-dev libfreetype-dev libjpeg-turbo8-dev \
             libpng-dev libtiff-dev libopenjp2-7-dev liblcms2-dev zlib1g-dev \
-            libcairo2-dev libglib2.0-dev
+            libcairo2-dev libglib2.0-dev fonts-dejavu-core
           python3 scripts/install_pinned_poppler.py
       - name: Set up Python 3.12
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -261,6 +261,139 @@ jobs:
           -- --ignored --exact --test-threads=1 --nocapture
       - name: Run public DOCX authoring conformance
         run: python3 scripts/docx_authoring_conformance.py --public
+      - name: Qualify original Linux DejaVu font entry points
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          font_root="${RUNNER_TEMP}/issue433-linux-font-entrypoints"
+          python3 -m venv "$font_root/venv"
+          font_python="$font_root/venv/bin/python"
+          "$font_python" -m pip install maturin==1.13.3
+          "$font_python" -m maturin build --release --locked \
+            --manifest-path crates/rdocx-py/Cargo.toml \
+            --interpreter "$font_python" --out "$font_root/wheels"
+          cargo build --release --locked -p rdocx-cli
+          mkdir "$font_root/bin"
+          cp target/release/rdocx "$font_root/bin/rdocx"
+          "$font_python" -m pip install --no-deps "$font_root"/wheels/rdocx-*.whl
+          export RDOCX_CLI="$font_root/bin/rdocx"
+          export RDOCX_433_REPORT="$font_root/report"
+          export RDOCX_433_WHEEL="$(find "$font_root/wheels" -name 'rdocx-*.whl' -print -quit)"
+          "$font_python" -I -B - <<'PY'
+          import os, re, subprocess, zipfile
+          import base64
+          import hashlib
+          import importlib.metadata
+          import json
+          from pathlib import Path
+          import sys
+
+          assert sys.platform == "linux", "This fixture requires the native Linux host"
+          import rdocx
+
+          root = Path(os.environ["RDOCX_433_REPORT"])
+          root.mkdir(parents=True, exist_ok=True)
+          cli = Path(os.environ["RDOCX_CLI"]).resolve()
+          wheel = Path(os.environ["RDOCX_433_WHEEL"]).resolve()
+          native = Path(rdocx.__file__).parent / "_rdocx.abi3.so"
+          assert native.resolve().is_relative_to(Path(sys.prefix).resolve())
+          distribution = importlib.metadata.distribution("rdocx")
+          for entry in distribution.files:
+              if entry.hash is not None:
+                  data = Path(distribution.locate_file(entry)).read_bytes()
+                  actual = base64.urlsafe_b64encode(
+                      hashlib.new(entry.hash.mode, data).digest()
+                  ).decode().rstrip("=")
+                  assert actual == entry.hash.value
+                  assert entry.size is None or len(data) == entry.size
+          with zipfile.ZipFile(wheel) as archive:
+              for name in archive.namelist():
+                  if name.startswith("rdocx/") and not name.endswith("/"):
+                      assert archive.read(name) == (
+                          Path(rdocx.__file__).parent / name.removeprefix("rdocx/")
+                      ).read_bytes()
+          font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+          assert font.is_file(), "The qualification requires installed DejaVu Sans"
+          version = subprocess.run([str(cli), "--version"], check=True, capture_output=True, text=True).stdout.strip()
+          assert version == "rdocx " + distribution.version
+
+          def pdf_facts(pdf):
+              pages = int(re.search(rb"/Type\s*/Pages\b.*?/Count (\d+)", pdf, re.S).group(1))
+              fonts = sorted({f.decode() for f in re.findall(
+                  rb"/BaseFont\s*/(?:[A-Z]{6}\+)?([A-Za-z0-9_-]+)", pdf
+              )})
+              return pages, fonts
+
+          doc = rdocx.Document()
+          doc.set_style("Normal", font_name="DejaVu Sans")
+          for _ in range(60):
+              doc.add_paragraph("The committee reviews the annual budget, the schedule of works and the report of the "
+                                "auditors for the coming year. " * 3)
+          source = root / "fonts.docx"
+          doc.save(source)
+          empty, with_font = root / "empty-fonts", root / "one-font"
+          empty.mkdir()
+          with_font.mkdir()
+          probe = rdocx.Document()
+          probe.add_paragraph("x")
+          ttf = re.search(r"base64,([A-Za-z0-9+/=]+)", probe.render_page_to_svg(0).svg).group(1)
+          (with_font / "caller-font.ttf").write_bytes(base64.b64decode(ttf))
+          facts = {"source_head": os.environ["GITHUB_SHA"], "python": sys.version,
+                   "package": rdocx.__file__, "native": str(native), "cli_version": version,
+                   "sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in [source, cli, wheel, native, font, with_font / "caller-font.ttf"]},
+                   "cases": []}
+          report = root / "RESULT.json"
+          report.write_text(json.dumps(facts, indent=2) + "\n")
+          for system in [False, True]:
+              for label, kwargs, flags in [
+                  ("omitted", {}, []),
+                  ("empty", {"font_dir": empty}, ["--font-dir", str(empty)]),
+                  ("one-font", {"font_dir": with_font}, ["--font-dir", str(with_font)]),
+              ]:
+                  name = label + ("-system" if system else "-bundled")
+                  output = root / (name + "-cli.pdf")
+                  if system:
+                      kwargs = {**kwargs, "system_fonts": True}
+                      flags = [*flags, "--system-fonts"]
+                  argv = [str(cli), "convert", str(source), "--to", "pdf", "-o", str(output), "--force", *flags]
+                  result = subprocess.run(argv, capture_output=True, text=True)
+                  row = {"name": name, "argv": argv, "cli_exit": result.returncode,
+                         "stdout": result.stdout, "stderr": result.stderr}
+                  facts["cases"].append(row)
+                  report.write_text(json.dumps(facts, indent=2) + "\n")
+                  assert result.returncode == 0, row
+                  cli_pages, cli_fonts = pdf_facts(output.read_bytes())
+                  pdf = doc.to_pdf(**kwargs)
+                  (root / (name + "-python.pdf")).write_bytes(pdf)
+                  py_pages, py_fonts = pdf_facts(pdf)
+                  count = doc.page_count(**kwargs)
+                  layout = max(fragment.physical_page for fragment in doc.layout(**kwargs))
+                  row.update(cli_pages=cli_pages, cli_fonts=cli_fonts, python_pages=py_pages,
+                             python_fonts=py_fonts, page_count=count, layout_pages=layout)
+                  report.write_text(json.dumps(facts, indent=2) + "\n")
+                  assert cli_fonts == py_fonts
+                  assert len({cli_pages, py_pages, count, layout}) == 1
+                  assert cli_fonts == (["DejaVuSans"] if system else ["Carlito"])
+                  assert system or "DejaVu Sans" in result.stdout + result.stderr
+                  row["qualified"] = True
+                  report.write_text(json.dumps(facts, indent=2) + "\n")
+          assert len(facts["cases"]) == 6 and all(row["qualified"] for row in facts["cases"])
+          assert hashlib.sha256(source.read_bytes()).hexdigest() == facts["sha256"][str(source)]
+          print(json.dumps(facts, sort_keys=True))
+          PY
+      - name: Retain original Linux font qualification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue433-linux-font-entrypoints
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/issue433-linux-font-entrypoints/report
+            ${{ runner.temp }}/issue433-linux-font-entrypoints/wheels
+            ${{ runner.temp }}/issue433-linux-font-entrypoints/bin
       - name: Run full workspace suite
         env:
           UV_CACHE_DIR: "${{ runner.temp }}/uv-cache"

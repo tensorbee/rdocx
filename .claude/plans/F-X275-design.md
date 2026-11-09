@@ -963,3 +963,32 @@ The user approved "Release with these measured limits documented" for the three 
 Preserve actual inputs, fonts, glyph/metric proof, native/library outputs and raw failures in the retained native-carlito-k1-line-seven-comparison-1 and k1-modern15-savedline-native-two-comparison-1 packets under `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh`. Retain the saved-compatibility context and controlled-profile inputs as diagnostics. The mode15-only direct-enabled control passes with max0.33637pt. It supports a compatibility-profile explanation for that exact case, not a general GPOS rule or a pass for all legacy/enabled/superscript sources. Omitted paragraph defaults remain application-defined and are not retrospectively source-specified.
 
 Keep nominal fonts/sizes, threshold rules, superscript policy, Source/resource validation, author/owner identity and original measurements unchanged. No offset/font/spacing tuning, tolerance relaxation, source reinterpretation, API change or general native waiver is approved. F-X290 must design and qualify the exact affected behavior with actual native outcomes and a different invariant discriminator before repair acceptance. The historical every-original50instance obligation remains F-X289 and is not replaced by these four cases. Existing F287/F288/Q16/Q28 scopes, A8 qualified-omission disposition, current-source correctness/safety/package gates, completed-provider history and review caps remain separate. No new plan, claim, implementation or delivery credit follows from registration.
+
+
+## Original Linux font-entry-point qualification
+
+Final evidence reconciliation finds no actual retained run of the expressly
+named F278 A278-7 original Issue433 Linux DejaVu Sans/current-CLI fixture. The
+synthetic caller controls and generic hosted success remain applicable, but
+cannot substitute for that finite observation. No approved carry covers it.
+The numbering-indent follow-up is already qualified by its local contract and
+requires no additional native campaign.
+
+Within A6, execute the original60paragraph fixture inline in the existing
+Ubuntu Test job with a freshly built ordinary release CLI and installed
+release wheel. Compare the same source across the original four entry points
+and three font-folder states, plus three explicit system opt-in controls.
+Require actual DejaVu Sans, installed member and RECORD authentication,
+successful identified builds and raw per-case outputs. Preserve failures. No
+product/API, font policy, tolerance, hash baseline or public release claim
+changes. The check runs on native Linux, not a container or a substituted host.
+
+Risk routing adds contributed-criterion and same-input consumer qualification,
+with CI/source/artifact custody and HLD15 execution intent. Existing product
+riders remain applicable at unchanged inputs. Obtain independent bounded
+review, focused workflow/prose checks and actual current-source Linux success
+before full acceptance. The fd212 26payload rehearsal remains its actual
+producer and is reusable only after authenticating unchanged product, wheel,
+CLI and release-workflow inputs. It does not claim execution at this successor.
+No completion, main merge, tag, publication or new waiver follows from adding
+the check.
