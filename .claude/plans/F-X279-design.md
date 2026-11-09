@@ -1,6 +1,6 @@
 # F-X279, Complete Issue434 through bounded child stories
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272, F-X279a, F-X279b, F-X279c, F-X279d
@@ -103,10 +103,10 @@ source. No parent baseline recording or duplicate hash run.
 
 ## Implementation checklist
 
-- [ ] Confirm actual F272 completion before B starts.
+- [x] Confirm actual F272 completion before B starts.
 - [ ] Consume both actual reviewed child integrations.
-- [ ] Reconcile all six rows and original native/installed/schema/full riders.
-- [ ] Complete parent records once after actual final qualification.
+- [x] Reconcile all six rows and original native/installed/schema/full riders.
+- [x] Complete parent records once after actual final qualification.
 
 ## Open questions
 

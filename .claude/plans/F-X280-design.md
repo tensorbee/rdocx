@@ -1,6 +1,6 @@
 # F-X280, Complete Issue435 through bounded child stories
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X277, F-X272, F-X280a, F-X280b, F-X280c
@@ -71,11 +71,11 @@ All three original design peers remain used and exhausted. F280b preserves full 
 
 ## Implementation checklist
 
-- [ ] Root audits and approves exact partition and childa readiness/coordination exception.
-- [ ] Childa completes its bounded independent contract.
-- [ ] Childc completes its bounded independent A4 contract with original-source and Display controls.
-- [ ] Childb closes actual provider/design barriers and implements its unchanged scope.
-- [ ] All three handoffs integrate, final union and original riders pass, then normal child and umbrella completion records reconcile once.
+- [x] Root audits and approves exact partition and childa readiness/coordination exception.
+- [x] Childa completes its bounded independent contract.
+- [x] Childc completes its bounded independent A4 contract with original-source and Display controls.
+- [x] Childb closes actual provider/design barriers and implements its unchanged scope.
+- [x] All three handoffs integrate, final union and original riders pass, then normal child and umbrella completion records reconcile once.
 
 ## Open questions
 

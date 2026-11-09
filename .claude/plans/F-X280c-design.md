@@ -1,6 +1,6 @@
 # F-X280c, Validate stored PresentationML packages through the public file route
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none
@@ -164,7 +164,7 @@ Separate worktrees are required. F280a and this child both edit rpptx lib.rs, na
 - [x] Approve metadata/path exception and hunk leases, fresh intake, actual whole-product check/clean worker and normal claim/start.
 - [x] Actual RED, smallest existing-file implementation, complete focused GREEN, installed Python result or named pending rider.
 - [x] Declared HLD updates, independent zero-finding microscope and scoped gate. Structured handoff validation is the separate preparation coordination step.
-- [ ] Integrator reconciles shape/validation hunks and final union before child/parent acceptance.
+- [x] Integrator reconciles shape/validation hunks and final union before child/parent acceptance.
 
 ## Local preparation disposition
 

@@ -21213,3 +21213,582 @@ Q22 includes14 measurement categories and84 fresh processes:60 historical source
 Receipt anchors: local `/private/tmp/s954-fx270-final-local/receipt.json`, hosted `/private/tmp/s954-fx270-hosted-acceptance.json`, frozen artifacts `/private/tmp/s954-recovered-artifacts-7ca9adb9/frozen-receipt.json`, native union `/private/tmp/s954-native-union-7ca9adb9/receipt.json`, runtime correction `/private/tmp/s954-word-runtime-env-correction-7ca9adb9/receipt.json`, A7 join `/private/tmp/s954-a7-independent-7ca9adb9/acceptance.json`, RSS `/private/tmp/s954-memory-v19-rss-execution/measurement-report.json` and actual no-oracle history `/private/tmp/s954-memory-v19-history-noassert/result/receipt.json`. Actual source/profiles, tools, input/artifact hashes, raw samples, failed attempts and scoped successors remain bound in those receipts and the committed reviews. No old proof helper is generalized to relabel its source.
 
 Nine delivery records are written once, including three earlier local provider-prefix completions. Per-feature effort is unrecorded. Six actual worked dates are calendar throughput units, not person-days. Historical overlapping scope judgments are not silently re-summed into a capacity promise. Remaining F-X269 work belongs to S96. M24 continues, with no end-of-milestone gate waived. Issue404 original input remains unavailable and unverified, with the authorized reporter retest/reopen note retained. Release-bound comments wait verified publication. No release tag, registry upload or publication is part of this sprint acceptance.
+
+
+### F-X271, Restore pinned viewer downloads and planning policy
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, historical estimate 1 to 2 developer-days (.claude/plans/F-X271-design.md and SPRINT_PLAN:3168, historical intake), actual developer effort not recorded.
+
+**What was built.** Restored pinned LibreOffice acquisition from official retained-release URLs and fail-closed archive/executable verification. Reconciled CI retrieval contracts, deterministic test fixtures and roadmap policy. The accepted supply-chain remediation pins pulldown-cmark 0.13.6 with its existing disabled defaults and html feature.
+
+**Non-obvious choices.** Official archive bytes and exact runtime identity govern admission. Download caps, checksum, traversal/member/expanded-size and executable checks remain mandatory. Later CI fixture repairs use local deterministic theme setup rather than installed macOS PowerPoint resources.
+
+**Deviations from the design plan.** The initial retrieval repair expanded only after actual integrated gate failures to the documented security patch, transport and test-premise corrections. The advisory refusal was actual RED. An exploitable public Markdown-importer RED was not demonstrated. No advisory allowlist or feature bypass was added.
+
+**Spec sections touched.** HLD12 pinned oracle acquisition and qualification. HLD14 roadmap/repair registration. HLD15 exact tool and supply-chain pins. Exact product work list: `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`, `docs/hld/15-build-and-toolchain.md`. Operative plan HLD section: `.claude/plans/F-X271-design.md:83`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded local gate: focused retrieval/roadmap RED then 3 PASS and negative runtime controls at plan lines 128-136. Existing policy carriers `test_workspace_viewer_jobs_install_pinned_libreoffice`, `test_pinned_libreoffice_installer_enforces_runtime_guards` and `test_m23_m24_roadmap_has_no_duplicate_or_dangling_story`. Root later records the exact SmartArt semantic body passing with its required native test-thread stack setting. This environment correction does not relabel the failed default-stack attempt.
+
+Recorded local review: `.claude/reviews/F-X271-all-pass-6.md`. Source/gate authorities: `.claude/plans/F-X271-design.md:128`, `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X271-progress.md:633`, `crates/rdocx/Cargo.toml:37`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** CI acquisition success alone is not rendering parity. Preserve exact tool provenance and actual hosted job conclusions. Recorded feature source tip `a3c9857b` and integration `a13b12927af21290ba0ea9eb512cc7f2639b9102` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X272, Preserve existing revisions during document comparison
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 3 to 4 developer-days (SPRINT_PLAN:3168, historical aggregate before child extraction), actual developer effort not recorded.
+
+**What was built.** Implemented revised-source document comparison that preserves existing revisions and supports changes in admitted editable owners. Integrated the ordered Word source/Field grammar and checked source authority used by comparison and subsequent native/Python consumers.
+
+**Non-obvious choices.** Existing protected revisions, physical owner identity, namespace scope, first-cause errors and required Source reads remain authoritative. Unknown/foreign XML stays opaque. Unsupported protected edits refuse atomically. No whole-model equality over private Field is used to bypass source admission.
+
+**Deviations from the design plan.** Root reconciled the separately approved F-X272a note contract and later shared C1/bookmark source corrections. Genuine LOCAL provider completion precedes dependent claims, while final rider acceptance is distinct. F-X287 carries only the two observed native Word-save note families. Q-A430-28 remains separately unproved.
+
+**Spec sections touched.** HLD03 comparison, ordered owner/Field authority and staged Word publication. HLD04 retained XML/relationship custody. HLD10 Rust/Python/CLI comparison and checked public boundary. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X272-design.md:90`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded genuine LOCAL provider gate:30 Rust Issue 425,35 focused comparison,2 CLI and 4 fresh opt2 Python nodes, plus affected all-target/all-feature strict lint at plan lines 6663-6671. Named controls include `issue425_nested_guard_is_independent_and_keeps_content_boundaries` and `issue425_projected_noop_retains_native_owner_and_exact_source`. External 46/7 client compilation is a separate observation, not an additive unique-suite total.
+
+Recorded local review: `.claude/reviews/F-X272-root-provider-final-1.md`. Source/gate authorities: `.claude/plans/F-X272-design.md:6663`, `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X272-progress.md:11741`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Keep original provider completion, failed attempts and final native debt distinct. Do not close Issue 430 or infer the carried Word-save states pass. Recorded feature source tip `b288828052b68cb2c3280ae24dfbaaa4bf26b878` and integration `5a4c5c0b` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X272a, Compare and resolve footnote ownership and lifecycle
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Added comparison-owned footnote insertion/removal/text lifecycle, source-qualified B/N custody markers, selector resolution and cleanup across saved/reopened note owners. Preserved normal versus special note inventories, ignored-story semantics and public revision/payment controls.
+
+**Non-obvious choices.** Hidden zero-width STANDARD bookmarks encode actual physical custody, never an inferred owner from adjacency. Body-only unmatched custody has the approved restricted contract. Special-record allocation preserves occupied IDs and imported ownership. All publishing remains staged and failures atomic.
+
+**Deviations from the design plan.** Q-A430-29 adds the approved unmatched-body convention. Fresh native follow-ups exposed B-only marker and dangling settings-edge defects subsequently repaired by Root under F-X275 A6. The two remaining note-plus-body/mixed-author Word-save families carry to pending F-X287, preserving all 45A/14G repair obligations and separate unproved Q-A430-28.
+
+**Spec sections touched.** HLD03 note comparison and custody. HLD04 normal/special part edges and atomic package ownership. HLD10 selector and lifecycle behavior. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X272a-design.md:541`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded final local v6:56 integration,5 unit,1 reported regression and 1 CLI PASS, strict scoped lint and fmt at progress lines 157-165. The LOCAL provider checkpoint is plan lines 809-835. Named controls include `issue430_comparison_inserts_a_middle_paragraph_with_a_new_footnote` and `issue430_comparison_multi_reference_custody_unit_selection`. Final native/SDK and actual installed G09/G12 must be bound to the final union below. Earlier native normalization does not qualify carried cases.
+
+Recorded local review: `.claude/reviews/F-X272a-custody-recognition-codex-final-4.md`. Source/gate authorities: `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X272a-progress.md:157`, `.claude/plans/F-X272a-design.md:809`, `.claude/plans/F-X272a-design.md:839`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Issue 430 stays open. Failed actions are atomic to their immediate pre-action state. An earlier successful first-author action can still retire custody while another author remains pending. Do not describe all mixed states as atomic whole-sequence success. Recorded feature source tip `27246080e51aa0abf5c91066123070bd1ed1fe3f` and integration `1c69b7e0` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X273, Repair header body clearance and complete TOC navigation
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 4 to 6 developer-days (SPRINT_PLAN:3168, historical intake), actual developer effort not recorded.
+
+**What was built.** Repaired selected header/footer measurement and body clearance, furniture frame/anchor positioning, note placement, line/kerning behavior and complete bounded TOC navigation. Integrated the ordinary selected furniture-frame page-offset repair while retaining source fonts and authored offsets.
+
+**Non-obvious choices.** Measure and paint actual selected stories with consistent source-derived origins, clear transitive obstacles and retain physical owner order. Kerning observes the original source threshold/profile. TOC qualified omission follows the approved owner policy, with actual cached-title/target evidence rather than guessed native parity.
+
+**Deviations from the design plan.** The labelled F-X273 geometry/kerning stage intentionally changes 22 hash keys and 7 golden samples. User-approved F-X288 carries exactly seven frame failures. F-X289 carries missing equivalence to 50 historical measurement instances. F-X290 carries three legacy cases plus one saved line edge. All failed measurements and 0.5 pt criterion remain. The separate row split and qualified TOC omission dispositions are not those carries.
+
+**Spec sections touched.** HLD08 selected furniture geometry, frame/anchor scope, kerning, note placement, navigation and exact approved native limitations. Exact product work list: `docs/hld/08-rendering-spec.md`. Operative plan HLD section: `.claude/plans/F-X273-design.md:96`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded local frame-offset RED fails expected 140/300 against actual 80/120, then 31 Issue 424 tests plus 8 additional controls PASS at progress lines 1173-1179. Named gates include `issue424_the_first_body_fragment_starts_below_a_header_taller_than_the_top_margin`, `issue424_frame_page_offset_axes_keep_unframed_and_alignment_policy` and selected-flow/warm-cold controls. Final original-reporter/native and fresh source checks require the final union record. No recovered historical 50 artifact identity is invented.
+
+Recorded local review: `.claude/reviews/F-X273-all-pass-11.md`. Source/gate authorities: `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X273-progress.md:1173`, `.claude/plans/F-X273-design.md:1012`, `.claude/plans/F-X273-design.md:1022`, `.claude/plans/F-X273-design.md:1032`, `.claude/plans/F-X273-design.md:1040`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Intentional labelled stage 25518295 changes 22 hash keys and 7 golden samples for reviewed geometry/kerning output. Later stage 19cde21f overlaps. Whole-sprint cumulative delta is 24 distinct keys/7 samples, not the sum 38. Current final 49 hash/7 pixel check: Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Issue 424 stays open. The native 0.551202 pt failures, off-page explicit-text footer/144 pt flow difference, historical coverage gap and four F-X290 measurements stay failed/unqualified. No general frame or drop-cap parity is claimed. Recorded feature source tip `711e7d2c3f83b0fbb38b1f3b4f757d405be62753` and integration `fca298cc1a90dd77682ebbe6b652c56dd74bd228` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X274, Honor section and field page-number formats
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, historical estimate 2 to 3 developer-days (SPRINT_PLAN:3168, historical intake), actual developer effort not recorded.
+
+**What was built.** Implemented section/field page-number display formats and shared PAGE/PAGEREF/TOC/cache projections while keeping display labels distinct from physical page indices. Qualified the exact original Issue 423 duplicate numbering source against Word and applied explicit-attribute overlay only in the rendering-effective reader.
+
+**Non-obvious choices.** Preserve the first-owner typed model, getters, setters and raw duplicate order. For an admitted qualified direct section owner, fold only explicit Word fmt/start attributes in source order, independently. Empty or omitted attributes retain prior values. Unsupported format remains sticky, foreign/nested lookalikes do not supply authority.
+
+**Deviations from the design plan.** Actual original Word displayed i,ii,1,2 while the old reader displayed i,ii,i,ii. The approved A1 refinement uses five independent native controls to distinguish attribute overlay from whole-last selection. It does not broaden arbitrary malformed-document recovery or rewrite the original invalid source into a valid substitute.
+
+**Spec sections touched.** HLD08 effective page numbering, physical/display identity and field/render context. HLD10 page-number field update/cache/public projection boundary. Exact product work list: `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X274-design.md:96`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded semantic RED lower 9 PASS/4 FAIL, native 3 PASS/1 FAIL and CLI 1 PASS/1 FAIL. Successor lower 13/native 4/CLI 2 PASS at plan lines 205-221. The actual current CLI matches original plus allfive native label sequences across four physical pages on unchanged inputs. The complete bounded microscope pass 3 is clean. Fresh final source/cache/reopen and native evidence remain final-record fields below.
+
+Recorded local review: `.claude/reviews/F-X274-all-aspects-pass-3.md`. Source/gate authorities: `.claude/plans/F-X274-design.md:162`, `.claude/plans/F-X274-design.md:183`, `.claude/plans/F-X274-design.md:205`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Retain original invalid and schema-valid intent carriers separately. Fresh original-script output has its own identity. No absent historical ZIP identity is claimed. Recorded feature source tip `625add1a60531a0f6f515b315d2d4f21879976d4` and integration `932696b738d016b1bb51124ea8d22a51b07d8c30` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X276, Report rpptx fit, plain Markdown, and slides.index
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, historical estimate 3 to 5 developer-days (SPRINT_PLAN:3509, historical provisional), actual developer effort not recorded.
+
+**What was built.** Made read-only PowerPoint fit report unsupported frames with causes instead of aborting the whole deck, aligned table-cell fit with actual grown transformed table geometry, improved plain Markdown escaping and added live SlideCollection.index. Validation text now uses existing Display semantics.
+
+**Non-obvious choices.** Read-only diagnosis tolerates/records unsupported owners and duplicate physical leaves while mutating fit APIs retain refusal. Width-unfit cells remain overflow. Grown-table height excuses only width-fitting cells whose transformed table stays on-page. Retain one shared table context and compute growth once per physical table.
+
+**Deviations from the design plan.** The table repair followed an actual retained-context/growth RED:16 copies/calls versus 2 physical tables. Markdown punctuation decisions use complete logical lines across runs and hard breaks. Slide index uses owner identity, not structural equality. Stale/foreign objects retain specified accessor errors. No rendering baseline change is allocated to this story.
+
+**Spec sections touched.** HLD08 read-only fit/count consumers and grown transformed table bounds. HLD10 SlideCollection.index, Display validation, fit exits/reasons and semantic Markdown escaping. Exact product work list: `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X276-design.md:289`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded actual Issue 431 successor 7 PASS and separate fresh Python 3.14 semantic 3 PASS plus public binding controls, strict four-crate lint/fmt/prose at F-X276-codex-final-2:31-43. Named resource discriminator `issue431_table_contexts_share_storage_and_grown_measurement`. CLI `issue431_fit_reports_an_unsupported_frame_with_cannot_assess`. Python `test_issue431_slides_index_returns_the_live_position_python_pptx_returns`. Debug semantic results are not the final installed 3.9/3.12 matrix or final public Markdown measurement.
+
+Recorded local review: `.claude/reviews/F-X276-codex-final-2.md`. Source/gate authorities: `.claude/plans/F-X276-design.md:289`, `.claude/reviews/F-X276-codex-final-2.md:31`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Unsupported is not counted as successful overflow assessment. Keep mutating fit refusals distinct from read-only diagnosis. No new source module, feature or renderer heuristic was introduced. Recorded feature source tip `04762602a981d4b5b31fb991fa4b25e49656bfef` and integration `91dfb0a7c6b48c054fc4a28df6bca7994f717fc9` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+Public Markdown correctness and consumer routing are qualified by the applicable complete Rust/CLI and installed Python3.9/3.12 functional evidence. Full seven-route benchmark timing remains unqualified and is carried under Q-S96-16 to F-X285. Historical untimed preflights remain attributed to their recorded producer. See .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/f276-markdown-rider-applicability-1/REPORT.md.
+
+### F-X277a, Emit authored radical degrees and preserve imported absence
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** S, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Changed the authored OfficeMath radical constructor to emit degree presence in schema order, including the empty authored degree, while preserving imported radicals whose degree is absent and retained raw slots.
+
+**Non-obvious choices.** The shared constructor is the actual correction owner for native LaTeX/MathML and Python add_equation. Imported absence remains a supported preservation state. No new field setter, schema framework or API is needed.
+
+**Deviations from the design plan.** A277-1 was extracted as a complete child independent of F-X272 note implementation. Native drawing residual stays distinct from authored markup/schema proof and is not claimed as universal radical rendering parity.
+
+**Spec sections touched.** HLD03 OfficeMath authored presence versus imported absence. HLD10 native equation conversion/Python markup with unchanged signatures. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X277a-design.md:119`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded independent clean implementation review covers genuine old-source authored-degree omission RED and fixed lower/public GREEN. Named carriers `issue432_authored_radicals_emit_deg_and_imports_keep_absence`, `issue432_imported_radicals_keep_absence_normalization_and_raw_slots`, `issue432_public_equation_radicals_keep_authored_degree` and Python `test_issue432_authored_radicals_emit_degree_through_python`. Final SDK authored-document and actual installed/runtime/typing outcomes must bind the final union below.
+
+Recorded local review: `.claude/reviews/F-X277a-all-pass-1.md`. Source/gate authorities: `.claude/plans/F-X277a-design.md:102`, `.claude/reviews/F-X277a-all-pass-1.md:21`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Missing-degree imported fixtures are preservation controls, not newly schema-valid authored outputs. No duplicate F-X277 or F-X272 completion credit. Recorded feature source tip `84534f382a2b261b7a0e5c8d67471f746ef6ad37` and integration `0621b9a0a28a978ed6faa59473ce2829349a741d` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X277b, Complete Word-like notes, links and numbering
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Added source-qualified missing special note records and exact normal-note marker spacing, styled the three actual hyperlink constructors, and preserved live numbering IDs across staged publication, signing and both same-document reopen paths.
+
+**Non-obvious choices.** Special notes are not normal story owners. Retain imported raw records, occupied IDs and both allocation formulas. Prepare missing Hyperlink definitions through physical typed references at shared staging. Keep live numbering maps separate from temporary normalized emitted IDs and restore live state unconditionally.
+
+**Deviations from the design plan.** Operative child scope is only A277-2/3/6. Inherited C-owned checklist rows stay historical/delegated. The genuine LOCAL checkpoint serves F-X280b note-positive prerequisite without completing whole umbrellas. Later exclusive hash stage records 2 document XML keys for intended hyperlink-style output.
+
+**Spec sections touched.** HLD03 note creation and live numbering publication. HLD04 additive note parts/specials, no implicit note-policy settings. HLD10 Hyperlink style IDs, numbering life-of-document and reopen/sign behavior. Historical C clauses are not B implementation. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X277b-design.md:506`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded genuine four-case pending-normal-ID RED and fixed GREEN, prior 12 integration/9 unit observations,56 affected provider plus one marker control and strict compilation/lint are named in plan lines 65-92. Named gates `issue432_note_mark_order_separators_and_space`, `issue432_low_level_hyperlinks_carry_hyperlink_style`, `issue432_numbering_sign_unchanged_save_mutation_and_reopen` and public note/hyperlink tests. Root final 2 is clean. Final schema/native/installed/typing/C1/hash union remains the final-record field below.
+
+Recorded local review: `.claude/reviews/F-X277b-implementation-codex-final-2.md`. Source/gate authorities: `.claude/plans/F-X277b-design.md:65`, `.claude/plans/F-X277b-design.md:96`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** The exclusive integrated owner records 2 intended feature_showcase/report document XML keys in stage 19cde21f, attributable to authored Hyperlink style. This worker did not move baseline. Current final check: Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Keep old checklist 566-580 unticked where historical/delegated. Do not replay or recredit C merge/TOC/replacement work under B. Q-A430-28 and F-X287 note limits remain separate relevant inherited final qualification limits. Recorded feature source tip `e40193a307600ed78299659a361cf210e9194c7c` and integration `07f79679` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X277c, Preserve cell formatting, authored TOC rebuilding and chart-excluding replacement
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Made cell merge discard only a lone truly empty paragraph, inherited last-paragraph/paragraph-mark formatting for new row/column cells, made authored no-heading TOCs rebuild in both insertion orders, and excluded chart caches/workbooks from literal replacement consistently with regex/text reporting.
+
+**Non-obvious choices.** Zero displayed text is insufficient emptiness proof: semantic/opaque content remains. New-cell inheritance strips only specified section/numbering/revision ownership and preserves other properties. Split_cell keeps its original behavior. Authored TOC gets a legal following field-end paragraph. Foreign one-paragraph input still refuses.
+
+**Deviations from the design plan.** A277-4/5/7/8 are a complete C child, not a residual B implementation. Actual body/header/footer text-box branches are updated/count once. Chart-data mutation and template mail merge remain separate APIs. No new F-X273 provider or parser broadening is introduced.
+
+**Spec sections touched.** HLD03 table merge/inheritance and logical replacement scope. HLD10 table/TOC/public text-report and literal/regex chart exclusion. Leave notes/style/numbering mechanisms with B. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X277c-design.md:84`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded5 unit/4native/1CLI plus4existing native and3CLI controls PASS with strict native/CLI lint in F-X277c-all-pass-1. Named gates `issue432_rebuild_toc_both_insert_orders`, `issue432_foreign_single_paragraph_toc_refuses_atomically`, `issue432_replacement_skips_chart_cache_and_workbook` and `issue432_literal_and_regex_keep_text_box_story_counts`. Python AST/source checks were local preparation, not installed qualification. Final actual public/runtime/WASM/schema fields remain below.
+
+Recorded local review: `.claude/reviews/F-X277c-all-pass-1.md`. Source/gate authorities: `.claude/plans/F-X277c-design.md:127`, `.claude/reviews/F-X277c-all-pass-1.md:21`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Retain R-A277-7 foreign one-paragraph TOC refusal. Do not silently extend imported support or weaken opaque-content preservation. Recorded feature source tip `4fe38f584355fbcea1cb67a6ff42c34970cfc976` and integration `20d4105cc5cad92e6de2a15d864fdc3149e1e092` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X278, Complete Word rendering fidelity and font policy
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 6 to 8 developer-days (SPRINT_PLAN:3509, historical provisional), actual developer effort not recorded.
+
+**What was built.** Aligned TOC hyperlink ink discrimination, first-line/hanging indentation precedence, direct table borders, row splitting, automatic text colour and symbol mapping. Unified default bundled-font policy across public layout/render/count routes, with system fonts opt-in and explicit caller fonts highest.
+
+**Non-obvious choices.** Keep first-line/hanging as one effective property pair and direct border ownership above style grid. Automatic colour uses actual background. Suppress Hyperlink appearance only for the approved TOC-role/style heuristic. Ordinary body hyperlinks retain their effective colour and underline. Font cache identity includes the effective tier/options.
+
+**Deviations from the design plan.** The intentional contrast stage owns 14 hash keys and 2 golden samples. The hand-typed TOC-style/_Toc heuristic residual remains explicit. Root F-X275 A6 later fixes shared typed colour-cluster precedence after genuine Word-native TOC/body comparison exposed direct 0563C1 versus inherited 467886. That corrective review does not reset F-X278 peers or justify retuning the fixture.
+
+**Spec sections touched.** HLD08 font priority, TOC ink, indentation/border/row/colour/symbol rendering. HLD10 public render/count/layout option/cache boundary. HLD15 deterministic baselines and explicit system-font mode. Exact product work list: `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/15-build-and-toolchain.md`. Operative plan HLD section: `.claude/plans/F-X278-design.md:490`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Named Issue 433 controls cover TOC/body ink, direct first-line versus numbering hanging, style/direct borders, row split, auto contrast, Wingdings 2 mapping and public font policy. Root final 3 records 8 focused engine PASS plus actual same-reporter prior 0.16.4 RED/current GREEN number positions. Actual native borders, colour and genuine TOC observations retain their bound source records. The original Linux DejaVu Sans fixture passed in42551910212: all four original entry points agree at7Carlito pages in each of3default folder states and8DejaVuSans pages in each of3explicit system states. The raw input/font/wheel/native/CLI/PDF and complete RECORD proof is .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/issue433-linux-actual-1/ARTIFACT_MEMBER_AUTHENTICATION.json. No blanket native parity follows from finite glyph observations.
+
+Recorded local review: `.claude/reviews/F-X278-codex-final-3.md`. Source/gate authorities: `.claude/plans/F-X278-design.md:47`, `.claude/plans/F-X278-design.md:490`, `.claude/reviews/F-X278-codex-final-3.md:54`, `.claude/reviews/S96-root-final-union-repair-pass-38.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Intentional contrast contribution at labelled stage 19cde21f is 14 hash keys and 2 golden samples. Its other 2 keys belong F-X277b XML. Prior F-X273 stage owns22keys/7 samples. Cumulative sprint effect is 24 distinct keys/7 samples. Current final check: Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Q-S96-07 is bundled default/system opt-in/caller highest. A literal direct colour declaration replaces inherited theme selector and transforms as a cluster. Same-element theme and existing textFill precedence remain. Do not claim the hand-typed residual passed as genuine Word TOC evidence. Recorded feature source tip `9ffe490409732f82280b21f8b9e9f3ae42df0b0e` and integration `52260431602d7b8e2b0c6b69d0af56c6f3c465d9` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X279a, Expose owned revision text and one kind vocabulary
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Exposed owned StoryRevision text and one consistent revision-kind vocabulary through Rust, Python snapshots and CLI. Prepared story-part context once and used bounded source-order facts for current-property versus revision-local scalar/field text.
+
+**Non-obvious choices.** Use the original event-stream decoders, actual ancestry and destination grammar, with field checkpoints/undo that do not leak deleted branches. Retain table separators and selected-owner scope without emitting nested aggregate text twice. Snapshots stay owned after later document changes.
+
+**Deviations from the design plan.** D1/D2 repair replaced a context-per-owner mechanism with shared context and scalar ownership controls. Clean-Base canonical-w wrapper admission is reconciled with C1 during integration. Private comparison-package revisions intentionally remain empty. This is no generic source-text getter.
+
+**Spec sections touched.** HLD03 owned revision text, context/field traversal and physical ownership. HLD10 additive Python text constructor/property, snapshot lifetime and CLI kind vocabulary. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X279a-design.md:88`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Independent pass 2 closes D1/D2 at exact reviewed 89a3fa69 diff. Named current unit gates `issue434_snapshot_scalars_current_properties_and_opaque_paths`, `issue434_snapshot_stored_field_caches_and_wrapper_frontiers` and `issue434_field_checkpoint_deletion_forks_preserve_current_and_local_modes`. Public Python constructor/default/frozen equality and saved/reopened snapshots have actual carrier source. Installed signature/runtime/typing/stub conclusions require the final union record.
+
+Recorded local review: `.claude/reviews/F-X279a-all-pass-2.md`. Source/gate authorities: `.claude/plans/F-X279a-design.md:130`, `.claude/reviews/F-X279a-all-pass-2.md:21`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** No stored XML is assigned from the read projection. Current versus revision-local hidden/deleted text policy is deliberately different, not an accidental text mismatch. Recorded feature source tip `ab4a8e8562eda84f5314b2af4e15b8ba2fe6e827` and integration `0c63c6e4a6902148a0384d33a3a79ccf7ca1f129` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X279b, Complete comment ranges, comparison and insert_document
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Implemented equal-run-split comparison invariance and protected-owner no-op handling, crossing-reply comparison/selective-resolution composition, effective font/default insertion and distinct list instances. Preserved Python companion/media closure while retaining the native body-only insert_document boundary.
+
+**Non-obvious choices.** Normalize only admitted equal representations within real protected owners. Actual nested text/format changes continue to refuse atomically. Rust native insertion imports body only. Python retains existing full fragment/companion relationship closure and destination commentsIds. Omitted defaults and effective fonts are explicit.
+
+**Deviations from the design plan.** A279-2/C2 authoring markup belongs C. Authoring/initials belongs D. D4 repair extends equal-split no-op through protected table/control paragraphs instead of narrowing valid input. Native body-only versus Python full-companion insertion is the reviewed alternative, not a silent common-policy assumption.
+
+**Spec sections touched.** HLD03 comparison equality through admitted protected owners and effective insertion. HLD04 destination companion/media ownership and preservation. HLD10 Rust/Python insert defaults, comparison and selective comment composition. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X279b-design.md:502`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Progress lines269-279 record current Rust 21, Native 29, CLI 4 plus 9 and strict batch PASS, followed by fresh authenticated 41 selected installed nodes. Predecessor 6 FAIL/3 PASS distinguishes table/control protected-owner no-ops. Named gates `test_issue434_compare_equal_split_and_one_word_public`, `test_issue434_compare_equal_split_and_one_word_public`, `issue434_insert_document_keeps_effective_font` and `test_issue434_default_insert_lists_restart_and_explicit_reuse_stays`. Final native/schema/typing/full fields remain pending below.
+
+Recorded local review: `.claude/reviews/F-X279b-root-final-3.md`. Source/gate authorities: `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X279b-progress.md:269`, `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X279b-progress.md:279`, `.claude/plans/F-X279b-design.md:550`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Keep source-media exclusions specific to native body-only insertion. No stale donor C5 success or media filter is credited. P1/P2 composition remains distinct from D authoring. Recorded feature source tip `af236725eb72e55a38d53d445354fa5016953748` and integration `2d387312` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X279c, Author comment markup and styles without changing reply ranges
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Added authored comment namespace/MC cleanup, correct comment styles and optional-ID handling through existing native comment methods, while preserving untouched imported comment XML and refusing incompatible namespace/style states atomically.
+
+**Non-obvious choices.** Cleanup is scoped to actual authored owners and real Word bindings, preserving producer metadata, foreign prefixes and opaque bytes. Comment style preparation retains valid existing definitions/order and refuses wrong style types rather than overwriting them. Original imported bindings remain authoritative on rollback.
+
+**Deviations from the design plan.** The separate child owns A279-2/C2 only, not crossing-reply authoring/composition. User-required fresh Word checks updated only two version/build test pins after actual Word 16.114.4 observations. Unchanged candidate digest is not a substitute for that native observation.
+
+**Spec sections touched.** HLD03 comment authoring and original-scope admission. HLD04 owned namespace/MC cleanup and package preservation. HLD10 comment style/optional-ID public behavior and import boundary. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X279c-design.md:228`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Named carriers `issue434_comment_markup_and_optional_ids`, `issue434_comment_wrong_style_types_refuse_both_add_and_reply_atomically`, `issue434_comment_mc_aliases_preserve_tokens_and_foreign_prefixes` and public held-view/refusal controls. Clean microscope pass 1 and owned-MC support cover local source. Plan lines279-287 record exact 03ca23e6 candidate SDK365 zero errors, native thread/anchor observation and both actual include-ignored guards PASS after pin refresh. No unobserved initials avatar or save behavior is inferred.
+
+Recorded local review: `.claude/reviews/F-X279c-microscope-pass-1.md`. Source/gate authorities: `.claude/plans/F-X279c-design.md:258`, `.claude/plans/F-X279c-design.md:279`, `.claude/reviews/F-X279c-owned-mc-cleanup-codex-pass-1.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Candidate hash 03ca remains unchanged across the version-pin update. Native UI/thread evidence, SDKresults and source guard execution have separate provenance. No fake pass on the obsolete 16.114.1 guard. Recorded feature source tip `925a97f0b1acb45768ab892f00dbaeced8d8c34a` and integration `947758886fad942ed703b4b1c5b566983532a001` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X279d, Author crossing comment replies with initials
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Implemented crossing comment replies with initials across native, Python and CLI, including repeated/selected parents, multiparagraph/header/cell owners and held-state lifecycle. Preserved neighboring comment cleanup and refused rangeless/ambiguous/unsupported reference endpoints atomically.
+
+**Non-obvious choices.** The supported endpoint is the selected parent end followed by its actual reference run. Formatting, root metadata and empty Text may remain, while unrelated text/Field/Drawing/opaque payload cannot be absorbed. Selected comment projection preserves crossing replies without relaxing generic strict paired-range inventory.
+
+**Deviations from the design plan.** D owns complete authoring/initials. P1/P2 comparison/selective-resolution remains B. Later actual CI root-move failure earned Root selected-owner correction with different scope discriminator, retaining generic pairing strictness and original error/public boundary.
+
+**Spec sections touched.** HLD03 comment reply range/owner projection. HLD04 actual marker/reference package placement. HLD10 reply initials, Python/CLI and refusal lifetime contracts. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X279d-design.md:224`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Independent microscope pass 2 closes D1 with all 12 sealed paths. Named tests `issue434_reply_crossing_repeated_and_selected_parent`, `issue434_reply_missing_parent_range_refuses_atomically`, `issue434_reply_cell_owner_and_aliased_producer_source` and `issue434_root_moves_keep_crossing_replies_and_generic_pairing_strict`. Actual Python/CLI held-view/refusal controls are separate from final installed/native/schema union fields below.
+
+Recorded local review: `.claude/reviews/F-X279d-microscope-pass-2.md`. Source/gate authorities: `.claude/plans/F-X279d-design.md:259`, `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X279d-progress.md:201`, `.claude/reviews/F-X279d-final-union-codex-pass-1.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Do not infer that all crossing generic ranges are now admitted. Keep selected comment projection and generic paired-range grammar distinct. Recorded feature source tip `0e60b646f6df371daf19e2ae1172b9dc9c46adf2` and integration `f89a8c9f83595cf38f9c32d44493bb07040ae96a` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X280a, Refuse negative authored shape sizes before publication
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** S, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Made root/group authored add_shape/add_textbox reject negative width/height before mutation. Kept zero extents and negative positions accepted and retained existing positive table and reversed/equal connector behavior.
+
+**Non-obvious choices.** A concrete shared validation helper serves three actual routes. Refusal occurs before shape IDs, relationship/part publication or live-owner changes. Populated-group controls mutate/read held member handles after every error and then perform later successful additions.
+
+**Deviations from the design plan.** Actual implementation host is opencode/GLM, with Root independent final 2 distinct from author self-review. D1/D2 repairs improve actual old-source populated-group and checked command/artifact proof. Cached-wheel and fixture failures remain uncredited history.
+
+**Spec sections touched.** HLD10 ShapeCollection authoring size/refusal and retained handle semantics. No parser, serializer or layout policy change. Exact product work list: `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X280a-design.md:83`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Root final 2 records actual old-native negative-size semantic RED and identical old-Python DID NOT RAISE, then 1 library/4 native/1 Python3.12 PASS and strict lint/fmt. Named tests `issue435_new_shapes_refuse_a_negative_size`, `issue435_new_shapes_accept_zero_extents_and_negative_positions`, `issue435_refusals_preserve_populated_group_companions` and `test_issue435_add_textbox_and_add_shape_refuse_a_negative_size`. Final accepted zero/positive native controls are in the final union field.
+
+Recorded local review: `.claude/reviews/F-X280a-codex-final-2.md`. Source/gate authorities: `.claude/reviews/F-X280a-codex-final-2.md:25`, `.claude/plans/F-X280a-design.md:103`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** No F-X272/F-X277 product dependency exists for this child. Do not call the author self-review an independent microscope or invent native negative-output files. Recorded feature source tip `973226aecdfb977352f9916b7f20aa7c08da650c` and integration `05ee6b42a13418af1b180e58b970a1f3644b7e43` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X280b, Complete validation and damaged-input refusal
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Added bounded Word validation of named XML/relationship/drawing/math faults, robust damaged-XML/duplicate-package opening refusal and repeated bookmark-ID tolerance that preserves physical ownership. Reconciled shared OPC errors reaching native/Python/stored-validation consumers.
+
+**Non-obvious choices.** Validate original qualified owners rather than local-name lookalikes or opaque foreign ancestry. Lossless lexical checks apply across selected related parts, while story-specific checks retain their actual roles. Repeated imported bookmark IDs do not merge independent pairs. Real occupancy guard/order remains.
+
+**Deviations from the design plan.** The explicit missing-radical-degree rule is a documented selected validator subset, not universal OMML schema parity. Root pass 1 D1-D4 earned qualified picture/textbox, namespace, note and duplicate/open-policy repairs. These do not replace B/Cprovider composition or broaden all-schema claims.
+
+**Spec sections touched.** HLD04 original-package validation/open refusal and physical duplicate/bookmark ownership. HLD10 validate diagnostic boundary and Python/native opening behavior. Exact product work list: `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X280b-design.md:357`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Root final 2 closes D1-D4 with actual authenticated predecessor/GREEN artifacts and affected 16 test successor. Existing gates `issue435_validate_reports_wordprocessingml_schema_faults`, `issue435_validate_reports_dangling_references_and_deleted_text`, `issue435_validate_reports_related_and_auxiliary_xml_faults`, `test_issue435_python_open_refuses_damaged_xml_naming_the_part` and `issue435_bookmarks_sharing_an_id_open_and_render`. Current shared-OPC controls also reach Presentation and stored-file APIs. Actual final union outcomes remain below.
+
+Recorded local review: `.claude/reviews/F-X280b-implementation-codex-final-2.md`. Source/gate authorities: `.claude/plans/F-X280b-design.md:424`, `.claude/reviews/F-X280b-implementation-codex-final-2.md:17`, `.claude/reviews/F-X280b-final-union-codex-pass-2.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Keep failed native/parser premises and later test expectation corrections separate from semantic product RED. Do not infer all physical parts were validated after earlier OPC parse refusal. Recorded feature source tip `f75944da8b2c940bacbfbc7e8301b83a8a6502d3` and integration `c156cffc7615b97d2791c5cd5d91c0b1f75a00d6` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X280c, Validate stored PresentationML packages through the public file route
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, no separate developer-day estimate recorded (extracted child), actual developer effort not recorded.
+
+**What was built.** Added public Rust validate_presentation_file and routed CLI validation through original stored package XML, checking the declared finite PresentationML/OPC subset before parsed-model issues. Python Presentation.validate remains parsed-model and retains existing signature/kind/Display semantics.
+
+**Non-obvious choices.** Borrow ordinary XML source bytes and separately read original OPC metadata, with deterministic stored-first/native-order dedup. Decode admitted UTF8/UTF16 opaque XML losslessly. No save/sanitize/recovery step supplies validator input. Expanded-name/direct-role checks preserve MCE/opaque boundaries.
+
+**Deviations from the design plan.** Root takeover and final 4 closed original-source/namespace/encoding seams after the author used three passes. Existing OPC duplicate/open-forbidden policy remains Bownership and is consumed before Cscan. The new API covers indexed unique identities admitted by the loader, not a second physical-ZIP duplicate implementation or full schema validator.
+
+**Spec sections touched.** HLD04 stored versus parsed validation and exact retained bytes. HLD10 additive Rust file function, CLIchecked subset/help, unchanged Python snapshot contract. Exact product work list: `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X280c-design.md:125`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Plan lines171-173 record 8 core/1 field inventory/14 native Issue 435/1 deep CLI/3 affected CLI, corrected 50 corpus custody and existing 8 legacy observations with 1 native ignored, plus actual debug Python validate/deep controls and scoped lint. Named CLI `issue435_cli_stored_validation_reports_the_six_original_faults`, `issue435_cli_help_names_the_checked_subset_and_disclaims_full_validation` and `issue435_cli_shared_opc_errors_reach_stored_validation`. Final same-source/native/typing/hosted/package results remain below.
+
+Recorded local review: `.claude/reviews/F-X280c-root-final-4.md`. Source/gate authorities: `.claude/plans/F-X280c-design.md:169`, `.claude/reviews/F-X280c-root-final-4.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** CLIerrors/issues exit 1. Clean file exits 0. Existing BrokenPipe behavior remains. Return actual model/open error when no stored issues exist. Do not report a failed parse as clean validation. Recorded feature source tip `f0ffde4a311bd02cb07bed860ea6078740726a1d` and integration `81825ba7e6c515187266630bfd67bd85183ebaf2` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X281, Complete picture, chart, export and layout fidelity
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** XL, historical estimate 10 to 15 developer-days (SPRINT_PLAN:3509, historical provisional), actual developer effort not recorded.
+
+**What was built.** Implemented the finite Word EMF/Adam7 rendering paths, complete-byte chart title reading and semantic exports, chart number-format/fallback and extra-axis preservation, imported hidden shape state, per-span ActualText and corrected master placeholder selection. Added Rust-only chart tables across the named export consumers.
+
+**Non-obvious choices.** Use sniffed admitted PNG/JPEG previews transiently without changing stored MIME. Retain encoded/decoded bounds. Preserve third c:axIdraw bytes after two typed IDs, explicitly nonconformant. Keep exact General special handling, current absent-title model and specified placeholder tie-break order.
+
+**Deviations from the design plan.** A later actual chart regression earned the transient cached-image/empty-input correction and separate final 2 review. Native Word/PPTmay normalize third ID 3 to 2 on their saved copies. Immutable library inputs remain 3 and those vendor outputs do not become library preservation failures. Quarter visual observer overreach remains a retained failed observer, separate from semantic-title criteria.
+
+**Spec sections touched.** HLD05 chart-title/value model. HLD07 master-placeholder inheritance selection. HLD08 finite EMF/Adam7/chart-format/hidden/ActualText rendering. HLD09 admitted cached-preview contract. HLD10 eight semantic export routes, Rust chart table and unchanged Python string APIs. Exact product work list: `docs/hld/05-drawingml-model.md`, `docs/hld/07-inheritance-and-resolution.md`, `docs/hld/08-rendering-spec.md`, `docs/hld/09-charts-spec.md`, `docs/hld/10-bindings-spec.md`. Operative plan HLD section: `.claude/plans/F-X281-design.md:377`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Recorded phaseA/Blocal Word 5, owner 1, PPT 4, HTML 8, CLI 2, HF 4, debug Python 6 and affected lint are distinct observations. Later final 2 records shared 7/native chart 12 PASS with 1 manual ignored/cached-preview 1 PASS. Named public `test_fx281_word_emf_page_pixels_adam7_and_decode_diagnostics`, `test_fx281_word_python_string_exports_project_current_chart_title`, `fx281_extra_axis_ids_remain_raw_after_two_typed_ids` and `fx281_number_format_sections_tokens_refusals_and_painter_fallback`. Bind actual current native Word EMF 30 DPI criterion, named 30 LO matrix, twelve native axis inputs/saves and SDK helper custody only through final evidence below. No universal chart/GDIfidelity.
+
+Recorded local review: `.claude/reviews/F-X281-codex-final-2.md`. Source/gate authorities: `.claude/plans/F-X281-design.md:344`, `.claude/plans/F-X281-design.md:377`, `.claude/plans/F-X281-design.md:478`, `.claude/reviews/F-X281-codex-final-2.md:27`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Keep all original eight A-IDscopes and explicit residuals, including nonconformant third-axis preservation and excluded publisher contexts. No extra Cartesian native-format campaign or synthetic native pass. Recorded feature source tip `95c14f0bfeccab7e007bd0cda206d5ad5aec4c98` and integration `1d2c5a803d346da4a7b65b1bf8ac7e590ad1492c` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X282, Bound edit cost across styles, body and cells
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** M, historical estimate 4 to 6 developer-days (SPRINT_PLAN:3509, historical provisional), actual developer effort not recorded.
+
+**What was built.** Shared styles through Arc/COW with source-byte/parse cache and open-time serialization proof, eliminating redundant unchanged styles work. Added checked direct-cell paragraph/run edit routing that prepares one candidate, invokes the callback at most once and falls back to existing checked publication when direct eligibility is not established.
+
+**Non-obvious choices.** An equal-model styles skip requires actual successful source proof and matching retained part. Changed bytes/model reparse or serialize as needed. Strict lexical admission is a sufficient direct-path qualification, not a stricter public refusal gate. Control-owned/nested/relationship/comment-decreasing candidates preserve checked fallback and first-cause errors.
+
+**Deviations from the design plan.** Implementation includes the separately labelled malformed styles replacement refusal rather than silent data loss. Counter and saved-byte controls prove work/ownership facts, not release speed. Q-S96-16 carries unchanged A282-1/2/3 and relevant F-X268 numerical gates to F-X285 and unfinished memory to F-X286. Nonnumerical/source/resource/atomic gates remain current.
+
+**Spec sections touched.** HLD03 styles COW/source-proof cache. HLD10 checked cell/run candidate publication and callback semantics. HLD12 unchanged benchmark definitions, saved bytes and exact Q-S96-16 carry boundary. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`. Operative plan HLD section: `.claude/plans/F-X282-design.md:372`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Root implementation final 2 authenticates all 15 named issue437 cases and actual source/log pins. Earlier OPC shared-accessor and 42 focused Python plus 3 public controls remain separate applicable observations. Named gates `issue437_styles_open_proof_and_unchanged_flush`, `issue437_changed_style_reaches_saved_part_and_retains_root_attributes`, `issue437_failed_cell_edit_preserves_live_model_and_layout` and candidate/fallback/at-most-once controls. Preserve numerical 454-456 and mixed 457 unticked. Final actual nonnumerical gates are pending below.
+
+Recorded local review: `.claude/reviews/F-X282-codex-final-2.md`. Source/gate authorities: `.claude/plans/F-X282-design.md:410`, `.claude/reviews/F-X282-codex-final-2.md:19`, `.claude/plans/F-X282-design.md:830`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Issue 437 stays open. Never present debug counters or compiled code as passing Linux release ratios. CT_Body::tables is unchanged. No test is invented for an unmodified lower carrier. Recorded feature source tip `a2a8bc7479606406e5b5faba0087b44a27912269` and integration `28a36b761eac87e446ac35d2556313aaa68c76c1` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X283, Bound whole-cell setters and Python open-replace-save cost
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, no developer-day estimate recorded (F-X283 effort unestimated at SPRINT_PLAN:3509), actual developer effort not recorded.
+
+**What was built.** Added complete selected-table cell candidate publication for whole-cell text/properties, current parent/run indexes and exact source certificates. Preserved eager validation while avoiding retained dormant Word publication until positive use, with first activation rebuilding actual current authority and explicit consuming replacement paths.
+
+**Non-obvious choices.** Validate staged candidate/source/namespace ownership before commit, retain current held/fresh handle agreement and original unit/border policies. Dormant open still performs required fallible reads and discards transient facts. No lazy-validation stamp or retained private Field equality cache substitutes for Source. First activation is unconditional current-source rebuild.
+
+**Deviations from the design plan.** Worker opencode and Root corrections retain actual provenance. Three peers and Root final 1 cover 13 A-ID semantics. Later eager-open and finite text materialization repairs preserve original contracts. Q-S96-16 carries unchanged setter/Python-versus-CLI timing and unfinished memory to F-X285/F-X286. Paragraph.text-in-cell remains a regression without an invented numerical target.
+
+**Spec sections touched.** HLD03 current selected-owner publication/dormant authority. HLD10 public cell/property/Paragraph.text routes, handle and initializer boundary. HLD12 exact performance/ownership qualification and carry. HLD15 authenticated Linux benchmark artifact/execution route. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/15-build-and-toolchain.md`. Operative plan HLD section: `.claude/plans/F-X283-design.md:752`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Root final 1 records corrected membership Base 16 PASS/frozen 8 FAIL 8 PASS/current affected 49 PASS, native membership 1 and actual binding-object C9 injected commit-refusal 1, with exact source/artifacts. Later progress lines236-245 records 25 current binding-unit PASS and 3 exact phase-test corrections on their own producers. Named gates `fx283_local_cell_source_certificate_rejects_changed_custody`, `fx283_owned_replacement_keeps_order_counts_and_refusal`, `fx283_local_text_matches_checked_fallback_for_anchors_and_opaque_xml` and public cross-cell comment/held-view controls. Original Linux timing and installed-wheel fault injection are not proved by those local observations.
+
+Recorded local review: `.claude/reviews/F-X283-codex-final-1.md`. Source/gate authorities: `.claude/plans/F-X283-design.md:775`, `.claude/reviews/F-X283-codex-final-1.md:51`, `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/progress-at-full-a3dc3b02/F-X283-progress.md:230`, `.claude/plans/F-X283-design.md:1310`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** No additional baseline movement is allocated to this feature. Consume actual final 49 hash/7 pixel verification and the separately attributed integrated deltas. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Issue 445 stays open. A C9 binding diagnostic is not installed-wheel fault injection. No new public fault hook, retained dormant source cache or numeric pass is implied. Recorded feature source tip `a79028e128dc32a864e4eebe542e201f562700c1` and integration `cce5082a` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X277, Complete Issue432 markup and search through bounded child stories
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 5 to 7 developer-days (SPRINT_PLAN:3509, historical aggregate. Children not additive), actual developer effort not recorded.
+
+**What was built.** Reconciled all eight Issue 432 acceptance rows through three delivered children: A authored radicals. B notes/hyperlinks/numbering. C cells/authored TOC/search. This parent supplies the actual integrated dependency and evidence rollup, without another product implementation.
+
+**Non-obvious choices.** A277-1 belongs A. 2/3/6 belong B. 4/5/7/8 belong C. Consume each child once and retain actual F-X272 composition/provider ancestry. Completion cannot follow an isolated child checkpoint.
+
+**Deviations from the design plan.** Extracted A/B/C to permit bounded source leases. The operative three-child partition supersedes historical two-child prose without resetting exhausted design/implementation review caps. Parent sizeL is a historical aggregate, not extra child effort.
+
+**Spec sections touched.** No separate parent product HLD edit. Confirm child union HLD03/HLD04/HLD10. HLD14 split registration is integrator planning, not duplicate mechanism. Exact product work list: No independent parent product work list, child union only. Operative plan HLD section: `.claude/plans/F-X277-design.md:76`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** No duplicate parent local suite. Bind child integrations 0621b9a0, 07f79679 and 20d4105c plus actual F-X272/F-X272a prerequisite records, final shared schema/native/installed/hash/typing/archive/hosted/full union and final metadata checks. Final evidence outcome remains pending below.
+
+Source/gate authorities: `.claude/plans/F-X277-design.md:23`, `.claude/plans/F-X277-design.md:35`, `.claude/plans/F-X277-design.md:76`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Consume the exclusive integrated expected-delta ledger and actual final check, with no parent baseline change or duplicate child output credit. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Do not tick superseded “both handoffs” wording or invent a parent patch. Complete children before rollup and do not double count effort. Recorded feature source tip `metadata-only parent` and integration `final rollup/preparation record` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X279, Complete Issue434 through bounded child stories
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 8 to 12 developer-days (SPRINT_PLAN:3509, historical aggregate. Children not additive), actual developer effort not recorded.
+
+**What was built.** Reconciled all six Issue 434 rows through four complete children: A revision text/kind snapshots, B comparison/insert composition, C comment markup/styles and D crossing-reply authoring/initials. This parent is a metadata/evidence rollup with no independent product patch.
+
+**Non-obvious choices.** Consume A/B/C/Dactual integrations and F-X272 readiness once. P1/P2 crossing-reply comparison/selective resolution stays B, while D owns authoring. Keep all original native/SDK/installed/hash/rider obligations mapped to their actual producer.
+
+**Deviations from the design plan.** Successive approved child extractions supersede historical two-child/three-child ranges without reducing any original row or resetting review caps. No extra parent implementation effort is created.
+
+**Spec sections touched.** No separate parent product HLD change. Confirm union of child HLD03/HLD04/HLD10 and integrator HLD14 registration. Exact product work list: No independent parent product work list, child union only. Operative plan HLD section: `.claude/plans/F-X279-design.md:65`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** No duplicate parent local suite. Bind 0c63c6e4, 2d387312, 94775888 and f89a8c9f plus genuine provider ancestry and the actual final comment candidate/SDK/native/runtime/full union. Original candidate source and actual native action/version remain distinct from a self-hash guard. Final acceptance is recorded below.
+
+Source/gate authorities: `.claude/plans/F-X279-design.md:6`, `.claude/plans/F-X279-design.md:65`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Consume the exclusive integrated expected-delta ledger and actual final check, with no parent baseline change or duplicate child output credit. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Do not tick superseded “both child integrations” wording or claim a second comment implementation. Complete four children and actual dependencies before rollup. Recorded feature source tip `metadata-only parent` and integration `final rollup/preparation record` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X280, Complete Issue435 through bounded child stories
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 7 to 10 developer-days (SPRINT_PLAN:3509, historical aggregate. Children not additive), actual developer effort not recorded.
+
+**What was built.** Reconciled all seven Issue 435 acceptance rows through three children: A negative authored shape dimensions, B Word validation/damaged input/bookmarks and C stored PresentationML validation. Parent completion is metadata/evidence composition only.
+
+**Non-obvious choices.** A280-7 belongs A, 1/2/3/5/6 belong B, 4 belongs C. Actual F-X272/F-X277 provider barriers remain with dependent B. Consume shared OPC duplicate/open-policy behavior in Cwithout inventing a second loader policy.
+
+**Deviations from the design plan.** The approved extraction retains original errors, native/schema/runtime riders and exhausted review history. Parent has no duplicate implementation or extra effort estimate.
+
+**Spec sections touched.** No separate parent product HLD change. Confirm child HLD04/HLD10 union and HLD14 partition accounting. Exact product work list: No independent parent product work list, child union only. Operative plan HLD section: `.claude/plans/F-X280-design.md:56`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** No parent local suite. Bind 05ee6b42, c156cffc, 81825ba7 and genuine prefix ancestry, then actual final native/schema/LibreOffice/installed/CLI/hash/typing/package/full union and owner/status checks. Child refusal creates no negative-size document requiring native opening. Accepted controls carry the native rider.
+
+Source/gate authorities: `.claude/plans/F-X280-design.md:33`, `.claude/plans/F-X280-design.md:72`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Consume the exclusive integrated expected-delta ledger and actual final check, with no parent baseline change or duplicate child output credit. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** Preserve whole original issue mapping. No shared-OPC error may be claimed as completed validation of unreadable package parts. Recorded feature source tip `metadata-only parent` and integration `final rollup/preparation record` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.
+
+### F-X275, Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates
+
+**Sprint.** S96
+**Completed.** 2026-11-09
+**Size.** L, historical estimate 2 to 3 developer-days (SPRINT_PLAN:3259, initial preparation scope only), actual developer effort not recorded.
+
+**What was built.** Prepared exact Word 0.17.0 and shared/PowerPoint 0.15.0 families, release notes/credits, package inventories and README measurements. Added strict native SemVer acquisition/evidence/signing/consumer gates and integrated final qualification repairs for note-marker/settings cleanup and Word colour inheritance.
+
+**Non-obvious choices.** Compare actual complete API baselines with pinned native tools and canaries. Authenticate independent signed native authority and reuse only exact evidence identities. Publication consumers share source-qualified proof rather than rerunning unchanged API acquisition. Keep immutable published suffixes and actual per-family inventories.
+
+**Deviations from the design plan.** User approved minor-family preparation after verified Vec/Arc incompatibility, not a universal compatible old-line patch. Final native G09/G12 repair preserves terminal B-only boundaries and removes only actual settings special-reference spans. The colour fix replaces the typed colour cluster as one winning declaration. Q-S96-16/F-X287..290 retain exact documented limits. No other gate is waived.
+
+**Spec sections touched.** HLD03 typed/staged note and colour ownership. HLD04 actual settings/package edge cleanup. HLD08 colour/native rendering boundary and carries. HLD10 public note/field/comparison boundary. HLD12 honest acceptance exceptions. HLD14 exact family/stories. HLD15 pinned tools, evidence acquisition/signing and build/release policy. Exact product work list: `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`, `docs/hld/15-build-and-toolchain.md`. Operative plan HLD section: `.claude/plans/F-X275-design.md:268`. Full preserved section is in .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/closure-ledger-drafts-1/FEATURE_DRAFT_CARDS.json.
+
+**Tests.** Release-regression carrier scripts/test_sprint_workflow.py covers exact family metadata, immutable suffix/contribution inventory, complete SemVer modes/canaries, signer/native evidence binding and reuse refusals. Named controls include `test_s96_release_notes_keep_exact_family_contribution_inventory` and `test_semver_ci_gate_requires_actual_admitted_union_and_preserves_skips`. Root pass 35/Support 18 authenticate the native follow-up repairs. Root pass 38/Support 24 record actual model RED and final-v2 model/layout/strict lint/CLI GREEN plus same-input genuine Word TOC black/flat and body 0563C1/underline paint. Actual final package, CI, installed and full evidence is recorded below. Support28 and the actual six-case original Linux qualification are retained at .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/issue433-linux-actual-1/ACTUAL_QUALIFICATION.json.
+
+Recorded local review: `.claude/reviews/S96-root-final-union-repair-pass-38.md`. Source/gate authorities: `.claude/plans/F-X275-design.md:258`, `.claude/plans/F-X275-design.md:892`, `.claude/plans/F-X275-design.md:934`, `.claude/reviews/S96-root-final-union-repair-pass-35.md`, `.claude/reviews/S96-final-colour-precedence-support-24.md`.
+
+Final integrated full: a3dc3b02be721b83318b9130e6623d4396082953 / accepted under the explicitly amended release scope, with failed and unqualified carried observations preserved. Actual current-source native/installed/hosted/package/rider applicability and commands: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. No local count substitutes for these fields.
+
+**Hash harness.** Authenticate actual final 49 hash/7 pixel check and both labelled intentional stages 25518295 and 19cde21f. Cumulative sprint effect 24 distinct keys/all 7 samples. Later colour corrective proof does not authorize another unexplained baseline movement. Actual hash49 and pixels7 checks passed, with no additional colour-wave delta. Two labelled stages yield cumulative24 distinct hash keys and all7 golden samples.
+
+**Notes for future sessions.** This records completed release preparation using the actual accepted evidence. Publication, yank, tags and outward messages remain separately held. The publication-required completion exception does not apply to the dry-run-only gate. Keep Issues424/430/437/445 and existing Issues264/281/377/381 dispositions open as applicable. Recorded feature source tip `b7b7f7c4b8050dcfe8387fa58bda073e064974a1` and integration `final rollup/preparation record` are provenance, not the final full SHA. Preserve earlier failed/setup attempts and review counters. This entry consumes recorded observations and claims no new execution.

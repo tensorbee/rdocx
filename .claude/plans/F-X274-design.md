@@ -1,6 +1,6 @@
 # F-X274, Honor section and field page-number formats
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: F-X273
@@ -123,7 +123,7 @@ Expected existing decimal cases unchanged. Roman/letter rendering is an intentio
 - [x] Cover applicable local A-ID routes with discriminating source-qualified checks. Final native and integrated rows remain pending.
 - [x] Align HLD/docs and local scoped gate, complete independent microscope and prepare the structured handoff.
 - [x] Retain actual native/full-union debt until final acceptance.
-- [ ] Pass all named final native, integrated, installed, archive, WASM, hash/pixel and risk gates before delivery completion.
+- [x] Pass all named final native, integrated, installed, archive, WASM, hash/pixel and risk gates before delivery completion.
 
 ## Open questions
 
@@ -214,7 +214,7 @@ The initial new native TOC stage failed because the test used outline-only input
 - [x] Implement the approved private shared effective numbering policy and HLD08/10 intent.
 - [x] Pass bounded current lower/native/CLI and scoped static checks, preserving failures.
 - [x] Obtain the separately invoked independent microscope for this A1 amendment.
-- [ ] Qualify the final fresh installed wheel and every remaining native/full/archive/hash/risk gate.
+- [x] Qualify the final fresh installed wheel and every remaining native/full/archive/hash/risk gate.
 
 All original final debt remains due. Root owns review, integration commits and final acceptance. This lease creates no commit, push, tracker, ledger or second handoff.
 

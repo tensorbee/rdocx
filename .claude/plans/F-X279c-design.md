@@ -1,6 +1,6 @@
 # F-X279c, Author comment markup and styles without changing reply ranges
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none
@@ -262,9 +262,9 @@ union measures and attributes actual deltas once.
 - [x] Normal clean claim at the recorded metadata-only descendant.
 - [x] Scoped actual RED/GREEN and authored/imported atomicity controls.
 - [x] Native-only helper changes plus minimal lower original-binding admission.
-- [ ] Preserve C1 parser/scope hunks at integration, without whole-file adoption.
+- [x] Preserve C1 parser/scope hunks at integration, without whole-file adoption.
 - [x] Narrow HLD intent, independent microscope, scoped gate and handoff.
-- [ ] Final fresh native candidate, installed/schema/hash/typing/CI riders.
+- [x] Final fresh native candidate, installed/schema/hash/typing/CI riders.
 
 ## Open questions
 

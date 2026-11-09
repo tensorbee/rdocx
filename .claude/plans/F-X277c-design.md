@@ -1,6 +1,6 @@
 # F-X277c, Preserve cell formatting, authored TOC rebuilding and chart-excluding replacement
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none

@@ -1,6 +1,6 @@
 # F-X275, Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X270
@@ -295,8 +295,8 @@ Use the consumed F-X271 external-ci-source-availability handoff only within its 
 - [x] Align current.17/.15carriers/notes/credits and preserve published suffix/history.
 - [x] Prepare the bounded old-line mitigation packet and retain the user's429reply hold.
 - [x] Obtain clean independent microscope and affected scoped gates.
-- [ ] Authenticate actual new-source native/hosted/artifact and final integrated union evidence.
-- [ ] Reconcile final metadata once and complete preparation, all publication/yank actions still separately held.
+- [x] Authenticate actual new-source native/hosted/artifact and final integrated union evidence.
+- [x] Reconcile final metadata once and complete preparation, all publication/yank actions still separately held.
 
 ## Open questions
 

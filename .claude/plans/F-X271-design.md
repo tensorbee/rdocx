@@ -1,6 +1,6 @@
 # F-X271, Restore pinned viewer downloads and planning policy
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none
@@ -104,7 +104,7 @@ Expected unchanged,49 hashes and 7 deterministic pixel cases. This tooling/polic
 - [x] Reconcile every currently listed HLD impact before final gate, including A8 intent.
 - [x] Implement and independently review A7 public diagnostic retention without changing its deadline or stages.
 - [x] Implement and independently review A8 shared-policy script fixtures and their exact coverage declaration.
-- [ ] Obtain actual final-source hosted acceptance, retaining pending status until observed.
+- [x] Obtain actual final-source hosted acceptance, retaining pending status until observed.
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # F-X282, Bound edit cost across styles, body and cells
 
-**Status**: approved
+**Status**: completed
 
 **Sprint**: S96
 
@@ -455,8 +455,8 @@ These are the operative preparation items. Earlier planned-test names and unexec
 - [ ] Exact A282-2 original 40 by 6 cell first/last cold n=3 ratios without discarded cell calls, plus original 2000-paragraph body one-warmup then n=3 ratios, bound 3.0.
 - [ ] Exact A282-3 original single-loop 30/120-cell fill per-call ratio, bound 2.0.
 - [ ] Final integrated saved bytes and hash49, F-X268 79 flat-cost gates, 252-call catalogue and original 407 gate. No baseline change or blanket output-preservation claim.
-- [ ] Full workspace, native Office and external oracle, installed runtime and typing, WASM, wheels, archives, packaging, hosted CI and all approved risk riders at the final union.
-- [ ] Reconcile actual future C1 checked typed-publication admission with this bridge during integration. C1 remains excluded from this Base and is not a provider edge.
+- [x] Full workspace, native Office and external oracle, installed runtime and typing, WASM, wheels, archives, packaging, hosted CI and all approved risk riders at the final union.
+- [x] Reconcile actual future C1 checked typed-publication admission with this bridge during integration. C1 remains excluded from this Base and is not a provider edge.
 - [ ] Final acceptance, delivery completion and separate reviewed-SHA release approval. No publication is authorized by preparation.
 
 ## Open questions

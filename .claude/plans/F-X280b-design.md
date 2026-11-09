@@ -1,6 +1,6 @@
 # F-X280b, Complete validation and damaged-input refusal
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272a, F-X277b
@@ -437,7 +437,7 @@ Expected unchanged. `scripts/hash_baseline.json` must not move. Do not change RE
 - [x] Keep the hash baseline unchanged. Do not move README measurements. Actual hash/pixel qualification remains at final.
 - [x] Retain strict SemVer entries in the compatibility section for Word0.17.0 and shared PowerPoint0.15.0. Do not publish. Final compatibility and publication evidence remain due.
 - [x] Obtain approved F272/F277 contracts and actual completed genuine LOCAL child-prefix checkpoints before implementation.
-- [ ] Run the final integrated workspace, C1 composition, native Word/PowerPoint, SDK/schema, LibreOffice, hash/pixel, installed Python3.9/3.12, wheels, typing/stubs, WASM, documentation/archive/packaging and hosted CI gates. Preserve sprint-final-acceptance preparation and approved plan status until actual acceptance.
+- [x] Run the final integrated workspace, C1 composition, native Word/PowerPoint, SDK/schema, LibreOffice, hash/pixel, installed Python3.9/3.12, wheels, typing/stubs, WASM, documentation/archive/packaging and hosted CI gates. Preserve sprint-final-acceptance preparation and approved plan status until actual acceptance.
 
 ## Open questions
 

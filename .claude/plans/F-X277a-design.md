@@ -1,6 +1,6 @@
 # F-X277a, Emit authored radical degrees and preserve imported absence
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: S
 **Depends on**: none

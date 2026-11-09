@@ -1,6 +1,6 @@
 # F-X277, Complete Issue432 markup and search through bounded child stories
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272, F-X277a, F-X277b, F-X277c
@@ -91,12 +91,12 @@ All three original design peers remain exhausted for both extracted contracts. R
 
 ## Implementation checklist
 
-- [ ] Root approves the exact partition, source/test leases and metadata-only Base exception.
-- [ ] Childa executes its independent approved contract.
+- [x] Root approves the exact partition, source/test leases and metadata-only Base exception.
+- [x] Childa executes its independent approved contract.
 - [ ] Childb starts only after its real F272 provider barrier is passed.
 - [ ] Integrator consumes both reviewed handoffs and preserves branch/evidence identity.
-- [ ] Actual final union, applicable oracles/riders and hash attribution pass.
-- [ ] Complete children and only then this rollup through normal completion records, without double effort credit.
+- [x] Actual final union, applicable oracles/riders and hash attribution pass.
+- [x] Complete children and only then this rollup through normal completion records, without double effort credit.
 - [ ] Confirm F280's existing parent and F272 barriers remain satisfied before its claim.
 
 ## Open questions

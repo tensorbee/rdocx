@@ -1,6 +1,6 @@
 # F-X272, Preserve existing revisions during document comparison
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X229, F-X230, F-X245
@@ -111,7 +111,7 @@ Expected unchanged 49 hashes/7 pixels. New comparison behavior is a separately l
 - [x] Align public docs/stub/help and existing README boundaries.
 - [x] Update listed HLD intent, scoped gate and independent microscope.
 - [x] Prepare the validated final-acceptance handoff.
-- [ ] Retain final native/installed/archives debt until actual integrated acceptance.
+- [x] Retain final native/installed/archives debt until actual integrated acceptance.
 
 ## Open questions
 

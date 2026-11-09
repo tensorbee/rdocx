@@ -1,6 +1,6 @@
 # F-X273, Repair header body clearance and complete TOC navigation
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-283, F-X264
@@ -116,8 +116,8 @@ Variant refactor must be unchanged. Geometry and navigation are separate labelle
 - [x] Run local regressions and scoped checks, obtain clean independent pass2 and preserve final debt.
 - [x] Update the listed HLD08 implementation intent.
 - [ ] Complete native floating, anchor, border, note and numeric qualification in the final sprint union.
-- [ ] Authenticate integrated provider ancestry and execute the approved local provider checkpoint before F-X274 claim.
-- [ ] Pass every final acceptance rider in the approved test matrix and sprint gate.
+- [x] Authenticate integrated provider ancestry and execute the approved local provider checkpoint before F-X274 claim.
+- [x] Pass every final acceptance rider in the approved test matrix and sprint gate.
 
 ## Open questions
 

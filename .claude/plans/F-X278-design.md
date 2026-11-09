@@ -1,6 +1,6 @@
 # F-X278, Complete Word rendering fidelity and font policy
 
-**Status**: approved
+**Status**: completed
 
 **Sprint**: S96
 
@@ -563,8 +563,8 @@ The donor delta names 14 keys. Those donor values are not acceptance. Re-record 
 - [x] Add local RED and GREEN tests in existing modules, including public, EPUB, ODT, diagnostic twins, and `capture_element`.
 - [x] Replace the named HLD paragraphs with the selected Alternative A text.
 - [x] Run the scoped gate and microscope after claim.
-- [ ] Record the reviewed 14-key hash delta in deterministic font mode.
-- [ ] Run the final union once, including F-X273 and F-X274 affected rows.
+- [x] Record the reviewed 14-key hash delta in deterministic font mode.
+- [x] Run the final union once, including F-X273 and F-X274 affected rows.
 - [x] Leave README measurements to F-X275.
 
 ## Open questions

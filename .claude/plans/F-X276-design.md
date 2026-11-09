@@ -1,6 +1,6 @@
 # F-X276, Report rpptx fit, plain Markdown, and slides.index
 
-**Status**: approved
+**Status**: completed
 
 **Sprint**: S96
 
@@ -337,10 +337,10 @@ Expected unchanged. Saved OPC bytes, PDF, and PNG stay the same. The integrated 
 
 ## Final sprint acceptance checklist
 
-- [ ] Final integrated workspace and CLI union.
-- [ ] Hash49 and pixels7, with expected unchanged F-X276 output.
-- [ ] Named native, PDF, PNG and LibreOffice riders.
-- [ ] Installed Python3.9 and3.12, typing, stubs and archive qualification.
+- [x] Final integrated workspace and CLI union.
+- [x] Hash49 and pixels7, with expected unchanged F-X276 output.
+- [x] Named native, PDF, PNG and LibreOffice riders.
+- [x] Installed Python3.9 and3.12, typing, stubs and archive qualification.
 - [ ] Hosted CI and full public Markdown export benchmark.
 
 ## Final Markdown measurement interpretation

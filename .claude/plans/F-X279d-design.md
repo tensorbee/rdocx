@@ -1,6 +1,6 @@
 # F-X279d, Author crossing comment replies with initials
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none
@@ -264,7 +264,7 @@ A self-hash or historical Word version cannot satisfy the final native gate.
 - [x] Existing C2 neighbor and unrelated marker/opaque behavior preserved.
 - [x] Fresh Python, CLI and lifecycle/held-state controls with source custody.
 - [x] Narrow HLD changes, independent microscope and scoped handoff.
-- [ ] Serial integration and final native/installed/schema/hash/union riders.
+- [x] Serial integration and final native/installed/schema/hash/union riders.
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # F-X272a, Compare and resolve footnote ownership and lifecycle
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X229, F-X230, F-X245
@@ -661,7 +661,7 @@ implementation evidence and final integrated riders stay required and pending.
 - [x] Add lifecycle, shared id at emit, part creation preserving the actual edited special inventory, predicate-based removal on accepted edited-absent and rejected originally-absent, settlement cleanup and presence postconditions, ignored-story coherence, and unowned invalid and opaque preservation.
 - [x] Add local Rust, Python and CLI regressions, A430-13 to A430-45, update HLD03, HLD04 and HLD10.
 - [x] Run local scoped regressions, declare expected deltas and obtain clean independent Root local approval.
-- [ ] Run the final integrated union and obtain final Root approval after the native, SDK, installed binding, hash and full riders.
+- [x] Run the final integrated union and obtain final Root approval after the native, SDK, installed binding, hash and full riders.
 
 - Preserve all45A430rows and14G430rows in actual evidence accounting.
 - Use only existing source/test carriers and preserve unmodelled XML verbatim.

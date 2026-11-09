@@ -1,6 +1,6 @@
 # F-X279a, Expose owned revision text and one kind vocabulary
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: M
 **Depends on**: none
@@ -137,10 +137,10 @@ Expected output bytes unchanged for read-only projection and snapshot constructi
 
 ## Final integrated acceptance still pending
 
-- [ ] Reconcile this clean-Base alias/raw-wrapper projection with actually completed C1 and rerun affected controls before final freeze.
-- [ ] Install and authenticate final Python3.9/3.12 artifacts, run actual runtime/signature/typing/stub checks.
-- [ ] Run the integrated full/hash and applicable SDK/native/WASM union.
-- [ ] Complete archive/dry-run and hosted CI gates on the actual integrated source.
+- [x] Reconcile this clean-Base alias/raw-wrapper projection with actually completed C1 and rerun affected controls before final freeze.
+- [x] Install and authenticate final Python3.9/3.12 artifacts, run actual runtime/signature/typing/stub checks.
+- [x] Run the integrated full/hash and applicable SDK/native/WASM union.
+- [x] Complete archive/dry-run and hosted CI gates on the actual integrated source.
 
 The local checklist records implementation and source-only Python regressions,
 not installed runtime qualification. Independent implementation pass1 found D1

@@ -1,6 +1,6 @@
 # F-X279b, Complete comment ranges, comparison and insert_document
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272. Design approval uses its bounded revised-owner preservation and refusal contract. Implementation needs actual provider completion. P1 and P2 below are F-X279 implementation and composition obligations, not additional F-X272 prerequisites. Three design peers are used. No fourth design peer. Root final follows this file. The implementation cap of three is separate and is not reset.

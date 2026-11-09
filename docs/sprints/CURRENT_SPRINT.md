@@ -2,7 +2,9 @@
 
 **Milestone**: X contribution and issue repair, ahead of the remaining M24 and AcroForm feature work.
 
-**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four approved implementations are integrated, with F-X274 at `932696b7` completing the serial waves. Initial individual local gates and independent microscopes passed at their recorded producers. Later full-suite and native failures required comparison/layout remediation. Current bounded repairs have fresh scoped observations and independent reviews, while final acceptance and Issue430remain pending. Final integrated, hosted and native acceptance remains pending. F-X273 passed its approved LOCAL provider implementation checkpoint at `fca298cc`, while its plan remains approved and final differential debt remains due. The sprint clock started with F-X271 on 2026-10-28. A later authorized intake adds F-X276 through F-X282 for Issues 431 to 437, all pending with no owner claimed and no design approved. On 2026-11-01 a reviewed Task07 intake adds F-X283 for Issue445, also pending with no owner claimed and no design approved.
+**Goal**: Integrated thirteen top-level contracts and eleven extracted children for the approved S96 release scope, including original Issues423to426 and the later contributor intake. All24 final delivery records consume actual accepted full evidence at `a3dc3b02be721b83318b9130e6623d4396082953`. Six expressly approved obligation groups remain pending in S96.1 under F-X285 through F-X290, after opening performance/memory review F-X284. Failed or unperformed measurements remain recorded. The sprint clock started2026-10-28.
+
+**Final acceptance**: .claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/FINAL_FULL_ACCEPTANCE_A3DC.md. This records release preparation. The registered independent formal sprint review and close records govern closure. Publication, tags, yank and outward actions remain separately held. The older implementation and intake paragraphs below retain checkpoint history and do not replace this final status or the operative approved limits.
 
 ## Approved release scope and Optimization Sprint
 
@@ -36,30 +38,30 @@ F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved 
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
+| F-X271 | Restore pinned viewer downloads and planning policy | M | done | - |
 | F-X272 | Preserve existing revisions during document comparison | L | done | - |
 | F-X272a | Compare and resolve footnote ownership and lifecycle | L | done | - |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
-| F-X274 | Honor section and field page-number formats | M | in-progress | codex |
-| F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
-| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | codex |
-| F-X277 | Complete Issue432 through child stories, completion umbrella | L | pending | - |
-| F-X277a | Emit authored radical degrees and preserve imported absence | S | in-progress | codex |
+| F-X274 | Honor section and field page-number formats | M | done | - |
+| F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | done | - |
+| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | done | - |
+| F-X277 | Complete Issue432 through child stories, completion umbrella | L | done | - |
+| F-X277a | Emit authored radical degrees and preserve imported absence | S | done | - |
 | F-X277b | Complete Word-like notes, links and numbering | L | done | - |
-| F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | M | in-progress | codex |
-| F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
-| F-X279 | Complete Issue434 through children, completion umbrella | L | pending | - |
-| F-X279a | Expose owned revision text and one kind vocabulary | M | in-progress | codex |
-| F-X279b | Complete comments, comparison and insert_document | L | in-progress | codex |
-| F-X279c | Author comment markup and styles without changing reply ranges | M | in-progress | codex |
-| F-X279d | Author crossing comment replies with initials | M | in-progress | codex |
-| F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
-| F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
-| F-X280b | Complete validation and damaged-input refusal | L | in-progress | codex |
-| F-X280c | Validate stored PresentationML packages through the public file route | M | in-progress | codex |
-| F-X281 | Complete picture, chart, export and layout fidelity | XL | in-progress | codex |
-| F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
-| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | opencode |
+| F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | M | done | - |
+| F-X278 | Complete Word rendering fidelity and font policy | L | done | - |
+| F-X279 | Complete Issue434 through children, completion umbrella | L | done | - |
+| F-X279a | Expose owned revision text and one kind vocabulary | M | done | - |
+| F-X279b | Complete comments, comparison and insert_document | L | done | - |
+| F-X279c | Author comment markup and styles without changing reply ranges | M | done | - |
+| F-X279d | Author crossing comment replies with initials | M | done | - |
+| F-X280 | Complete Issue435 through child stories, completion umbrella | L | done | - |
+| F-X280a | Refuse negative authored shape sizes before publication | S | done | - |
+| F-X280b | Complete validation and damaged-input refusal | L | done | - |
+| F-X280c | Validate stored PresentationML packages through the public file route | M | done | - |
+| F-X281 | Complete picture, chart, export and layout fidelity | XL | done | - |
+| F-X282 | Bound edit cost across styles, body and cells | M | done | - |
+| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | done | - |
 
 ## Sequencing note
 

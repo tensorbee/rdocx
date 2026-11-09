@@ -1,6 +1,6 @@
 # F-X281, Complete picture, chart, export and layout fidelity
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: XL
 **Depends on**: none
@@ -470,7 +470,7 @@ publication and preserves its font aliases. HLD impact remains unchanged.
 - [x] Export the image enum and classifier at the public oxml_pdf root and compile an external consumer of both paths.
 - [x] Use complete chart bytes for the one chart_plain_title signature, exact title-path namespace controls, private HTML tuple plumbing and both direct/AlternateContent semantic routes.
 - [x] Add only the public ShapeTreeChild hidden getter and keep variant helpers private or pub(crate).
-- [ ] Include rpptx-oxml in final packaging and strict public API evidence.
+- [x] Include rpptx-oxml in final packaging and strict public API evidence.
 - [x] Use idx-free public PlaceholderKey::matches for equivalent-family selection without changing occupancy matching or mislabelling a missing type as Object.
 
 The accepted proposal carried no separate implementation checklist. Its implementation obligations are the eight criteria in `## Approach` and `## Acceptance criteria`, the tests in `## Test plan`, and the HLD edits in `## HLD impact`. This heading adds no scope.

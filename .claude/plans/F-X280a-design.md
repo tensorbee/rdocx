@@ -1,6 +1,6 @@
 # F-X280a, Refuse negative authored shape sizes before publication
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: S
 **Depends on**: none
@@ -106,8 +106,8 @@ Canonical F272 source/build lease remains with its current owner. Proposed excep
 - [x] Fresh mutable issue/PR check, reviewed metadata Base, clean worker product verification and /start-feature F-X280a --claimed.
 - [x] Actual semantic RED, private helper and three call-site implementation, focused GREEN and Python evidence or exact pending installation rider.
 - [x] Update only declared HLD section, scoped gate and independent zero-finding microscope with actual source pins.
-- [ ] Prepare and validate structured handoff only after Root's acceptance, preserve branch through integration/verification.
-- [ ] Integrator consumes final applicable riders and completes child without claiming parent validation/provider completion.
+- [x] Prepare and validate structured handoff only after Root's acceptance, preserve branch through integration/verification.
+- [x] Integrator consumes final applicable riders and completes child without claiming parent validation/provider completion.
 
 ## Open questions
 

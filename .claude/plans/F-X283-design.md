@@ -1,6 +1,6 @@
 # F-X283, Bound whole-cell setters and Python open-replace-save cost
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: none
@@ -786,7 +786,7 @@ No baseline movement is authorized.
 - [x] Implement all thirteen A-IDs with discriminating local evidence, unconditional first-activation rebuild, no retained dormant caches, all named direct publishers and serializer/error outcomes.
 - [x] Update exactly the HLD impact list before implementation freeze.
 - [x] Independent implementation microscope, scoped gate and structured handoff.
-- [ ] Final integrated and release artifact qualification.
+- [x] Final integrated and release artifact qualification.
 
 
 ## Contract closure self-review

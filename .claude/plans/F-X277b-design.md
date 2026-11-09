@@ -1,6 +1,6 @@
 # F-X277b, Complete Word-like notes, links and numbering
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272a
@@ -114,7 +114,7 @@ passes are consumed. No further confirmation review is needed for this source.
 - [x] Finish final affected local regression refresh and scoped format/lint checks.
 - [x] Obtain independent zero-defect, zero-smell implementation microscope,
   actual Root final pass2 in .claude/reviews/F-X277b-implementation-codex-final-2.md.
-- [ ] Final integrated union: schema/native/oracle, installed Python binding and
+- [x] Final integrated union: schema/native/oracle, installed Python binding and
   typing, C1 composition, deterministic hash wave, full/native/hosted/packaging
   and all inherited final riders. No baseline was changed by this worker.
 
