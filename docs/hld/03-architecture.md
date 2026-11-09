@@ -801,7 +801,13 @@ and the Office Math flag all have typed members beside the fonts, sizes,
 colour, shading, language, and direction state that were already modeled.
 `w:rFonts` owns all four explicit script slots, all four theme slots, and
 `w:hint`, and `w:color` owns its theme colour, tint, and shade, so nothing on
-either element is dropped on save. `CT_Shd` owns the same six theme attributes
+either element is dropped on save. During effective inheritance, a nearer
+literal or theme colour declaration replaces the typed `w:color` tuple,
+including absent tint/shade. Foreign attributes retain their existing merge
+and preservation behavior. An
+absent semantic colour retains inheritance. This does not normalize the parsed
+source or change the existing modifier-only and opaque-only model behavior.
+`CT_Shd` owns the same six theme attributes
 for run, paragraph, and table shading. Like `CT_FramePr` and `CT_BorderEdge`,
 each of these retains its unmodelled attributes in source order and replays
 them ahead of the modeled ones. `CT_RPr` stores its character border, its

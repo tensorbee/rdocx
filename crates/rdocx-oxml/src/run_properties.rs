@@ -2215,8 +2215,9 @@ impl CT_RPr {
             && (!raw || self.revision_xml.is_empty())
     }
 
-    /// Merge another CT_RPr into this one (non-None fields override).
-    /// Used for style inheritance.
+    /// Merge another CT_RPr for style inheritance.
+    /// A declared colour replaces its complete colour property. Other absent
+    /// properties inherit.
     pub fn merge_from(&mut self, other: &CT_RPr) {
         // Only a recognized semantic solid fill participates in style precedence.
         // Opaque extension children are not transported into an effective style.
@@ -2304,17 +2305,18 @@ impl CT_RPr {
         if other.sz_cs.is_some() {
             self.sz_cs = other.sz_cs;
         }
-        if other.color.is_some() {
+        if other.color.is_some() || other.color_theme.is_some() {
             self.color = other.color.clone();
-        }
-        if other.color_theme.is_some() {
             self.color_theme = other.color_theme.clone();
-        }
-        if other.color_theme_tint.is_some() {
             self.color_theme_tint = other.color_theme_tint;
-        }
-        if other.color_theme_shade.is_some() {
             self.color_theme_shade = other.color_theme_shade;
+        } else {
+            if other.color_theme_tint.is_some() {
+                self.color_theme_tint = other.color_theme_tint;
+            }
+            if other.color_theme_shade.is_some() {
+                self.color_theme_shade = other.color_theme_shade;
+            }
         }
         if !other.color_extra_attributes.is_empty() {
             self.color_extra_attributes = other.color_extra_attributes.clone();
@@ -3023,6 +3025,70 @@ mod tests {
         assert_eq!(base.bold, Some(true)); // kept
         assert_eq!(base.sz, Some(HalfPoint(28))); // overridden
         assert_eq!(base.italic, Some(true)); // added
+    }
+
+    #[test]
+    fn nearer_run_color_replaces_the_inherited_theme_and_its_attributes() {
+        let inherited = parse_rpr(
+            r#"<w:color xmlns:old="urn:old" w:val="467886" w:themeColor="hyperlink" w:themeTint="66" w:themeShade="33" old:kept="old"/>"#,
+        );
+        let direct = parse_rpr(r#"<w:color xmlns:new="urn:new" w:val="0563C1" new:kept="new"/>"#);
+        let mut effective = inherited.clone();
+        effective.merge_from(&direct);
+        assert_eq!(effective.color.as_deref(), Some("0563C1"));
+        assert_eq!(effective.color_theme, None);
+        assert_eq!(effective.color_theme_tint, None);
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(
+            effective.color_extra_attributes,
+            direct.color_extra_attributes
+        );
+        assert_eq!(inherited.color_theme.as_deref(), Some("hyperlink"));
+        assert_eq!(inherited.color_theme_tint, Some(0x66));
+        assert_eq!(direct.color_theme, None);
+    }
+
+    #[test]
+    fn nearer_run_color_theme_does_not_inherit_replaced_tint_or_shade() {
+        let mut effective = parse_rpr(
+            r#"<w:color xmlns:old="urn:old" w:val="111111" w:themeColor="accent1" w:themeTint="66" w:themeShade="33" old:kept="old"/>"#,
+        );
+        let opaque = effective.color_extra_attributes.clone();
+        effective.merge_from(&parse_rpr(
+            r#"<w:color w:val="222222" w:themeColor="accent2"/>"#,
+        ));
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        assert_eq!(effective.color_theme_tint, None);
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(effective.color_extra_attributes, opaque);
+
+        effective.merge_from(&CT_RPr {
+            bold: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        effective.merge_from(&CT_RPr {
+            color_theme_shade: Some(0x20),
+            color_extra_attributes: vec![("xmlns:x".into(), "urn:opaque".into())],
+            ..Default::default()
+        });
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        assert_eq!(effective.color_theme_shade, Some(0x20));
+
+        effective.merge_from(&CT_RPr {
+            color_theme: Some("accent3".into()),
+            ..Default::default()
+        });
+        assert_eq!(effective.color, None);
+        assert_eq!(effective.color_theme.as_deref(), Some("accent3"));
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(
+            effective.color_extra_attributes,
+            vec![("xmlns:x".to_owned(), "urn:opaque".to_owned())]
+        );
     }
 
     #[test]

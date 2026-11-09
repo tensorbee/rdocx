@@ -908,7 +908,13 @@ the inherited hanging value.
 Run colour follows the resolved inheritance cascade. An effective `auto`
 colour, or no colour after inheritance, takes a contrast colour from the fill
 behind it. A run without its own colour retains an inherited explicit or theme
-colour.
+colour. A nearer literal or theme selector replaces the whole inherited
+`w:color` declaration, so an explicit run RGB or `auto` does not retain a
+style's theme selector, tint or shade. This rule reaches ordinary runs, stored
+field segments and generated styles through the shared model merge. Within
+one winning declaration, a resolvable theme still takes precedence over its
+cached literal fallback. Existing textFill precedence and tint/shade arithmetic
+are unchanged.
 Black fills and dark navy fills produce white text, a light grey fill produces
 black text, and an unshaded cell or paragraph produces black text. The fill is
 the cell's resolved shading, including a paragraph shading inside that cell, and

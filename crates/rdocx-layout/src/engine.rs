@@ -16945,7 +16945,7 @@ fn ruby_inline_item(
 
 /// Resolve the effective color for a run, considering theme colors.
 ///
-/// Priority: literal color (non-auto) > theme color > `automatic`, the
+/// Priority: solid text fill > resolved theme color > literal fallback > `automatic`, the
 /// automatic colour that [`automatic_text_color`] gives for the fill behind
 /// the text.
 fn resolve_run_color(
@@ -27285,6 +27285,72 @@ mod tests {
         assert_eq!(
             field_layout("BodyText"),
             (Some(Color::from_hex("0563C1")), 1)
+        );
+    }
+
+    #[test]
+    fn direct_hyperlink_color_replaces_style_theme_in_runs_and_stored_fields() {
+        let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="467886" w:themeColor="hyperlink"/><w:u w:val="single"/></w:rPr></w:style></w:styles>"#;
+        let layout = |direct: &str, stored: bool, dark: bool| {
+            let mut input = make_input_with_text("");
+            input.styles = CT_Styles::from_xml(styles).unwrap();
+            let mut theme = rdocx_oxml::theme::Theme::default();
+            theme.colors.hlink = Some("467886".into());
+            theme.colors.accent2 = Some("1077AA".into());
+            input.theme = Some(theme);
+            let run = format!(
+                r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/>{direct}</w:rPr><w:t>COLOUR_CONTROL</w:t></w:r>"#
+            );
+            let content = if stored {
+                format!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-3&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{run}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                )
+            } else {
+                run
+            };
+            let shading = if dark {
+                r#"<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:pPr>"#
+            } else {
+                ""
+            };
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>{shading}<w:hyperlink w:anchor="BodyTarget">{content}</w:hyperlink></w:p></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            let (mut colors, mut underlines) = (Vec::new(), 0);
+            oxml_layout::walk(&output.pages[0].elements, &mut |element, _| match element {
+                PositionedElement::Text(run) if run.text == "COLOUR_CONTROL" => {
+                    colors.push(run.color);
+                }
+                PositionedElement::Line { .. } => underlines += 1,
+                _ => {}
+            });
+            assert_eq!(underlines, 1, "body Hyperlink underline must remain");
+            assert_eq!(colors.len(), 1);
+            colors[0]
+        };
+        assert_eq!(layout("", false, false), Color::from_hex("467886"));
+        for stored in [false, true] {
+            assert_eq!(
+                layout(r#"<w:color w:val="0563C1"/>"#, stored, false),
+                Color::from_hex("0563C1")
+            );
+        }
+        assert_eq!(
+            layout(r#"<w:color w:val="auto"/>"#, false, true),
+            Color::WHITE
+        );
+        assert_eq!(
+            layout(
+                r#"<w:color w:val="FF0000" w:themeColor="accent2"/>"#,
+                false,
+                false
+            ),
+            Color::from_hex("1077AA")
         );
     }
 
