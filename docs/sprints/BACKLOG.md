@@ -868,6 +868,8 @@ HLD14 contract before adopting contributor changes.
 | F-X286 | Qualify and reduce memory footprint and retained history | S96.1 | L | pending |
 | F-X287 | Repair note comparison after Word-save normalization | S96.1 | L | pending |
 | F-X288 | Repair seven native ordinary furniture-frame differences | S96.1 | L | pending |
+| F-X289 | Requalify historical native kerning and right-edge coverage | S96.1 | L | pending |
+| F-X290 | Repair measured legacy Word kerning and line-number edge differences | S96.1 | L | pending |
 
 <!-- AUTOGEN:backlog-MX END -->
 
@@ -961,3 +963,15 @@ F-X287 requires the normal design, claim, implementation, review and qualificati
 F-X288 owns only the user-approved seven-case ordinary header/footer frame carry: six0.551202pt edge errors against the unchanged0.5pt criterion and the explicit-text footer off-page frame/144pt following-flow difference. Preserve failed observations, nominal source fonts and authored offsets. Issue424 stays open. F-X288 is pending design, unclaimed and not completed. General body frames, drop caps and the separate row-split disposition are outside its scope. All other native, runtime, safety and release gates remain required.
 
 The exact seven F273 A3 cases and immutable evidence paths are retained in the operative F-X273/F-X275 plan sections. This explicit release exception does not relabel failed0.5pt comparisons as passes or infer a matching source-supported oracle disposition. No new plan, claim, provider-status change, completion count or peer-cap reset follows from this registration.
+
+## Approved historical native right-edge qualification carry
+
+F-X289 is pending design and unclaimed in S96.1. It owns only the user-approved historical native kerning/right-edge qualification limit: fresh checks do not prove equivalence to all50older measurement instances. These are not50named files. Original tests, failed/absent measurements, the0.5pt metric and fresh reported-case checks remain intact. Recover/authenticate the original logical instance map or explicitly review a replacement finite qualification contract before closing that debt. No other current failure, source policy, public reproduction, A8 operation union or native/runtime/release gate is waived. Other approved carries and all existing statuses/caps remain separate.
+
+The operative F273/F275 sections retain the exact approval and original obligation. F-X289 registration creates no plan file, claim, implementation, qualification pass or delivery credit.
+
+## Approved four-case current Word rendering carry
+
+F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved three measured legacy Word compatibility kerning/superscript cases and one measured line-number edge. The legacy cases are k1-threshold-1, k1-threshold-3 and k1-threshold-4 under the original mode12/default-compatibility profile, with maxima3.715936pt,3.715936pt and4.946208pt. The fourth case is label3bottom in native-line-style-enabled-explicit-defaults at0.511225pt against0.5pt. Preserve every failed outcome and the unchanged0.5pt metric. The single mode15direct-enabled control passes, but does not qualify all threshold/superscript variants. Historical50instance recovery remains separately owned by F-X289. No other current failure, source policy, native/runtime/release gate, provider status, completion count or review cap changes.
+
+Exact case/evidence boundaries are retained in the existing F273/F275 plans. This registration creates no new plan file, claim, completed status or delivery credit.

@@ -978,6 +978,16 @@ Atomic list labels retain whole-marker shaping and grouping. Structural field ma
 retain their synthetic zero-advance glyphs. Neutral and PowerPoint shaping defaults
 remain separate from the Word producer.
 
+Native parity remains unqualified for three measured legacy compatibility
+kerning/superscript cases, with maximum difference4.946208pt, and one exact
+Word-saved line-number label3bottom edge at0.511225pt against0.5pt. Pending
+S96.1 F-X290 owns only this user-approved four-case release carry. One controlled
+mode15direct-enabled case passes, not every enabled or superscript case.
+These observations do not change the effective threshold, source nominal sizes,
+font identity, superscript or generated-number rules below. Preserve failed raw
+measurements and all unaffected native/source/resource obligations. Historical
+50instance recovery is separately owned by F-X289.
+
 In mixed rich paragraphs, the actual plain computed-field producers retain their
 own legacy factory contexts. The original eligible rich batch remains rich.
 Checked source-order assembly assigns global span ordinals through the neutral

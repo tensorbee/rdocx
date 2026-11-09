@@ -9094,3 +9094,27 @@ Pending design and unclaimed. Own only the seven user-approved F273 A3 failures:
 Design must distinguish the small metric differences from the footer placement/wrap invariant. Preserve nominal11pt/16pt source fonts, authored offsets, grouping, actual owner/anchor presence and one coherent prepared rectangle for paint and applicable obstacles. A universal footer clamp, font-size substitution or offset fudge is not approved. Include a different invariant discriminator and preserve previously qualified page-offset and same-story controls. Do not broaden general body-frame or drop-cap support, alter Source/resource limits, or waive schema/other native checks. The separate row-split23/17 versus26/14 disposition is outside this story.
 
 Use the retained anchor-eight, remaining24 and footer-and-row source-triage packets under `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh` as failed inputs and source facts, not a passed baseline. The normal design, claim, implementation, independent review and qualification lifecycle remains required. Coordinate exclusive Word layout source ownership with other S96.1 work. Registration creates no new plan, claim, status reset, peer-cap reset, completion credit or public API change.
+
+### F-X289, Requalify historical native kerning and right-edge coverage
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md effective Word kerning and source nominal fonts, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+Pending design and unclaimed. Own only the approved qualification carry for50historical native right-edge measurement instances, not50named files. Recover the per-instance source, text/owner occurrence, font profile and native/library artifact joins where possible. Do not invent historical ZIP/PDF custody or identify the current55recipes or five K1 threshold inputs as the original set without proof. Preserve original tests, historical failures, absent observations, fresh reported-case checks and the unchanged0.5pt metric.
+
+Restore the original every-original same-font qualification obligation or obtain an explicit reviewed finite replacement contract where original mapping remains unrecoverable. Record honest source/artifact identities, affected A1/A3/A4/A7/A8 consumer applicability and a different invariant discriminator before qualification. No arbitrary50-case campaign, new API, font substitution, source offset, kerning-policy change, tolerance relaxation or blanket native waiver is approved. Existing current failures and original public/operation checks remain separate gates. Use the sealed f273-original50-recovery-1 packet as custody analysis, not passed native equivalence. The normal lifecycle remains pending, with no provider-status, count, review-cap or completion reset.
+
+### F-X290, Repair measured legacy Word kerning and line-number edge differences
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md effective Word shaping and generated line numbers, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved three measured legacy Word compatibility kerning/superscript cases and one measured line-number edge. The legacy cases are k1-threshold-1, k1-threshold-3 and k1-threshold-4 under the original mode12/default-compatibility profile, with maxima3.715936pt,3.715936pt and4.946208pt. The fourth case is label3bottom in native-line-style-enabled-explicit-defaults at0.511225pt against0.5pt. Preserve every failed outcome and the unchanged0.5pt metric. The single mode15direct-enabled control passes, but does not qualify all threshold/superscript variants. Historical50instance recovery remains separately owned by F-X289. No other current failure, source policy, native/runtime/release gate, provider status, completion count or review cap changes.
+
+Restore affected native behavior or explicitly close its source-supported compatibility contract through the normal approved design before implementation. Preserve exact mode12/mode15 source distinctions, source nominal sizes and qualified physical glyph/metric identities. Include threshold inheritance/direct override, nominal superscript decision, generated-number tuple and a genuinely different invariant. Do not apply font/offset/spacing adjustments merely to fit the reference. Keep old failures and all input/producer/Word-version joins. No historical50instance equivalence, new API, source-model scope, tolerance relaxation or broad native waiver follows. Normal claim, implementation, independent review and fresh affected qualification remain pending, with no completion credit or cap reset.

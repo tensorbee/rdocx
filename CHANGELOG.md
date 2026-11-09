@@ -45,6 +45,10 @@ After Word saves a comparison that adds a note alongside new body text, later re
 
 Some positioned header/footer frames differ from Word by about 0.55 pt. In a tested text-anchored footer, the frame falls outside the page and following footer text wraps differently. [Issue424](https://github.com/tensorbee/rdocx/issues/424) stays open, with a fix planned for S96.1. These measured limitations do not establish general Word layout parity.
 
+Historical native kerning and right-edge coverage is not fully requalified. Fresh checks do not prove equivalence to all 50 older measurements. Further qualification is planned for S96.1.
+
+Some legacy Word compatibility documents show kerning or superscript differences of up to 4.95 pt. One tested line-number edge differs by 0.511225 pt against the 0.5 pt qualification limit. Repair work is planned for S96.1.
+
 The rendering refinements cover the approved fixtures and retain documented residuals for imported numbering, unsupported formatting, automatic-colour calibration, font coverage and general native layout. Stored validation is a bounded subset, not complete OOXML schema validation. Literal `_x0001_`, valid opaque XML and binary payloads remain preserved. Source preservation is not sanitization.
 
 ### Performance and memory limitations
