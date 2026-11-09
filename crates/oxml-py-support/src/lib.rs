@@ -151,6 +151,29 @@ struct ScopeGeneration {
     retired: std::sync::OnceLock<InvalidationCause>,
 }
 
+#[cfg(debug_assertions)]
+thread_local! {
+    // All actual ScopeGeneration creations, then the owner-successor subset.
+    static SCOPE_GENERATION_WORK: std::cell::Cell<[[usize; 2]; 2]> = const { std::cell::Cell::new([[0; 2]; 2]) };
+}
+
+#[cfg(debug_assertions)]
+fn note_scope_generation_allocation(row: usize) {
+    SCOPE_GENERATION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts[row][0] += 1;
+        counts[row][1] += std::mem::size_of::<ScopeGeneration>();
+        work.set(counts);
+    });
+}
+
+/// Actual creation calls and value payload bytes, then their owner-successor subset.
+/// Excludes Arc headers and allocator overhead. Reading resets both debug rows.
+#[cfg(debug_assertions)]
+pub fn take_scope_generation_work() -> [[usize; 2]; 2] {
+    SCOPE_GENERATION_WORK.with(|work| work.replace([[0; 2]; 2]))
+}
+
 /// Hashes an allocation address, unique while the allocation is held, for
 /// the scope set of one preparation.
 #[derive(Default)]
@@ -233,7 +256,7 @@ pub fn revision_to_pyerr(error: RevisionError) -> PyErr {
     }
 }
 
-/// Fully allocated successors. Dropping this value has no observable effect.
+/// Fully allocated requested successors and births. Dropping publishes nothing.
 #[derive(Debug)]
 pub struct PreparedRevision {
     origin: std::sync::Arc<()>,
@@ -248,7 +271,7 @@ pub struct PreparedRevision {
 }
 
 impl PreparedRevision {
-    /// Successors have the same ordering as the caller's affected scopes.
+    /// Requested successors follow the caller's affected scopes. Replacement has none.
     pub fn successor(&self, index: usize) -> Option<RevisionState> {
         self.successors.get(index.checked_add(1)?).cloned()
     }
@@ -263,6 +286,17 @@ impl PreparedRevision {
     pub fn born(&self, index: usize) -> Option<RevisionState> {
         self.born.get(index).cloned()
     }
+}
+
+/// The three actual publication policies for prepared document and owner states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionPreparation {
+    /// Retire the document and supply every requested owner successor.
+    Global,
+    /// Keep the document epoch and supply every requested owner successor.
+    Local,
+    /// Retire the document and supply births, reserving unused owner generations.
+    Replacement,
 }
 
 /// One document's common committed serial and checked generation allocator.
@@ -296,6 +330,8 @@ impl RevisionCounter {
             scope: RevisionScope::Document,
             retired: std::sync::OnceLock::new(),
         }));
+        #[cfg(debug_assertions)]
+        note_scope_generation_allocation(0);
         Self {
             current: 0,
             next_generation: 0,
@@ -319,12 +355,15 @@ impl RevisionCounter {
     }
 
     fn state(&self, generation: u64, scope: RevisionScope) -> RevisionState {
-        RevisionState(std::sync::Arc::new(ScopeGeneration {
+        let state = RevisionState(std::sync::Arc::new(ScopeGeneration {
             origin: self.origin.clone(),
             generation,
             scope,
             retired: std::sync::OnceLock::new(),
-        }))
+        }));
+        #[cfg(debug_assertions)]
+        note_scope_generation_allocation(0);
+        state
     }
 
     /// Only construction uses this operation, before returning captured handles.
@@ -332,10 +371,7 @@ impl RevisionCounter {
         &mut self,
         scopes: &[RevisionScope],
     ) -> Result<Vec<RevisionState>, RevisionError> {
-        if self.initialized
-            || self.current != 0
-            || std::sync::Arc::strong_count(&self.document.0) != 1
-        {
+        if self.initialized || std::sync::Arc::strong_count(&self.document.0) != 1 {
             return Err(RevisionError::AlreadyInitialized);
         }
         let count = u64::try_from(scopes.len()).map_err(|_| RevisionError::Overflow)?;
@@ -418,7 +454,7 @@ impl RevisionCounter {
         scopes: &[RevisionState],
         born: &[RevisionScope],
     ) -> Result<PreparedRevision, RevisionError> {
-        self.prepare(Some(operation), scopes, born, true)
+        self.prepare_revision(Some(operation), scopes, born, RevisionPreparation::Global)
     }
 
     /// Advance the commit serial while retiring only the supplied owner scopes.
@@ -429,16 +465,21 @@ impl RevisionCounter {
         scopes: &[RevisionState],
         born: &[RevisionScope],
     ) -> Result<PreparedRevision, RevisionError> {
-        self.prepare(Some(operation), scopes, born, false)
+        self.prepare_revision(Some(operation), scopes, born, RevisionPreparation::Local)
     }
 
-    fn prepare(
+    /// Allocate the document state and births under the selected publication policy.
+    /// Replacement reserves the same generation positions as Global but returns no
+    /// owner successors. Every mode validates all retirements before publication.
+    pub fn prepare_revision(
         &self,
         operation: Option<&'static str>,
         scopes: &[RevisionState],
         born: &[RevisionScope],
-        retire_document: bool,
+        mode: RevisionPreparation,
     ) -> Result<PreparedRevision, RevisionError> {
+        let retire_document = mode != RevisionPreparation::Local;
+        let owner_successors = mode != RevisionPreparation::Replacement;
         self.current.checked_add(1).ok_or(RevisionError::Overflow)?;
         let total = scopes
             .len()
@@ -477,7 +518,7 @@ impl RevisionCounter {
         }
         let mut successors = Vec::new();
         successors
-            .try_reserve_exact(retired.len())
+            .try_reserve_exact(if owner_successors { retired.len() } else { 1 })
             .map_err(|_| RevisionError::Allocation)?;
         let mut generation = self.next_generation;
         for (index, old) in retired.iter().enumerate() {
@@ -486,7 +527,14 @@ impl RevisionCounter {
                 continue;
             }
             generation += 1;
+            if index != 0 && !owner_successors {
+                continue;
+            }
             successors.push(self.state(generation, old.scope()));
+            #[cfg(debug_assertions)]
+            if index != 0 {
+                note_scope_generation_allocation(1);
+            }
         }
         let mut births = Vec::new();
         births
@@ -553,7 +601,7 @@ impl RevisionCounter {
     /// Numeric compatibility. Migrated consumers prepare with the real public label.
     pub fn bump(&mut self) -> u64 {
         let prepared = self
-            .prepare(None, &[], &[], true)
+            .prepare_revision(None, &[], &[], RevisionPreparation::Global)
             .expect("document revision counter overflowed");
         self.commit_scopes(prepared)
             .expect("legacy numeric transaction was just prepared")
@@ -1011,6 +1059,307 @@ mod tests {
         ));
         assert_eq!(early.current(), 0);
         assert!(early_document.first_cause().is_none());
+    }
+
+    #[test]
+    fn fx283_dormant_commits_preserve_serial_during_first_initialization() {
+        for commits in [0, 1, 3] {
+            let mut clock = RevisionCounter::new();
+            for _ in 0..commits {
+                let prepared = clock.prepare_scopes("dormant", &[], &[]).unwrap();
+                clock.commit_scopes(prepared).unwrap();
+            }
+            let serial = clock.current();
+            let held = clock.current_document_scope();
+            assert!(clock.initialize_scopes(&[]).is_err());
+            drop(held);
+            let pending = clock.prepare_scopes("pending", &[], &[]).unwrap();
+            assert!(clock.initialize_scopes(&[]).is_err());
+            drop(pending);
+            let states = clock
+                .initialize_scopes(&[RevisionScope::Owner, RevisionScope::Text])
+                .unwrap();
+            assert_eq!(clock.current(), serial);
+            assert_ne!(states[0].generation(), states[1].generation());
+            assert!(clock.capture_scopes(smallvec![], &states).is_ok());
+            assert!(clock.initialize_scopes(&[]).is_err());
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn replacement_preparation_omits_unused_owner_successor_allocations() {
+        let mut clock = RevisionCounter::new();
+        let scopes = clock
+            .initialize_scopes(&[
+                RevisionScope::Owner,
+                RevisionScope::Text,
+                RevisionScope::Document,
+            ])
+            .unwrap();
+        let old = clock.capture(smallvec![]);
+        let _ = take_scope_generation_work();
+        let prepared = clock
+            .prepare_revision(
+                Some("replacement"),
+                &scopes,
+                &[RevisionScope::Owner, RevisionScope::Text],
+                RevisionPreparation::Replacement,
+            )
+            .unwrap();
+        let work = take_scope_generation_work();
+        assert_eq!(prepared.document_scope().generation(), 4);
+        assert_eq!(prepared.born(0).unwrap().generation(), 8);
+        assert_eq!(prepared.born(1).unwrap().generation(), 9);
+        assert!(prepared.successor(0).is_none());
+        assert!(prepared.successor(usize::MAX).is_none());
+        assert_eq!(clock.current(), 0);
+        assert!(scopes.iter().all(|state| state.first_cause().is_none()));
+        let future = clock.capture_prepared(&prepared, smallvec![]).unwrap();
+        clock.commit_scopes(prepared).unwrap();
+        assert_eq!(clock.current(), 1);
+        assert_eq!(clock.next_generation, 9);
+        assert!(
+            future
+                .validate_scopes(&clock, "document", "refetch")
+                .is_ok()
+        );
+        assert!(old.validate_scopes(&clock, "document", "refetch").is_err());
+        for state in &scopes {
+            let cause = state.first_cause().unwrap();
+            assert_eq!(cause.serial, 1);
+            assert_eq!(cause.operation, Some("replacement"));
+            assert_eq!(cause.scope, state.scope());
+        }
+        assert_eq!(
+            work[0],
+            [3, 3 * std::mem::size_of::<ScopeGeneration>()],
+            "only the document and two births need allocation: {work:?}"
+        );
+        assert_eq!(work[1], [0, 0], "unused owner successors: {work:?}");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn replacement_preparation_keeps_default_generations_and_retirement() {
+        for retired_count in [0, 1, 32] {
+            for birth_count in [0, 3] {
+                let mut clock = RevisionCounter::new();
+                let kinds = [
+                    RevisionScope::Document,
+                    RevisionScope::Text,
+                    RevisionScope::Grid,
+                ];
+                let scopes = clock
+                    .initialize_scopes(
+                        &(0..retired_count).map(|i| kinds[i % 3]).collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                let births = vec![RevisionScope::Owner; birth_count];
+                let before = clock.next_generation;
+                let _ = take_scope_generation_work();
+                let reference = clock.prepare_scopes("replace", &scopes, &births).unwrap();
+                let reference_work = take_scope_generation_work();
+                assert_eq!(reference_work[0][0], 1 + retired_count + birth_count);
+                assert_eq!(reference_work[1][0], retired_count);
+                let reference_document = reference.document_scope().generation();
+                let reference_births = (0..birth_count)
+                    .map(|i| reference.born(i).unwrap().generation())
+                    .collect::<Vec<_>>();
+                for (index, old) in scopes.iter().enumerate() {
+                    assert_eq!(reference.successor(index).unwrap().scope(), old.scope());
+                }
+                drop(reference);
+                let actual = clock
+                    .prepare_revision(
+                        Some("replace"),
+                        &scopes,
+                        &births,
+                        RevisionPreparation::Replacement,
+                    )
+                    .unwrap();
+                let actual_work = take_scope_generation_work();
+                assert_eq!(actual_work[0][0], 1 + birth_count);
+                assert_eq!(actual_work[1], [0, 0]);
+                assert_eq!(actual.document_scope().generation(), reference_document);
+                assert_eq!(actual.document_scope().generation(), before + 1);
+                for (index, expected) in reference_births.into_iter().enumerate() {
+                    assert_eq!(actual.born(index).unwrap().generation(), expected);
+                    assert_eq!(expected, before + retired_count as u64 + 2 + index as u64);
+                    assert_eq!(actual.born(index).unwrap().scope(), RevisionScope::Owner);
+                }
+                assert!(actual.successor(0).is_none());
+                assert!(actual.successor(usize::MAX).is_none());
+                let future = clock.capture_prepared(&actual, smallvec![]).unwrap();
+                clock.commit_scopes(actual).unwrap();
+                assert_eq!(
+                    clock.next_generation,
+                    before + retired_count as u64 + 1 + birth_count as u64
+                );
+                assert_eq!(clock.current(), 1);
+                assert!(
+                    future
+                        .validate_scopes(&clock, "document", "refetch")
+                        .is_ok()
+                );
+                for scope in &scopes {
+                    let cause = scope.first_cause().unwrap();
+                    assert_eq!(cause.serial, 1);
+                    assert_eq!(cause.operation, Some("replace"));
+                    assert_eq!(cause.scope, scope.scope());
+                }
+                let next = clock
+                    .prepare_scopes("next", &[], &[RevisionScope::Text])
+                    .unwrap();
+                assert_eq!(
+                    next.born(0).unwrap().generation(),
+                    clock.next_generation + 2
+                );
+                clock.commit_scopes(next).unwrap();
+                assert_eq!(clock.current(), 2);
+                for scope in &scopes {
+                    assert_eq!(scope.first_cause().unwrap().operation, Some("replace"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_preparation_refuses_invalid_scopes_and_virtual_overflow() {
+        let mut clock = RevisionCounter::new();
+        let scopes = clock.initialize_scopes(&[RevisionScope::Owner]).unwrap();
+        let mut foreign = RevisionCounter::new();
+        let foreign_scopes = foreign.initialize_scopes(&[RevisionScope::Owner]).unwrap();
+        for (input, expected) in [
+            (foreign_scopes, RevisionError::ForeignOwner),
+            (
+                vec![scopes[0].clone(), scopes[0].clone()],
+                RevisionError::DuplicateScope,
+            ),
+        ] {
+            let result = clock.prepare_revision(
+                Some("replace"),
+                &input,
+                &[],
+                RevisionPreparation::Replacement,
+            );
+            assert_eq!(result.unwrap_err(), expected);
+            assert_eq!(clock.current(), 0);
+            assert_eq!(clock.next_generation, 1);
+            assert!(scopes[0].first_cause().is_none());
+        }
+        clock.next_generation = u64::MAX - 1;
+        assert_eq!(
+            clock
+                .prepare_revision(
+                    Some("replace"),
+                    &scopes,
+                    &[],
+                    RevisionPreparation::Replacement
+                )
+                .unwrap_err(),
+            RevisionError::Overflow,
+        );
+        assert_eq!(clock.next_generation, u64::MAX - 1);
+        assert!(scopes[0].first_cause().is_none());
+        clock.next_generation = 1;
+        clock.current = u64::MAX;
+        assert_eq!(
+            clock
+                .prepare_revision(
+                    Some("replace"),
+                    &scopes,
+                    &[],
+                    RevisionPreparation::Replacement
+                )
+                .unwrap_err(),
+            RevisionError::Overflow,
+        );
+        clock.current = 0;
+        let prepared = clock.prepare_scopes("old", &scopes, &[]).unwrap();
+        clock.commit_scopes(prepared).unwrap();
+        assert_eq!(
+            clock
+                .prepare_revision(
+                    Some("replace"),
+                    &scopes,
+                    &[],
+                    RevisionPreparation::Replacement
+                )
+                .unwrap_err(),
+            RevisionError::Retired,
+        );
+        assert_eq!(scopes[0].first_cause().unwrap().operation, Some("old"));
+        assert_eq!(clock.current(), 1);
+    }
+
+    #[test]
+    fn replacement_preparation_drop_foreign_and_stale_commit_publish_nothing() {
+        let mut clock = RevisionCounter::new();
+        let scopes = clock.initialize_scopes(&[RevisionScope::Owner]).unwrap();
+        let prepared = clock
+            .prepare_revision(
+                Some("drop"),
+                &scopes,
+                &[RevisionScope::Text],
+                RevisionPreparation::Replacement,
+            )
+            .unwrap();
+        let birth = std::sync::Arc::downgrade(&prepared.born(0).unwrap().0);
+        drop(prepared);
+        assert!(birth.upgrade().is_none());
+        assert_eq!(clock.current(), 0);
+        assert_eq!(clock.next_generation, 1);
+        assert!(scopes[0].first_cause().is_none());
+        let mut other = RevisionCounter::new();
+        let prepared = clock
+            .prepare_revision(
+                Some("foreign"),
+                &scopes,
+                &[],
+                RevisionPreparation::Replacement,
+            )
+            .unwrap();
+        assert_eq!(
+            other.capture_prepared(&prepared, smallvec![]).unwrap_err(),
+            RevisionError::ForeignOwner
+        );
+        assert_eq!(
+            other.commit_scopes(prepared).unwrap_err(),
+            RevisionError::ForeignOwner
+        );
+        assert_eq!(other.current(), 0);
+        assert!(scopes[0].first_cause().is_none());
+        let stale = clock
+            .prepare_revision(
+                Some("stale"),
+                &scopes,
+                &[],
+                RevisionPreparation::Replacement,
+            )
+            .unwrap();
+        let intervening = clock.prepare_scopes("intervening", &[], &[]).unwrap();
+        clock.commit_scopes(intervening).unwrap();
+        assert_eq!(
+            clock.commit_scopes(stale).unwrap_err(),
+            RevisionError::StalePreparation
+        );
+        assert!(scopes[0].first_cause().is_none());
+        assert_eq!(clock.current(), 1);
+        let stale = clock
+            .prepare_revision(
+                Some("stale-generation"),
+                &scopes,
+                &[],
+                RevisionPreparation::Replacement,
+            )
+            .unwrap();
+        clock.next_generation += 1;
+        assert_eq!(
+            clock.commit_scopes(stale).unwrap_err(),
+            RevisionError::StalePreparation
+        );
+        assert!(scopes[0].first_cause().is_none());
     }
 
     #[test]

@@ -503,6 +503,17 @@ fn layout_table_inner(
     resolved_table.properties = Some(resolved_properties);
     let tbl = &resolved_table;
     let source_rows = accepted_table_rows(tbl, path, input);
+    if let Some(sources) = sources {
+        let kept = source_rows
+            .iter()
+            .map(|(_, path)| path)
+            .collect::<std::collections::HashSet<_>>();
+        for (_, row_path) in layout_table_rows(tbl, path) {
+            if !kept.contains(&row_path) {
+                sources.record_table_omission(story, &row_path, num_state);
+            }
+        }
+    }
     let bidi_visual = tbl
         .properties
         .as_ref()
@@ -736,6 +747,9 @@ fn layout_table_inner(
 
             // Layout cell content (paragraphs and nested tables)
             let (blocks, block_semantics) = if is_vmerge_continue {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, cell_path, num_state);
+                }
                 (Vec::new(), Vec::new())
             } else {
                 layout_cell_content(
@@ -752,6 +766,7 @@ fn layout_table_inner(
                     cell_path,
                     style_cell.paragraph_properties.as_ref(),
                     style_cell.run_properties.as_ref(),
+                    cell_shading,
                     doc_grid,
                 )?
             };
@@ -1507,6 +1522,8 @@ fn autofit_column_widths(
                             cell_path,
                             style_cell.paragraph_properties.as_ref(),
                             style_cell.run_properties.as_ref(),
+                            // Text colour does not change a measured width.
+                            None,
                             doc_grid,
                         )?;
                         Ok(if rotated {
@@ -1704,6 +1721,7 @@ fn layout_cell_content(
     cell_path: &[usize],
     table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
     table_style_rpr: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     doc_grid: Option<&CT_DocGrid>,
 ) -> Result<(Vec<CellBlock>, Vec<CellBlockSemantics>)> {
     use crate::engine;
@@ -1717,25 +1735,29 @@ fn layout_cell_content(
         match item {
             CellContent::Paragraph(para) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
-                let (mut block, reflow_direction) = engine::layout_paragraph_with_source_in_table(
-                    para,
-                    available_width,
-                    styles,
-                    input,
-                    media,
-                    fm,
-                    num_state,
-                    diagnostics,
-                    source,
-                    table_style_ppr,
-                    table_style_rpr,
-                    doc_grid,
-                )?;
+                let (mut block, reflow_direction, mut paint) =
+                    engine::layout_paragraph_with_source_in_table(
+                        para,
+                        available_width,
+                        styles,
+                        input,
+                        media,
+                        fm,
+                        num_state,
+                        diagnostics,
+                        source,
+                        table_style_ppr,
+                        table_style_rpr,
+                        cell_shading,
+                        doc_grid,
+                    )?;
                 if let Some(registry) = sources {
-                    registry.bind_text_boxes(&mut block, source)?;
+                    registry.bind_text_boxes(&mut block, &mut paint, source)?;
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    paint: std::sync::Arc::new(paint),
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,
                     structure_id: None,
@@ -1743,7 +1765,11 @@ fn layout_cell_content(
                 }));
             }
             CellContent::Table(tbl)
-                if input.revision_view == RevisionView::Accepted && tbl.accepted_view_removes() => {
+                if input.revision_view == RevisionView::Accepted && tbl.accepted_view_removes() =>
+            {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, &source_path, num_state);
+                }
             }
             CellContent::Table(tbl) => {
                 // Recursively lay out the nested table
@@ -1779,6 +1805,7 @@ fn layout_cell_content(
                 &source_path,
                 table_style_ppr,
                 table_style_rpr,
+                cell_shading,
                 doc_grid,
                 &mut blocks,
                 &mut semantics,
@@ -1832,6 +1859,7 @@ fn layout_control_cell_content(
     path: &[usize],
     table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
     table_style_rpr: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     doc_grid: Option<&CT_DocGrid>,
     blocks: &mut Vec<CellBlock>,
     semantics: &mut Vec<CellBlockSemantics>,
@@ -1844,25 +1872,29 @@ fn layout_control_cell_content(
         match content {
             SdtContent::Paragraph(paragraph) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
-                let (mut block, reflow_direction) = engine::layout_paragraph_with_source_in_table(
-                    paragraph,
-                    available_width,
-                    styles,
-                    input,
-                    media,
-                    fm,
-                    num_state,
-                    diagnostics,
-                    source,
-                    table_style_ppr,
-                    table_style_rpr,
-                    doc_grid,
-                )?;
+                let (mut block, reflow_direction, mut paint) =
+                    engine::layout_paragraph_with_source_in_table(
+                        paragraph,
+                        available_width,
+                        styles,
+                        input,
+                        media,
+                        fm,
+                        num_state,
+                        diagnostics,
+                        source,
+                        table_style_ppr,
+                        table_style_rpr,
+                        cell_shading,
+                        doc_grid,
+                    )?;
                 if let Some(registry) = sources {
-                    registry.bind_text_boxes(&mut block, source)?;
+                    registry.bind_text_boxes(&mut block, &mut paint, source)?;
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    paint: std::sync::Arc::new(paint),
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,
                     structure_id: None,
@@ -1871,7 +1903,12 @@ fn layout_control_cell_content(
             }
             SdtContent::Table(table)
                 if input.revision_view == RevisionView::Accepted
-                    && table.accepted_view_removes() => {}
+                    && table.accepted_view_removes() =>
+            {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, &source_path, num_state);
+                }
+            }
             SdtContent::Table(table) => {
                 let (nested, nested_semantics) = layout_table_inner(
                     table,
@@ -1905,6 +1942,7 @@ fn layout_control_cell_content(
                 &source_path,
                 table_style_ppr,
                 table_style_rpr,
+                cell_shading,
                 doc_grid,
                 blocks,
                 semantics,
@@ -2132,13 +2170,10 @@ fn resolve_table_style_cell(
                 .get_or_insert_with(rdocx_oxml::properties::CT_RPr::default)
                 .merge_from(properties);
         }
-        if let Some(borders) = style
-            .table_properties
-            .as_ref()
-            .and_then(|properties| properties.borders.as_ref())
-        {
-            overlay_borders(&mut resolved.borders, borders);
-        }
+        // The style's `w:tblBorders` are table borders, not cell borders. They
+        // reach the table through `resolve_base_table_properties`, under the
+        // table's own, and its outer edges apply to the table's outer edges
+        // only (ECMA-376 Part 1, 17.4.39).
         if let Some(shading) = style
             .table_properties
             .as_ref()
@@ -2889,8 +2924,12 @@ mod tests {
             header_borders.top.as_ref().unwrap().color.as_deref(),
             Some("0000AA")
         );
+        // The style's `w:tblBorders` stays on the table, where paint uses it
+        // as the fallback for a cell edge the cell itself did not set.
+        assert!(header_borders.left.is_none());
+        let table_borders = block.borders.as_ref().expect("style table borders");
         assert_eq!(
-            header_borders.left.as_ref().unwrap().color.as_deref(),
+            table_borders.left.as_ref().unwrap().color.as_deref(),
             Some("AA0000")
         );
     }

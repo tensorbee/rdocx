@@ -307,6 +307,27 @@ struct AutofitContext {
     shape: rpptx_layout::ResolvedShape,
     text: rpptx_layout::ResolvedTextBody,
     directions: Vec<Vec<oxml_layout::TextDirection>>,
+    /// For a table cell, the table whose rows grow to fit their text.
+    table: Option<Arc<AutofitTable>>,
+}
+
+/// A table as one context renders it, shared by the contexts of its cells.
+#[cfg(feature = "render")]
+#[derive(Debug, PartialEq)]
+struct AutofitTable {
+    shape: rpptx_layout::ResolvedShape,
+    /// One entry per cell in row order.
+    directions: Vec<Vec<oxml_layout::TextDirection>>,
+    page: (f64, f64),
+}
+
+/// The zero-based child path as plain ordinals joined by `/`.
+#[cfg(feature = "render")]
+fn plain_path(path: &[usize]) -> String {
+    path.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(feature = "render")]
@@ -1074,6 +1095,67 @@ pub enum ValidationIssue {
         path: String,
         message: String,
     },
+}
+
+/// One sentence per issue. Slides, masters and shapes are numbered from 1, as
+/// PowerPoint shows them, where the fields hold zero-based indexes.
+impl std::fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateShapeId { slide, id } => write!(
+                f,
+                "slide {}: duplicate shape ID {id}, shared by more than one shape",
+                slide + 1
+            ),
+            Self::SlideIdOutOfRange { slide, id } => write!(
+                f,
+                "slide {}: slide ID {id} is outside 256 to 2147483647",
+                slide + 1
+            ),
+            Self::DuplicateSlideId { id } => write!(f, "two slides share slide ID {id}"),
+            Self::MissingContentTypeOverride { part } => {
+                write!(f, "{part} has no content type override")
+            }
+            Self::DanglingRelationship { part, r_id, target } => write!(
+                f,
+                "{part}: relationship {r_id} to {target} is referenced without being defined, \
+                 or defined without being referenced"
+            ),
+            Self::UnreachableRelationshipTarget { part, target } => {
+                write!(
+                    f,
+                    "{part}: relationship target {target} is not in the package"
+                )
+            }
+            Self::EmptyTextBody { slide, shape } => write!(
+                f,
+                "slide {}: shape {} has a text body without a paragraph",
+                slide + 1,
+                shape + 1
+            ),
+            Self::DuplicatePlaceholderIdx { slide, idx } => write!(
+                f,
+                "slide {}: two placeholders share placeholder idx {idx}",
+                slide + 1
+            ),
+            Self::OrphanMedia { part } => write!(f, "{part} is not the target of any relationship"),
+            Self::CustomShowReference { slide_id } => write!(
+                f,
+                "a custom show references relationship rId{slide_id}, which names no slide"
+            ),
+            Self::MissingLayoutRel { slide } => {
+                write!(f, "slide {} has no slide layout relationship", slide + 1)
+            }
+            Self::MissingThemeRel { master } => {
+                write!(f, "slide master {} has no theme relationship", master + 1)
+            }
+            Self::InvalidXmlChild {
+                part,
+                path,
+                message,
+            } => write!(f, "{part} {path}: {message}"),
+        }
+    }
 }
 
 /// One slide master's theme, as [`Presentation::theme`] reads it.
@@ -1860,6 +1942,20 @@ fn ppt_xml_frontier(uri: &str, local: &str) -> bool {
         (P_NS, "sp" | "sld") | (A_NS, "p" | "prstGeom")
     )
 }
+
+/// The qualified nonvisual-property child that carries a physical shape
+/// kind's `cNvPr`. The frontier scanner and the stored-package scanner apply
+/// the same five-kind match.
+fn ppt_shape_nonvisual_parent(shape_local: &str) -> &'static str {
+    match shape_local {
+        "sp" => "nvSpPr",
+        "pic" => "nvPicPr",
+        "cxnSp" => "nvCxnSpPr",
+        "graphicFrame" => "nvGraphicFramePr",
+        "grpSp" => "nvGrpSpPr",
+        _ => "",
+    }
+}
 fn ppt_xml_frontier_order(
     uri: &str,
     local: &str,
@@ -1982,14 +2078,7 @@ fn ppt_xml_frontiers(source: &[u8], names: &mut PptXmlNames) -> Result<PptXmlFro
                 if names.values[uri] == P_NS && names.values[local] == "cNvPr" && stack.len() >= 2 {
                     let shape = &stack[stack.len() - 2];
                     let parent = &stack[stack.len() - 1];
-                    let expected = match names.values[shape.local].as_str() {
-                        "sp" => "nvSpPr",
-                        "pic" => "nvPicPr",
-                        "cxnSp" => "nvCxnSpPr",
-                        "graphicFrame" => "nvGraphicFramePr",
-                        "grpSp" => "nvGrpSpPr",
-                        _ => "",
-                    };
+                    let expected = ppt_shape_nonvisual_parent(&names.values[shape.local]);
                     if let Some(index) = shape.owner_index
                         && names.values[parent.uri] == P_NS
                         && names.values[parent.local] == expected
@@ -3055,6 +3144,905 @@ fn register_content_type(
     }
 }
 
+// Stored-package validation, original Issue435 A280-4. This route inspects
+// the original XML bytes a read admits, never a reserialized model, and
+// never mutates its input. It covers the finite A280-4 subset only: lexical
+// and character XML faults, one complete root, the p:presentation direct
+// child sequence, unknown direct shape-tree children, required unqualified
+// cNvPr id and name on actual physical owners, and physical table row and
+// grid column equality. It is not a full schema validator.
+
+/// The SDK 3.0.1 p:presentation direct-child sequence. Each child is a
+/// singleton slot. This is the pinned generated particle, not the older API
+/// remarks that also list smartTags, and it deliberately includes p:kinsoku.
+const STORED_PRESENTATION_ROOT_ORDER: [&str; 14] = [
+    "sldMasterIdLst",
+    "notesMasterIdLst",
+    "handoutMasterIdLst",
+    "sldIdLst",
+    "sldSz",
+    "notesSz",
+    "embeddedFontLst",
+    "custShowLst",
+    "photoAlbum",
+    "custDataLst",
+    "kinsoku",
+    "defaultTextStyle",
+    "modifyVerifier",
+    "extLst",
+];
+
+const STORED_TABLE_URI: &str = "http://schemas.openxmlformats.org/drawingml/2006/table";
+
+/// Validates the stored presentation package at `path` through its original
+/// XML bytes and returns every detected issue. This reads the file only: no
+/// default template is applied, no bytes variant exists, and the input file
+/// is never written back. An OPC forbidden-character error becomes an existing
+/// invalid-XML issue. Other file, ZIP and OPC errors propagate unchanged. The
+/// checks cover a finite source subset, not full schema validation, and
+/// existing live-model issues are appended after the stored ones.
+pub fn validate_presentation_file<P: AsRef<Path>>(path: P) -> Result<Vec<ValidationIssue>> {
+    let bytes = std::fs::read(path.as_ref()).map_err(OpcError::from)?;
+    let package = match OpcPackage::from_reader(Cursor::new(&bytes)) {
+        Ok(package) => package,
+        Err(OpcError::InvalidXmlCharacter {
+            part, code_point, ..
+        }) => {
+            return Ok(vec![ValidationIssue::InvalidXmlChild {
+                part,
+                path: "/".to_owned(),
+                message: format!("holds U+{code_point:04X}, a character XML 1.0 cannot carry"),
+            }]);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut issues = stored_package_issues(&bytes, &package);
+    match Presentation::from_read_package(package) {
+        Ok(presentation) => {
+            for issue in presentation.validate() {
+                if !issues.contains(&issue) {
+                    issues.push(issue);
+                }
+            }
+            Ok(issues)
+        }
+        Err(error) if issues.is_empty() => Err(error),
+        Err(_) => Ok(issues),
+    }
+}
+
+fn stored_package_issues(original: &[u8], package: &OpcPackage) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let roles = stored_role_roots(package);
+    let mut part_names: Vec<&String> = package.parts.keys().collect();
+    part_names.sort_unstable();
+    for part_name in part_names {
+        if !stored_ordinary_xml_part(package, part_name) {
+            continue;
+        }
+        issues.extend(stored_part_issues(
+            part_name,
+            &package.parts[part_name],
+            &roles,
+        ));
+    }
+    issues.extend(stored_metadata_issues(original));
+    issues.extend(stored_content_type_issues(package));
+    issues
+}
+
+/// The qualified root local name each structurally checked part must carry,
+/// qualified by an actual owning role relationship plus that role's expected
+/// content type, and by the officeDocument relationship plus a presentation
+/// package class for the main part. Namespace vocabulary alone never makes a
+/// custom part a presentation owner.
+fn stored_role_roots(package: &OpcPackage) -> HashMap<String, &'static str> {
+    const ROLES: [(&str, &str, &str); 6] = [
+        (rel_types::SLIDE, "sld", content_types::SLIDE),
+        (
+            rel_types::SLIDE_LAYOUT,
+            "sldLayout",
+            content_types::SLIDE_LAYOUT,
+        ),
+        (
+            rel_types::SLIDE_MASTER,
+            "sldMaster",
+            content_types::SLIDE_MASTER,
+        ),
+        (rel_types::NOTES_SLIDE, "notes", content_types::NOTES_SLIDE),
+        (
+            rel_types::NOTES_MASTER,
+            "notesMaster",
+            content_types::NOTES_MASTER,
+        ),
+        (
+            rel_types::HANDOUT_MASTER,
+            "handoutMaster",
+            content_types::HANDOUT_MASTER,
+        ),
+    ];
+    let mut roots = HashMap::new();
+    let mut sources: Vec<&String> = package.part_rels.keys().collect();
+    sources.sort_unstable();
+    let mut collect = |source: &str, relationships: &Relationships| {
+        for relationship in &relationships.items {
+            if relationship_is_external(relationship) {
+                continue;
+            }
+            let Some((expected_root, expected_type)) = ROLES
+                .iter()
+                .find(|(rel_type, _, _)| *rel_type == relationship.rel_type)
+                .map(|(_, root, content_type)| (*root, *content_type))
+            else {
+                continue;
+            };
+            let target = OpcPackage::resolve_rel_target(source, &relationship.target);
+            if package.content_types.content_type_for(&target) == Some(expected_type) {
+                roots.insert(target, expected_root);
+            }
+        }
+    };
+    collect("/", &package.package_rels);
+    for source in sources {
+        collect(source, &package.part_rels[source]);
+    }
+    if let Some(main) = package.package_rels.get_by_type(rel_types::DOCUMENT)
+        && !relationship_is_external(main)
+    {
+        let target = OpcPackage::resolve_rel_target("/", &main.target);
+        if let Some(content_type) = package.content_types.content_type_for(&target)
+            && PresentationPackageClass::from_content_type(content_type).is_some()
+        {
+            roots.insert(target, "presentation");
+        }
+    }
+    roots
+}
+
+fn stored_ordinary_xml_part(package: &OpcPackage, part_name: &str) -> bool {
+    package
+        .content_types
+        .content_type_for(part_name)
+        .is_some_and(|content_type| content_type.to_ascii_lowercase().ends_with("xml"))
+}
+
+fn stored_part_issues(
+    part: &str,
+    xml: &[u8],
+    roles: &HashMap<String, &'static str>,
+) -> Vec<ValidationIssue> {
+    let fault = |path: String, message: String| ValidationIssue::InvalidXmlChild {
+        part: part.to_owned(),
+        path,
+        message,
+    };
+    let decoded = match stored_decode_xml(xml) {
+        Ok(decoded) => decoded,
+        Err(message) => return vec![fault("/".to_owned(), message)],
+    };
+    if let Some(message) = stored_lexical_fault(&decoded) {
+        return vec![fault("/".to_owned(), message)];
+    }
+    if let Some(message) = stored_root_fault(&decoded) {
+        return vec![fault("/".to_owned(), message)];
+    }
+    let mut names = PptXmlNames::default();
+    stored_structural_issues(part, &decoded, roles, &mut names)
+        .unwrap_or_else(|error| vec![("/".to_owned(), error.to_string())])
+        .into_iter()
+        .map(|(path, message)| fault(path, message))
+        .collect()
+}
+
+/// Losslessly decodes a part to text using the same UTF-8/BOM and UTF-16
+/// LE/BE recognition the OPC character scan applies. Malformed encodings are
+/// rejected instead of replaced. This preserves existing opaque UTF-16 XML
+/// support without claiming universal encoding support.
+fn stored_decode_xml(data: &[u8]) -> std::result::Result<String, String> {
+    if let Some(body) = data.strip_prefix(&[0xFF, 0xFE]) {
+        return stored_decode_utf16(body, true);
+    }
+    if let Some(body) = data.strip_prefix(&[0xFE, 0xFF]) {
+        return stored_decode_utf16(body, false);
+    }
+    if data.len() >= 4 && data[1] == 0 && data[3] == 0 {
+        return stored_decode_utf16(data, true);
+    }
+    if data.len() >= 4 && data[0] == 0 && data[2] == 0 {
+        return stored_decode_utf16(data, false);
+    }
+    let body = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data);
+    std::str::from_utf8(body)
+        .map(str::to_owned)
+        .map_err(|_| "XML part is not valid UTF-8 and has no UTF-16 signature".to_owned())
+}
+
+fn stored_decode_utf16(data: &[u8], little_endian: bool) -> std::result::Result<String, String> {
+    if !data.len().is_multiple_of(2) {
+        return Err("XML part ends with an odd number of UTF-16 bytes".to_owned());
+    }
+    let units: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).map_err(|_| "XML part holds an unpaired UTF-16 surrogate".to_owned())
+}
+
+fn stored_lexical_fault(decoded: &str) -> Option<String> {
+    oxml_core::xml::validate_strict_xml_1_0(decoded.as_bytes())
+        .err()
+        .map(|error| format!("{error:?}"))
+}
+
+/// Counts document roots and depth with the actual reader, because the
+/// shared lexical helper checks names, attributes and references but not
+/// root count or completion.
+/// Counts document roots and depth with the actual reader, because the
+/// shared lexical helper checks names, attributes and references but not
+/// root count, completion or document position. Character-bearing events are
+/// only valid inside the root, and declarations and document type
+/// declarations only in the prolog.
+fn stored_root_fault(decoded: &str) -> Option<String> {
+    let mut reader = quick_xml::Reader::from_reader(decoded.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut roots = 0usize;
+    let mut depth = 0usize;
+    let mut root_seen = false;
+    let mut prolog_done = false;
+    let mut text_outside_root = false;
+    loop {
+        match reader.read_event() {
+            Ok(XmlEvent::Start(_)) => {
+                prolog_done = true;
+                depth += 1;
+                if depth == 1 {
+                    roots += 1;
+                    root_seen = true;
+                }
+            }
+            Ok(XmlEvent::Empty(_)) => {
+                prolog_done = true;
+                if depth == 0 {
+                    roots += 1;
+                    root_seen = true;
+                }
+            }
+            Ok(XmlEvent::End(_)) => {
+                if depth == 0 {
+                    return Some("XML part closes an element outside the document root".to_owned());
+                }
+                depth -= 1;
+            }
+            Ok(XmlEvent::Text(text)) => {
+                if depth == 0 && !text.iter().all(u8::is_ascii_whitespace) {
+                    text_outside_root = true;
+                }
+            }
+            Ok(XmlEvent::CData(_)) if depth == 0 => {
+                return Some("CDATA section outside the document root".to_owned());
+            }
+            Ok(XmlEvent::GeneralRef(_)) if depth == 0 => {
+                return Some("entity reference outside the document root".to_owned());
+            }
+            Ok(XmlEvent::DocType(_)) if root_seen => {
+                return Some("document type declaration outside the document prolog".to_owned());
+            }
+            Ok(XmlEvent::Decl(_)) if prolog_done => {
+                return Some("XML declaration outside the document prolog".to_owned());
+            }
+            Ok(XmlEvent::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Some(error.to_string()),
+        }
+    }
+    if text_outside_root {
+        return Some("non-whitespace text outside the document root".to_owned());
+    }
+    if depth != 0 {
+        return Some("XML part ends before its document root closes".to_owned());
+    }
+    match roots {
+        1 => None,
+        0 => Some("XML part has no document root".to_owned()),
+        _ => Some("XML part has more than one document root".to_owned()),
+    }
+}
+
+/// The shared mutable state of one stored scan, so the frame dispatch keeps
+/// a bounded argument list.
+struct StoredScan<'a> {
+    scope: &'a mut PptXmlScope,
+    names: &'a mut PptXmlNames,
+    issues: &'a mut Vec<(String, String)>,
+}
+
+/// One open element frame of the iterative stored scan. Frames live in a
+/// flat heap vector, so no native recursion and no recursive owned-tree
+/// destruction exist on any input.
+struct StoredFrame {
+    kind: StoredKind,
+    delta: PptXmlScopeDelta,
+    route: usize,
+    children: usize,
+}
+
+enum StoredKind {
+    /// Consumes a subtree without structural checks: an extension island,
+    /// contentPart, foreign payload or any other unchecked element.
+    Opaque,
+    /// p:presentation root with the finite direct-child sequence.
+    PresentationRoot { last_rank: Option<usize> },
+    /// A qualified role root: only cSld is structurally interesting.
+    RoleRoot,
+    /// p:cSld: only spTree is structurally interesting.
+    CSld,
+    /// spTree or grpSp: direct children are tree members. The role tree's
+    /// own spTree also requires its root nvGrpSpPr cNvPr.
+    TreeContainer { root_owner: bool, seen_cnvpr: bool },
+    /// A physical shape member waiting for its nonvisual child.
+    Owner {
+        nv_local: &'static str,
+        seen_cnvpr: bool,
+    },
+    /// The nonvisual-property child of an owner.
+    NonVisual { seen_cnvpr: bool },
+    /// a:graphic waiting for a:graphicData.
+    Graphic,
+    /// a:graphicData: table content only under the table URI.
+    GraphicData { table: bool },
+    /// a:tbl with the direct grid column count of its own tblGrid.
+    Table { columns: Option<usize> },
+    /// a:tblGrid counting direct gridCol children.
+    TableGrid { columns: usize },
+    /// a:tr counting direct tc children.
+    TableRow { cells: usize },
+    /// mc:AlternateContent at a tree-member position.
+    Alternate,
+    /// mc:Choice or mc:Fallback whose members inherit the tree context.
+    Branch,
+    /// The role tree root's own nvGrpSpPr.
+    RootNonVisual { seen_cnvpr: bool },
+}
+
+/// Iterative finite structural scan of one qualified role part. The part
+/// must be an actual role owner per the approved contract; every other XML
+/// source already received its lexical and root checks and stays opaque.
+fn stored_structural_issues(
+    part: &str,
+    decoded: &str,
+    roles: &HashMap<String, &'static str>,
+    names: &mut PptXmlNames,
+) -> Result<Vec<(String, String)>> {
+    let Some(expected_root) = roles.get(part).copied() else {
+        return Ok(Vec::new());
+    };
+    let mut reader = quick_xml::Reader::from_reader(decoded.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut scope = PptXmlScope::default();
+    let mut issues = Vec::new();
+    let root = loop {
+        match reader
+            .read_event()
+            .map_err(|error| invalid_shape_mutation("stored validation", error.to_string()))?
+        {
+            XmlEvent::Start(element) => break element,
+            XmlEvent::Empty(_) | XmlEvent::Eof => return Ok(issues),
+            _ => {}
+        }
+    };
+    let delta = scope.enter(&root, names)?;
+    let (uri, local) = scope.name(root.name().as_ref(), false, names)?;
+    if names.values[uri] != P_NS || names.values[local] != expected_root {
+        scope.leave(delta);
+        return Ok(issues);
+    }
+    let root_route = names.route(0, 0, uri, local);
+    let root_kind = if names.values[local] == "presentation" {
+        StoredKind::PresentationRoot { last_rank: None }
+    } else {
+        StoredKind::RoleRoot
+    };
+    let mut stack: Vec<StoredFrame> = vec![StoredFrame {
+        kind: root_kind,
+        delta,
+        route: root_route,
+        children: 0,
+    }];
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|error| invalid_shape_mutation("stored validation", error.to_string()))?;
+        let mut scan = StoredScan {
+            scope: &mut scope,
+            names,
+            issues: &mut issues,
+        };
+        match event {
+            XmlEvent::Start(element) => {
+                stored_start_element(element, &mut stack, &mut scan)?;
+            }
+            XmlEvent::Empty(element) => {
+                stored_start_element(element, &mut stack, &mut scan)?;
+                stored_end_element(&mut stack, &mut scan)?;
+            }
+            XmlEvent::End(_) => {
+                stored_end_element(&mut stack, &mut scan)?;
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() {
+        issues.push((
+            "/".to_owned(),
+            "XML part ends before its root element closes".to_owned(),
+        ));
+    }
+    Ok(issues)
+}
+
+fn stored_start_element(
+    element: XmlBytesStart<'_>,
+    stack: &mut Vec<StoredFrame>,
+    scan: &mut StoredScan<'_>,
+) -> Result<()> {
+    let delta = scan.scope.enter(&element, scan.names)?;
+    let Some(top) = stack.last_mut() else {
+        scan.scope.leave(delta);
+        return Err(invalid_shape_mutation(
+            "stored validation",
+            "element outside the document root",
+        ));
+    };
+    if matches!(top.kind, StoredKind::Opaque) {
+        stack.push(StoredFrame {
+            kind: StoredKind::Opaque,
+            delta,
+            route: 0,
+            children: 0,
+        });
+        return Ok(());
+    }
+    let (uri, local) = scan
+        .scope
+        .name(element.name().as_ref(), false, scan.names)?;
+    let ignorable = scan.scope.ignorable.contains(&uri);
+    let route = scan.names.route(top.route, top.children, uri, local);
+    top.children += 1;
+    let child_kind =
+        stored_child_kind(&mut top.kind, uri, local, ignorable, route, &element, scan)?;
+    stack.push(StoredFrame {
+        kind: child_kind,
+        delta,
+        route,
+        children: 0,
+    });
+    Ok(())
+}
+
+fn stored_end_element(stack: &mut Vec<StoredFrame>, scan: &mut StoredScan<'_>) -> Result<()> {
+    let Some(frame) = stack.pop() else {
+        return Err(invalid_shape_mutation(
+            "stored validation",
+            "XML part closes an element outside the document root",
+        ));
+    };
+    scan.scope.leave(frame.delta);
+    match frame.kind {
+        StoredKind::Owner {
+            seen_cnvpr: false, ..
+        } => {
+            scan.issues.push((
+                scan.names.path(frame.route),
+                "required cNvPr is absent".to_owned(),
+            ));
+        }
+        StoredKind::NonVisual { seen_cnvpr } => {
+            if let Some(StoredKind::Owner {
+                seen_cnvpr: flag, ..
+            }) = stack.last_mut().map(|owner| &mut owner.kind)
+            {
+                *flag = seen_cnvpr;
+            }
+        }
+        StoredKind::TreeContainer {
+            root_owner: false,
+            seen_cnvpr: false,
+        } => {
+            scan.issues.push((
+                scan.names.path(frame.route),
+                "required cNvPr is absent".to_owned(),
+            ));
+        }
+        StoredKind::RootNonVisual { seen_cnvpr } => {
+            if let Some(StoredKind::TreeContainer {
+                seen_cnvpr: flag, ..
+            }) = stack.last_mut().map(|owner| &mut owner.kind)
+            {
+                *flag = seen_cnvpr;
+            }
+            if !seen_cnvpr {
+                scan.issues.push((
+                    scan.names.path(frame.route),
+                    "required cNvPr is absent".to_owned(),
+                ));
+            }
+        }
+        StoredKind::TableGrid { columns } => {
+            if let Some(StoredKind::Table { columns: target }) =
+                stack.last_mut().map(|table| &mut table.kind)
+            {
+                *target = Some(columns);
+            }
+        }
+        StoredKind::TableRow { cells } => {
+            if let Some(StoredKind::Table { columns }) =
+                stack.last_mut().map(|table| &mut table.kind)
+                && let Some(columns) = *columns
+                && cells != columns
+            {
+                scan.issues.push((
+                    scan.names.path(frame.route),
+                    format!("table row has {cells} cells but its grid has {columns} columns"),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Resolves what frame an opening child of `top` needs, reporting the finite
+/// membership, sequence, nonvisual and row faults on the way.
+fn stored_child_kind(
+    top: &mut StoredKind,
+    uri: usize,
+    local: usize,
+    ignorable: bool,
+    route: usize,
+    element: &XmlBytesStart<'_>,
+    scan: &mut StoredScan<'_>,
+) -> Result<StoredKind> {
+    let uri = scan.names.values[uri].clone();
+    let local = scan.names.values[local].clone();
+    match top {
+        StoredKind::Opaque => unreachable!("opaque frames resolve no children"),
+        StoredKind::PresentationRoot { last_rank } => {
+            if uri == P_NS {
+                match STORED_PRESENTATION_ROOT_ORDER
+                    .iter()
+                    .position(|name| *name == local)
+                {
+                    Some(rank) => {
+                        if last_rank.is_some_and(|last| rank <= last) {
+                            scan.issues.push((
+                                scan.names.path(route),
+                                "finite XML child order or multiplicity is invalid".to_owned(),
+                            ));
+                        }
+                        if last_rank.is_none_or(|last| rank > last) {
+                            *last_rank = Some(rank);
+                        }
+                    }
+                    None => scan.issues.push(stored_unknown_child(route, scan.names)),
+                }
+            } else if !ignorable {
+                scan.issues.push(stored_unknown_child(route, scan.names));
+            }
+            Ok(StoredKind::Opaque)
+        }
+        StoredKind::RoleRoot => Ok(if uri == P_NS && local == "cSld" {
+            StoredKind::CSld
+        } else {
+            StoredKind::Opaque
+        }),
+        StoredKind::CSld => Ok(if uri == P_NS && local == "spTree" {
+            StoredKind::TreeContainer {
+                root_owner: true,
+                seen_cnvpr: false,
+            }
+        } else {
+            StoredKind::Opaque
+        }),
+        StoredKind::TreeContainer { .. } => {
+            Ok(match uri.as_str() {
+                P_NS if local == "nvGrpSpPr" => StoredKind::RootNonVisual { seen_cnvpr: false },
+                P_NS => {
+                    if local == "grpSp" {
+                        StoredKind::TreeContainer {
+                            root_owner: false,
+                            seen_cnvpr: false,
+                        }
+                    } else if matches!(local.as_str(), "sp" | "pic" | "cxnSp" | "graphicFrame") {
+                        StoredKind::Owner {
+                            nv_local: ppt_shape_nonvisual_parent(&local),
+                            seen_cnvpr: false,
+                        }
+                    } else if stored_tree_membership(&local) {
+                        // nvGrpSpPr, grpSpPr, extLst and contentPart are
+                        // accepted members.
+                        StoredKind::Opaque
+                    } else {
+                        // An ignorable namespace never excuses an unknown
+                        // PresentationML child.
+                        scan.issues.push(stored_unknown_child(route, scan.names));
+                        StoredKind::Opaque
+                    }
+                }
+                PPT_MC_NS if local == "AlternateContent" => StoredKind::Alternate,
+                _ if ignorable => StoredKind::Opaque,
+                _ => {
+                    scan.issues.push(stored_unknown_child(route, scan.names));
+                    StoredKind::Opaque
+                }
+            })
+        }
+        StoredKind::Owner { nv_local, .. } => {
+            let nv_local = *nv_local;
+            Ok(if uri == P_NS && local == nv_local {
+                StoredKind::NonVisual { seen_cnvpr: false }
+            } else if nv_local == "nvGraphicFramePr" && uri == A_NS && local == "graphic" {
+                StoredKind::Graphic
+            } else {
+                StoredKind::Opaque
+            })
+        }
+        StoredKind::NonVisual { seen_cnvpr } => {
+            if uri == P_NS && local == "cNvPr" {
+                *seen_cnvpr = true;
+                stored_cnvpr_attr_issues(route, element, scan)?;
+            }
+            Ok(StoredKind::Opaque)
+        }
+        StoredKind::RootNonVisual { seen_cnvpr } => {
+            if uri == P_NS && local == "cNvPr" {
+                *seen_cnvpr = true;
+                stored_cnvpr_attr_issues(route, element, scan)?;
+            }
+            Ok(StoredKind::Opaque)
+        }
+        StoredKind::Graphic => Ok(if uri == A_NS && local == "graphicData" {
+            StoredKind::GraphicData {
+                table: stored_unqualified_attr(element, scan, "uri")?
+                    .is_some_and(|value| value == STORED_TABLE_URI),
+            }
+        } else {
+            StoredKind::Opaque
+        }),
+        StoredKind::GraphicData { table } => Ok(if *table && uri == A_NS && local == "tbl" {
+            StoredKind::Table { columns: None }
+        } else {
+            StoredKind::Opaque
+        }),
+        StoredKind::Table { .. } => Ok(match (uri == A_NS, local.as_str()) {
+            (true, "tblGrid") => StoredKind::TableGrid { columns: 0 },
+            (true, "tr") => StoredKind::TableRow { cells: 0 },
+            _ => StoredKind::Opaque,
+        }),
+        StoredKind::TableGrid { columns } => {
+            if uri == A_NS && local == "gridCol" {
+                *columns += 1;
+            }
+            Ok(StoredKind::Opaque)
+        }
+        StoredKind::TableRow { cells } => {
+            if uri == A_NS && local == "tc" {
+                *cells += 1;
+            }
+            Ok(StoredKind::Opaque)
+        }
+        StoredKind::Alternate => Ok(
+            if uri == PPT_MC_NS && matches!(local.as_str(), "Choice" | "Fallback") {
+                StoredKind::Branch
+            } else {
+                StoredKind::Opaque
+            },
+        ),
+        StoredKind::Branch => Ok(match uri.as_str() {
+            P_NS => {
+                // Members inherit the tree context: the same finite rule as
+                // the enclosing tree container, so a supported chart Choice
+                // cannot hide a missing nonvisual name.
+                if local == "grpSp" {
+                    StoredKind::TreeContainer {
+                        root_owner: false,
+                        seen_cnvpr: false,
+                    }
+                } else if matches!(local.as_str(), "sp" | "pic" | "cxnSp" | "graphicFrame") {
+                    StoredKind::Owner {
+                        nv_local: ppt_shape_nonvisual_parent(&local),
+                        seen_cnvpr: false,
+                    }
+                } else if stored_tree_membership(&local) {
+                    StoredKind::Opaque
+                } else {
+                    scan.issues.push(stored_unknown_child(route, scan.names));
+                    StoredKind::Opaque
+                }
+            }
+            PPT_MC_NS if local == "AlternateContent" => StoredKind::Alternate,
+            // Foreign branch payload stays opaque and is never treated as
+            // PresentationML owners by local-name resemblance.
+            _ => StoredKind::Opaque,
+        }),
+    }
+}
+
+/// The finite member set shared by spTree, grpSp and qualified immediate
+/// compatibility-branch members. Membership comes from the existing
+/// child-order helper plus the stored-only p:contentPart allowance.
+fn stored_tree_membership(local: &str) -> bool {
+    ppt_xml_child_order(P_NS, b"spTree", local.as_bytes()).is_some() || local == "contentPart"
+}
+
+/// The unknown-direct-child issue for one resolved child route.
+fn stored_unknown_child(route: usize, names: &PptXmlNames) -> (String, String) {
+    (
+        names.path(route),
+        "unknown or misplaced direct XML child".to_owned(),
+    )
+}
+
+/// Reports the required unqualified cNvPr id and name attributes at their
+/// own element route, mirroring the approved nonvisual-owner frontier.
+fn stored_cnvpr_attr_issues(
+    route: usize,
+    element: &XmlBytesStart<'_>,
+    scan: &mut StoredScan<'_>,
+) -> Result<()> {
+    let id = stored_unqualified_attr(element, scan, "id")?;
+    let name = stored_unqualified_attr(element, scan, "name")?;
+    if id.is_none() {
+        scan.issues.push((
+            scan.names.path(route),
+            "required cNvPr id attribute is absent".to_owned(),
+        ));
+    }
+    if name.is_none() {
+        scan.issues.push((
+            scan.names.path(route),
+            "required cNvPr name attribute is absent".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The decoded value of one unqualified attribute of this element, resolved
+/// through the existing namespace scope. Namespaced lookalikes never match.
+fn stored_unqualified_attr(
+    element: &XmlBytesStart<'_>,
+    scan: &mut StoredScan<'_>,
+    local: &str,
+) -> Result<Option<String>> {
+    let expected = (scan.names.id(""), scan.names.id(local));
+    let mut value = None;
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| invalid_shape_mutation("stored validation", error.to_string()))?;
+        let raw = attribute.key.as_ref();
+        if raw == b"xmlns" || raw.starts_with(b"xmlns:") {
+            continue;
+        }
+        if scan.scope.name(raw, true, scan.names)? == expected {
+            value = Some(
+                attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                    .map_err(|error| {
+                        invalid_shape_mutation("stored validation", error.to_string())
+                    })?
+                    .into_owned(),
+            );
+        }
+    }
+    Ok(value)
+}
+
+/// Recovers the original [Content_Types].xml and relationship bytes from a
+/// read-only archive over the retained original file bytes. Ordinary parts
+/// are already carried unmodified in the package; only metadata is not.
+fn stored_metadata_issues(original: &[u8]) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(original)) else {
+        return issues;
+    };
+    let mut metadata: Vec<(usize, String)> = Vec::new();
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        let Ok(raw_name) = entry.name() else {
+            continue;
+        };
+        // Original metadata is the root content-types identity under the
+        // loader's normalization and case policy, plus relationship parts.
+        // A name suffix alone must not promote a binary or nested ordinary
+        // part to metadata.
+        let normalized = OpcPackage::resolve_rel_target("/", &raw_name);
+        let is_content_types = normalized.eq_ignore_ascii_case("/[Content_Types].xml");
+        let is_relationships = normalized.to_ascii_lowercase().ends_with(".rels");
+        if is_content_types || is_relationships {
+            metadata.push((index, raw_name.to_string()));
+        }
+    }
+    metadata.sort_by(|(_, a), (_, b)| a.cmp(b));
+    for (index, name) in metadata {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        let mut xml = Vec::new();
+        if std::io::Read::read_to_end(&mut entry, &mut xml).is_err() {
+            continue;
+        }
+        if let Some(message) = stored_metadata_fault(&xml) {
+            let part = format!("/{}", name.strip_prefix('/').unwrap_or(&name));
+            issues.push(ValidationIssue::InvalidXmlChild {
+                part,
+                path: "/".to_owned(),
+                message,
+            });
+        }
+    }
+    issues
+}
+
+fn stored_metadata_fault(xml: &[u8]) -> Option<String> {
+    let decoded = match stored_decode_xml(xml) {
+        Ok(decoded) => decoded,
+        Err(message) => return Some(message),
+    };
+    stored_lexical_fault(&decoded).or_else(|| stored_root_fault(&decoded))
+}
+
+/// Requires the matching existing content-type constant for every internal
+/// relationship of a PowerPoint role, resolved through its actual owning
+/// part. A missing, fallback or wrong type is reported for the target part.
+fn stored_content_type_issues(package: &OpcPackage) -> Vec<ValidationIssue> {
+    const ROLES: [(&str, &str); 6] = [
+        (rel_types::SLIDE, content_types::SLIDE),
+        (rel_types::SLIDE_LAYOUT, content_types::SLIDE_LAYOUT),
+        (rel_types::SLIDE_MASTER, content_types::SLIDE_MASTER),
+        (rel_types::NOTES_SLIDE, content_types::NOTES_SLIDE),
+        (rel_types::NOTES_MASTER, content_types::NOTES_MASTER),
+        (rel_types::HANDOUT_MASTER, content_types::HANDOUT_MASTER),
+    ];
+    let mut issues = Vec::new();
+    let mut sources: Vec<&String> = package.part_rels.keys().collect();
+    sources.sort_unstable();
+    let mut check = |source: &str, relationships: &Relationships| {
+        for relationship in &relationships.items {
+            if relationship_is_external(relationship) {
+                continue;
+            }
+            let Some(expected) = ROLES
+                .iter()
+                .find(|(rel_type, _)| *rel_type == relationship.rel_type)
+                .map(|(_, content_type)| *content_type)
+            else {
+                continue;
+            };
+            let target = OpcPackage::resolve_rel_target(source, &relationship.target);
+            if package.content_types.content_type_for(&target) != Some(expected)
+                && !issues.contains(&ValidationIssue::MissingContentTypeOverride {
+                    part: target.clone(),
+                })
+            {
+                issues.push(ValidationIssue::MissingContentTypeOverride { part: target });
+            }
+        }
+    };
+    check("/", &package.package_rels);
+    for source in sources {
+        check(source, &package.part_rels[source]);
+    }
+    issues
+}
+
 impl Presentation {
     /// Creates an empty 16:9 presentation from the bundled standard template.
     #[cfg(feature = "default-template")]
@@ -3865,7 +4853,7 @@ impl Presentation {
                 validate_autofit_authoring_namespaces(xml, part)?;
             }
         }
-        let mut owners = autofit_inventory(self, &package, None)?;
+        let (mut owners, _) = autofit_inventory(self, &package, None, false)?;
         let mut fonts = authoring_fonts(self, font_files)?;
         let mut plans = Vec::new();
         for owner in &mut owners {
@@ -3946,7 +4934,7 @@ impl Presentation {
             let mut bytes = Cursor::new(Vec::new());
             package.write_to(&mut bytes)?;
             let candidate = Self::from_bytes(bytes.get_ref())?;
-            let proposed = autofit_inventory(&candidate, &package, None)?;
+            let (proposed, _) = autofit_inventory(&candidate, &package, None, false)?;
             for (location, change) in &plans {
                 if !matches!(change, AuthoringChange::Shape(_)) {
                     continue;
@@ -4018,11 +5006,14 @@ impl Presentation {
     #[cfg(feature = "render")]
     pub fn fit_report(&self, font_files: &[(&str, &[u8])]) -> Result<FitReport> {
         let package = self.staged_package(false)?;
-        let owners = autofit_inventory(self, &package, None)?;
+        let (owners, duplicates) = autofit_inventory(self, &package, None, true)?;
         let mut fonts = authoring_fonts(self, font_files)?;
         let mut frames = Vec::new();
         let mut diagnostics = Vec::new();
         let mut seen_font_facts = HashSet::new();
+        // Retain each shared owner with its result so pointer identity cannot be reused.
+        let mut grown_tables: HashMap<(*const AutofitTable, usize), (Arc<AutofitTable>, bool)> =
+            HashMap::new();
         for mut owner in owners {
             let pair = if owner.empty || owner.unsupported.is_some() {
                 None
@@ -4042,6 +5033,16 @@ impl Presentation {
                         .cloned(),
                 );
             }
+            // A repeated shape id is named once on the physical owner that
+            // carries it, after the font facts and before its contexts.
+            for (part, path, diagnostic) in &duplicates {
+                if owner.update.location.owner_part == *part
+                    && owner.update.location.child_path == *path
+                    && !owner.update.diagnostics.contains(diagnostic)
+                {
+                    owner.update.diagnostics.push(diagnostic.clone());
+                }
+            }
             for context in &owner.contexts {
                 if owner.empty {
                     frames.push(FitFrameReport {
@@ -4057,9 +5058,15 @@ impl Presentation {
                     });
                     continue;
                 }
-                if owner.unsupported.is_some() {
+                if let Some(reason) = &owner.unsupported {
                     let mut update = owner.update.clone();
                     update.status = "unsupported".to_owned();
+                    let diagnostic = oxml_layout::Diagnostic {
+                        message: reason.clone(),
+                    };
+                    if !update.diagnostics.contains(&diagnostic) {
+                        update.diagnostics.push(diagnostic);
+                    }
                     frames.push(FitFrameReport {
                         update,
                         context: context.context.clone(),
@@ -4082,11 +5089,27 @@ impl Presentation {
                 )
                 .map_err(|e| autofit_failure(&owner.update.location, e))?;
                 let mut update = owner.update.clone();
-                if owner.unsupported.is_some() {
-                    update.status = "unsupported".to_owned();
-                } else if !owner.empty && pair.is_none() {
+                if !owner.empty && pair.is_none() {
                     update.status = "unfit".to_owned();
                 }
+                // A table row grows to fit its cells, so a cell taller than its
+                // stored row overflows only when the grown table leaves the page.
+                let overflow = match &context.table {
+                    Some(table) if !measured.fits && measured.width_fits => {
+                        let page_number = context.slide_index + 1;
+                        let key = (Arc::as_ptr(table), page_number);
+                        let fits = if let Some((_, fits)) = grown_tables.get(&key) {
+                            *fits
+                        } else {
+                            let fits = grown_table_fits_page(table, &mut fonts, page_number)
+                                .map_err(|e| autofit_failure(&owner.update.location, e))?;
+                            grown_tables.insert(key, (Arc::clone(table), fits));
+                            fits
+                        };
+                        !fits
+                    }
+                    _ => !measured.fits,
+                };
                 let trials = pair
                     .map(|pair| {
                         rpptx_render::measure_autofit_candidate(
@@ -4105,7 +5128,7 @@ impl Presentation {
                     context: context.context.clone(),
                     quantized_trial: trials.as_ref().map(|(q, _)| q.clone()),
                     persisted_trial: trials.map(|(_, s)| s),
-                    overflow: !measured.fits,
+                    overflow,
                     needed_scale: pair.map(|p| p.0),
                     needed_reduction: pair.map(|p| p.1),
                     measured_font_scale: Some(measured.font_scale),
@@ -4121,6 +5144,16 @@ impl Presentation {
             if owner.contexts.is_empty() {
                 let mut update = owner.update;
                 update.status = if owner.empty { "empty" } else { "unsupported" }.to_owned();
+                if !owner.empty
+                    && let Some(reason) = &owner.unsupported
+                {
+                    let diagnostic = oxml_layout::Diagnostic {
+                        message: reason.clone(),
+                    };
+                    if !update.diagnostics.contains(&diagnostic) {
+                        update.diagnostics.push(diagnostic);
+                    }
+                }
                 frames.push(FitFrameReport {
                     update,
                     context: "uninstantiated".to_owned(),
@@ -4132,6 +5165,11 @@ impl Presentation {
                     quantized_trial: None,
                     persisted_trial: None,
                 });
+            }
+        }
+        for (_, _, diagnostic) in duplicates {
+            if !diagnostics.contains(&diagnostic) {
+                diagnostics.push(diagnostic);
             }
         }
         frames.sort_by_key(|frame| {
@@ -4192,7 +5230,8 @@ impl Presentation {
             .iter()
             .any(|slide| slide.part_name == location.owner_part)
             .then_some(location.owner_part.as_str());
-        let mut owner = autofit_inventory(self, &package, slide_part)?
+        let (owners, _) = autofit_inventory(self, &package, slide_part, false)?;
+        let mut owner = owners
             .into_iter()
             .find(|owner| owner.update.location == *location)
             .ok_or_else(|| autofit_failure(location, "stale or foreign physical owner"))?;
@@ -4200,7 +5239,7 @@ impl Presentation {
         // the inventory of every slide when it can be taken.
         #[cfg(debug_assertions)]
         if slide_part.is_some()
-            && let Ok(owners) = autofit_inventory(self, &package, None)
+            && let Ok((owners, _)) = autofit_inventory(self, &package, None, false)
         {
             let whole = owners
                 .into_iter()
@@ -22354,7 +23393,7 @@ fn textbox_member(id: u32, left: Emu, top: Emu, width: Emu, height: Emu) -> Resu
     CT_Shape::new_textbox(
         id,
         &format!("TextBox {id}"),
-        positioned_transform(left, top, width, height),
+        sized_transform("add textbox", left, top, width, height)?,
     )
     .map(ShapeTreeChild::Shape)
     .map_err(|error| invalid_shape_construction("add textbox", error))
@@ -22372,7 +23411,7 @@ fn preset_member(
         id,
         &format!("Shape {id}"),
         preset,
-        positioned_transform(left, top, width, height),
+        sized_transform("add shape", left, top, width, height)?,
     )
     .map_err(|error| invalid_shape_construction("add shape", error))?;
     shape
@@ -22393,7 +23432,7 @@ fn unstyled_preset_member(
         id,
         &format!("Shape {id}"),
         preset,
-        positioned_transform(left, top, width, height),
+        sized_transform("add shape", left, top, width, height)?,
     )
     .map(ShapeTreeChild::Shape)
     .map_err(|error| invalid_shape_construction("add shape", error))
@@ -22731,6 +23770,27 @@ impl ConnectorType {
             Self::Curve => "curvedConnector3",
         }
     }
+}
+
+/// Builds a positioned transform for authored shape dimensions, refusing a
+/// negative width or height at the call.
+fn sized_transform(
+    operation: &'static str,
+    left: Emu,
+    top: Emu,
+    width: Emu,
+    height: Emu,
+) -> Result<CT_Transform2D> {
+    if width.0 < 0 || height.0 < 0 {
+        return Err(Error::InvalidShapeMutation {
+            operation,
+            message: format!(
+                "shape width and height must not be negative, got {} by {} EMU",
+                width.0, height.0
+            ),
+        });
+    }
+    Ok(positioned_transform(left, top, width, height))
 }
 
 fn positioned_transform(left: Emu, top: Emu, width: Emu, height: Emu) -> CT_Transform2D {
@@ -27482,6 +28542,40 @@ fn apply_owned_change(
     Ok(())
 }
 
+#[cfg(all(test, feature = "render"))]
+thread_local! {
+    static TABLE_GROWTH_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `table`, its rows grown to fit their text, stays inside its page.
+#[cfg(feature = "render")]
+fn grown_table_fits_page(
+    table: &AutofitTable,
+    fonts: &mut FontManager,
+    page_number: usize,
+) -> std::result::Result<bool, rpptx_render::RenderInputError> {
+    #[cfg(test)]
+    TABLE_GROWTH_EVALUATIONS.set(TABLE_GROWTH_EVALUATIONS.get() + 1);
+    let shape = &table.shape;
+    let ResolvedContent::Table(content) = &shape.content else {
+        return Ok(false);
+    };
+    let height =
+        rpptx_render::authoring_table_height(content, fonts, page_number, &table.directions)?;
+    let width = content.column_widths.iter().sum::<f64>();
+    let rect = oxml_layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+    };
+    let bounds = rpptx_render::shape_transform(shape).transform_rect_bbox(rect);
+    Ok(bounds.x >= -0.01
+        && bounds.y >= -0.01
+        && bounds.x + bounds.width <= table.page.0 + 0.01
+        && bounds.y + bounds.height <= table.page.1 + 0.01)
+}
+
 #[cfg(feature = "render")]
 fn autofit_failure(location: &TextFrameLocation, detail: impl std::fmt::Display) -> Error {
     render_failure(format!(
@@ -27539,6 +28633,7 @@ fn owned_text(child: &ShapeTreeChild, cell: Option<(usize, usize)>) -> Option<&C
 }
 
 #[cfg(feature = "render")]
+#[allow(clippy::too_many_arguments)] // Physical leaf operands plus the shared read-only scan state.
 fn append_autofit_context(
     owners: &mut Vec<AutofitOwner>,
     ctx: &ResolveCtx<'_>,
@@ -27546,6 +28641,8 @@ fn append_autofit_context(
     owner_identity: (&str, &str),
     consuming_context: (usize, &str),
     size: (f64, f64),
+    read_only: bool,
+    duplicates: &mut Vec<(String, Vec<usize>, oxml_layout::Diagnostic)>,
     hyperlinks: &ScopedHyperlinkTargets,
 ) -> Result<()> {
     let (part, kind) = owner_identity;
@@ -27563,9 +28660,24 @@ fn append_autofit_context(
         if let Some(id) = child.non_visual_id()
             && !ids.insert(id)
         {
-            return Err(render_failure(format!(
-                "autofit {part}: duplicate shape ID {id}"
-            )));
+            if !read_only {
+                return Err(render_failure(format!(
+                    "autofit {part}: duplicate shape ID {id}"
+                )));
+            }
+            // A read-only report measures a shape that repeats an ID and notes
+            // it once for that physical leaf. A picture is skipped below and
+            // still reaches the report diagnostics.
+            duplicates.push((
+                part.to_owned(),
+                path.clone(),
+                oxml_layout::Diagnostic {
+                    message: format!(
+                        "{part} {}: shape ID {id} is shared with an earlier shape",
+                        plain_path(&path)
+                    ),
+                },
+            ));
         }
         let cells: Vec<Option<(usize, usize)>> = match child {
             ShapeTreeChild::Shape(shape) if shape.text_body.is_some() => vec![None],
@@ -27593,6 +28705,20 @@ fn append_autofit_context(
         }
         let fingerprint = shape_ref(child).xml()?;
         let resolved = ctx.resolve_owned_text_shape(item, size, hyperlinks);
+        let table = match &resolved {
+            Ok((slide, directions)) => slide
+                .shapes
+                .first()
+                .filter(|shape| matches!(shape.content, ResolvedContent::Table(_)))
+                .map(|shape| {
+                    Arc::new(AutofitTable {
+                        shape: shape.clone(),
+                        directions: directions.first().cloned().unwrap_or_default(),
+                        page: size,
+                    })
+                }),
+            Err(_) => None,
+        };
         for cell in cells {
             let location = TextFrameLocation {
                 owner_part: part.to_owned(),
@@ -27686,6 +28812,7 @@ fn append_autofit_context(
                     shape,
                     text,
                     directions,
+                    table: cell.and_then(|_| table.clone()),
                 });
             } else {
                 unsupported = Some(match projection {
@@ -27752,11 +28879,16 @@ fn append_autofit_context(
 #[cfg(feature = "render")]
 /// The text owners of the deck and their measured contexts, or with
 /// `slide_part` only those of that slide, measured on it.
+#[allow(clippy::type_complexity)] // Owners plus the duplicate-leaf diagnostics they carry.
 fn autofit_inventory(
     presentation: &Presentation,
     package: &OpcPackage,
     slide_part: Option<&str>,
-) -> Result<Vec<AutofitOwner>> {
+    read_only: bool,
+) -> Result<(
+    Vec<AutofitOwner>,
+    Vec<(String, Vec<usize>, oxml_layout::Diagnostic)>,
+)> {
     let default_style = presentation
         .presentation
         .default_text_style
@@ -27766,6 +28898,7 @@ fn autofit_inventory(
         (w.0 as f64 / 12700.0, h.0 as f64 / 12700.0)
     });
     let mut owners = Vec::new();
+    let mut duplicates = Vec::new();
     let table_styles = render_table_styles(package, &presentation.presentation_part)?;
     for (index, record) in presentation.slides.iter().enumerate() {
         if slide_part.is_some_and(|part| part != record.part_name) {
@@ -27804,6 +28937,8 @@ fn autofit_inventory(
                 (part, kind),
                 (index, &record.part_name),
                 size,
+                read_only,
+                &mut duplicates,
                 &links,
             )?;
         }
@@ -27845,9 +28980,10 @@ fn autofit_inventory(
                 }
                 // Geometry inheritance follows the existing notes overlay's
                 // matched placeholder, but text remains the physical body.
-                materialize_notes_measurement_bounds(
+                let reasons = materialize_notes_measurement_bounds(
                     &mut slide.common_slide_data.shape_tree.children,
                     &notes_master.common_slide_data.shape_tree.children,
+                    read_only,
                 )?;
                 let ctx = ResolveCtx::new(
                     &theme,
@@ -27875,6 +29011,8 @@ fn autofit_inventory(
                     (notes_master_part, "notes-master"),
                     (index, &format!("{}:notes", record.part_name)),
                     export_page_size(&presentation.presentation),
+                    read_only,
+                    &mut duplicates,
                     &links,
                 )?;
                 if let Some(notes) = &record.notes {
@@ -27885,8 +29023,27 @@ fn autofit_inventory(
                         (&notes.part_name, "notes-slide"),
                         (index, &notes.part_name),
                         export_page_size(&presentation.presentation),
+                        read_only,
+                        &mut duplicates,
                         &links,
                     )?;
+                    // A placeholder that the read-only type fallback could not
+                    // resolve keeps its geometry unset and reports the reason.
+                    for (path, reason) in reasons {
+                        if let Some(owner) = owners.iter_mut().find(|owner| {
+                            owner.update.location.owner_part == notes.part_name
+                                && owner.update.location.child_path == path
+                                && owner.update.location.cell.is_none()
+                        }) {
+                            owner.unsupported = Some(reason.clone());
+                            if !owner.empty {
+                                owner
+                                    .update
+                                    .diagnostics
+                                    .push(oxml_layout::Diagnostic { message: reason });
+                            }
+                        }
+                    }
                     // Measurement clones materialized inherited geometry. Bind
                     // mutation selectors to the original physical child bytes.
                     for owner in owners
@@ -27988,7 +29145,7 @@ fn autofit_inventory(
                 right.update.location.cell,
             ))
     });
-    Ok(owners)
+    Ok((owners, duplicates))
 }
 
 #[cfg(feature = "render")]
@@ -28089,23 +29246,85 @@ fn opaque_autofit_modes(xml: &[u8]) -> Result<Vec<AutofitMode>> {
 fn materialize_notes_measurement_bounds(
     children: &mut [ShapeTreeChild],
     master: &[ShapeTreeChild],
-) -> Result<()> {
+    read_only: bool,
+) -> Result<Vec<(Vec<usize>, String)>> {
     let mut placeholders = Vec::new();
     collect_export_placeholder_shapes(master, &mut placeholders)?;
-    for child in children {
+    let mut reasons = Vec::new();
+    materialize_notes_bounds(
+        children,
+        &placeholders,
+        &mut Vec::new(),
+        read_only,
+        &mut reasons,
+    )?;
+    Ok(reasons)
+}
+
+#[cfg(feature = "render")]
+fn materialize_notes_bounds(
+    children: &mut [ShapeTreeChild],
+    placeholders: &[(PlaceholderKey, CT_Shape)],
+    path: &mut Vec<usize>,
+    read_only: bool,
+    reasons: &mut Vec<(Vec<usize>, String)>,
+) -> Result<()> {
+    for (index, child) in children.iter_mut().enumerate() {
+        path.push(index);
         match child {
-            ShapeTreeChild::GroupShape(group) => {
-                materialize_notes_measurement_bounds(&mut group.children, master)?
-            }
+            ShapeTreeChild::GroupShape(group) => materialize_notes_bounds(
+                &mut group.children,
+                placeholders,
+                path,
+                read_only,
+                reasons,
+            )?,
             ShapeTreeChild::Shape(shape) if shape.shape_properties.transform.is_none() => {
                 if let Some(ph) = &shape.placeholder {
-                    let mut matching = placeholders
+                    let key = ph.key();
+                    let key_matches = placeholders
                         .iter()
-                        .filter(|(key, _)| key.matches(&ph.key()));
-                    if let Some((_, parent)) = matching.next() {
-                        if matching.next().is_some() {
-                            return Err(render_failure("ambiguous notes placeholder geometry"));
+                        .filter(|(existing, _)| existing.matches(&key))
+                        .count();
+                    let mut parent = None;
+                    if key_matches == 1 {
+                        parent = placeholders
+                            .iter()
+                            .find(|(existing, _)| existing.matches(&key))
+                            .map(|(_, parent)| parent);
+                    } else if read_only {
+                        let by_type = PlaceholderKey {
+                            ph_type: key.ph_type.clone(),
+                            idx: None,
+                        };
+                        let typed = placeholders
+                            .iter()
+                            .filter(|(existing, _)| by_type.matches(existing))
+                            .count();
+                        if key_matches == 0 && typed == 1 {
+                            parent = placeholders
+                                .iter()
+                                .find(|(existing, _)| by_type.matches(existing))
+                                .map(|(_, parent)| parent);
+                        } else {
+                            let subject = key.idx.map_or_else(
+                                || "has no idx".to_owned(),
+                                |idx| format!("idx {idx} matches no notes-master placeholder"),
+                            );
+                            let count = if typed == 0 {
+                                "no notes-master placeholder has its type".to_owned()
+                            } else {
+                                format!("{typed} notes-master placeholders have its type")
+                            };
+                            reasons.push((
+                                path.clone(),
+                                format!("notes placeholder {subject}, and {count}"),
+                            ));
                         }
+                    } else if key_matches > 1 {
+                        return Err(render_failure("ambiguous notes placeholder geometry"));
+                    }
+                    if let Some(parent) = parent {
                         shape.shape_properties.transform =
                             parent.shape_properties.transform.clone();
                     }
@@ -28113,6 +29332,7 @@ fn materialize_notes_measurement_bounds(
             }
             _ => {}
         }
+        path.pop();
     }
     Ok(())
 }
@@ -28856,7 +30076,16 @@ fn render_scoped_resources(
             master: master.media_ids,
             media_content_types: deck_media
                 .iter()
-                .map(|(media_id, media)| (*media_id, media.content_type.clone()))
+                .map(|(media_id, media)| {
+                    // These relationship IDs have already passed render_compatible_media.
+                    // Preserve the package declaration while reporting the effective raster type.
+                    let content_type = match ImageFormat::sniff(&media.bytes) {
+                        Some(ImageFormat::Png) => "image/png",
+                        Some(ImageFormat::Jpeg) => "image/jpeg",
+                        _ => &media.content_type,
+                    };
+                    (*media_id, content_type.to_owned())
+                })
                 .collect(),
         },
         ScopedMediaFailures {
@@ -29051,25 +30280,30 @@ fn render_compatible_media(
     bytes: &[u8],
     content_type: &str,
 ) -> std::result::Result<bool, &'static str> {
-    let format = match ImageFormat::sniff(bytes) {
-        Some(ImageFormat::Png) if content_type.eq_ignore_ascii_case("image/png") => {
-            ImageFormat::Png
+    let format = ImageFormat::sniff(bytes);
+    if let Some(format @ (ImageFormat::Png | ImageFormat::Jpeg)) = format
+        && !render_media_within_decode_bounds(bytes, format)?
+    {
+        return Err("could not be decoded");
+    }
+    match oxml_pdf::classify_image_draw(bytes, content_type) {
+        oxml_pdf::ImageDrawClass::UnsupportedFormat { kind: "emf" } => {
+            return Err("uses unsupported image format emf");
         }
-        Some(ImageFormat::Jpeg)
-            if content_type.eq_ignore_ascii_case("image/jpeg")
-                || content_type.eq_ignore_ascii_case("image/jpg") =>
-        {
-            ImageFormat::Jpeg
+        oxml_pdf::ImageDrawClass::UnsupportedFormat { .. } => {
+            return Err("uses unsupported image format wmf");
         }
-        _ => return Ok(false),
-    };
-    if !render_media_within_decode_bounds(bytes, format)? {
-        return Ok(false);
+        oxml_pdf::ImageDrawClass::CouldNotDecode => return Err("could not be decoded"),
+        oxml_pdf::ImageDrawClass::NotThisDecoder => return Ok(false),
+        oxml_pdf::ImageDrawClass::Drawn => {}
+    }
+    if format == Some(ImageFormat::Emf) {
+        return Ok(true);
     }
     let Some(info) = probe(bytes).filter(|info| info.width_px > 0 && info.height_px > 0) else {
-        return Ok(false);
+        return Err("could not be decoded");
     };
-    if format == ImageFormat::Jpeg && (info.bit_depth != 8 || info.channels != 3) {
+    if format == Some(ImageFormat::Jpeg) && (info.bit_depth != 8 || info.channels != 3) {
         return Ok(false);
     }
     let width = f64::from(info.width_px);
@@ -29153,12 +30387,42 @@ fn render_media_within_decode_bounds(
     if format != ImageFormat::Png {
         return Ok(true);
     }
-    let Some(expected) = usize::try_from(info.width_px)
-        .ok()
-        .and_then(|width| width.checked_mul(info.channels as usize))
-        .and_then(|stride| stride.checked_add(1))
-        .and_then(|row| row.checked_mul(info.height_px as usize))
-    else {
+    let interlace = *bytes.get(28).ok_or("could not be decoded")?;
+    if interlace > 1 {
+        return Err("could not be decoded");
+    }
+    let expected = (|| {
+        let width = usize::try_from(info.width_px).ok()?;
+        let height = usize::try_from(info.height_px).ok()?;
+        let channels = usize::from(info.channels);
+        let passes: &[(usize, usize, usize, usize)] = match interlace {
+            0 => &[(0, 0, 1, 1)],
+            1 => &[
+                (0, 0, 8, 8),
+                (4, 0, 8, 8),
+                (0, 4, 4, 8),
+                (2, 0, 4, 4),
+                (0, 2, 2, 4),
+                (1, 0, 2, 2),
+                (0, 1, 1, 2),
+            ],
+            _ => return None,
+        };
+        passes.iter().try_fold(0usize, |total, &(x, y, dx, dy)| {
+            if width <= x || height <= y {
+                return Some(total);
+            }
+            let pass_width = (width - x).div_ceil(dx);
+            let pass_height = (height - y).div_ceil(dy);
+            total.checked_add(
+                pass_width
+                    .checked_mul(channels)?
+                    .checked_add(1)?
+                    .checked_mul(pass_height)?,
+            )
+        })
+    })();
+    let Some(expected) = expected else {
         return Err("has dimensions that overflow the decoded-image size");
     };
     if expected > MAX_RENDER_PREVIEW_DECODED_BYTES {
@@ -30638,33 +31902,72 @@ fn field_identities(package: &OpcPackage, parsed: Option<&Parsed>) -> Result<Has
 fn part_field_identities(name: &str, bytes: &[u8]) -> Result<Vec<String>> {
     note_commit_work(|work| work.parsed += 1);
     let mut ids = Vec::new();
-    let mut reader = NsReader::from_reader(bytes);
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    // Keep the legacy vendor declaration rules and raw URI matching, while
+    // tracking logical depth independently of its u16 namespace level.
+    let mut declarations = quick_xml::name::NamespaceResolver::default();
+    let mut bindings: HashMap<Vec<u8>, bool> = HashMap::new();
+    let mut undo: Vec<(Vec<u8>, Option<bool>)> = Vec::new();
+    let mut frames = Vec::new();
     let mut buffer = Vec::new();
     loop {
-        let (namespace, event) = reader
-            .read_resolved_event_into(&mut buffer)
+        let event = reader
+            .read_event_into(&mut buffer)
             .map_err(|error| footer_malformed(name, error))?;
+        let closes = matches!(event, XmlEvent::Empty(_) | XmlEvent::End(_));
         match event {
-            XmlEvent::Start(start) | XmlEvent::Empty(start)
-                if matches!(namespace, XmlResolveResult::Bound(XmlNamespace(uri)) if uri == A_NS.as_bytes())
-                    && xml_local_name(start.name().as_ref()) == b"fld" =>
-            {
-                for attr in start.attributes() {
-                    let attr = attr.map_err(|error| footer_malformed(name, error))?;
-                    if attr.key.as_ref() == b"id" {
-                        ids.push(
-                            attr.decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                reader.decoder(),
-                            )
-                            .map_err(|error| footer_malformed(name, error))?
-                            .to_uppercase(),
-                        );
+            XmlEvent::Start(start) | XmlEvent::Empty(start) => {
+                declarations
+                    .push(&start)
+                    .map_err(|error| footer_malformed(name, error))?;
+                frames.push(undo.len());
+                for attribute in start.attributes().with_checks(false) {
+                    let Ok(attribute) = attribute else { break };
+                    let Some(prefix) = attribute.key.as_namespace_binding() else {
+                        continue;
+                    };
+                    let prefix = match prefix {
+                        quick_xml::name::PrefixDeclaration::Default => Vec::new(),
+                        quick_xml::name::PrefixDeclaration::Named(prefix) => prefix.to_vec(),
+                    };
+                    let previous = bindings
+                        .insert(prefix.clone(), attribute.value.as_ref() == A_NS.as_bytes());
+                    undo.push((prefix, previous));
+                }
+                declarations.pop();
+                let drawing_namespace = match start.name().prefix() {
+                    Some(prefix) if prefix.as_ref().is_empty() => false,
+                    Some(prefix) => bindings.get(prefix.as_ref()) == Some(&true),
+                    None => bindings.get(&b""[..]) == Some(&true),
+                };
+                if drawing_namespace && xml_local_name(start.name().as_ref()) == b"fld" {
+                    for attr in start.attributes() {
+                        let attr = attr.map_err(|error| footer_malformed(name, error))?;
+                        if attr.key.as_ref() == b"id" {
+                            ids.push(
+                                attr.decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    reader.decoder(),
+                                )
+                                .map_err(|error| footer_malformed(name, error))?
+                                .to_uppercase(),
+                            );
+                        }
                     }
                 }
             }
             XmlEvent::Eof => break,
             _ => {}
+        }
+        if closes && let Some(mark) = frames.pop() {
+            while undo.len() > mark {
+                let (prefix, previous) = undo.pop().expect("namespace scope undo entry");
+                if let Some(previous) = previous {
+                    bindings.insert(prefix, previous);
+                } else {
+                    bindings.remove(&prefix);
+                }
+            }
         }
         buffer.clear();
     }
@@ -31050,6 +32353,26 @@ impl Presentation {
 
 #[cfg(test)]
 mod write_tests {
+    #[test]
+    fn issue435_field_inventory_preserves_legacy_namespace_selection_at_large_depth() {
+        let xml = format!(
+            r#"<root xmlns="{A_NS}" xmlns:d="{A_NS}"><fld id="a"/><d:fld id="b"/><x xmlns=""><fld id="skip"/><d:fld id="c"/></x><d:x xmlns:d="urn:foreign"><d:fld id="skip"/></d:x><d:fld id="d"/><:fld id="skip"/><d:fld id="e" vendor:unknown="x" mc:Ignorable="unbound"/></root>"#
+        );
+        assert_eq!(
+            super::part_field_identities("/custom.xml", xml.as_bytes()).unwrap(),
+            ["A", "B", "C", "D", "E"]
+        );
+        let deep = format!(
+            "<root xmlns:d=\"{A_NS}\">{}<d:fld id=\"skip\"/>{}<d:fld id=\"outer\"/></root>",
+            "<x xmlns:d=\"urn:foreign\">".repeat(100_000),
+            "</x>".repeat(100_000)
+        );
+        assert_eq!(
+            super::part_field_identities("/custom.xml", deep.as_bytes()).unwrap(),
+            ["OUTER"]
+        );
+    }
+
     fn fx215_native_data() -> ChartData {
         ChartData {
             categories: vec!["North".into(), "South".into()],
@@ -34449,8 +35772,9 @@ mod write_tests {
         let notes_part = deck.slides[1].notes.as_ref().unwrap().part_name.clone();
         let mut notes_target = deck.clone();
         let notes_package = notes_target.staged_package(true).unwrap();
-        let notes_location = autofit_inventory(&notes_target, &notes_package, None)
+        let notes_location = autofit_inventory(&notes_target, &notes_package, None, false)
             .unwrap()
+            .0
             .into_iter()
             .find(|owner| {
                 owner.update.location.owner_part == notes_part
@@ -34571,7 +35895,7 @@ mod write_tests {
             include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").as_slice(),
         )];
         let staged = deck.staged_package(true).unwrap();
-        let inventory = autofit_inventory(&deck, &staged, None).unwrap();
+        let inventory = autofit_inventory(&deck, &staged, None, false).unwrap().0;
         let physical = inventory
             .iter()
             .find(|owner| {
@@ -35386,7 +36710,9 @@ mod write_tests {
                 .set_properties(p);
         }
         let before = deck.to_bytes().unwrap();
-        let owners = autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None).unwrap();
+        let owners = autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None, false)
+            .unwrap()
+            .0;
         let owner = owners
             .iter()
             .find(|o| {
@@ -35491,7 +36817,7 @@ mod write_tests {
             .collect::<Vec<_>>();
         assert_eq!(frames.len(), 10);
         assert_ne!(frames[0].context, frames[1].context);
-        let inventory = autofit_inventory(&deck, &before, None).unwrap();
+        let inventory = autofit_inventory(&deck, &before, None, false).unwrap().0;
         let physical = inventory
             .iter()
             .find(|o| o.update.location.owner_part == master_part && o.update.shape_id == Some(100))
@@ -35600,7 +36926,9 @@ mod write_tests {
                 package.write_to(&mut bytes).unwrap();
                 let mut deck = Presentation::from_bytes(bytes.get_ref()).unwrap();
                 let old =
-                    autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None).unwrap();
+                    autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None, false)
+                        .unwrap()
+                        .0;
                 let old = old
                     .iter()
                     .find(|o| o.update.shape_id == Some(2) && o.update.location.owner_part == part)
@@ -35621,7 +36949,9 @@ mod write_tests {
                 let result = deck.refresh_autofit(&[]).unwrap();
                 assert!(result.changed);
                 let new =
-                    autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None).unwrap();
+                    autofit_inventory(&deck, &deck.staged_package(false).unwrap(), None, false)
+                        .unwrap()
+                        .0;
                 let new = new
                     .iter()
                     .find(|o| o.update.shape_id == Some(2) && o.update.location.owner_part == part)
@@ -36013,6 +37343,778 @@ mod write_tests {
             deck.slide(0).unwrap().notes_text().as_deref(),
             Some("iiiiWWWW\nSecond notes\nThird notes")
         );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_fit_report_measures_a_repeated_shape_id_and_keeps_mutation_refusal() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        for top in [914400, 2743200] {
+            deck.slide_mut(0)
+                .unwrap()
+                .add_textbox(Emu(914400), Emu(top), Emu(2743200), Emu(914400))
+                .unwrap()
+                .set_text("text")
+                .unwrap();
+        }
+        deck.add_picture(
+            0,
+            b"\x89PNG\r\n\x1a\nfixture",
+            "pixel.png",
+            Emu(914400),
+            Emu(4000000),
+            Some(Emu(914400)),
+            Some(Emu(914400)),
+        )
+        .unwrap();
+        let ids = deck
+            .slide(0)
+            .unwrap()
+            .shapes()
+            .map(|shape| shape.non_visual_id().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        let (first, second, picture) = (ids[0], ids[1], ids[2]);
+        let package = deck.staged_package(false).unwrap();
+        let slide_part = deck.slides[0].part_name.clone();
+        let original =
+            String::from_utf8(required_part(&package, &slide_part).unwrap().to_vec()).unwrap();
+        let edited = original
+            .replacen(
+                &format!(r#"<p:cNvPr id="{second}""#),
+                &format!(r#"<p:cNvPr id="{first}""#),
+                1,
+            )
+            .replacen(
+                &format!(r#"<p:cNvPr id="{picture}""#),
+                &format!(r#"<p:cNvPr id="{first}""#),
+                1,
+            );
+        assert_ne!(edited, original);
+        let mut package = package.clone();
+        package.set_part(&slide_part, edited.into_bytes());
+        let mut bytes = Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let mut duplicate = Presentation::from_bytes(bytes.get_ref()).unwrap();
+        let before = duplicate.to_bytes().unwrap();
+        let report = duplicate.fit_report(&[]).unwrap();
+        let frames = report
+            .frames
+            .iter()
+            .filter(|frame| frame.update.location.owner_part == slide_part)
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        let first_frame = frames
+            .iter()
+            .find(|frame| frame.update.location.child_path == [0])
+            .unwrap();
+        assert!(
+            !first_frame
+                .update
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("shape ID")),
+            "{first_frame:?}"
+        );
+        let second_frame = frames
+            .iter()
+            .find(|frame| frame.update.location.child_path == [1])
+            .unwrap();
+        assert!(first_frame.measured_font_scale.is_some(), "{first_frame:?}");
+        assert!(
+            second_frame.measured_font_scale.is_some(),
+            "{second_frame:?}"
+        );
+        let sentence = format!("{slide_part} 1: shape ID {first} is shared with an earlier shape");
+        assert_eq!(
+            second_frame
+                .update
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message == sentence)
+                .count(),
+            1,
+            "{second_frame:?}"
+        );
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message == sentence)
+                .count(),
+            1
+        );
+        let picture_sentence =
+            format!("{slide_part} 2: shape ID {first} is shared with an earlier shape");
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message == picture_sentence)
+                .count(),
+            1
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.update.location.child_path != [2]),
+            "{frames:?}"
+        );
+        let error = duplicate.refresh_autofit(&[]).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("duplicate shape ID {first}")),
+            "{error}"
+        );
+        assert_eq!(duplicate.to_bytes().unwrap(), before);
+        let issue = duplicate.validate().into_iter().next().unwrap();
+        assert_eq!(
+            issue.to_string(),
+            format!("slide 1: duplicate shape ID {first}, shared by more than one shape")
+        );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_a_table_cell_overflows_only_when_its_grown_row_leaves_the_slide() {
+        for (top, repeat, overflow) in [(2, 4, false), (6, 8, true)] {
+            let mut deck = Presentation::new().unwrap();
+            deck.add_slide(6).unwrap();
+            {
+                let mut slide = deck.slide_mut(0).unwrap();
+                let mut shape = slide
+                    .add_table(
+                        2,
+                        2,
+                        Emu(914400),
+                        Emu(914400 * top),
+                        Emu(9144000),
+                        Emu(731520),
+                    )
+                    .unwrap();
+                let mut table = shape.table_mut().unwrap();
+                for row in 0..2 {
+                    table.set_row_height(row, Emu(365760)).unwrap();
+                }
+                table
+                    .cell_mut(1, 1)
+                    .unwrap()
+                    .set_text(&"Start interviews in November with two agencies; ".repeat(repeat));
+            }
+            let report = deck.fit_report(&[]).unwrap();
+            let frame = report
+                .frames
+                .iter()
+                .find(|frame| frame.update.location.cell == Some((1, 1)))
+                .unwrap();
+            assert_eq!(frame.overflow, overflow, "table at {top} in: {frame:?}");
+            if overflow {
+                assert!(frame.needed_scale.is_some(), "{frame:?}");
+            } else {
+                assert_eq!(frame.needed_scale, Some(40000), "{frame:?}");
+                let quantized = frame
+                    .quantized_trial
+                    .as_ref()
+                    .expect("an admitted pair publishes the quantized trial");
+                let persisted = frame
+                    .persisted_trial
+                    .as_ref()
+                    .expect("an admitted pair publishes the persisted trial");
+                assert!(quantized.width_fits, "{frame:?}");
+                assert!(persisted.width_fits, "{frame:?}");
+            }
+        }
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_a2_geometry_controls_compare_the_transformed_page_box() {
+        use rpptx_layout::{
+            ResolvedParagraph, ResolvedRunStyle, ResolvedShape, ResolvedTable, ResolvedTableCell,
+            ResolvedTableRow, ResolvedTextBody, ResolvedTextRun,
+        };
+
+        fn table(
+            bounds: (f64, f64, f64, f64),
+            rotation: f64,
+            flip_v: bool,
+            width: f64,
+            heights: &[f64],
+            text: &str,
+        ) -> AutofitTable {
+            let body = || ResolvedTextBody {
+                insets: rpptx_layout::TextInsets::default(),
+                anchor: rpptx_layout::TextAnchor::Top,
+                wrap: true,
+                vertical: rpptx_layout::TextDirection::Horizontal,
+                space_first_last_paragraph: false,
+                autofit: ResolvedAutofit::None,
+                paragraphs: vec![ResolvedParagraph {
+                    runs: vec![ResolvedTextRun::Text {
+                        text: text.to_owned(),
+                        style: ResolvedRunStyle {
+                            font_size: Some(6.0),
+                            ..ResolvedRunStyle::default()
+                        },
+                    }],
+                    ..ResolvedParagraph::default()
+                }],
+            };
+            let rows = heights
+                .iter()
+                .map(|height| ResolvedTableRow {
+                    height: *height,
+                    cells: vec![ResolvedTableCell {
+                        text: Some(body()),
+                        ..ResolvedTableCell::default()
+                    }],
+                })
+                .collect();
+            let content = ResolvedTable {
+                column_widths: vec![width],
+                rows,
+                ..ResolvedTable::default()
+            };
+            let shape = ResolvedShape {
+                group_transform: Transform::IDENTITY,
+                bounds: Rect {
+                    x: bounds.0,
+                    y: bounds.1,
+                    width: bounds.2,
+                    height: bounds.3,
+                },
+                rotation_deg: rotation,
+                flip_h: false,
+                flip_v,
+                geometry: rpptx_layout::ResolvedGeometry::Rectangle,
+                fill: None,
+                image_fill: None,
+                line: None,
+                head_end: None,
+                tail_end: None,
+                shadow: None,
+                content: ResolvedContent::Table(content),
+                unsupported: None,
+            };
+            AutofitTable {
+                shape,
+                directions: vec![Vec::new(); heights.len()],
+                page: (720.0, 540.0),
+            }
+        }
+        let height = |table: &AutofitTable| {
+            let ResolvedContent::Table(content) = &table.shape.content else {
+                panic!("table content");
+            };
+            rpptx_render::authoring_table_height(
+                content,
+                &mut FontManager::new_deterministic().unwrap(),
+                1,
+                &table.directions,
+            )
+            .unwrap()
+        };
+        let fits = |table: &AutofitTable| {
+            grown_table_fits_page(table, &mut FontManager::new_deterministic().unwrap(), 1).unwrap()
+        };
+
+        // Right edge 580 is inside the 720-point page even though max_x
+        // exceeds the 540-point page height.
+        let right_edge_580 = table(
+            (500.0, 100.0, 80.0, 60.0),
+            0.0,
+            false,
+            80.0,
+            &[60.0],
+            "short",
+        );
+        assert!(fits(&right_edge_580));
+        assert!(height(&right_edge_580) + 100.0 <= 540.01);
+        assert!(!fits(&table(
+            (680.0, 100.0, 80.0, 60.0),
+            0.0,
+            false,
+            80.0,
+            &[60.0],
+            "short"
+        )));
+        assert!(fits(&table(
+            (100.0, 100.0, 80.0, 60.0),
+            0.0,
+            false,
+            80.0,
+            &[60.0],
+            "short"
+        )));
+
+        // Rotation 90 maps local (x, y) to (730 - y, 130 + x).
+        let rotated_max_x = table(
+            (660.0, 100.0, 40.0, 100.0),
+            90.0,
+            false,
+            40.0,
+            &[100.0],
+            "max",
+        );
+        assert!(height(&rotated_max_x) + 130.0 <= 540.01);
+        assert!(!fits(&rotated_max_x));
+
+        // Rotation 90 maps local (x, y) to (50 - y, 230 + x), so a grown
+        // height above 80 pushes min_x below zero.
+        let rotated_min_x = table(
+            (0.0, 200.0, 20.0, 80.0),
+            90.0,
+            false,
+            20.0,
+            &[80.0],
+            &"one two three four five six seven eight nine ten eleven twelve ".repeat(3),
+        );
+        let min_x_height = height(&rotated_min_x);
+        assert!(
+            min_x_height > 80.0 && min_x_height <= 340.0,
+            "{min_x_height}"
+        );
+        assert!(!fits(&rotated_min_x));
+
+        // A rotation that stays on the page must not be treated as overflow.
+        let on_page_rotation = table(
+            (300.0, 100.0, 100.0, 40.0),
+            90.0,
+            false,
+            100.0,
+            &[40.0],
+            &"one two three four five six seven eight nine ten eleven twelve ".repeat(6),
+        );
+        let rotation_height = height(&on_page_rotation);
+        assert!(
+            rotation_height > 40.01 && rotation_height <= 150.0,
+            "{rotation_height}"
+        );
+        assert!(fits(&on_page_rotation));
+
+        // flip_v puts the page box at 40 - local_y, negative once H exceeds 40.
+        let flipped = table(
+            (100.0, 0.0, 80.0, 40.0),
+            0.0,
+            true,
+            80.0,
+            &[40.0],
+            &"one two three four five six seven eight nine ten eleven twelve ".repeat(6),
+        );
+        let flipped_height = height(&flipped);
+        assert!(
+            flipped_height > 40.01 && flipped_height <= 540.0,
+            "{flipped_height}"
+        );
+        assert!(!fits(&flipped));
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_table_contexts_share_storage_and_grown_measurement() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        {
+            let mut slide = deck.slide_mut(0).unwrap();
+            for y in [914400, 6858000] {
+                let mut shape = slide
+                    .add_table(2, 4, Emu(914400), Emu(y), Emu(3657600), Emu(508000))
+                    .unwrap();
+                let mut table = shape.table_mut().unwrap();
+                for row in 0..2 {
+                    for column in 0..4 {
+                        table
+                            .cell_mut(row, column)
+                            .unwrap()
+                            .set_text("line\nline\nline");
+                    }
+                }
+            }
+        }
+        let package = deck.staged_package(false).unwrap();
+        let retained = [false, true].map(|read_only| {
+            let (owners, _) = autofit_inventory(&deck, &package, None, read_only).unwrap();
+            let tables = owners
+                .iter()
+                .flat_map(|owner| &owner.contexts)
+                .filter_map(|context| context.table.as_ref())
+                .map(|table| std::ptr::from_ref(&table.shape))
+                .collect::<HashSet<_>>();
+            tables.len()
+        });
+        TABLE_GROWTH_EVALUATIONS.set(0);
+        let before = deck.to_bytes().unwrap();
+        let report = deck.fit_report(&[]).unwrap();
+        let cells = report
+            .frames
+            .iter()
+            .filter(|frame| frame.update.location.cell.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(cells.len(), 16);
+        for frame in cells {
+            assert_eq!(
+                frame.overflow,
+                frame.update.location.child_path == [1],
+                "{frame:?}"
+            );
+        }
+        assert_eq!(deck.to_bytes().unwrap(), before);
+        assert_eq!(
+            (retained, TABLE_GROWTH_EVALUATIONS.get()),
+            ([2, 2], 2),
+            "retain and measure each immutable resolved table once, not once per cell"
+        );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_a2_width_failure_stays_overflow_inside_the_page() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        {
+            let mut slide = deck.slide_mut(0).unwrap();
+            let mut shape = slide
+                .add_table(1, 1, Emu(914400), Emu(914400), Emu(1828800), Emu(457200))
+                .unwrap();
+            let mut table = shape.table_mut().unwrap();
+            table.set_row_height(0, Emu(457200)).unwrap();
+            let mut cell = table.cell_mut(0, 0).unwrap();
+            cell.set_text(&"W".repeat(80));
+            cell.text_frame().set_word_wrap(Some(false));
+        }
+        let report = deck.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| frame.update.location.cell == Some((0, 0)))
+            .unwrap();
+        assert!(frame.overflow, "{frame:?}");
+        assert_eq!(frame.update.status, "unfit", "{frame:?}");
+        assert!(frame.needed_scale.is_none(), "{frame:?}");
+        assert!(frame.needed_reduction.is_none(), "{frame:?}");
+        // No admissible candidate fits the stored width, so no trial is
+        // published and both needed values are None. The width failure remains
+        // overflow rather than being cleared by the page-growth exception. This
+        // fixture is a no-pair width failure, not a claim that every stored
+        // width failure lacks a fitting pair.
+        assert!(frame.quantized_trial.is_none(), "{frame:?}");
+        assert!(frame.persisted_trial.is_none(), "{frame:?}");
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_an_empty_text_frame_stays_empty_without_a_cause() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        deck.slide_mut(0)
+            .unwrap()
+            .add_textbox(Emu(914400), Emu(914400), Emu(914400), Emu(457200))
+            .unwrap();
+        let report = deck.fit_report(&[]).unwrap();
+        let empty = report
+            .frames
+            .iter()
+            .filter(|frame| frame.update.status == "empty")
+            .collect::<Vec<_>>();
+        assert!(!empty.is_empty());
+        for frame in empty {
+            assert!(!frame.overflow, "{frame:?}");
+            assert!(frame.needed_scale.is_none(), "{frame:?}");
+            assert!(
+                frame
+                    .update
+                    .diagnostics
+                    .iter()
+                    .all(
+                        |diagnostic| diagnostic.message != "opaque or unresolved text owner"
+                            && !diagnostic.message.contains("cannot assess")
+                    ),
+                "{frame:?}"
+            );
+        }
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "opaque or unresolved text owner")
+        );
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn issue431_fit_report_resolves_notes_placeholders_by_type_and_reports_reasons() {
+        let edited = |deck: &Presentation, part: &str, edit: &dyn Fn(&str) -> String| {
+            let mut package = deck.staged_package(false).unwrap();
+            let xml = std::str::from_utf8(required_part(&package, part).unwrap()).unwrap();
+            let changed = edit(xml);
+            assert_ne!(changed, xml);
+            package.set_part(part, changed.into_bytes());
+            let mut bytes = Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            Presentation::from_bytes(bytes.get_ref()).unwrap()
+        };
+        let second_sldnum = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Slide Number 8"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" sz="quarter" idx="7"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="3884613" y="8685213"/><a:ext cx="2971800" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>"#;
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        deck.set_notes_text(0, "A note").unwrap();
+        let notes_master_part = deck.notes_master_part.clone().unwrap();
+        let notes_part = deck.slides[0].notes.as_ref().unwrap().part_name.clone();
+        let source = deck.to_bytes().unwrap();
+        let notes_placeholder = |ph: &str| {
+            let ph = ph.to_owned();
+            move |xml: &str| {
+                xml.replace(
+                    r#"<p:ph type="sldNum" idx="5" sz="quarter"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#,
+                    &format!(
+                        r#"<p:ph {ph}/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>1</a:t></a:r></a:p></p:txBody></p:sp>"#
+                    ),
+                )
+            }
+        };
+
+        // One notes-master placeholder of the shape's type resolves the
+        // geometry on the read-only path and leaves the stored body alone.
+        let single = edited(
+            &deck,
+            &notes_part,
+            &notes_placeholder(r#"type="sldNum" idx="10" sz="quarter""#),
+        );
+        let before = single.to_bytes().unwrap();
+        let report = single.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.update.location.owner_part == notes_part
+                    && frame.update.location.child_path == [2]
+            })
+            .unwrap();
+        assert_eq!(frame.context, notes_part);
+        assert_eq!(
+            (frame.update.status.as_str(), frame.overflow),
+            ("unchanged", false)
+        );
+        assert_eq!(frame.update.old_bounds, (3884613, 8685213, 2971800, 457200));
+        assert!(
+            report
+                .frames
+                .iter()
+                .all(|frame| frame.context != "uninstantiated")
+        );
+        assert_eq!(single.to_bytes().unwrap(), before);
+        let mut mutated = single.clone();
+        let refreshed = mutated.refresh_autofit(&[]).unwrap();
+        let after = mutated.to_bytes().unwrap();
+        let before_package = OpcPackage::from_reader(Cursor::new(before.clone())).unwrap();
+        let after_package = OpcPackage::from_reader(Cursor::new(after)).unwrap();
+        assert_eq!(
+            required_part(&before_package, &notes_part).unwrap(),
+            required_part(&after_package, &notes_part).unwrap()
+        );
+        assert!(
+            refreshed
+                .updates
+                .iter()
+                .all(|update| !(update.location.owner_part == notes_part && update.changed)),
+            "{:?}",
+            refreshed
+                .updates
+                .iter()
+                .filter(|update| update.location.owner_part == notes_part && update.changed)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            mutated.slides[0]
+                .notes
+                .as_ref()
+                .unwrap()
+                .notes
+                .common_slide_data
+                .shape_tree
+                .children
+                .iter()
+                .any(|child| match child {
+                    ShapeTreeChild::Shape(shape) => shape
+                        .placeholder
+                        .as_ref()
+                        .is_some_and(|ph| ph.key().idx == Some(10)),
+                    _ => false,
+                })
+        );
+
+        // Two sldNum masters of different idx leave the idx-10 placeholder
+        // unresolved on the read-only path.
+        let two_masters = edited(&deck, &notes_master_part, &|xml| {
+            xml.replacen(r#"idx="5""#, r#"idx="6""#, 1)
+                .replace("</p:spTree>", &format!("{second_sldnum}</p:spTree>"))
+        });
+        let several = edited(
+            &two_masters,
+            &notes_part,
+            &notes_placeholder(r#"type="sldNum" idx="10" sz="quarter""#),
+        );
+        let report = several.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.update.location.owner_part == notes_part
+                    && frame.update.location.child_path == [2]
+            })
+            .unwrap();
+        assert_eq!(frame.update.status, "unsupported");
+        assert_eq!(frame.update.old_bounds, (0, 0, 0, 0));
+        let reason = "notes placeholder idx 10 matches no notes-master placeholder, and 2 notes-master placeholders have its type";
+        assert_eq!(
+            frame
+                .update
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message == reason)
+                .count(),
+            1,
+            "{frame:?}"
+        );
+        assert!(!report.diagnostics.iter().any(|d| d.message == reason));
+
+        let absent_several = edited(
+            &two_masters,
+            &notes_part,
+            &notes_placeholder(r#"type="sldNum" sz="quarter""#),
+        );
+        let report = absent_several.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.update.location.owner_part == notes_part
+                    && frame.update.location.child_path == [2]
+            })
+            .unwrap();
+        let reason = "notes placeholder has no idx, and 2 notes-master placeholders have its type";
+        assert_eq!(frame.update.status, "unsupported");
+        assert_eq!(
+            frame
+                .update
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message == reason)
+                .count(),
+            1
+        );
+        // An unresolved key supplies no cannot-assess cause when the physical
+        // text frame is empty. Keep both keyed and unkeyed fallback controls.
+        for (candidate, reason) in [
+            (
+                &several,
+                "notes placeholder idx 10 matches no notes-master placeholder, and 2 notes-master placeholders have its type",
+            ),
+            (
+                &absent_several,
+                "notes placeholder has no idx, and 2 notes-master placeholders have its type",
+            ),
+        ] {
+            let empty = edited(candidate, &notes_part, &|xml| {
+                xml.replace("<a:r><a:t>1</a:t></a:r>", "")
+            });
+            let before = empty.to_bytes().unwrap();
+            let report = empty.fit_report(&[]).unwrap();
+            let frames = report
+                .frames
+                .iter()
+                .filter(|frame| {
+                    frame.update.location.owner_part == notes_part
+                        && frame.update.location.child_path == [2]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(frames.len(), 1);
+            let frame = frames[0];
+            assert_eq!(frame.update.status, "empty");
+            assert!(!frame.overflow);
+            assert!(frame.needed_scale.is_none());
+            assert!(
+                frame
+                    .update
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.message != reason),
+                "{frame:?}"
+            );
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.message != reason)
+            );
+            assert_eq!(empty.to_bytes().unwrap(), before);
+        }
+
+        let mut mutated = absent_several.clone();
+        let error = mutated.refresh_autofit(&[]).unwrap_err().to_string();
+        assert!(
+            error.contains("ambiguous notes placeholder geometry"),
+            "{error}"
+        );
+        assert_eq!(
+            mutated.to_bytes().unwrap(),
+            absent_several.to_bytes().unwrap()
+        );
+
+        let zero = edited(
+            &deck,
+            &notes_part,
+            &notes_placeholder(r#"type="dgm" idx="10" sz="quarter""#),
+        );
+        let report = zero.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.update.location.owner_part == notes_part
+                    && frame.update.location.child_path == [2]
+            })
+            .unwrap();
+        assert_eq!(
+            frame.update.diagnostics.iter().filter(|d| d.message == "notes placeholder idx 10 matches no notes-master placeholder, and no notes-master placeholder has its type").count(),
+            1
+        );
+
+        let absent_zero = edited(
+            &deck,
+            &notes_part,
+            &notes_placeholder(r#"type="dgm" sz="quarter""#),
+        );
+        let report = absent_zero.fit_report(&[]).unwrap();
+        let frame = report
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.update.location.owner_part == notes_part
+                    && frame.update.location.child_path == [2]
+            })
+            .unwrap();
+        assert_eq!(
+            frame
+                .update
+                .diagnostics
+                .iter()
+                .filter(|d| d.message
+                    == "notes placeholder has no idx, and no notes-master placeholder has its type")
+                .count(),
+            1
+        );
+
+        // Two master keys that match each other stay a checked collection error.
+        let collision = edited(&deck, &notes_master_part, &|xml| {
+            let start = xml.find(r#"<p:sp><p:nvSpPr><p:cNvPr id="7""#).unwrap();
+            let end = start + xml[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+            let block = &xml[start..end];
+            let duplicate = block.replacen(r#"id="7""#, r#"id="8""#, 1);
+            xml.replace("</p:spTree>", &format!("{duplicate}</p:spTree>"))
+        });
+        assert!(collision.fit_report(&[]).is_err());
+        assert!(collision.to_notes_pdf_deterministic().is_err());
+        assert_eq!(source, deck.to_bytes().unwrap());
     }
 
     #[cfg(feature = "render")]
@@ -42680,4 +44782,66 @@ fn issue389_local_edits_do_not_scale_with_unrelated_package() {
             .unwrap();
         assert_eq!(fx260_slide_scans(), 1, "xml slides={slides}");
     }
+}
+
+#[test]
+fn issue435_unstyled_shape_route_refuses_a_negative_size() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let before = presentation.to_bytes().unwrap();
+
+    let error = match presentation.slide_mut(0).unwrap().add_unstyled_shape(
+        "rect",
+        Emu(1),
+        Emu(2),
+        Emu(-3),
+        Emu(4),
+    ) {
+        Ok(_) => panic!("negative unstyled width was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got -3 by 4 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_unstyled_shape("rect", Emu(-1), Emu(-2), Emu(0), Emu(0))
+        .unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_unstyled_shape("rect", Emu(10), Emu(20), Emu(300), Emu(400))
+        .unwrap();
+    let children = &presentation.slides[0]
+        .slide
+        .common_slide_data
+        .shape_tree
+        .children;
+    assert_eq!(children.len(), 2);
+    for (index, child) in children.iter().enumerate() {
+        let ShapeTreeChild::Shape(shape) = child else {
+            panic!("expected an unstyled preset shape at {index}");
+        };
+        assert!(shape.style().is_none(), "unstyled route introduced a style");
+    }
+    let transform = |index: usize| {
+        let ShapeTreeChild::Shape(shape) = &children[index] else {
+            panic!("expected an unstyled preset shape at {index}");
+        };
+        shape.shape_properties.transform.as_ref().unwrap()
+    };
+    assert_eq!(transform(0).offset.unwrap().x, Emu(-1));
+    assert_eq!(transform(0).offset.unwrap().y, Emu(-2));
+    assert_eq!(transform(0).extent.unwrap().cx, Emu(0));
+    assert_eq!(transform(0).extent.unwrap().cy, Emu(0));
+    assert_eq!(transform(1).extent.unwrap().cx, Emu(300));
+    assert_eq!(transform(1).extent.unwrap().cy, Emu(400));
 }

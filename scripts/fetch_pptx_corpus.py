@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
+import http.client
 import os
 from pathlib import Path
+import socket
+import ssl
 import sys
+import time
+import urllib.error
 import urllib.request
 
 
@@ -71,6 +77,83 @@ def verify_directory(output: Path, entries: list[tuple[str, str, str, str]]) -> 
             )
 
 
+def _retryable_transport(error: Exception) -> tuple[bool, urllib.error.HTTPError | None]:
+    seen: set[int] = set()
+    while isinstance(error, urllib.error.URLError) and not isinstance(error, urllib.error.HTTPError):
+        if id(error) in seen or not isinstance(error.reason, Exception):
+            return False, None
+        seen.add(id(error))
+        error = error.reason
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {429, 500, 502, 503, 504}, error
+    if isinstance(error, (ssl.SSLError, ssl.CertificateError)):
+        return False, None
+    if isinstance(error, socket.gaierror):
+        return error.errno == socket.EAI_AGAIN, None
+    if isinstance(error, (TimeoutError, ConnectionResetError, ConnectionAbortedError,
+                          ConnectionRefusedError, http.client.RemoteDisconnected,
+                          http.client.IncompleteRead)):
+        return True, None
+    transient_errnos = {getattr(errno, name) for name in (
+        "ETIMEDOUT", "ECONNRESET", "ECONNABORTED", "ECONNREFUSED",
+        "ENETRESET", "ENETUNREACH", "EHOSTUNREACH",
+    ) if hasattr(errno, name)}
+    return isinstance(error, OSError) and error.errno in transient_errnos, None
+
+
+def _fetch_subject(destination: Path, expected_digest: str, url: str) -> None:
+    temporary = destination.with_name(f".{destination.name}.download")
+    for attempt in range(1, 4):
+        owned = False
+        transport_error = None
+        retryable = False
+        error_response = None
+        request = urllib.request.Request(url, headers={"User-Agent": "rdocx-corpus-fetcher/1"})
+        try:
+            stream = temporary.open("xb")
+            owned = True
+            with stream:
+                try:
+                    response = urllib.request.urlopen(request, timeout=60)
+                except Exception as error:
+                    transport_error = error
+                    retryable, error_response = _retryable_transport(error)
+                    print(f"{destination.name} attempt {attempt}/3: {error!r}", file=sys.stderr)
+                else:
+                    with response:
+                        while True:
+                            try:
+                                chunk = response.read(1024 * 1024)
+                            except Exception as error:
+                                transport_error = error
+                                retryable, error_response = _retryable_transport(error)
+                                print(f"{destination.name} attempt {attempt}/3: {error!r}", file=sys.stderr)
+                                break
+                            if not chunk:
+                                break
+                            stream.write(chunk)
+            if transport_error is None:
+                actual_digest = file_digest(temporary)
+                if actual_digest != expected_digest:
+                    raise ValueError(
+                        f"digest mismatch for {destination.name}: {actual_digest}, expected {expected_digest}"
+                    )
+                os.replace(temporary, destination)
+                owned = False
+                print(f"fetched {destination.name}")
+                return
+        finally:
+            try:
+                if error_response is not None:
+                    error_response.close()
+            finally:
+                if owned:
+                    temporary.unlink(missing_ok=True)
+        if not retryable or attempt == 3:
+            raise transport_error
+        time.sleep(attempt)
+
+
 def fetch(output: Path, entries: list[tuple[str, str, str, str]]) -> None:
     output.mkdir(parents=True, exist_ok=True)
     expected = {entry[0] for entry in entries}
@@ -82,23 +165,7 @@ def fetch(output: Path, entries: list[tuple[str, str, str, str]]) -> None:
         if destination.is_file() and file_digest(destination) == expected_digest:
             print(f"verified {relative_path}")
             continue
-        temporary = output / f".{relative_path}.download"
-        request = urllib.request.Request(url, headers={"User-Agent": "rdocx-corpus-fetcher/1"})
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open(
-                "wb"
-            ) as stream:
-                while chunk := response.read(1024 * 1024):
-                    stream.write(chunk)
-            actual_digest = file_digest(temporary)
-            if actual_digest != expected_digest:
-                raise ValueError(
-                    f"digest mismatch for {relative_path}: {actual_digest}, expected {expected_digest}"
-                )
-            os.replace(temporary, destination)
-            print(f"fetched {relative_path}")
-        finally:
-            temporary.unlink(missing_ok=True)
+        _fetch_subject(destination, expected_digest, url)
     verify_directory(output, entries)
 
 

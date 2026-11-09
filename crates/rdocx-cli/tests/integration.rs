@@ -69,6 +69,26 @@ fn assert_success(output: &Output, command: &str) {
     );
 }
 
+/// Asserts success and that stderr carries only font-substitution facts.
+fn assert_success_with_font_diagnostics(output: &Output, command: &str) -> String {
+    assert!(
+        output.status.success(),
+        "{command} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    for line in stderr.lines() {
+        assert!(
+            line.starts_with("Font '")
+                && line.contains("' substituted: selected '")
+                && line.ends_with(" tier"),
+            "{command} wrote an unexpected diagnostic: {line}"
+        );
+    }
+    stderr
+}
+
 /// Asserts that `args` refuses to replace an existing `output` and leaves it
 /// byte-identical, and that the same command with `--force` replaces it.
 fn assert_existing_output_needs_force(args: &[&str], output: &Path) {
@@ -85,7 +105,13 @@ fn assert_existing_output_needs_force(args: &[&str], output: &Path) {
     assert_eq!(fs::read(output).unwrap(), b"keep me");
 
     let forced = [args, &["--force"]].concat();
-    assert_success(&cli(&forced), &forced.join(" "));
+    let diagnostics = assert_success_with_font_diagnostics(&cli(&forced), &forced.join(" "));
+    assert!(
+        diagnostics.is_empty()
+            || diagnostics
+                == "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n",
+        "{diagnostics}"
+    );
     assert_ne!(fs::read(output).unwrap(), b"keep me");
     assert!(
         fs::read_dir(output.parent().unwrap())
@@ -320,7 +346,7 @@ fn inspect_json_uses_the_shared_schema() {
             "count_scope": "accepted-main-body",
             "character_include_spaces": true,
             "page_count_source": "deterministic-layout",
-            "diagnostics": [],
+            "diagnostics": ["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
             "pictures": [],
         })
     );
@@ -577,7 +603,7 @@ fn text_views_read_every_story_after_the_body() {
          --- header (/word/header1.xml) ---\nHeader NEEDLE\n\
          --- footer (/word/footer1.xml) ---\nFooter NEEDLE\n\nFooter cell NEEDLE\n\
          --- footer (/word/footerFirst1.xml) ---\nFirst footer NEEDLE\n\
-         --- footnote (/word/footnotes.xml) ---\nFootnote NEEDLE.\n\
+         --- footnote (/word/footnotes.xml) ---\n Footnote NEEDLE.\n\
          --- endnote (/word/endnotes.xml) ---\n Endnote NEEDLE.\n"
     );
 
@@ -627,7 +653,7 @@ fn text_views_read_every_story_after_the_body() {
             story(
                 "footnote",
                 "/word/footnotes.xml",
-                json!([paragraph(0, "Footnote NEEDLE.")])
+                json!([paragraph(0, " Footnote NEEDLE.")])
             ),
             story(
                 "endnote",
@@ -996,7 +1022,10 @@ fn convert_writes_valid_formats_and_uses_the_shared_default_output() {
         "--output",
         path_text(&pdf),
     ]);
-    assert_success(&output, "convert PDF");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&output, "convert PDF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("Written to {}\n", pdf.display())
@@ -1016,7 +1045,10 @@ fn convert_writes_valid_formats_and_uses_the_shared_default_output() {
         "--output",
         path_text(&png),
     ]);
-    assert_success(&output, "convert PNG");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&output, "convert PNG"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!("Written to {}\n", png.display())
@@ -1281,8 +1313,8 @@ fn diff_compares_headers_footers_notes_and_comments() {
         diff_body(&before, &after),
         "- [header default, section 1, paragraph 1] Header alpha\n\
          + [header default, section 1, paragraph 1] Header beta\n\
-         - [footnote 1, paragraph 1] Footnote alpha\n\
-         + [footnote 1, paragraph 1] Footnote beta\n\
+         - [footnote 1, paragraph 1]  Footnote alpha\n\
+         + [footnote 1, paragraph 1]  Footnote beta\n\
          - [comment 1, paragraph 1] Comment alpha\n\
          + [comment 1, paragraph 1] Comment beta\n\
          \n3 paragraph(s) changed, 0 added, 0 removed.\n"
@@ -2038,12 +2070,12 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         ),
         (
             "inserted-drawing",
-            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            "<w:ins w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:ins>",
             false,
         ),
         (
             "moved-away-drawing",
-            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            "<w:moveFrom w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:moveFrom>",
             true,
         ),
         (
@@ -2066,7 +2098,7 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         ),
         (
             "deleted",
-            "<w:del><w:r><w:delText>deleted</w:delText><w:drawing/></w:r></w:del>",
+            "<w:del w:id=\"9\" w:author=\"Fixture\"><w:r><w:delText>deleted</w:delText><w:drawing/></w:r></w:del>",
             true,
         ),
         (
@@ -2090,6 +2122,31 @@ fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings(
         let input = temp.path.join(format!("{label}.docx"));
         write_document(&input, &["CONTENT"]);
         rewrite_run(&input, "CONTENT", |_| fragment.to_owned());
+        if let Some((kind, relationship_type)) = match label {
+            "footnote" => Some(("footnote", rel_types::FOOTNOTES)),
+            "endnote" => Some(("endnote", rel_types::ENDNOTES)),
+            _ => None,
+        } {
+            let mut package = OpcPackage::open(&input).unwrap();
+            let part = format!("/word/{kind}s.xml");
+            package.set_part(
+                &part,
+                format!(
+                    r#"<w:{kind}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:{kind} w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:{kind}></w:{kind}s>"#,
+                )
+                .into_bytes(),
+            );
+            package.content_types.add_override(
+                &part,
+                &format!(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}s+xml"
+                ),
+            );
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, &format!("{kind}s.xml"));
+            package.save(&input).unwrap();
+        }
         let before = fs::read(&input).unwrap();
         let output = cli(&["validate", path_text(&input)]);
         assert_success(&output, label);
@@ -2210,17 +2267,17 @@ fn validation_qualified_display_content_and_field_controls_preserve_source() {
         ),
         (
             "deleted-drawing",
-            "<w:del><w:r><w:drawing/></w:r></w:del>",
+            "<w:del w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:del>",
             false,
         ),
         (
             "moved-away",
-            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            "<w:moveFrom w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:moveFrom>",
             false,
         ),
         (
             "inserted-drawing",
-            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            "<w:ins w:id=\"9\" w:author=\"Fixture\"><w:r><w:drawing/></w:r></w:ins>",
             true,
         ),
         (
@@ -2341,12 +2398,12 @@ fn validation_qualified_display_content_and_field_controls_preserve_source() {
         ),
         (
             "inserted-loose-marker",
-            r#"<w:ins><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:ins>"#,
+            r#"<w:ins w:id="9" w:author="Fixture"><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:ins>"#,
             false,
         ),
         (
             "deleted-loose-marker",
-            r#"<w:del><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del>"#,
+            r#"<w:del w:id="9" w:author="Fixture"><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del>"#,
             false,
         ),
         (
@@ -2454,9 +2511,10 @@ fn validation_preserves_recursive_block_control_and_table_paragraph_scope() {
         "</w:sdtContent></w:sdt>",
         "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p/></w:tc></w:tr></w:tbl>",
     );
+    assert_eq!(xml.matches("<w:sectPr").count(), 1);
     package.set_part(
         &part,
-        xml.replace("</w:body>", &format!("{controls}</w:body>"))
+        xml.replacen("<w:sectPr", &format!("{controls}<w:sectPr"), 1)
             .into_bytes(),
     );
     package.save(&input).unwrap();
@@ -2537,9 +2595,10 @@ fn validation_ignores_opaque_content_control_slots() {
         let mut package = OpcPackage::open(&input).unwrap();
         let part = package.main_document_part().unwrap();
         let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+        assert_eq!(xml.matches("<w:sectPr").count(), 1);
         package.set_part(
             &part,
-            xml.replace("</w:body>", &format!("{control}</w:body>"))
+            xml.replacen("<w:sectPr", &format!("{control}<w:sectPr"), 1)
                 .into_bytes(),
         );
         package.save(&input).unwrap();
@@ -2667,7 +2726,7 @@ fn validate_rejects_malformed_related_parts_and_undefined_style_ids() {
         (
             "/word/settings.xml",
             "end tag",
-            "the part ends inside 1 unclosed element(s)",
+            "expected exactly one complete root element",
         ),
     ] {
         let broken = temp.path.join("broken.docx");
@@ -2705,7 +2764,7 @@ fn validate_rejects_malformed_related_parts_and_undefined_style_ids() {
     let output = cli(&["validate", path_text(&broken)]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains(&format!(
-        "part {header} is not well-formed XML: the part has CDATA outside its root element"
+        "part {header} is not well-formed XML: text outside root element"
     )));
 
     // Undefined paragraph, table, and character style ids in the body and a
@@ -2792,7 +2851,12 @@ fn render_uses_the_bundled_font_deterministic_path() {
         "--page",
         "0",
     ]);
-    assert_success(&selected_output, "render selected page");
+    let selected_stderr =
+        assert_success_with_font_diagnostics(&selected_output, "render selected page");
+    assert_eq!(
+        selected_stderr,
+        "Font 'Helvetica Neue' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let selected_png = first_dir.join("visible_page1.png");
     let selected_bytes = fs::read(&selected_png).unwrap();
     assert_eq!(
@@ -2815,7 +2879,11 @@ fn render_uses_the_bundled_font_deterministic_path() {
         "--dpi",
         "24",
     ]);
-    assert_success(&all_output, "render all pages");
+    let all_stderr = assert_success_with_font_diagnostics(&all_output, "render all pages");
+    assert_eq!(
+        all_stderr,
+        "Font 'Helvetica Neue' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let all_png = second_dir.join("visible_page1.png");
     let all_bytes = fs::read(&all_png).unwrap();
     assert_eq!(
@@ -2850,6 +2918,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
         .to_pdf_with_options(RenderOptions {
             revision_view: RevisionView::Tracked,
             revision_style: RevisionStyle::Plain,
+            use_system_fonts: false,
         })
         .unwrap();
     assert_ne!(accepted_pdf, tracked_pdf);
@@ -2865,7 +2934,10 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
             "--revision-view",
             view,
         ]);
-        assert_success(&result, view);
+        assert_eq!(
+            assert_success_with_font_diagnostics(&result, view),
+            "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+        );
         assert_eq!(fs::read(&output).unwrap(), expected);
     }
     let invalid = temp.path.join("invalid.pdf");
@@ -2902,6 +2974,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
             RenderOptions {
                 revision_view: RevisionView::Tracked,
                 revision_style: RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         )
         .unwrap()
@@ -2917,7 +2990,10 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
         "--revision-view",
         "tracked",
     ]);
-    assert_success(&result, "tracked render");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "tracked render"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         fs::read(rendered.join("redline_page1.png")).unwrap(),
         tracked_png
@@ -2941,6 +3017,7 @@ fn cli_revision_style_colours_the_tracked_view_only() {
     let legal = RenderOptions {
         revision_view: RevisionView::Tracked,
         revision_style: RevisionStyle::Legal,
+        use_system_fonts: false,
     };
     let legal_pdf = opened.to_pdf_with_options(legal).unwrap();
     assert_ne!(
@@ -2965,7 +3042,10 @@ fn cli_revision_style_colours_the_tracked_view_only() {
         "--revision-style",
         "legal",
     ]);
-    assert_success(&result, "legal convert");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "legal convert"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(fs::read(&output).unwrap(), legal_pdf);
 
     let legal_png = opened
@@ -2985,7 +3065,10 @@ fn cli_revision_style_colours_the_tracked_view_only() {
         "--revision-style",
         "legal",
     ]);
-    assert_success(&result, "legal render");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "legal render"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert_eq!(
         fs::read(rendered.join("redline_page1.png")).unwrap(),
         legal_png
@@ -3058,7 +3141,10 @@ fn render_page_and_pages_flags_keep_legacy_and_range_indexing_separate() {
         "--page",
         "1",
     ]);
-    assert_success(&legacy, "render zero-based legacy page");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&legacy, "render zero-based legacy page"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let legacy_png = page_dir.join("pages_page2.png");
     assert_eq!(fs::read(&legacy_png).unwrap(), expected);
     assert_eq!(
@@ -3080,7 +3166,10 @@ fn render_page_and_pages_flags_keep_legacy_and_range_indexing_separate() {
         "--pages",
         "2",
     ]);
-    assert_success(&ranged, "render one-based page range");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&ranged, "render one-based page range"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let ranged_png = pages_dir.join("pages_page2.png");
     assert_eq!(fs::read(&ranged_png).unwrap(), expected);
     assert_eq!(
@@ -3146,7 +3235,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--pages",
         "2",
     ]);
-    assert_success(&converted, "convert selected JPEG");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&converted, "convert selected JPEG"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let jpeg = input.with_extension("jpg");
     let expected = Document::open(&input)
         .unwrap()
@@ -3174,7 +3266,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--output",
         path_text(&temp.path.join("all.png")),
     ]);
-    assert_success(&default_all, "convert all deterministic PNG pages");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&default_all, "convert all deterministic PNG pages"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     for one_based in 1..=3 {
         assert!(
             temp.path.join(format!("all_{one_based:03}.png")).exists(),
@@ -3194,7 +3289,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--pages",
         "1,3",
     ]);
-    assert_success(&rendered, "render selected TIFF");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&rendered, "render selected TIFF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert!(
         fs::read(temp.path.join("tiff-out/pages.tiff"))
             .unwrap()
@@ -3377,6 +3475,7 @@ fn cli_collaboration_commands_are_schema_stable_and_atomic() {
                     "author": "Alice",
                     "timestamp": "2026-09-13T12:00:00Z",
                     "kind": "deletion",
+                    "text": "Comment target",
                     "story": {
                         "kind": "body",
                         "part_name": "/word/document.xml",
@@ -3388,6 +3487,7 @@ fn cli_collaboration_commands_are_schema_stable_and_atomic() {
                     "author": "Alice",
                     "timestamp": "2026-09-13T12:00:00Z",
                     "kind": "insertion",
+                    "text": "Edited target",
                     "story": {
                         "kind": "body",
                         "part_name": "/word/document.xml",
@@ -3553,8 +3653,11 @@ fn comment_commands_round_trip_one_resolved_thread() {
                     "text": "Agreed",
                     "parent_id": 0,
                     "resolved": false,
-                    "anchor_text": null,
-                    "anchor": null,
+                    "anchor_text": "Comment target",
+                    "anchor": {
+                        "start": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 0, "direct_body_index": 0 },
+                        "end": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 2, "direct_body_index": 0 },
+                    },
                     "anchor_issue": null,
                 },
             ],
@@ -3696,6 +3799,71 @@ fn comment_anchor_selects_second_occurrence_and_reopens() {
     assert_success(&result, "comment add --anchor");
     let reopened = Document::open(&output).unwrap();
     assert_eq!(reopened.comments()[0].text(), "note");
+}
+
+#[test]
+fn issue434_reply_range_and_initials() {
+    let temp = TempWorkspace::new("issue434-reply");
+    let input = temp.path.join("input.docx");
+    let mut seed = Document::new();
+    seed.add_paragraph("thirty");
+    let root = seed
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    seed.save(&input).unwrap();
+    for (label, initials) in [("omitted", None), ("empty", Some("")), ("value", Some("B"))] {
+        let output = temp.path.join(format!("{label}.docx"));
+        let parent_id = root.to_string();
+        let mut args = vec![
+            "comment",
+            "reply",
+            path_text(&input),
+            "--id",
+            &parent_id,
+            "--author",
+            "Ben",
+            "--text",
+            "reply",
+            "--output",
+            path_text(&output),
+            "--json",
+        ];
+        if let Some(value) = initials {
+            args.extend(["--initials", value]);
+        }
+        let actual = cli(&args);
+        assert_success(&actual, "reply initials");
+        let reread = Document::open(&output).unwrap();
+        let comments = reread.comments();
+        let reply = comments
+            .iter()
+            .find(|item| item.parent_id() == Some(root))
+            .unwrap();
+        assert_eq!(reply.initials(), initials);
+        assert_eq!(
+            reread.comment_anchor_text(reply.id()).unwrap().as_deref(),
+            Some("thirty")
+        );
+        let record: Value = serde_json::from_slice(&actual.stdout).unwrap();
+        assert_eq!(record["action"], "reply");
+    }
+    let output = temp.path.join("invalid.docx");
+    fs::write(&output, b"unchanged").unwrap();
+    let actual = cli(&[
+        "comment",
+        "reply",
+        path_text(&input),
+        "--id",
+        "999",
+        "--author",
+        "Ben",
+        "--text",
+        "reply",
+        "--output",
+        path_text(&output),
+    ]);
+    assert_eq!(actual.status.code(), Some(1));
+    assert_eq!(fs::read(output).unwrap(), b"unchanged");
 }
 
 #[test]
@@ -7396,4 +7564,1576 @@ fn issue390_comment_resolution_preserves_unknown_state() {
     let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(value["comments"][0]["resolved"], json!(false));
     assert_eq!(value["comments"][0]["id"], json!(id));
+}
+
+#[test]
+fn issue425_compare_keeps_the_revisions_of_an_earlier_redline() {
+    let temp = TempWorkspace::new("issue425-compare-redline");
+    let first = temp.path.join("first.docx");
+    let second = temp.path.join("second.docx");
+    let redline = temp.path.join("redline.docx");
+    let edited = temp.path.join("edited.docx");
+    let refused = temp.path.join("refused.docx");
+    let combined = temp.path.join("combined.docx");
+    let refused_output = temp.path.join("refused-output.docx");
+    write_document(&first, &["Reviewed once.", "Edited later."]);
+    write_document(&second, &["Reviewed twice.", "Edited later."]);
+    let compare = |original: &Path, edited: &Path, author: &str, output: &Path| {
+        cli(&[
+            "compare",
+            path_text(original),
+            path_text(edited),
+            "--author",
+            author,
+            "--timestamp",
+            COMPARE_TIMESTAMP,
+            "--output",
+            path_text(output),
+            "--json",
+        ])
+    };
+    let first_review = compare(&first, &second, "Alice", &redline);
+    assert_success(&first_review, "first compare");
+    let edit_redline = |from: &str, to: &str, output: &Path| {
+        let mut package = OpcPackage::open(&redline).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .replacen(from, to, 1);
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(output).unwrap();
+    };
+    edit_redline(">Edited later.<", ">Edited again.<", &edited);
+    edit_redline(">Reviewed twice.<", ">Reviewed thrice.<", &refused);
+
+    let second_review = compare(&redline, &edited, "Bob", &combined);
+    assert_success(&second_review, "second compare");
+    let record: Value = serde_json::from_slice(&second_review.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    assert_eq!(record["main_story_revisions"], json!(2));
+    let authors = Document::open(&combined)
+        .unwrap()
+        .revisions()
+        .iter()
+        .map(|revision| revision.author().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(authors, ["Alice", "Alice", "Bob", "Bob"]);
+    let alice = |path: &Path| {
+        let package = OpcPackage::open(path).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .to_owned();
+        let mut reader = quick_xml::NsReader::from_str(&xml);
+        let mut depth = 0usize;
+        let mut selected = None;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let (namespace, event) = reader.read_resolved_event().unwrap();
+            match event {
+                quick_xml::events::Event::Start(element) => {
+                    if selected.is_none()
+                        && element.local_name().as_ref() == b"p"
+                        && namespace
+                            == quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                                b"http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                            ))
+                    {
+                        selected = Some((before, depth));
+                    }
+                    depth += 1;
+                }
+                quick_xml::events::Event::End(_) => {
+                    depth -= 1;
+                    if let Some((start, owner_depth)) = selected
+                        && depth == owner_depth
+                    {
+                        break xml[start..reader.buffer_position() as usize].to_owned();
+                    }
+                }
+                quick_xml::events::Event::Eof => panic!("missing first Word paragraph: {xml}"),
+                _ => {}
+            }
+        }
+    };
+    assert!(alice(&redline).contains(r#"w:author="Alice""#));
+    assert_eq!(alice(&combined), alice(&redline));
+
+    let human_output = temp.path.join("human.docx");
+    let human_review = cli(&[
+        "compare",
+        path_text(&redline),
+        path_text(&edited),
+        "--author",
+        "Bob",
+        "--timestamp",
+        COMPARE_TIMESTAMP,
+        "--output",
+        path_text(&human_output),
+    ]);
+    assert_success(&human_review, "human second compare");
+    assert!(
+        String::from_utf8_lossy(&human_review.stdout).contains("Created 2 revision element(s)")
+    );
+
+    let same_author = temp.path.join("same-author.docx");
+    let same_review = compare(&redline, &edited, "Alice", &same_author);
+    assert_success(&same_review, "same author second compare");
+    let same_record: Value = serde_json::from_slice(&same_review.stdout).unwrap();
+    assert_eq!(same_record["revisions"], json!(2));
+    assert_eq!(same_record["main_story_revisions"], json!(2));
+    assert_eq!(Document::open(&same_author).unwrap().revisions().len(), 4);
+
+    let unchanged = temp.path.join("unchanged.docx");
+    let no_review = compare(&redline, &redline, "Alice", &unchanged);
+    assert_success(&no_review, "identical redline compare");
+    let no_record: Value = serde_json::from_slice(&no_review.stdout).unwrap();
+    assert_eq!(no_record["revisions"], json!(0));
+    assert_eq!(no_record["main_story_revisions"], json!(0));
+    assert_eq!(alice(&unchanged), alice(&redline));
+
+    let failed = compare(&redline, &refused, "Bob", &refused_output);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "comparison cannot replace body/paragraph[0] whole, because it holds an existing tracked revision"
+        ),
+        "{stderr}"
+    );
+    assert!(!refused_output.exists());
+
+    let property_original = temp.path.join("property-original.docx");
+    let property_edited = temp.path.join("property-edited.docx");
+    let property_output = temp.path.join("property-output.docx");
+    for (value, path) in [("before", &property_original), ("after", &property_edited)] {
+        let mut package = OpcPackage::open(&redline).unwrap();
+        let mut xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .to_owned();
+        let start = xml.find("<w:p").unwrap();
+        let at = start + xml[start..].find('>').unwrap() + 1;
+        xml.insert_str(
+            at,
+            &format!(
+                r#"<w:pPr xmlns:v="urn:producer" v:note="{value}"><w:jc w:val="left"/></w:pPr>"#
+            ),
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(path).unwrap();
+    }
+    let property_before = fs::read(&property_original).unwrap();
+    let property_edited_before = fs::read(&property_edited).unwrap();
+    let failed = compare(
+        &property_original,
+        &property_edited,
+        "Bob",
+        &property_output,
+    );
+    assert!(
+        !failed.status.success(),
+        "protected source edit succeeded, output_exists={}, stdout={}",
+        property_output.exists(),
+        String::from_utf8_lossy(&failed.stdout)
+    );
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("body/paragraph[0]"));
+    assert!(failed.stdout.is_empty());
+    assert!(!property_output.exists());
+    assert_eq!(fs::read(&property_original).unwrap(), property_before);
+    assert_eq!(fs::read(&property_edited).unwrap(), property_edited_before);
+
+    // The documented workaround resolves independent copies before comparison.
+    let preserved_redline = fs::read(&redline).unwrap();
+    let preserved_edited = fs::read(&refused).unwrap();
+    let resolved_original = temp.path.join("resolved-original.docx");
+    let resolved_edited = temp.path.join("resolved-edited.docx");
+    let workaround_output = temp.path.join("workaround-review.docx");
+    for (input, output) in [(&redline, &resolved_original), (&refused, &resolved_edited)] {
+        let resolved = cli(&[
+            "revision",
+            "accept",
+            path_text(input),
+            "--author",
+            "Alice",
+            "--output",
+            path_text(output),
+            "--json",
+        ]);
+        assert_success(&resolved, "checked workaround resolution");
+        assert!(
+            Document::open(output)
+                .unwrap()
+                .story_revisions()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let workaround = compare(
+        &resolved_original,
+        &resolved_edited,
+        "Bob",
+        &workaround_output,
+    );
+    assert_success(&workaround, "checked workaround compare");
+    let record: Value = serde_json::from_slice(&workaround.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    let mut accepted = Document::open(&workaround_output).unwrap();
+    assert_eq!(accepted.accept_all().unwrap(), 2);
+    assert!(accepted.text().contains("Reviewed thrice."));
+    assert!(!accepted.text().contains("Reviewed twice."));
+    let mut rejected = Document::open(&workaround_output).unwrap();
+    assert_eq!(rejected.reject_all().unwrap(), 2);
+    assert!(rejected.text().contains("Reviewed twice."));
+    assert!(!rejected.text().contains("Reviewed thrice."));
+    assert_eq!(fs::read(&redline).unwrap(), preserved_redline);
+    assert_eq!(fs::read(&refused).unwrap(), preserved_edited);
+}
+
+#[test]
+fn issue425_new_counts_keep_ignored_textbox_identity_separate_from_body() {
+    let temp = TempWorkspace::new("issue425-ignored-counts");
+    let original = temp.path.join("original.docx");
+    let edited = temp.path.join("edited.docx");
+    let output = temp.path.join("output.docx");
+    let human_output = temp.path.join("human.docx");
+    let held = format!(
+        r#"<w:txbxContent><w:p><w:ins w:id="0" w:author="Ada" w:date="{COMPARE_TIMESTAMP}"><w:r><w:t>held box</w:t></w:r></w:ins></w:p></w:txbxContent>"#
+    );
+    for (path, text) in [(&original, "before"), (&edited, "after")] {
+        write_document(path, &["seed"]);
+        let mut package = OpcPackage::open(path).unwrap();
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:r><w:pict><v:shape id="box" style="width:100pt;height:50pt"><v:textbox>{held}</v:textbox></v:shape></w:pict></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(path).unwrap();
+    }
+    let original_bytes = fs::read(&original).unwrap();
+    let edited_bytes = fs::read(&edited).unwrap();
+    let run = |path: &Path, json_output: bool| {
+        let mut args = vec![
+            "compare",
+            path_text(&original),
+            path_text(&edited),
+            "--author",
+            "Ada",
+            "--timestamp",
+            COMPARE_TIMESTAMP,
+            "--ignore-story",
+            "text_box",
+            "--output",
+            path_text(path),
+        ];
+        if json_output {
+            args.push("--json");
+        }
+        cli(&args)
+    };
+    let json_result = run(&output, true);
+    let human_result = run(&human_output, false);
+    assert_success(&json_result, "ignored box JSON compare");
+    assert_success(&human_result, "ignored box human compare");
+    for path in [&output, &human_output] {
+        assert!(package_part_text(path, "/word/document.xml").contains(&held));
+        let revisions = Document::open(path).unwrap().story_revisions().unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .filter(|r| r.story().kind() == rdocx::StoryKind::TextBox)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(fs::read(&original).unwrap(), original_bytes);
+    assert_eq!(fs::read(&edited).unwrap(), edited_bytes);
+    let record: Value = serde_json::from_slice(&json_result.stdout).unwrap();
+    let human = String::from_utf8(human_result.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    assert_eq!(record["main_story_revisions"], json!(2));
+    assert!(
+        record["stories"]
+            == json!([{"kind":"body", "part_name":"/word/document.xml", "owner_index":0, "revisions":2}])
+            && human.contains("Created 2 revision element(s) in 1 story(ies)")
+            && human.contains("body\t/word/document.xml\t0\t2")
+            && !human.contains("text-box"),
+        "JSON={record}, human={human}"
+    );
+}
+
+#[test]
+fn issue426_toc_cli_keeps_all_original_switch_controls_and_styled_omission() {
+    let temp = TempWorkspace::new("issue426-toc");
+    for (case, merged, outline, styled) in [
+        (0, false, false, false),
+        (1, false, true, false),
+        (2, true, false, false),
+        (3, true, true, false),
+        (4, true, false, true),
+    ] {
+        let input = temp.path.join(format!("input{case}.docx"));
+        let output = temp.path.join(format!("output{case}.docx"));
+        let mut document = fixture_document(&[]);
+        document
+            .set_style(
+                rdocx::StyleBuilder::paragraph("Heading1", "Heading 1").paragraph_properties(
+                    rdocx_oxml::properties::CT_PPr {
+                        outline_lvl: Some(0),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .unwrap();
+        document.save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let first = if merged {
+            r#"<w:tcPr><w:vMerge w:val="restart"/></w:tcPr>"#
+        } else {
+            ""
+        };
+        let second = if merged {
+            "<w:tcPr><w:vMerge/></w:tcPr>"
+        } else {
+            ""
+        };
+        let style = if styled {
+            r#"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#
+        } else {
+            ""
+        };
+        let instruction = if outline {
+            r#"TOC \o "1-2" \h \u"#
+        } else {
+            r#"TOC \o "1-2" \h"#
+        };
+        let heading = |text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>OLD TOC</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>{}<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>{first}<w:p><w:r><w:t>cell 00</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc>{second}<w:p>{style}<w:r><w:t>cell 10</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+            heading("First section"),
+            heading("Second section")
+        );
+        package.set_part("/word/document.xml",format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "toc",
+            "rebuild",
+            path_text(&input),
+            "--output",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, &format!("issue426 case{case}"));
+        let json: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["entry_count"], 2);
+        let mut reopened = Document::open(&output).unwrap();
+        let entries = reopened
+            .paragraphs()
+            .into_iter()
+            .filter(|p| p.style_id().is_some_and(|style| style.starts_with("TOC")))
+            .map(|p| p.text().split('\t').next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["First section", "Second section"]);
+        assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 2);
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn issue424_cli_layout_and_pdf_clear_five_spaced_normal_paragraphs_and_logo_table() {
+    let temp = TempWorkspace::new("issue424-logo");
+    let input = temp.path.join("logo.docx");
+    let pdf = temp.path.join("logo.pdf");
+    let mut document = fixture_document(&[]);
+    for index in 0..40 {
+        document.add_paragraph(&format!("Body line {index}"));
+    }
+    // Valid one-pixel RGB PNG with checked IDAT checksum and chunk CRCs.
+    let png = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    document.set_header_image(
+        &png,
+        "logo.png",
+        rdocx::Length::cm(1.5),
+        rdocx::Length::cm(1.5),
+    );
+    document.section_properties_mut().margin_top = Some(rdocx_oxml::Twips(1134));
+    document.set_header_footer_distance(rdocx::Length::cm(1.27), rdocx::Length::cm(1.27));
+    document.save(&input).unwrap();
+    let mut package = OpcPackage::open(&input).unwrap();
+    let header = header_part_name(&input);
+    let source = String::from_utf8(package.get_part(&header).unwrap().to_vec()).unwrap();
+    let root = source.find("<w:hdr").unwrap();
+    let start = root + source[root..].find('>').unwrap() + 1;
+    let end = source.rfind("</w:hdr>").unwrap();
+    let paragraphs=(0..5).map(|i|format!(r#"<w:p><w:pPr><w:pStyle w:val="Normal"/><w:spacing w:after="160"/></w:pPr><w:r><w:t>Normal header paragraph {i}</w:t></w:r></w:p>"#)).collect::<String>();
+    let inner = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2200"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc>{}</w:tc><w:tc><w:p><w:r><w:t>Organization descriptive logo table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{paragraphs}"#,
+        &source[start..end]
+    );
+    package.set_part(
+        &header,
+        format!("{}{inner}{}", &source[..start], &source[end..]).into_bytes(),
+    );
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let result = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&result, "issue424 layout");
+    let json: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let top = json["body_items"][0]["fragments"][0]["y"].as_f64().unwrap();
+    assert!(
+        top >= 36.0 + 1.5 / 2.54 * 72.0 + 5.0 * 12.0 + 5.0 * 8.0,
+        "actual full-header body top={top}"
+    );
+    let result = cli(&[
+        "convert",
+        path_text(&input),
+        "--to",
+        "pdf",
+        "--output",
+        path_text(&pdf),
+    ]);
+    assert_eq!(
+        assert_success_with_font_diagnostics(&result, "issue424 PDF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
+    assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn issue423_cli_update_formats_supported_pages_and_retains_unsupported_source() {
+    let temp = TempWorkspace::new("issue423-format");
+    for (fmt, instruction, expected, updated) in [
+        ("upperRoman", r"PAGE \* LOWER", "vii", 1),
+        ("future", r"PAGE \* Arabic", "STORED", 0),
+        ("decimal", "PAGE", "7", 1),
+    ] {
+        let input = temp.path.join(format!("{fmt}-input.docx"));
+        let output = temp.path.join(format!("{fmt}-output.docx"));
+        fixture_document(&[]).save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let source = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="{instruction}"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="{fmt}" w:start="7"/></w:sectPr></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", source.into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "fields",
+            "update",
+            path_text(&input),
+            "-o",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, "issue423 fields update");
+        let report = json_stdout(&result);
+        assert_eq!(report["page_fields"], updated);
+        let mut reopened = Document::open(&output).unwrap();
+        assert_eq!(reopened.paragraphs()[0].text(), expected);
+        let part = package_part_text(&output, "/word/document.xml");
+        assert!(part.contains(&format!(r#"w:fmt="{fmt}""#)));
+        assert_eq!(reopened.update_page_fields().unwrap(), updated as usize);
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn issue423_cli_duplicate_numbering_overlay_preserves_source_and_refusals() {
+    let temp = TempWorkspace::new("issue423-overlay");
+    for (name, later, expected, updated) in [
+        (
+            "both",
+            r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            "27",
+            1,
+        ),
+        ("format", r#"<w:pgNumType w:fmt="decimal"/>"#, "12", 1),
+        ("start", r#"<w:pgNumType w:start="27"/>"#, "xxvii", 1),
+        ("empty", "<w:pgNumType/>", "xii", 1),
+        (
+            "invalid",
+            r#"<w:pgNumType w:fmt="decimal" w:start="bad"/>"#,
+            "STORED",
+            0,
+        ),
+    ] {
+        let input = temp.path.join(format!("{name}-input.docx"));
+        let output = temp.path.join(format!("{name}-output.docx"));
+        fixture_document(&[]).save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let numbering = format!(r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>{later}"#);
+        let source = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr>{numbering}</w:sectPr></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", source.into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "fields",
+            "update",
+            path_text(&input),
+            "-o",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, name);
+        assert_eq!(json_stdout(&result)["page_fields"], updated);
+        let reopened = Document::open(&output).unwrap();
+        assert_eq!(reopened.paragraphs()[0].text(), expected, "{name}");
+        assert!(package_part_text(&output, "/word/document.xml").contains(&numbering));
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[cfg(not(feature = "system-fonts"))]
+#[test]
+fn cli_explicit_system_fonts_refuse_without_the_feature_and_publish_nothing() {
+    let workspace = TempWorkspace::new("system-fonts-off");
+    let input = workspace.path.join("input.docx");
+    let mut document = fixture_document(&[]);
+    document.add_paragraph("explicit system refusal");
+    document.save(&input).unwrap();
+    let original = fs::read(&input).unwrap();
+
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    fs::write(
+        fonts.join("Carlito.ttf"),
+        include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+    )
+    .unwrap();
+
+    let caller_image = workspace.path.join("caller-only.png");
+    assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "png",
+            "--font-dir",
+            path_text(&fonts),
+            "--dpi",
+            "24",
+            "--output",
+            path_text(&caller_image),
+        ]),
+        "feature-off caller image",
+    );
+    let font_files = oxml_layout::FontFile::from_dir(&fonts).unwrap();
+    let refs = font_files
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let caller_layout = Document::open(&input)
+        .unwrap()
+        .layout_with_fonts_and_bundled_fallback_and_options(&refs, RenderOptions::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_image).unwrap(),
+        oxml_pdf::render_page_to_png(&caller_layout.layout, 0, 24.0).unwrap()
+    );
+    let refusal = "system fonts are not available in this build";
+
+    for format in ["pdf", "png"] {
+        let converted = workspace.path.join(format!("converted.{format}"));
+        for caller in [false, true] {
+            let mut args = vec![
+                "convert",
+                path_text(&input),
+                "--to",
+                format,
+                "--system-fonts",
+                "--output",
+                path_text(&converted),
+            ];
+            if caller {
+                args.extend(["--font-dir", path_text(&fonts)]);
+            }
+            let result = cli(&args);
+            assert_eq!(result.status.code(), Some(1), "convert caller={caller}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains(refusal),
+                "convert caller={caller}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                !converted.exists(),
+                "convert caller={caller} published output"
+            );
+            assert_eq!(fs::read(&input).unwrap(), original);
+        }
+    }
+    let rendered = workspace.path.join("rendered");
+    for caller in [false, true] {
+        let mut args = vec![
+            "render",
+            path_text(&input),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&rendered),
+            "--dpi",
+            "24",
+        ];
+        if caller {
+            args.extend(["--font-dir", path_text(&fonts)]);
+        }
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "render caller={caller}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(refusal),
+            "render caller={caller}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !rendered.join("input_page1.png").exists(),
+            "render caller={caller} published output"
+        );
+    }
+
+    for caller in [false, true] {
+        let mut args = vec!["layout", path_text(&input), "--system-fonts", "--json"];
+        if caller {
+            args.extend(["--font-dir", path_text(&fonts)]);
+        }
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "layout caller={caller}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(refusal),
+            "layout caller={caller}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stdout.is_empty(),
+            "layout caller={caller} printed a layout"
+        );
+    }
+
+    // `inspect` gains no font-policy flag, so clap refuses it as an option.
+    let inspect = cli(&["inspect", path_text(&input), "--system-fonts"]);
+    assert_eq!(
+        inspect.status.code(),
+        Some(2),
+        "inspect must reject --system-fonts"
+    );
+    assert!(String::from_utf8_lossy(&inspect.stderr).contains("system-fonts"));
+
+    // An empty caller directory without the flag is omission, not a caller set.
+    // This must be a genuinely empty directory, not the populated `fonts` path
+    // used by the explicit-system refusal loops above.
+    let empty_fonts = workspace.path.join("empty-fonts");
+    fs::create_dir(&empty_fonts).unwrap();
+    let omitted = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&empty_fonts),
+        "--json",
+    ]);
+    assert_success(&omitted, "empty-directory omission layout");
+    let plain = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&plain, "plain layout");
+    assert_eq!(omitted.stdout, plain.stdout);
+}
+
+#[cfg(feature = "system-fonts")]
+#[test]
+fn cli_font_policy_routes_bundled_omission_and_the_system_opt_in_per_command() {
+    let workspace = TempWorkspace::new("system-fonts-on");
+    let input = workspace.path.join("input.docx");
+    let mut document = fixture_document(&[]);
+    document.add_paragraph("font policy routes");
+    document
+        .add_paragraph("")
+        .add_run("iiiiWWWW caller matrix")
+        .font("FX195CallerOnly");
+    document.save(&input).unwrap();
+    let opened = Document::open(&input).unwrap();
+
+    let empty_fonts = workspace.path.join("empty-fonts");
+    fs::create_dir(&empty_fonts).unwrap();
+
+    // Omission is bundled. No flag and an empty directory share the
+    // deterministic result for all three commands.
+    let deterministic_pdf = opened
+        .to_pdf_deterministic_with_options(RenderOptions::default())
+        .unwrap();
+    let plain_pdf = workspace.path.join("plain.pdf");
+    let plain_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--output",
+            path_text(&plain_pdf),
+        ]),
+        "plain convert",
+    );
+    assert_eq!(fs::read(&plain_pdf).unwrap(), deterministic_pdf);
+    assert!(
+        plain_stderr
+            .contains("Font 'Calibri' substituted: selected 'Carlito' from the bundled tier")
+    );
+    assert!(plain_stderr.contains("Font 'FX195CallerOnly' substituted: selected '"));
+    let empty_pdf = workspace.path.join("empty.pdf");
+    let empty_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&empty_fonts),
+            "--output",
+            path_text(&empty_pdf),
+        ]),
+        "empty-directory convert",
+    );
+    assert_eq!(fs::read(&empty_pdf).unwrap(), deterministic_pdf);
+    assert_eq!(empty_stderr, plain_stderr);
+
+    let deterministic_png = opened
+        .render_page_to_png_deterministic_with_options(0, 24.0, RenderOptions::default())
+        .unwrap()
+        .unwrap();
+    let plain_render = workspace.path.join("plain-render");
+    let render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--output-dir",
+            path_text(&plain_render),
+            "--dpi",
+            "24",
+        ]),
+        "plain render",
+    );
+    assert_eq!(render_stderr, plain_stderr);
+    assert_eq!(
+        fs::read(plain_render.join("input_page1.png")).unwrap(),
+        deterministic_png
+    );
+
+    let plain_layout = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&plain_layout, "plain layout");
+    let empty_layout = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&empty_fonts),
+        "--json",
+    ]);
+    assert_success(&empty_layout, "empty-directory layout");
+    assert_eq!(plain_layout.stdout, empty_layout.stdout);
+
+    // The explicit opt-in selects the system tier on the same three routes.
+    let system = RenderOptions {
+        use_system_fonts: true,
+        ..RenderOptions::default()
+    };
+    let system_pdf_path = workspace.path.join("system.pdf");
+    let system_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--system-fonts",
+            "--output",
+            path_text(&system_pdf_path),
+        ]),
+        "system convert",
+    );
+    assert!(system_stderr.contains("Font 'FX195CallerOnly' substituted: selected '"));
+    assert_eq!(
+        fs::read(&system_pdf_path).unwrap(),
+        opened.to_pdf_with_options(system).unwrap()
+    );
+
+    let system_png = opened
+        .render_page_to_png_with_options(0, 24.0, system)
+        .unwrap()
+        .unwrap();
+    let system_render = workspace.path.join("system-render");
+    let system_render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&system_render),
+            "--dpi",
+            "24",
+        ]),
+        "system render",
+    );
+    assert_eq!(system_render_stderr, system_stderr);
+    assert_eq!(
+        fs::read(system_render.join("input_page1.png")).unwrap(),
+        system_png
+    );
+
+    let system_layout = cli(&["layout", path_text(&input), "--system-fonts", "--json"]);
+    assert_success(&system_layout, "system layout");
+    let system_layout: Value = serde_json::from_slice(&system_layout.stdout).unwrap();
+    assert_eq!(
+        system_layout["page_count"],
+        opened
+            .layout_with_options(system)
+            .unwrap()
+            .layout
+            .pages
+            .len()
+    );
+
+    // A nonempty caller directory keeps caller priority on the bundled route.
+    let caller_fonts = workspace.path.join("caller-fonts");
+    fs::create_dir(&caller_fonts).unwrap();
+    let caller_bytes = fx195_caller_only_monospace();
+    fs::write(caller_fonts.join("FilenameAlias.ttf"), &caller_bytes).unwrap();
+    let caller_pdf = workspace.path.join("caller.pdf");
+    let caller_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--output",
+            path_text(&caller_pdf),
+        ]),
+        "caller convert",
+    );
+    assert!(
+        !caller_stderr.contains("FX195CallerOnly"),
+        "caller face must satisfy the request without a substitution fact: {caller_stderr}"
+    );
+    let caller_files = oxml_layout::FontFile::from_dir(&caller_fonts).unwrap();
+    let caller_refs = caller_files
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let caller_layout = opened
+        .layout_with_fonts_and_bundled_fallback_and_options(&caller_refs, RenderOptions::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_pdf).unwrap(),
+        oxml_pdf::render_to_pdf_checked(&caller_layout.layout).unwrap()
+    );
+
+    // A nonempty caller list with the explicit system opt-in follows the
+    // system column on all three commands and keeps caller priority.
+    let caller_system_pdf = workspace.path.join("caller-system.pdf");
+    let caller_system_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--system-fonts",
+            "--output",
+            path_text(&caller_system_pdf),
+        ]),
+        "caller system convert",
+    );
+    assert!(
+        !caller_system_stderr.contains("FX195CallerOnly"),
+        "caller face must satisfy the request without a substitution fact: {caller_system_stderr}"
+    );
+    let caller_system_layout = opened
+        .layout_with_additional_fonts_and_options(&caller_refs, system)
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_system_pdf).unwrap(),
+        oxml_pdf::render_to_pdf_checked(&caller_system_layout.layout).unwrap()
+    );
+
+    let caller_system_render = workspace.path.join("caller-system-render");
+    let caller_system_render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&caller_system_render),
+            "--dpi",
+            "24",
+        ]),
+        "caller system render",
+    );
+    assert_eq!(caller_system_render_stderr, caller_system_stderr);
+    assert_eq!(
+        fs::read(caller_system_render.join("input_page1.png")).unwrap(),
+        opened
+            .render_page_to_png_with_fonts_and_options(0, 24.0, &caller_refs, system)
+            .unwrap()
+            .unwrap()
+    );
+
+    let caller_system_layout_json = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&caller_fonts),
+        "--system-fonts",
+        "--json",
+    ]);
+    assert_success(&caller_system_layout_json, "caller system layout");
+    let caller_system_layout_json: Value =
+        serde_json::from_slice(&caller_system_layout_json.stdout).unwrap();
+    assert_eq!(
+        caller_system_layout_json["page_count"],
+        caller_system_layout.layout.pages.len()
+    );
+
+    for (name, caller, system_fonts) in [
+        ("bundled-image", false, false),
+        ("caller-image", true, false),
+        ("system-image", false, true),
+        ("caller-system-image", true, true),
+    ] {
+        let output = workspace.path.join(format!("{name}.png"));
+        let mut args = vec![
+            "convert",
+            path_text(&input),
+            "--to",
+            "png",
+            "--dpi",
+            "24",
+            "--output",
+            path_text(&output),
+        ];
+        if caller {
+            args.extend(["--font-dir", path_text(&caller_fonts)]);
+        }
+        if system_fonts {
+            args.push("--system-fonts");
+        }
+        assert_success_with_font_diagnostics(&cli(&args), name);
+        let options = RenderOptions {
+            use_system_fonts: system_fonts,
+            ..RenderOptions::default()
+        };
+        let expected = if caller {
+            let layout = if system_fonts {
+                opened
+                    .layout_with_additional_fonts_and_options(&caller_refs, options)
+                    .unwrap()
+            } else {
+                opened
+                    .layout_with_fonts_and_bundled_fallback_and_options(&caller_refs, options)
+                    .unwrap()
+            };
+            oxml_pdf::render_page_to_png(&layout.layout, 0, 24.0).unwrap()
+        } else {
+            opened
+                .render_page_to_png_with_options(0, 24.0, options)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(fs::read(output).unwrap(), expected, "{name}");
+    }
+}
+
+#[test]
+fn fx281_cli_chart_tables_and_separate_read_diagnostics() {
+    let workspace = TempWorkspace::new("fx281-chart-export");
+    let input = workspace.path.join("source.docx");
+    let data = rdocx::ChartData {
+        categories: vec!["Q1".into(), "Q2".into()],
+        series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+        ..Default::default()
+    };
+    let mut document = Document::new();
+    document.add_paragraph("Body retained");
+    document
+        .add_chart(
+            rdocx::ChartKind::Bar,
+            rdocx::Length::inches(5.0),
+            rdocx::Length::inches(3.0),
+            &data,
+        )
+        .unwrap();
+    document.save(&input).unwrap();
+    let mut package = OpcPackage::open(&input).unwrap();
+    let rel = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::CHART)
+        .unwrap()
+        .clone();
+    let part = OpcPackage::resolve_rel_target("/word/document.xml", &rel.target);
+    let original = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+    let title =
+        "<c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>";
+    let titled = original.replace("<c:chart>", &format!("<c:chart>{title}"));
+    assert_ne!(titled, original);
+    package.set_part(&part, titled.as_bytes().to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("success.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap().replace("&#32;", " ");
+        for token in ["Quarter", "Q1", "Zeta region", "1150"] {
+            assert!(text.contains(token), "{text}");
+        }
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("chart table omitted"));
+    }
+    package.set_part(&part, br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("omitted.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap();
+        assert!(!text.contains("Zeta region") && !text.contains("chart table omitted"));
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr)
+                .matches("chart table omitted:")
+                .count(),
+            1
+        );
+    }
+}
+
+fn issue432_text_box_options() -> rdocx::TextBoxOptions {
+    rdocx::TextBoxOptions {
+        width: rdocx::Length::pt(120.0),
+        height: rdocx::Length::pt(40.0),
+        anchor: rdocx::PictureAnchor {
+            horizontal_relative_from: rdocx::DrawingHorizontalRelativeFrom::Column,
+            horizontal_offset: rdocx::Length::pt(12.0),
+            horizontal_alignment: None,
+            vertical_relative_from: rdocx::DrawingVerticalRelativeFrom::Paragraph,
+            vertical_offset: rdocx::Length::pt(6.0),
+            vertical_alignment: None,
+            wrap: rdocx::DrawingWrap::Square,
+            distance_top: rdocx::Length::pt(0.0),
+            distance_bottom: rdocx::Length::pt(0.0),
+            distance_left: rdocx::Length::pt(0.0),
+            distance_right: rdocx::Length::pt(0.0),
+            relative_height: 1,
+            behind_text: false,
+        },
+        rotation_degrees: 0.0,
+        text_direction: rdocx::TextBoxDirection::Horizontal,
+        fill_color: None,
+    }
+}
+
+#[test]
+fn issue432_cli_text_and_expected_replacement_agree_without_chart_mutation() {
+    for chart in [true, false] {
+        let workspace = TempWorkspace::new("issue432-agreement");
+        let input = workspace.path.join("input.docx");
+        let output = workspace.path.join("output.docx");
+        let mut document = Document::new();
+        document.add_paragraph("North body");
+        let expected = if chart {
+            let data = rdocx::ChartData {
+                categories: vec!["North".into(), "South".into()],
+                series: vec![("Sales".into(), vec![1.0, 2.0])],
+                ..Default::default()
+            };
+            document
+                .add_chart(
+                    rdocx::ChartKind::Bar,
+                    rdocx::Length::inches(3.0),
+                    rdocx::Length::inches(2.0),
+                    &data,
+                )
+                .unwrap();
+            1
+        } else {
+            document.set_header("North header");
+            document.set_footer("North footer");
+            for kind in [
+                rdocx::StoryKind::Body,
+                rdocx::StoryKind::Header,
+                rdocx::StoryKind::Footer,
+            ] {
+                let story = document
+                    .stories()
+                    .unwrap()
+                    .into_iter()
+                    .find(|story| story.kind() == kind)
+                    .unwrap();
+                document
+                    .add_text_box_to_story(&story, "North textbox", issue432_text_box_options())
+                    .unwrap();
+            }
+            6
+        };
+        document.save(&input).unwrap();
+        let plain = cli(&["text", path_text(&input)]);
+        assert_success(&plain, "issue432 text");
+        assert_eq!(
+            String::from_utf8(plain.stdout)
+                .unwrap()
+                .matches("North")
+                .count(),
+            expected
+        );
+        let json = cli(&["text", path_text(&input), "--json"]);
+        assert_success(&json, "issue432 JSON");
+        let value: Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["scope"], "all-supported-stories");
+        let body_count = value["paragraphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|paragraph| paragraph["text"].as_str().unwrap().matches("North").count())
+            .sum::<usize>();
+        let story_count = value["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|story| story["items"].as_array().unwrap())
+            .map(|item| item["text"].as_str().unwrap().matches("North").count())
+            .sum::<usize>();
+        assert_eq!(body_count + story_count, expected);
+        let replaced = cli(&[
+            "replace",
+            path_text(&input),
+            "-p",
+            "North",
+            "-v",
+            "NORTH",
+            "--expect",
+            &expected.to_string(),
+            "-o",
+            path_text(&output),
+        ]);
+        assert_success(&replaced, "issue432 replace --expect");
+        let plain = cli(&["text", path_text(&output)]);
+        assert_success(&plain, "issue432 reopened text");
+        assert_eq!(
+            String::from_utf8(plain.stdout)
+                .unwrap()
+                .matches("NORTH")
+                .count(),
+            expected
+        );
+        assert_eq!(
+            Document::open(&output)
+                .unwrap()
+                .text_report()
+                .text
+                .matches("NORTH")
+                .count(),
+            expected
+        );
+    }
+}
+
+fn issue434_revision_text_fixture(path: &Path) {
+    write_document(path, &["thirty", "sixty", "Late fees apply."]);
+    rewrite_run(path, "thirty", |run| {
+        format!(
+            r#"<w:del w:id="101" w:author="Fixture" w:date="2026-11-03T00:00:00Z">{}</w:del>"#,
+            run.replace("<w:t", "<w:delText")
+                .replace("</w:t>", "</w:delText>")
+        )
+    });
+    rewrite_run(path, "sixty", |run| {
+        format!(
+            r#"<w:ins w:id="102" w:author="Fixture" w:date="2026-11-03T00:00:00Z">{run}</w:ins>"#
+        )
+    });
+    rewrite_run(path, "Late fees apply.", |run| {
+        assert!(run.starts_with("<w:r>"));
+        run.replacen("<w:r>",r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="103" w:author="Fixture" w:date="2026-11-03T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,1)
+    });
+    assert_eq!(
+        Document::open(path)
+            .unwrap()
+            .story_revisions()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn issue434_revision_list_exposes_owned_text_without_rewriting_source() {
+    let workspace = TempWorkspace::new("issue434-text");
+    let input = workspace.path.join("revisions.docx");
+    issue434_revision_text_fixture(&input);
+    let before = fs::read(&input).unwrap();
+    let mut native = Document::open(&input).unwrap();
+    let held = native.story_revisions().unwrap();
+    assert_eq!(
+        held.iter()
+            .map(|revision| revision.text())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty", "Late fees apply."]
+    );
+    let saved = workspace.path.join("snapshot-saved.docx");
+    native.save(&saved).unwrap();
+    assert_eq!(
+        Document::open(&saved).unwrap().story_revisions().unwrap(),
+        held
+    );
+    assert_eq!(native.accept_all().unwrap(), 3);
+    assert!(native.story_revisions().unwrap().is_empty());
+    assert_eq!(
+        held.iter()
+            .map(|revision| revision.text())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty", "Late fees apply."]
+    );
+    let output = cli(&["revision", "list", path_text(&input), "--json"]);
+    assert_success(&output, "revision text JSON");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r["text"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("thirty"), Some("sixty"), Some("Late fees apply.")]
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn issue434_revision_kinds_match_python_without_changing_story_labels_or_tsv_columns() {
+    let workspace = TempWorkspace::new("issue434-kinds");
+    let input = workspace.path.join("revisions.docx");
+    issue434_revision_text_fixture(&input);
+    let before = fs::read(&input).unwrap();
+    let output = cli(&["revision", "list", path_text(&input), "--json"]);
+    assert_success(&output, "revision kind JSON");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["deletion", "insertion", "run_property_change"]
+    );
+    let output = cli(&["revision", "list", path_text(&input)]);
+    assert_success(&output, "human revision list");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let rows = text
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.len() == 7 && row[4] == "body"));
+    assert_eq!(rows[2][3], "run_property_change");
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn issue430_compare_note_creation_listing_and_destination_cleanup() {
+    let temp = TempWorkspace::new("issue430-note-lifecycle");
+    let old = temp.path.join("old.docx");
+    let new = temp.path.join("new.docx");
+    let pending = temp.path.join("pending.docx");
+    let accepted = temp.path.join("accepted.docx");
+    let rejected = temp.path.join("rejected.docx");
+    let mut original = Document::new();
+    original.add_paragraph("seller");
+    original.add_paragraph("payment");
+    original.save(&old).unwrap();
+    let mut edited = Document::open(&old).unwrap();
+    let id = edited.add_footnote("note");
+    edited.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    edited.save(&new).unwrap();
+    compare_record(&old, &new, &pending, &[]);
+    let listed = cli(&["revision", "list", path_text(&pending), "--json"]);
+    assert_success(&listed, "issue430 list");
+    let value: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert!(records.iter().any(|row| row["story"]["kind"] == "footnote"));
+    for (operation, destination, count, present) in [
+        ("accept", &accepted, 1, true),
+        ("reject", &rejected, 0, false),
+    ] {
+        let resolved = cli(&[
+            "revision",
+            operation,
+            path_text(&pending),
+            "--output",
+            path_text(destination),
+            "--json",
+        ]);
+        assert_success(&resolved, "issue430 resolution");
+        let value: Value = serde_json::from_slice(&resolved.stdout).unwrap();
+        assert_eq!(value["resolved"].as_u64(), Some(records.len() as u64));
+        let mut doc = Document::open(destination).unwrap();
+        assert_eq!(doc.footnotes().len(), count);
+        assert!(doc.text().contains("payment"));
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(doc.to_bytes().unwrap())).unwrap();
+        assert_eq!(package.contains_part("/word/footnotes.xml"), present);
+        assert!(
+            package
+                .parts
+                .values()
+                .all(|xml| !String::from_utf8_lossy(xml).contains("_rdocxCmpNoteF"))
+        );
+    }
+}
+
+// Stored ZIP fixture construction bypasses the serializer's intentional refusal
+// so the CLI receives actual damaged source bytes, including correct CRCs.
+fn issue435_raw_package_zip(package: &OpcPackage, part: &str, duplicate: bool) -> Vec<u8> {
+    let mut entries = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            package.content_types.to_xml().unwrap(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            package.package_rels.to_xml().unwrap(),
+        ),
+    ];
+    for (owner, relationships) in &package.part_rels {
+        let (directory, file) = owner.trim_start_matches('/').rsplit_once('/').unwrap();
+        entries.push((
+            format!("{directory}/_rels/{file}.rels"),
+            relationships.to_xml().unwrap(),
+        ));
+    }
+    for (name, data) in &package.parts {
+        let mut data = data.to_vec();
+        if name == part && !duplicate {
+            let offset = data
+                .windows(b"Issue435 seed".len())
+                .position(|text| text == b"Issue435 seed")
+                .unwrap();
+            data[offset] = 1;
+        }
+        entries.push((name.trim_start_matches('/').to_owned(), data));
+    }
+    if duplicate {
+        entries.push((
+            part.trim_start_matches('/').to_owned(),
+            package.get_part(part).unwrap().to_vec(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut output = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in &entries {
+        let offset = output.len() as u32;
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        let crc = !crc;
+        let size = data.len() as u32;
+        let length = name.len() as u16;
+        output.extend_from_slice(b"PK\x03\x04");
+        for value in [20u16, 0, 0, 0, 0] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        output.extend_from_slice(&length.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        for value in [20u16, 20, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [length, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = output.len() as u32;
+    let size = central.len() as u32;
+    output.extend_from_slice(&central);
+    output.extend_from_slice(b"PK\x05\x06");
+    for value in [0u16, 0, entries.len() as u16, entries.len() as u16] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [size, start] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output
+}
+
+#[test]
+fn issue435_cli_reports_shared_package_faults_and_preserves_input() {
+    let temp = TempWorkspace::new("issue435-shared");
+    let mut document = Document::new();
+    document.add_paragraph("Issue435 seed");
+    let source = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+    for duplicate in [false, true] {
+        let bytes = issue435_raw_package_zip(&package, "/word/document.xml", duplicate);
+        let input = temp.path.join(if duplicate {
+            "duplicate.docx"
+        } else {
+            "forbidden.docx"
+        });
+        fs::write(&input, &bytes).unwrap();
+        for command in ["validate", "text"] {
+            let output = cli(&[command, path_text(&input)]);
+            assert!(!output.status.success());
+            let message = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(message.contains("word/document.xml"), "{message}");
+            assert!(
+                message.to_ascii_lowercase().contains(if duplicate {
+                    "duplicate"
+                } else {
+                    "u+0001"
+                }),
+                "{message}"
+            );
+            assert_eq!(fs::read(&input).unwrap(), bytes);
+        }
+    }
+    let help = cli(&["validate", "--help"]);
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("not a full schema validator"), "{help}");
+}
+
+#[test]
+fn issue435_cli_subset_and_repeated_bookmarks_match_library_validation() {
+    let temp = TempWorkspace::new("issue435-word-subset");
+    let mut document = Document::new();
+    document.add_paragraph("seed");
+    let source = document.to_bytes().unwrap();
+    for (body, valid) in [
+        ("<w:p><w:bogus/></w:p>", false),
+        (
+            "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>first</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>second</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p>",
+            true,
+        ),
+    ] {
+        let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+        let xml = format!(
+            "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body>{body}</w:body></w:document>"
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let input = temp.path.join("subset.docx");
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let report = rdocx::validate_document_file(&input).unwrap();
+        let output = cli(&["validate", path_text(&input)]);
+        assert_eq!(output.status.success(), valid);
+        assert_eq!(report.is_valid(), valid);
+        let message = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            message.contains(if valid { "bookmark id 2" } else { "w:bogus" }),
+            "{message}"
+        );
+        if valid {
+            assert_success(&cli(&["text", path_text(&input)]), "repeated bookmark text");
+        }
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn issue434_compare_equal_splits_and_word_revision_text() {
+    let temp = TempWorkspace::new("issue434-splits");
+    let original = temp.path.join("original.docx");
+    let edited = temp.path.join("edited.docx");
+    write_document(&original, &["invoice thirty days"]);
+    let mut split = rdocx::Document::new();
+    let mut paragraph = split.add_paragraph("invoi");
+    paragraph.add_run("ce thirty days");
+    split.save(&edited).unwrap();
+    for granularity in ["run", "word", "character"] {
+        let redline = temp.path.join(format!("equal-{granularity}.docx"));
+        let record = compare_record(
+            &original,
+            &edited,
+            &redline,
+            &["--granularity", granularity],
+        );
+        assert_eq!(record["main_story_revisions"], 0);
+    }
+    split
+        .paragraph_mut(0)
+        .unwrap()
+        .run_mut(1)
+        .unwrap()
+        .set_text("ce sixty days");
+    split.save(&edited).unwrap();
+    let redline = temp.path.join("changed.docx");
+    let record = compare_record(&original, &edited, &redline, &["--granularity", "word"]);
+    assert_eq!(record["main_story_revisions"], 2);
+    let output = cli(&["revision", "list", path_text(&redline), "--json"]);
+    assert_success(&output, "revision list --json");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let revisions = value
+        .as_array()
+        .or_else(|| value.get("revisions").and_then(Value::as_array))
+        .unwrap();
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["deletion", "insertion"]
+    );
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|r| r["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty"]
+    );
 }

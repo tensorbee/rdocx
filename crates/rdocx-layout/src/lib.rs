@@ -328,6 +328,7 @@ impl WordSequenceSnapshot {
 /// Effective accepted paragraph facts from the production style cascade.
 #[derive(Debug, Clone)]
 pub(crate) struct ParagraphNavigation {
+    pub omitted_by_table: bool,
     pub level: Option<u32>,
     pub text: String,
     pub style: Option<String>,
@@ -354,9 +355,15 @@ pub struct WordLayoutResult {
     bookmark_pages: std::collections::BTreeMap<usize, WordPageSection>,
     field_source_xml: std::collections::BTreeMap<oxml_layout::FieldSource, Vec<u8>>,
     text_box_owner_indices: std::collections::BTreeMap<WordStory, usize>,
+    picture_draw_owners: input::PictureDrawOwners,
 }
 
 impl WordLayoutResult {
+    /// Image relationship and optional related-story relationship for emitted pictures.
+    pub fn picture_draw_owners(&self) -> &[(String, Option<String>)] {
+        &self.picture_draw_owners
+    }
+
     /// Physical and displayed section placement from the same pagination pass.
     pub fn page_sections(&self) -> &[WordPageSection] {
         &self.page_sections
@@ -490,6 +497,16 @@ impl WordLayoutResult {
         ))
     }
 
+    /// Whether this result's actual table layout omitted a registered paragraph.
+    /// `None` means that this source has no qualified navigation facts.
+    #[doc(hidden)]
+    pub fn paragraph_omitted_by_table(&self, node: SourceNodeId) -> Option<bool> {
+        self.source_node(node)?;
+        self.navigation_by_source
+            .get(&node)
+            .map(|facts| facts.omitted_by_table)
+    }
+
     /// Whether the effective paragraph explicitly suppresses its numbering.
     #[doc(hidden)]
     pub fn paragraph_numbering_suppressed(&self, source: SourceNodeId) -> bool {
@@ -613,6 +630,7 @@ pub fn layout_document_with_provenance(input: &LayoutInput) -> Result<WordLayout
         bookmark_pages: ordered(bookmark_pages),
         field_source_xml: ordered(engine.take_field_source_xml()),
         text_box_owner_indices: ordered(engine.take_text_box_owner_indices()),
+        picture_draw_owners: engine.take_picture_draw_owners(),
         numbering_by_source,
         navigation_by_source: ordered(engine.take_navigation()),
         navigation_failure: input
@@ -651,6 +669,7 @@ pub fn layout_document_with_reusable_engine(
         bookmark_pages: ordered(bookmark_pages),
         field_source_xml: ordered(engine.take_field_source_xml()),
         text_box_owner_indices: ordered(engine.take_text_box_owner_indices()),
+        picture_draw_owners: engine.take_picture_draw_owners(),
         numbering_by_source,
         navigation_by_source: ordered(engine.take_navigation()),
         navigation_failure: input
@@ -686,6 +705,7 @@ pub fn layout_document_with_caller_fonts_and_provenance(
         bookmark_pages: ordered(bookmark_pages),
         field_source_xml: ordered(engine.take_field_source_xml()),
         text_box_owner_indices: ordered(engine.take_text_box_owner_indices()),
+        picture_draw_owners: engine.take_picture_draw_owners(),
         numbering_by_source,
         navigation_by_source: ordered(engine.take_navigation()),
         navigation_failure: input
@@ -744,6 +764,7 @@ pub fn layout_document_deterministic_with_provenance(
         bookmark_pages: ordered(bookmark_pages),
         field_source_xml: ordered(engine.take_field_source_xml()),
         text_box_owner_indices: ordered(engine.take_text_box_owner_indices()),
+        picture_draw_owners: engine.take_picture_draw_owners(),
         numbering_by_source,
         navigation_by_source: ordered(engine.take_navigation()),
         navigation_failure: input

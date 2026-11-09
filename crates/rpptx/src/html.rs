@@ -205,7 +205,13 @@ impl<'a> SemanticExporter<'a> {
                     if let Some(properties) = &paragraph.properties {
                         inherited.apply_paragraph(properties);
                     }
-                    content.push_str(&self.inline(index, paragraph, inherited.marks, &path)?);
+                    content.push_str(&self.inline(
+                        index,
+                        paragraph,
+                        inherited.marks,
+                        &path,
+                        false,
+                    )?);
                 }
                 if !content.is_empty() {
                     heading = Some(content);
@@ -253,9 +259,10 @@ impl<'a> SemanticExporter<'a> {
                 } else {
                     self.result.text.push_str("## Notes\n\n");
                     for line in notes.split('\n') {
-                        self.result
-                            .text
-                            .push_str(&format!("> {}\n", semantic_md_preserved(line)));
+                        self.result.text.push_str(&format!(
+                            "> {}\n",
+                            semantic_md_preserved(line, true, MdNewline::HardBreak)
+                        ));
                     }
                     self.result.text.push('\n');
                 }
@@ -297,7 +304,10 @@ impl<'a> SemanticExporter<'a> {
                     self.walk(index, &group.children, title, &path)?
                 }
                 ShapeTreeChild::AlternateContent(alternate) => {
-                    if let Some(children) = alternate.selected_fallback() {
+                    if let Some(frame) = alternate.chart_choice() {
+                        self.close_lists();
+                        self.chart(index, frame, &path)?;
+                    } else if let Some(children) = alternate.selected_fallback() {
                         self.walk(index, children, title, &path)?;
                     } else {
                         self.diagnostic(&path, "unsupported compatibility content omitted");
@@ -324,6 +334,7 @@ impl<'a> SemanticExporter<'a> {
                     self.close_lists();
                     match frame.graphic_data.payload() {
                         GraphicDataPayload::Table(table) => self.table(index, table, &path)?,
+                        GraphicDataPayload::Chart(_) => self.chart(index, frame, &path)?,
                         _ => self.diagnostic(
                             &path,
                             "unsupported chart, SmartArt or embedded-object projection omitted",
@@ -369,7 +380,7 @@ impl<'a> SemanticExporter<'a> {
         if let Some(properties) = &paragraph.properties {
             effective.apply_paragraph(properties);
         }
-        let text = self.inline(index, paragraph, effective.marks, path)?;
+        let text = self.inline(index, paragraph, effective.marks, path, true)?;
         let bullet = effective.bullet.as_ref();
         let ordered = matches!(bullet, Some(TextBulletChoice::AutoNumber(_)));
         let listed = matches!(
@@ -475,7 +486,7 @@ impl<'a> SemanticExporter<'a> {
                     path,
                     "Markdown canonical decimal list marker, source ordered label retained as text",
                 );
-                format!("{} {text}", semantic_md_text(&label))
+                format!("{} {text}", semantic_md_text(&label, false))
             } else {
                 text
             };
@@ -496,8 +507,29 @@ impl<'a> SemanticExporter<'a> {
         paragraph: &oxml_drawing::text::CT_TextParagraph,
         base: SemanticMarks,
         path: &str,
+        content_start: bool,
     ) -> Result<String> {
         use oxml_drawing::text::TextRun;
+        let markdown = self.format == SemanticFormat::Markdown;
+        let mut raw = Vec::new();
+        if markdown {
+            for run in &paragraph.runs {
+                match run {
+                    TextRun::Run(run) => raw.extend(run.text.value.chars()),
+                    TextRun::Field(field) => raw.extend(
+                        field
+                            .text
+                            .as_ref()
+                            .map_or("", |text| text.value.as_str())
+                            .chars(),
+                    ),
+                    TextRun::Break(_) => raw.push('\n'),
+                }
+            }
+        }
+        let escaped =
+            markdown.then(|| semantic_md_chars(&raw, content_start, true, MdNewline::HardBreak));
+        let mut offset = 0usize;
         let mut out = String::new();
         for run in &paragraph.runs {
             let (text, properties) = match run {
@@ -510,11 +542,12 @@ impl<'a> SemanticExporter<'a> {
                     )
                 }
                 TextRun::Break(_) => {
-                    out.push_str(if self.format == SemanticFormat::Html {
-                        "<br />"
+                    if markdown {
+                        out.push_str(&escaped.as_ref().unwrap()[offset]);
+                        offset += 1;
                     } else {
-                        "  \n"
-                    });
+                        out.push_str("<br />");
+                    }
                     continue;
                 }
             };
@@ -528,10 +561,13 @@ impl<'a> SemanticExporter<'a> {
                 .map(|id| self.link(index, id, path))
                 .transpose()?
                 .flatten();
-            let mut value = if self.format == SemanticFormat::Html {
-                semantic_escape(text).replace(['\u{000b}', '\n'], "<br />")
+            let mut value = if markdown {
+                let length = text.chars().count();
+                let value = escaped.as_ref().unwrap()[offset..offset + length].concat();
+                offset += length;
+                value
             } else {
-                semantic_md_preserved(text).replace(['\u{000b}', '\n'], "  \n")
+                semantic_escape(text).replace(['\u{000b}', '\n'], "<br />")
             };
             for tag in marks.tags().into_iter().rev() {
                 value = format!("<{tag}>{value}</{tag}>");
@@ -656,7 +692,7 @@ impl<'a> SemanticExporter<'a> {
         } else {
             self.result.text.push_str(&format!(
                 "![{}](<{destination}> \"{}\")\n\n",
-                semantic_md_preserved(&alt).replace('\n', "&#10;"),
+                semantic_md_preserved(&alt, false, MdNewline::Literal).replace('\n', "&#10;"),
                 semantic_escape(&title)
                     .replace('\n', "&#10;")
                     .replace('\r', "&#13;")
@@ -665,6 +701,127 @@ impl<'a> SemanticExporter<'a> {
         }
         Ok(())
     }
+    fn chart(
+        &mut self,
+        index: usize,
+        frame: &rpptx_oxml::graphic_frame::CT_GraphicFrame,
+        path: &str,
+    ) -> Result<()> {
+        let id = frame.chart_relationship_id().unwrap_or("");
+        let projection = (|| -> std::result::Result<_, String> {
+            let source = &self.deck.slides[index].part_name;
+            let part = chart_internal_part(
+                &self.deck.package,
+                source,
+                id,
+                rel_types::CHART,
+                "export chart table",
+            )
+            .map_err(|error| error.to_string())?;
+            if self.deck.package.content_types.content_type_for(&part) != Some(content_types::CHART)
+            {
+                return Err("chart target has an invalid content type".to_owned());
+            }
+            let bytes =
+                required_part(&self.deck.package, &part).map_err(|error| error.to_string())?;
+            let (_, data) =
+                oxml_chart::read_chart_data(bytes).map_err(|error| error.to_string())?;
+            let title = oxml_chart::chart_plain_title(bytes).map_err(|error| error.to_string())?;
+            Ok((data, title))
+        })();
+        let (data, title) = match projection {
+            Ok(value) => value,
+            Err(error) => {
+                self.diagnostic(
+                    path,
+                    &format!("chart relationship {id}: chart table omitted: {error}"),
+                );
+                return Ok(());
+            }
+        };
+        if data
+            .series
+            .iter()
+            .any(|(_, values)| values.iter().any(|value| !value.is_finite()))
+        {
+            self.diagnostic(
+                path,
+                &format!("chart relationship {id}: non-finite series value omitted"),
+            );
+        }
+        if let Some(title) = title.filter(|title| !title.is_empty()) {
+            if self.format == SemanticFormat::Html {
+                self.result.text.push_str(&format!(
+                    "<p class=\"chart-title\">{}</p>\n",
+                    semantic_escape(&title)
+                ));
+            } else {
+                self.result.text.push_str(&semantic_md_text(&title, true));
+                self.result.text.push_str("\n\n");
+            }
+        }
+        let count = data
+            .series
+            .iter()
+            .map(|(_, values)| values.len())
+            .chain(std::iter::once(data.categories.len()))
+            .max()
+            .unwrap_or(0);
+        let mut header = vec![String::new()];
+        header.extend(data.series.iter().map(|(name, _)| name.clone()));
+        let mut rows = vec![header];
+        for row in 0..count {
+            let mut cells = vec![data.categories.get(row).cloned().unwrap_or_default()];
+            cells.extend(data.series.iter().map(|(_, values)| {
+                values
+                    .get(row)
+                    .filter(|value| value.is_finite())
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            }));
+            rows.push(cells);
+        }
+        if self.format == SemanticFormat::Html {
+            self.result.text.push_str("<table class=\"chart-data\">\n");
+        }
+        for (index, row) in rows.iter().enumerate() {
+            if self.format == SemanticFormat::Html {
+                self.result.text.push_str("<tr>");
+                let tag = if index == 0 { "th" } else { "td" };
+                for cell in row {
+                    self.result
+                        .text
+                        .push_str(&format!("<{tag}>{}</{tag}>", semantic_escape(cell)));
+                }
+                self.result.text.push_str("</tr>\n");
+            } else {
+                self.result.text.push('|');
+                for cell in row {
+                    self.result.text.push_str(&format!(
+                        " {} |",
+                        semantic_md_text(cell, true).replace('\n', "<br>")
+                    ));
+                }
+                self.result.text.push('\n');
+                if index == 0 {
+                    self.result.text.push('|');
+                    for _ in row {
+                        self.result.text.push_str(" --- |");
+                    }
+                    self.result.text.push('\n');
+                }
+            }
+        }
+        self.result
+            .text
+            .push_str(if self.format == SemanticFormat::Html {
+                "</table>\n"
+            } else {
+                "\n"
+            });
+        Ok(())
+    }
+
     fn table(
         &mut self,
         index: usize,
@@ -754,7 +911,7 @@ impl<'a> SemanticExporter<'a> {
                         if let Some(properties) = &paragraph.properties {
                             effective.apply_paragraph(properties);
                         }
-                        text = self.inline(index, paragraph, effective.marks, path)?;
+                        text = self.inline(index, paragraph, effective.marks, path, true)?;
                     }
                 }
                 if self.format == SemanticFormat::Html {
@@ -1144,21 +1301,123 @@ fn semantic_escape(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-fn semantic_md_text(text: &str) -> String {
-    let mut out = String::new();
-    for character in text.chars() {
-        if "\\`*_{}[]<>()#!|+-=~&.".contains(character) {
-            out.push('\\');
+/// How an assembled Markdown paragraph writes a line feed.
+#[derive(Clone, Copy, PartialEq)]
+enum MdNewline {
+    HardBreak,
+    Literal,
+}
+fn md_line_is_setext(raw: &[char], start: usize, end: usize, marker: char) -> bool {
+    let mut end = end;
+    while end > start && raw[end - 1] == ' ' {
+        end -= 1;
+    }
+    end > start && raw[start..end].iter().all(|&character| character == marker)
+}
+/// The index just past the line holding `from`, excluding its line feed.
+fn md_line_end(raw: &[char], from: usize) -> usize {
+    let mut end = from;
+    while end < raw.len() && raw[end] != '\n' && raw[end] != '\u{000b}' {
+        end += 1;
+    }
+    end
+}
+#[cfg(test)]
+thread_local! {
+    static MD_ORDERED_PREFIX_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Escapes one assembled Markdown paragraph. `content_start` is false when the
+/// text follows generated syntax on its first line, as heading text after `# `.
+fn semantic_md_chars(
+    raw: &[char],
+    content_start: bool,
+    preserve_spaces: bool,
+    newline: MdNewline,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut line_start = 0usize;
+    let mut digits_only = true;
+    for (index, &character) in raw.iter().enumerate() {
+        if character == '\n' || character == '\u{000b}' {
+            out.push(match newline {
+                MdNewline::HardBreak => "  \n".to_owned(),
+                MdNewline::Literal => "\n".to_owned(),
+            });
+            if newline == MdNewline::HardBreak {
+                line_start = index + 1;
+                digits_only = true;
+            } else {
+                digits_only = false;
+            }
+            continue;
         }
-        out.push(character);
+        if character == '\r' {
+            digits_only = false;
+            out.push("&#13;".to_owned());
+            continue;
+        }
+        if character == '\t' {
+            digits_only = false;
+            out.push("&#9;".to_owned());
+            continue;
+        }
+        if character == ' ' {
+            digits_only = false;
+            if !preserve_spaces {
+                out.push(" ".to_owned());
+                continue;
+            }
+            let left = index.checked_sub(1).map(|previous| raw[previous]);
+            let right = raw.get(index + 1).copied();
+            let literal = left.is_some_and(|neighbour| !neighbour.is_whitespace())
+                && right.is_some_and(|neighbour| !neighbour.is_whitespace());
+            out.push(if literal {
+                " ".to_owned()
+            } else {
+                "&#32;".to_owned()
+            });
+            continue;
+        }
+        let line_content_start = line_start == 0 && content_start || line_start > 0;
+        let at_line_content = index == line_start && line_content_start;
+        let escape = if "\\`*_[]<>#|~&".contains(character) {
+            true
+        } else if character == '-' {
+            at_line_content
+                && (raw.get(index + 1).is_none_or(|next| next.is_whitespace())
+                    || md_line_is_setext(raw, line_start, md_line_end(raw, index), '-'))
+        } else if character == '+' {
+            at_line_content && raw.get(index + 1).is_none_or(|next| next.is_whitespace())
+        } else if character == '=' {
+            at_line_content && md_line_is_setext(raw, line_start, md_line_end(raw, index), '=')
+        } else if character == '.' || character == ')' {
+            line_content_start && index > line_start && digits_only
+        } else {
+            false
+        };
+        // Once the line has a non-digit, later punctuation cannot end an
+        // ordered-list number. Inspect each prefix character at most once.
+        if digits_only {
+            #[cfg(test)]
+            MD_ORDERED_PREFIX_VISITS.set(MD_ORDERED_PREFIX_VISITS.get() + 1);
+            digits_only = character.is_ascii_digit();
+        }
+        if escape {
+            out.push(format!("\\{character}"));
+        } else {
+            out.push(character.to_string());
+        }
     }
     out
 }
-fn semantic_md_preserved(text: &str) -> String {
-    semantic_md_text(text)
-        .replace(' ', "&#32;")
-        .replace('\t', "&#9;")
-        .replace('\r', "&#13;")
+fn semantic_md_text(text: &str, content_start: bool) -> String {
+    let raw = text.chars().collect::<Vec<_>>();
+    semantic_md_chars(&raw, content_start, false, MdNewline::HardBreak).concat()
+}
+fn semantic_md_preserved(text: &str, content_start: bool, newline: MdNewline) -> String {
+    let raw = text.chars().collect::<Vec<_>>();
+    semantic_md_chars(&raw, content_start, true, newline).concat()
 }
 fn semantic_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -3035,6 +3294,264 @@ fn html_error(path: impl Into<String>, message: impl Into<String>) -> Error {
 
 #[cfg(all(test, feature = "default-template"))]
 mod tests {
+    #[cfg(feature = "render")]
+    #[test]
+    fn fx281_number_format_diagnostics_follow_successful_paint() {
+        for (code, refused) in [
+            ("General", false),
+            ("0", false),
+            ("0.00", false),
+            ("0.0%", false),
+            ("#,##0", false),
+            ("#,##0.0", false),
+            ("$#,##0", false),
+            ("\"EUR \"#,##0", false),
+            ("# ##0", false),
+            ("yyyy", true),
+            ("0.0E+00", true),
+            ("0;General", true),
+            ("", true),
+        ] {
+            let mut data = oxml_chart::ChartData {
+                categories: vec!["Q1".into()],
+                series: vec![("Zeta region".into(), vec![1820.0])],
+                number_format: Some(code.into()),
+                ..Default::default()
+            };
+            let mut deck = Presentation::new().unwrap();
+            deck.add_slide(6).unwrap();
+            if code.is_empty() {
+                let Err(error) = deck.add_chart(
+                    0,
+                    oxml_chart::ChartKind::Bar,
+                    Emu(0),
+                    Emu(0),
+                    Emu(4572000),
+                    Emu(2743200),
+                    &data,
+                ) else {
+                    panic!("checked chart authoring accepted an empty number format");
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains("number format must not be empty")
+                );
+                data.number_format = Some("General".into());
+            }
+            deck.add_chart(
+                0,
+                oxml_chart::ChartKind::Bar,
+                Emu(0),
+                Emu(0),
+                Emu(4572000),
+                Emu(2743200),
+                &data,
+            )
+            .unwrap();
+            if code.is_empty() {
+                // Imported empty codes remain readable and reach the painter's
+                // General fallback. Checked authoring above still refuses them.
+                let source = deck.slides[0].part_name.clone();
+                let rel = deck
+                    .package
+                    .get_part_rels(&source)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .find(|rel| rel.rel_type == rel_types::CHART)
+                    .unwrap();
+                let part = OpcPackage::resolve_rel_target(&source, &rel.target);
+                let original =
+                    String::from_utf8(deck.package.get_part(&part).unwrap().to_vec()).unwrap();
+                let imported = original
+                    .replace(r#"formatCode="General""#, r#"formatCode="""#)
+                    .replace(
+                        "<c:formatCode>General</c:formatCode>",
+                        "<c:formatCode></c:formatCode>",
+                    );
+                assert_ne!(imported, original);
+                deck.package.set_part(&part, imported.into_bytes());
+            }
+            let (_, layout) = deck.render_deterministic_with_fonts(&[]).unwrap();
+            let diagnostics = layout.diagnostics;
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("placeholder")),
+                "{code}: {diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|d| d.message.contains("labels use General"))
+                    .count(),
+                usize::from(refused),
+                "{code}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fx281_chart_choice_titles_sparse_cells_and_read_failures_share_projection() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        deck.add_chart(
+            0,
+            oxml_chart::ChartKind::Bar,
+            Emu(0),
+            Emu(0),
+            Emu(4572000),
+            Emu(2743200),
+            &oxml_chart::ChartData {
+                categories: vec!["Q1".into(), "Q2".into()],
+                series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let source = deck.slides[0].part_name.clone();
+        let rel = deck
+            .package
+            .get_part_rels(&source)
+            .unwrap()
+            .items
+            .iter()
+            .find(|rel| rel.rel_type == rel_types::CHART)
+            .unwrap()
+            .clone();
+        let part = OpcPackage::resolve_rel_target(&source, &rel.target);
+        let original = String::from_utf8(deck.package.get_part(&part).unwrap().to_vec()).unwrap();
+        let title = "<c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>";
+        let titled = original.replace("<c:chart>", &format!("<c:chart>{title}"));
+        assert_ne!(titled, original);
+        deck.package.set_part(&part, titled.as_bytes().to_vec());
+        // Semantic cache projection needs no workbook relationship.
+        deck.package
+            .set_part_rels(&part, oxml_opc::relationship::Relationships::new());
+        let frame = deck.slides[0]
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children
+            .iter()
+            .find_map(|child| {
+                if let ShapeTreeChild::GraphicFrame(frame) = child {
+                    Some(frame)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let frame = String::from_utf8(frame.to_xml().unwrap())
+            .unwrap()
+            .replace("<p:cNvPr ", "<p:cNvPr hidden=\"1\" ");
+        let tree = format!(
+            r#"<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><p:nvGrpSpPr/><p:grpSpPr/><mc:AlternateContent><mc:Choice Requires="c">{frame}</mc:Choice><mc:Fallback><p:sp><p:nvSpPr><p:cNvPr id="99" name="fallback"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Fallback must not export</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback></mc:AlternateContent></p:spTree>"#
+        );
+        Arc::make_mut(&mut deck.slides[0])
+            .slide
+            .common_slide_data
+            .shape_tree = rpptx_oxml::shape_tree::CT_ShapeTree::from_xml(tree.as_bytes()).unwrap();
+        let before = deck.slides[0].slide.to_xml().unwrap();
+        let options = PresentationTextExportOptions::default();
+        for output in [
+            deck.to_html().unwrap(),
+            deck.to_markdown().unwrap(),
+            deck.to_html_with_options(&options).unwrap(),
+            deck.to_markdown_with_options(&options).unwrap(),
+        ] {
+            for token in ["Quarter", "Q1", "Zeta region", "1150"] {
+                assert!(output.text.contains(token), "{}", output.text);
+            }
+            assert!(!output.text.contains("Fallback must not export"));
+            assert!(
+                !output.diagnostics.iter().any(|d| d.contains("omitted")),
+                "{:?}",
+                output.diagnostics
+            );
+        }
+        assert_eq!(deck.slides[0].slide.to_xml().unwrap(), before);
+        assert_eq!(deck.package.get_part(&part).unwrap(), titled.as_bytes());
+        let sparse = titled.replace("<c:pt idx=\"1\"><c:v>1820</c:v></c:pt>", "");
+        assert_ne!(sparse, titled);
+        deck.package.set_part(&part, sparse.as_bytes().to_vec());
+        let output = deck.to_html().unwrap();
+        assert!(output.text.contains("1150") && !output.text.contains("NaN"));
+        assert_eq!(
+            output
+                .diagnostics
+                .iter()
+                .filter(|d| d.contains("non-finite series value omitted"))
+                .count(),
+            1
+        );
+        deck.package.set_part(&part, b"<malformed".to_vec());
+        for output in [deck.to_html().unwrap(), deck.to_markdown().unwrap()] {
+            assert!(!output.text.contains("chart-data") && !output.text.contains("Zeta region"));
+            assert_eq!(
+                output
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.contains("chart table omitted:"))
+                    .count(),
+                1
+            );
+            assert!(
+                !output
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.contains("unsupported chart, SmartArt"))
+            );
+        }
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn fx281_render_media_uses_sniffed_classification() {
+        assert_eq!(render_compatible_media(PNG, "image/emf"), Ok(true));
+        assert_eq!(
+            render_compatible_media(b"\x89PNG\r\n\x1a\n", "image/png"),
+            Err("could not be decoded")
+        );
+        assert_eq!(
+            render_compatible_media(b"", "image/wmf"),
+            Err("uses unsupported image format wmf")
+        );
+        assert_eq!(
+            render_compatible_media(b"random", "application/octet-stream"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn fx281_chart_semantic_exports_preserve_values() {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        deck.add_chart(
+            0,
+            oxml_chart::ChartKind::Bar,
+            Emu(0),
+            Emu(0),
+            Emu(4572000),
+            Emu(2743200),
+            &oxml_chart::ChartData {
+                categories: vec!["Q1".into(), "Q2".into()],
+                series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for output in [
+            deck.to_html().unwrap().text,
+            deck.to_markdown().unwrap().text,
+        ] {
+            for expected in ["Q1", "Zeta region", "1150"] {
+                assert!(output.contains(expected), "missing {expected}: {output}");
+            }
+        }
+    }
+
     use std::io::Cursor;
 
     use super::*;
@@ -3428,6 +3945,50 @@ mod tests {
             shape.text(),
             Some("Chrome oracle".to_owned()),
             "{CHROME_ORACLE}"
+        );
+    }
+
+    #[test]
+    fn markdown_long_plain_line_keeps_its_characters_and_syntax_boundaries() {
+        // A long ordinary line must not turn ordinary characters into
+        // line-end scans. The same assembled paragraph still escapes only
+        // where Markdown syntax starts.
+        for marker in ['.', ')'] {
+            let digits = "1".repeat(2048);
+            let text = format!("{digits}{}", marker.to_string().repeat(2048));
+            MD_ORDERED_PREFIX_VISITS.set(0);
+            assert_eq!(
+                semantic_md_text(&text, true),
+                format!("{digits}\\{marker}{}", marker.to_string().repeat(2047))
+            );
+            assert!(
+                MD_ORDERED_PREFIX_VISITS.get() <= text.chars().count(),
+                "ordered-list prefix work must be linear, got {} visits for {} characters",
+                MD_ORDERED_PREFIX_VISITS.get(),
+                text.chars().count()
+            );
+        }
+        assert_eq!(semantic_md_text("12.\n34)", true), "12\\.  \n34\\)");
+        assert_eq!(
+            semantic_md_preserved("12.\n34)", true, MdNewline::Literal),
+            "12\\.\n34)"
+        );
+        assert_eq!(semantic_md_text("12\r34.", true), "12&#13;34.");
+        assert_eq!(semantic_md_text("12\t34.", true), "12&#9;34.");
+        assert_eq!(semantic_md_text("12 34.", true), "12 34.");
+        assert_eq!(semantic_md_text("12.", false), "12.");
+        let plain = "a".repeat(16_384);
+        assert_eq!(semantic_md_text(&plain, true), plain);
+        let mut assembled = String::from("see ");
+        assembled.push_str(&"b".repeat(16_384));
+        assembled.push_str(" - table");
+        assert_eq!(
+            semantic_md_preserved(&assembled, true, MdNewline::HardBreak),
+            assembled
+        );
+        assert_eq!(
+            semantic_md_text(&format!("{}\n- not a list", "c".repeat(16_384)), true),
+            format!("{}  \n\\- not a list", "c".repeat(16_384))
         );
     }
 

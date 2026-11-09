@@ -15,9 +15,11 @@ notes, comments, diagrams, and timing data.
 
 ## Measured footprint and speed
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-oxml | 218,670 compressed bytes, 1,386,209 member bytes, 20 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rpptx-oxml | 219,481 compressed bytes, 1,391,234 member bytes, 20 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rpptx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-06 |
 
 ## Use it when
 
@@ -45,4 +47,4 @@ assert!(presentation.slide_ids.is_empty());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Add `rpptx-oxml = "0.14.4"` to your dependencies. The [API documentation](https://docs.rs/rpptx-oxml) lists the modeled PresentationML types.
+Add `rpptx-oxml = "0.15.0"` to your dependencies. The [API documentation](https://docs.rs/rpptx-oxml) lists the modeled PresentationML types.

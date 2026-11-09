@@ -1,7 +1,7 @@
 //! Layout engine orchestrator: ties all phases together.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -31,11 +31,16 @@ use rdocx_oxml::text::{
 };
 
 use crate::block::{
-    self, CellBlockSemantics, LayoutBlock, LayoutBlockLike, ParagraphBlock, ParagraphSemantics,
-    SharedLayoutBlock, TableSemantics,
+    self, CellBlockSemantics, FieldPaintOwner, LayoutBlock, LayoutBlockLike, PaintPolicies,
+    PaintedElements, ParagraphBlock, ParagraphSemantics, SharedLayoutBlock, TableSemantics,
+    WordAnchorPaint, WordAnnotationKind, WordAnnotationRecipe, WordAnnotationRootKind,
+    WordAnnotationStyle, WordFieldOccurrence, WordInputAnnotation, WordLegacyCache,
+    WordLegacyProducer, WordParagraphPaint,
 };
 use crate::convert;
-use crate::input::{EmbeddedFontSource, LayoutInput, MediaRegistry, RevisionStyle, RevisionView};
+use crate::input::{
+    EmbeddedFontSource, LayoutInput, MediaRegistry, PictureDrawOwners, RevisionStyle, RevisionView,
+};
 use crate::notes::NoteRegistry;
 use crate::paginator::{
     self, ColumnTrack, HeaderFooterContent, HeaderFooterSemantics, LineNumbering, PageBorderFrame,
@@ -49,11 +54,25 @@ use oxml_layout::{
     FontManager, FontTraceEvent, GlyphRun, GroupElement, InlineItem, LayoutError, LayoutResult,
     LineItem, NoteRef, NoteStream, PageFrame, Point, PositionedElement, Rect, Result, ShapedText,
     SourceNodeId, SourceSpan, StructureId, StructureNode, StructureRole, TextDirection,
-    TextSegment, Transform, Underline, break_into_lines, break_multilingual_into_lines,
+    TextSegment, Transform, Underline, break_multilingual_into_lines,
 };
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum WordInputOrigin {
+    #[default]
+    Text,
+    PlainField,
+    Structural,
+    AtomicMarker,
+    Annotation,
+}
 
 #[derive(Clone, Default)]
 struct WordMultilingualStyle {
+    occurrence: Option<WordFieldOccurrence>,
+    annotation: Option<WordInputAnnotation>,
+    kern: bool,
+    origin: WordInputOrigin,
     requested_family: Option<String>,
     language: Option<String>,
     language_east_asia: Option<String>,
@@ -210,37 +229,46 @@ pub(crate) struct SourceRegistry {
     nodes: Vec<WordSourcePath>,
     navigation_sources: HashMap<SourceNodeId, crate::ParagraphNavigation>,
     ids: HashMap<WordSourcePath, SourceNodeId>,
+    navigation_paths: BTreeMap<(WordStory, Vec<usize>), SourceNodeId>,
     body_ids: Vec<Option<SourceNodeId>>,
     field_descendants: HashMap<FieldSource, Vec<u32>>,
     field_source_xml: HashMap<FieldSource, Vec<u8>>,
     field_source_contexts: HashMap<FieldSource, (String, bool, bool)>,
+    page_fields: HashMap<FieldSource, (FieldInstruction, String)>,
     styleref_requests: HashMap<FieldSource, FieldInstruction>,
     text_box_owner_indices: HashMap<WordStory, usize>,
     story_part_names: HashMap<WordStory, String>,
     story_owner_children: HashMap<WordStory, Vec<usize>>,
     revision_view: RevisionView,
     text_box_sources: HashMap<SourceNodeId, Vec<TextBoxSourceBinding>>,
+    preparation_error: Option<String>,
 }
 
 impl SourceRegistry {
-    fn for_body(input: &LayoutInput, body: &CT_Body) -> Self {
+    fn for_body(input: &LayoutInput, body: &CT_Body) -> Result<Self> {
         let mut registry = Self {
             nodes: Vec::new(),
             navigation_sources: HashMap::new(),
             ids: HashMap::new(),
+            navigation_paths: BTreeMap::new(),
             body_ids: Vec::new(),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            page_fields: HashMap::new(),
             styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
             story_owner_children: HashMap::new(),
             revision_view: input.revision_view,
             text_box_sources: HashMap::new(),
+            preparation_error: None,
         };
         registry.collect_story_body(body, &WordStory::Document);
-        registry
+        if let Some(error) = registry.preparation_error.take() {
+            return Err(LayoutError::Layout(error));
+        }
+        Ok(registry)
     }
 
     fn bind_sequence_shape_sources(
@@ -347,6 +375,9 @@ impl SourceRegistry {
         for node in self.ids.values_mut() {
             *node = forward[node];
         }
+        for node in self.navigation_paths.values_mut() {
+            *node = forward[node];
+        }
         for node in self.body_ids.iter_mut().flatten() {
             *node = forward[node];
         }
@@ -386,6 +417,18 @@ impl SourceRegistry {
                 )
             })
             .collect();
+        self.page_fields = std::mem::take(&mut self.page_fields)
+            .into_iter()
+            .map(|(source, value)| {
+                (
+                    FieldSource {
+                        node: forward[&source.node],
+                        index: source.index,
+                    },
+                    value,
+                )
+            })
+            .collect();
         self.text_box_sources = std::mem::take(&mut self.text_box_sources)
             .into_iter()
             .map(|(owner, mut bindings)| {
@@ -404,21 +447,24 @@ impl SourceRegistry {
         Ok(inverse)
     }
 
-    fn for_input(input: &LayoutInput) -> Self {
+    fn for_input(input: &LayoutInput) -> Result<Self> {
         let mut registry = Self {
             nodes: Vec::new(),
             navigation_sources: HashMap::new(),
             ids: HashMap::new(),
+            navigation_paths: BTreeMap::new(),
             body_ids: Vec::with_capacity(input.document.body.content.len()),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            page_fields: HashMap::new(),
             styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
             story_owner_children: HashMap::new(),
             revision_view: input.revision_view,
             text_box_sources: HashMap::new(),
+            preparation_error: None,
         };
 
         for (body_index, content) in input.document.body.content.iter().enumerate() {
@@ -538,7 +584,10 @@ impl SourceRegistry {
             }
         }
 
-        registry
+        if let Some(error) = registry.preparation_error.take() {
+            return Err(LayoutError::Layout(error));
+        }
+        Ok(registry)
     }
 
     fn collect_story_body(&mut self, body: &CT_Body, story: &WordStory) {
@@ -610,14 +659,49 @@ impl SourceRegistry {
         }
     }
 
+    pub(crate) fn record_table_omission(
+        &self,
+        story: &WordStory,
+        prefix: &[usize],
+        state: &mut NumberingState,
+    ) {
+        // Sorted physical paths bound each lookup to the omitted subtree.
+        for (_, node) in self
+            .navigation_paths
+            .range((story.clone(), prefix.to_vec())..)
+            .take_while(|((owner, children), _)| owner == story && children.starts_with(prefix))
+        {
+            if let Some(original) = self.navigation_sources.get(node) {
+                let mut facts = original.clone();
+                facts.omitted_by_table = true;
+                facts.level = None;
+                facts.style = None;
+                state.record_navigation(*node, facts);
+            }
+        }
+    }
+
     fn register_fields(&mut self, node: SourceNodeId, paragraph: &CT_P) {
+        let text = match projected_paragraph_text(paragraph, self.revision_view) {
+            Ok(text) => text,
+            Err(error) => {
+                self.preparation_error.get_or_insert_with(|| {
+                    format!(
+                        "source paragraph {} preparation failed: {error}",
+                        node.get()
+                    )
+                });
+                String::new()
+            }
+        };
         self.navigation_sources.insert(
             node,
             crate::ParagraphNavigation {
+                omitted_by_table: false,
                 level: None,
                 suppressed_numbering: false,
                 accepted_runs: project_paragraph_runs(paragraph, RevisionView::Accepted).len(),
-                text: projected_paragraph_text(paragraph, self.revision_view),
+                text,
                 style: paragraph
                     .properties
                     .as_ref()
@@ -661,12 +745,24 @@ impl SourceRegistry {
             let locked = locked || field.locked() == Some(true);
             let instruction = field.effective_instruction();
             if !locked && !cached && supported_styleref(&instruction) {
-                registry.styleref_requests.insert(source, instruction);
+                registry
+                    .styleref_requests
+                    .insert(source, instruction.clone());
             }
             registry
                 .field_source_contexts
                 .insert(source, (field.effective_instruction_text(), locked, cached));
-            if retain_raw && let Ok(Some((source_xml, _))) = field.source_replacement() {
+            if matches!(
+                instruction.name.as_str(),
+                "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+            ) {
+                registry.page_fields.insert(
+                    source,
+                    (instruction, field.effective_display().into_owned()),
+                );
+            }
+
+            if retain_raw && let Ok(Some((_, source_xml))) = field.source_replacement() {
                 registry
                     .field_source_xml
                     .insert(source, source_xml.to_vec());
@@ -703,18 +799,41 @@ impl SourceRegistry {
     pub(crate) fn bind_text_boxes(
         &self,
         block: &mut ParagraphBlock,
+        paint: &mut WordParagraphPaint,
         owner: Option<SourceNodeId>,
     ) -> Result<()> {
         let Some(children) = owner.and_then(|owner| self.text_box_sources.get(&owner)) else {
             return Ok(());
         };
-        for (drawing, binding) in block.anchored.iter_mut().zip(children) {
+        if paint.anchors.len() != block.anchored.len() {
+            return Err(LayoutError::Layout(
+                "text box paint owner count mismatch".into(),
+            ));
+        }
+        for ((drawing, binding), anchor_paint) in block
+            .anchored
+            .iter_mut()
+            .zip(children)
+            .zip(&mut paint.anchors)
+        {
             if let block::AnchoredContent::Shape { text, .. } = &mut drawing.content {
+                let WordAnchorPaint::Shape { paragraphs } = anchor_paint else {
+                    return Err(LayoutError::Layout(
+                        "text box paint owner variant mismatch".into(),
+                    ));
+                };
+                if paragraphs.len() != text.len() {
+                    return Err(LayoutError::Layout(
+                        "text box paragraph paint count mismatch".into(),
+                    ));
+                }
                 match binding {
                     TextBoxSourceBinding::Paragraphs(nodes) => {
-                        for (paragraph, node) in text.iter_mut().zip(nodes) {
+                        for ((paragraph, paint), node) in text.iter_mut().zip(paragraphs).zip(nodes)
+                        {
                             rebind_paragraph_source(paragraph, Some(*node))?;
-                            self.bind_text_boxes(paragraph, Some(*node))?;
+                            paint.rebind_source(Some(*node))?;
+                            self.bind_text_boxes(paragraph, paint, Some(*node))?;
                         }
                     }
                     TextBoxSourceBinding::Body(nodes) => {
@@ -729,8 +848,9 @@ impl SourceRegistry {
                                 )
                             })
                             .collect();
-                        for paragraph in text {
+                        for (paragraph, paint) in text.iter_mut().zip(paragraphs) {
                             remap_text_box_sources(paragraph, &map)?;
+                            paint.remap_sources(&map)?;
                         }
                     }
                 }
@@ -831,6 +951,8 @@ impl SourceRegistry {
         }
         let id = self.insert_node(path.clone());
         self.register_fields(id, paragraph);
+        self.navigation_paths
+            .insert((path.story.clone(), path.children.clone()), id);
         self.ids.insert(path, id);
     }
 
@@ -894,6 +1016,226 @@ pub fn format_numeric_field_general(
         };
     }
     Ok(output)
+}
+
+fn validate_page_field_instruction(
+    instruction: &FieldInstruction,
+) -> std::result::Result<(), String> {
+    let page_ref = instruction.name == "PAGEREF";
+    if !matches!(
+        instruction.name.as_str(),
+        "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+    ) {
+        return Err("not a page-family field".into());
+    }
+    if !instruction.quotes_are_balanced() {
+        return Err(format!("field {} has unclosed quoting", instruction.name));
+    }
+    if instruction.arguments.len() != usize::from(page_ref)
+        || page_ref && !matches!(instruction.arguments.first(), Some(FieldArgument::Text(_)))
+    {
+        return Err(format!(
+            "field {} requires {} positional operands",
+            instruction.name,
+            usize::from(page_ref)
+        ));
+    }
+    for switch in &instruction.switches {
+        let format = matches!(switch.name.as_str(), "*" | "#");
+        if !format && !(page_ref && matches!(switch.name.as_str(), "h" | "p")) {
+            return Err(format!("unsupported switch \\{}", switch.name));
+        }
+        if format && !matches!(switch.argument, Some(FieldArgument::Text(_))) {
+            return Err(format!(
+                "field {} switch \\{} requires a text argument",
+                instruction.name, switch.name
+            ));
+        }
+        if !format && switch.argument.is_some() {
+            return Err(format!(
+                "field {} switch \\{} does not take an argument",
+                instruction.name, switch.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Shared bounded page-family policy for layout and saved-cache consumers.
+#[doc(hidden)]
+pub fn format_page_field_result(
+    instruction: &FieldInstruction,
+    value: usize,
+    section_format: Option<&str>,
+) -> std::result::Result<String, String> {
+    validate_page_field_instruction(instruction)?;
+    let section_format = section_format
+        .filter(|format| supported_section_page_number_format(format))
+        .ok_or_else(|| "unsupported section page number format".to_owned())?;
+    let numeric_override = instruction.switches.iter().any(|switch| switch.name == "#" || switch.name == "*" && matches!(&switch.argument, Some(FieldArgument::Text(format)) if matches!(format.to_ascii_lowercase().as_str(), "arabic" | "roman" | "alphabetic" | "ordinal")));
+    let mut base = value.to_string();
+    if !numeric_override && section_format != "decimal" {
+        base = match section_format {
+            "upperRoman" => roman(parse_positive_integer(&base)?, true)?,
+            "lowerRoman" => roman(parse_positive_integer(&base)?, false)?,
+            "upperLetter" => page_alphabetic(parse_positive_integer(&base)?, true)?,
+            "lowerLetter" => page_alphabetic(parse_positive_integer(&base)?, false)?,
+            _ => unreachable!(),
+        };
+    }
+    format_numeric_field_display(instruction, base)
+}
+
+/// Read effective imported numbering after qualifying the modeled first owner.
+/// Qualified absence is decimal. Unsupported chapter or unqualified source is None.
+/// Direct Word duplicates overlay explicit attributes without changing the model.
+#[doc(hidden)]
+pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
+    effective_section_page_number(section).format
+}
+
+struct EffectiveSectionPageNumber {
+    start: Option<usize>,
+    format: Option<String>,
+}
+
+fn supported_section_page_number_format(format: &str) -> bool {
+    matches!(
+        format,
+        "decimal" | "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter"
+    )
+}
+
+fn effective_section_page_number(section: &CT_SectPr) -> EffectiveSectionPageNumber {
+    let start = section
+        .page_number
+        .as_ref()
+        .and_then(|number| number.start)
+        .map(|value| value as usize);
+    let unsupported = || EffectiveSectionPageNumber {
+        start,
+        format: None,
+    };
+    if section.page_number.is_none() {
+        return EffectiveSectionPageNumber {
+            start: None,
+            format: Some("decimal".into()),
+        };
+    }
+    // Positively admit the actual modeled owner before any opaque duplicate can
+    // contribute. The writer owns canonical w and retained root binding records.
+    let mut owner = section.clone();
+    let root_records = section
+        .extra_xml
+        .iter()
+        .zip(&section.extra_xml_positions)
+        .filter(|(raw, position)| CT_SectPr::raw_position_is_root_attributes(position, raw))
+        .map(|(raw, position)| (raw.clone(), position.clone()))
+        .collect::<Vec<_>>();
+    (owner.extra_xml, owner.extra_xml_positions) = root_records.into_iter().unzip();
+    if read_effective_section_page_number(&owner, start).is_none() {
+        return unsupported();
+    }
+    // This is an analysis-only projection of the current writer output. Typed
+    // getters and writes still address the first owner. Invalid later state
+    // discards the entire recovery and retains the legacy start as compatibility.
+    read_effective_section_page_number(section, start).unwrap_or_else(unsupported)
+}
+
+fn read_effective_section_page_number(
+    section: &CT_SectPr,
+    modeled_start: Option<usize>,
+) -> Option<EffectiveSectionPageNumber> {
+    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    section.to_xml(&mut writer).ok()?;
+    let mut xml =
+        b"<pageSource xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            .to_vec();
+    xml.extend(writer.into_inner());
+    xml.extend_from_slice(b"</pageSource>");
+    let mut reader = NsReader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut owners = 0usize;
+    let mut start = modeled_start;
+    let mut format = "decimal".to_owned();
+    let mut unsupported_format = None;
+    loop {
+        let event = reader.read_event_into(&mut buffer).ok()?;
+        let opens = matches!(&event, Event::Start(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                if depth == 2 && element.local_name().as_ref() == b"pgNumType" {
+                    let namespace = reader.resolver().resolve_element(element.name()).0;
+                    if matches!(namespace, ResolveResult::Unknown(_)) {
+                        return None;
+                    }
+                    if matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                    {
+                        owners += 1;
+                        for attribute in element.attributes() {
+                            let attribute = attribute.ok()?;
+                            if attribute.key.as_ref() == b"xmlns"
+                                || attribute.key.as_ref().starts_with(b"xmlns:")
+                            {
+                                continue;
+                            }
+                            let namespace = reader.resolver().resolve_attribute(attribute.key).0;
+                            if matches!(namespace, ResolveResult::Unknown(_)) {
+                                return None;
+                            }
+                            if !matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                            {
+                                continue;
+                            }
+                            match attribute.key.local_name().as_ref() {
+                                b"fmt" => {
+                                    format = attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .ok()?
+                                        .into_owned();
+                                    if !supported_section_page_number_format(&format)
+                                        && unsupported_format.is_none()
+                                    {
+                                        unsupported_format = Some(format.clone());
+                                    }
+                                }
+                                b"start" if owners > 1 => {
+                                    let value = attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .ok()?;
+                                    start = Some(value.parse::<u32>().ok()? as usize);
+                                }
+                                b"chapStyle" | b"chapSep" => return None,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if opens {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+            }
+            Event::Eof => {
+                return (owners > 0).then(|| EffectiveSectionPageNumber {
+                    start,
+                    format: Some(unsupported_format.unwrap_or(format)),
+                });
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
 }
 
 fn apply_general_format(value: &str, format: &str) -> std::result::Result<String, String> {
@@ -1270,7 +1612,7 @@ pub fn evaluate_sequence_fields(input: &LayoutInput) -> Result<crate::WordSequen
             "sequence evaluation requires the accepted revision view".into(),
         ));
     }
-    let sources = SourceRegistry::for_input(input);
+    let sources = SourceRegistry::for_input(input)?;
     sequence_snapshot(input, &sources)
 }
 
@@ -1304,7 +1646,7 @@ pub(crate) fn validate_navigation_exclusions(
             "navigation exclusions require a qualified accepted main story".into(),
         ));
     }
-    let sources = SourceRegistry::for_input(input);
+    let sources = SourceRegistry::for_input(input)?;
     let mut counts = HashMap::new();
     for (index, path) in sources.nodes.iter().enumerate() {
         let node = SourceNodeId::new(
@@ -1608,9 +1950,13 @@ impl SequenceCollector<'_> {
         Ok(())
     }
 
-    fn bookmark_boundaries(&mut self, paragraph: &CT_P, story: &WordStory, run: usize) {
-        for marker in paragraph
-            .bookmark_markers
+    fn bookmark_boundaries(
+        &mut self,
+        markers: &[rdocx_oxml::text::BookmarkMarker],
+        story: &WordStory,
+        run: usize,
+    ) {
+        for marker in markers
             .iter()
             .filter(|marker| marker.projected_run_index() == run)
         {
@@ -1751,7 +2097,8 @@ impl SequenceCollector<'_> {
         }
         let projected_runs = project_paragraph_runs(paragraph, RevisionView::Accepted);
         let projected_count = projected_runs.len();
-        for (order, marker) in paragraph.bookmark_markers.iter().enumerate() {
+        let current_bookmarks = paragraph.current_bookmark_projection();
+        for (order, marker) in current_bookmarks.iter().enumerate() {
             let Some(id) = marker.id() else {
                 continue;
             };
@@ -1777,7 +2124,7 @@ impl SequenceCollector<'_> {
         }
         for (run_index, projected) in projected_runs.into_iter().enumerate() {
             if main {
-                self.bookmark_boundaries(paragraph, &path.story, run_index);
+                self.bookmark_boundaries(&current_bookmarks, &path.story, run_index);
             }
             for content in &projected.run.content {
                 match content {
@@ -1800,14 +2147,14 @@ impl SequenceCollector<'_> {
                             );
                         }
                         if main {
-                            for reference in content_note_references(content) {
+                            for reference in
+                                content_note_references(content, RevisionView::Accepted)?
+                            {
                                 let story = match reference {
                                     RunContent::FootnoteRef { id, .. } => {
-                                        WordStory::Footnote { id: *id }
+                                        WordStory::Footnote { id }
                                     }
-                                    RunContent::EndnoteRef { id, .. } => {
-                                        WordStory::Endnote { id: *id }
-                                    }
+                                    RunContent::EndnoteRef { id, .. } => WordStory::Endnote { id },
                                     _ => continue,
                                 };
                                 self.note_contexts
@@ -1904,7 +2251,7 @@ impl SequenceCollector<'_> {
             }
         }
         if main {
-            self.bookmark_boundaries(paragraph, &path.story, projected_count);
+            self.bookmark_boundaries(&current_bookmarks, &path.story, projected_count);
         }
         Ok(())
     }
@@ -2383,11 +2730,7 @@ fn project_revision_runs<'a>(
                 RevisionKind::Deletion | RevisionKind::MoveFrom
             ));
     let marked = (view == RevisionView::Tracked).then(|| revision.kind());
-    if matches!(
-        revision.kind(),
-        RevisionKind::Insertion | RevisionKind::MoveTo
-    ) && let Some(paragraph) = revision.content_paragraph()
-    {
+    if let Some(paragraph) = revision.content_paragraph() {
         for nested in project_paragraph_runs(paragraph, view) {
             projected.push(ProjectedRun {
                 boundary,
@@ -2500,11 +2843,24 @@ fn push_equations_before_order(
     Ok(())
 }
 
-fn projected_paragraph_text(para: &CT_P, view: RevisionView) -> String {
-    project_paragraph_runs(para, view)
-        .iter()
-        .map(|projected| projected.run.text())
-        .collect()
+fn projected_paragraph_text(para: &CT_P, view: RevisionView) -> Result<String> {
+    let mut text = String::new();
+    for projected in project_paragraph_runs(para, view) {
+        for content in &projected.run.content {
+            if let RunContent::Field(field) = content {
+                for stored in stored_note_cache_runs(field, None, view, None, false, None, false)? {
+                    text.push_str(&stored.run.text());
+                }
+            } else {
+                let run = CT_R {
+                    content: vec![content.clone()],
+                    ..CT_R::new("")
+                };
+                text.push_str(&run.text());
+            }
+        }
+    }
+    Ok(text)
 }
 
 fn projected_content_char_starts(run: &CT_R) -> Vec<usize> {
@@ -2767,6 +3123,7 @@ pub struct Engine {
     last_bookmark_pages: HashMap<usize, crate::WordPageSection>,
     last_field_source_xml: HashMap<FieldSource, Vec<u8>>,
     last_text_box_owner_indices: HashMap<WordStory, usize>,
+    last_picture_draw_owners: PictureDrawOwners,
     #[cfg(test)]
     owned_context_builds: usize,
     #[cfg(test)]
@@ -3055,6 +3412,7 @@ struct ParagraphCacheEntry {
     fingerprint: u64,
     key: ParagraphCacheKey,
     block: Arc<ParagraphBlock>,
+    paint: Arc<WordParagraphPaint>,
     diagnostics: Vec<Diagnostic>,
     font_trace: Vec<FontTraceEvent>,
     reflow_direction: TextDirection,
@@ -3104,7 +3462,7 @@ struct HeaderFooterCacheKey {
 #[derive(Clone)]
 struct HeaderFooterVariantContent {
     blocks: Vec<ParagraphBlock>,
-    directions: Vec<(TextDirection, f64)>,
+    directions: Vec<paginator::HeaderFooterBlockSemantics>,
     watermark: Option<GroupElement>,
 }
 
@@ -3112,16 +3470,26 @@ struct HeaderFooterCacheEntry {
     key: HeaderFooterCacheKey,
     content: HeaderFooterVariantContent,
     diagnostics: Vec<Diagnostic>,
+    picture_draw_owners: PictureDrawOwners,
     font_trace: Vec<FontTraceEvent>,
     bytes: usize,
 }
 
+#[derive(Clone, PartialEq)]
+enum RestartPaint {
+    Paragraph(Arc<WordParagraphPaint>),
+    Table(TableSemantics),
+}
+
 struct RestartCache {
+    paint: Vec<RestartPaint>,
     body: Vec<RestartBodyEntry>,
     with_provenance: bool,
     body_fragments: Vec<Vec<WordBodyLayoutFragment>>,
     raw_pages: Vec<Arc<PageFrame>>,
+    raw_policies: Vec<PaintPolicies>,
     pages: Vec<Arc<PageFrame>>,
+    policies: Vec<PaintPolicies>,
     substitution_inputs: Vec<Option<FieldSubstitutionInputs>>,
     outlines: Vec<oxml_layout::OutlineEntry>,
     checkpoints: Vec<paginator::PaginationCheckpoint>,
@@ -3215,7 +3583,7 @@ impl RestartBodyEntry {
     ) -> Option<Self> {
         match content {
             BodyContent::Paragraph(paragraph) => {
-                let mut note_references = paragraph_note_references(paragraph, view);
+                let mut note_references = paragraph_note_references(paragraph, view).ok()?;
                 note_references.shrink_to_fit();
                 let bytes = identity.capacity().saturating_add(
                     note_references
@@ -3359,114 +3727,328 @@ fn restart_body_identity(content: &BodyContent) -> Option<Vec<u8>> {
     Some(identity)
 }
 
-/// Flatten stored result fields for painting only. Generated cache instructions
-/// never acquire a physical field source or run through the field evaluator.
+#[cfg(test)]
+thread_local! {
+    static ORDERED_STORED_PREPARATION_CALLS: Cell<usize> = const { Cell::new(0) };
+    static ORDERED_STORED_OWNED_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// One stored run from frozen operation-local prepared result storage.
+struct StoredFieldRun {
+    occurrence: Option<WordFieldOccurrence>,
+    run: CT_R,
+    force_underline: bool,
+    force_strike: bool,
+    revision: Option<RevisionKind>,
+    source: Option<FieldSource>,
+    field_kind: Option<FieldKind>,
+}
+
+/// Project each current stored owner once, retaining actual inner view marks.
+/// Source association is qualified by the outer source and actual accepted
+/// run/content slot before any prepared address is used for consumption.
 fn stored_note_cache_runs(
     field: &rdocx_oxml::text::Field,
     inherited: Option<&CT_RPr>,
-) -> Vec<CT_R> {
-    let Some(runs) = field.cached_result_runs() else {
+    view: RevisionView,
+    source: Option<FieldSource>,
+    inherited_locked: bool,
+    input: Option<&LayoutInput>,
+    cached_child: bool,
+) -> Result<Vec<StoredFieldRun>> {
+    let occurrence = source.map(|source| WordFieldOccurrence {
+        source,
+        owner_id: field.source_owner_id(),
+        paint_scope: 0,
+    });
+    let locked = inherited_locked || field.locked() == Some(true);
+    let field_kind = if cached_child && !locked && source.is_some() {
+        let instruction = field.effective_instruction();
+        if validate_page_field_instruction(&instruction).is_err() {
+            None
+        } else {
+            match instruction.name.as_str() {
+                "PAGE" => Some(FieldKind::Page),
+                "NUMPAGES" => Some(FieldKind::NumPages),
+                "SECTION" => Some(FieldKind::Section),
+                "SECTIONPAGES" => Some(FieldKind::SectionPages),
+                "PAGEREF" => input
+                    .and_then(|input| {
+                        field_text_argument(&instruction, 0)
+                            .and_then(|name| page_ref_id(input, name))
+                    })
+                    .map(FieldKind::TargetPage),
+                _ => None,
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(test)]
+    ORDERED_STORED_PREPARATION_CALLS.set(
+        ORDERED_STORED_PREPARATION_CALLS
+            .get()
+            .checked_add(1)
+            .expect("stored preparation call overflow"),
+    );
+    let prepared = field.cached_result_owner_projection().map_err(|error| {
+        LayoutError::Layout(format!("stored field preparation failed: {error}"))
+    })?;
+    #[cfg(test)]
+    if prepared.is_some() {
+        ORDERED_STORED_OWNED_PROJECTIONS.set(
+            ORDERED_STORED_OWNED_PROJECTIONS
+                .get()
+                .checked_add(1)
+                .expect("stored projection call overflow"),
+        );
+    }
+    let runs = if let Some(paragraph) = &prepared {
+        project_paragraph_runs(paragraph, view)
+    } else if let Some(runs) = field.cached_result_runs() {
+        runs.iter()
+            .enumerate()
+            .map(|(boundary, run)| ProjectedRun {
+                run,
+                boundary,
+                raw_order: RawOrder::BeforeRaw,
+                ordinary_run_index: Some(boundary),
+                hyperlink_index: None,
+                force_underline: false,
+                force_strike: false,
+                revision: None,
+            })
+            .collect()
+    } else {
         let mut run = CT_R::new(&field.effective_display());
         run.properties = inherited.cloned();
-        return vec![run];
+        return Ok(vec![StoredFieldRun {
+            occurrence,
+            run,
+            force_underline: false,
+            force_strike: false,
+            revision: None,
+            source,
+            field_kind,
+        }]);
     };
+    let accepted = if let Some(paragraph) = &prepared {
+        paragraph
+            .accepted_run_paths()
+            .into_iter()
+            .map(|path| paragraph.accepted_run(&path).expect("fresh accepted path"))
+            .collect::<Vec<_>>()
+    } else {
+        field
+            .cached_result_runs()
+            .expect("borrowed cache selected")
+            .iter()
+            .collect()
+    };
+    let children = field.cached_fields_in_source_order();
+    let mut next = source
+        .map(|source| source.index)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| LayoutError::Layout("stored field source index overflow".into()))?;
+    for instruction_child in field.nested_fields_in_source_order() {
+        let mut pending = vec![instruction_child];
+        while let Some(child) = pending.pop() {
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| LayoutError::Layout("stored field source index overflow".into()))?;
+            pending.extend(child.all_nested_fields_in_source_order());
+        }
+    }
+    let mut slots = HashMap::new();
+    let mut ordinal = 0usize;
+    for run in accepted {
+        for (slot, content) in run.content.iter().enumerate() {
+            let RunContent::Field(child) = content else {
+                continue;
+            };
+            let original = children.get(ordinal).ok_or_else(|| {
+                LayoutError::Layout("stored accepted field occurrence is extra".into())
+            })?;
+            if original.source_owner_id() != child.source_owner_id()
+                || original.form() != child.form()
+            {
+                return Err(LayoutError::Layout(
+                    "stored accepted field source slot changed".into(),
+                ));
+            }
+            if slots
+                .insert(
+                    (std::ptr::from_ref(run), slot),
+                    source.map(|parent| FieldSource {
+                        node: parent.node,
+                        index: next,
+                    }),
+                )
+                .is_some()
+            {
+                return Err(LayoutError::Layout(
+                    "stored accepted field source slot is ambiguous".into(),
+                ));
+            }
+            ordinal += 1;
+            let mut pending = vec![*original];
+            while let Some(child) = pending.pop() {
+                next = next.checked_add(1).ok_or_else(|| {
+                    LayoutError::Layout("stored field source index overflow".into())
+                })?;
+                pending.extend(child.all_nested_fields_in_source_order());
+            }
+        }
+    }
+    if ordinal != children.len() {
+        return Err(LayoutError::Layout(
+            "stored accepted field occurrence is missing".into(),
+        ));
+    }
     let mut result = Vec::new();
-    for run in runs {
+    for projected in runs {
+        let run = projected.run;
         let mut segment = run.clone();
         segment.content.clear();
         if segment.properties.is_none() {
             segment.properties = inherited.cloned();
         }
-        for content in &run.content {
+        for (slot, content) in run.content.iter().enumerate() {
             if let RunContent::Field(child) = content {
-                if !segment.content.is_empty() {
-                    result.push(segment.clone());
+                if !segment.content.is_empty() || !segment.extra_xml.is_empty() {
+                    result.push(StoredFieldRun {
+                        occurrence,
+                        run: segment.clone(),
+                        force_underline: projected.force_underline,
+                        force_strike: projected.force_strike,
+                        revision: projected.revision,
+                        source,
+                        field_kind,
+                    });
                     segment.content.clear();
+                    segment.extra_xml.clear();
+                    segment.extra_xml_positions.clear();
                 }
-                result.extend(stored_note_cache_runs(
+                let child_source = slots
+                    .get(&(std::ptr::from_ref(run), slot))
+                    .copied()
+                    .flatten();
+                for mut child in stored_note_cache_runs(
                     child,
                     run.properties.as_ref().or(inherited),
-                ));
+                    view,
+                    child_source,
+                    locked,
+                    input,
+                    true,
+                )? {
+                    child.force_underline |= projected.force_underline;
+                    child.force_strike |= projected.force_strike;
+                    child.revision = child.revision.or(projected.revision);
+                    result.push(child);
+                }
             } else {
                 segment.content.push(content.clone());
             }
         }
-        if !segment.content.is_empty() {
-            result.push(segment);
+        if !segment.content.is_empty() || !segment.extra_xml.is_empty() {
+            result.push(StoredFieldRun {
+                occurrence,
+                run: segment,
+                force_underline: projected.force_underline,
+                force_strike: projected.force_strike,
+                revision: projected.revision,
+                source,
+                field_kind,
+            });
         }
     }
-    result
-}
-
-fn append_cached_note_contents<'a>(
-    field: &'a rdocx_oxml::text::Field,
-    contents: &mut Vec<&'a RunContent>,
-) {
-    if let Some(runs) = field.cached_result_runs() {
-        for content in runs.iter().flat_map(|run| &run.content) {
-            match content {
-                RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. } => {
-                    contents.push(content)
-                }
-                RunContent::Field(child) => append_cached_note_contents(child, contents),
-                _ => {}
-            }
-        }
-    } else {
-        for child in field.cached_fields_in_source_order() {
-            append_cached_note_contents(child, contents);
-        }
+    if result.is_empty() && source.is_some() {
+        let mut run = CT_R::new("");
+        run.properties = inherited.cloned();
+        result.push(StoredFieldRun {
+            occurrence,
+            run,
+            force_underline: false,
+            force_strike: false,
+            revision: None,
+            source,
+            field_kind,
+        });
     }
+    Ok(result)
 }
 
-fn content_note_references(content: &RunContent) -> Vec<&RunContent> {
+fn append_cached_note_contents(
+    field: &rdocx_oxml::text::Field,
+    view: RevisionView,
+    contents: &mut Vec<RunContent>,
+) -> Result<()> {
+    for stored in stored_note_cache_runs(field, None, view, None, false, None, false)? {
+        contents.extend(stored.run.content.into_iter().filter(|content| {
+            matches!(
+                content,
+                RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. }
+            )
+        }));
+    }
+    Ok(())
+}
+
+fn content_note_references(content: &RunContent, view: RevisionView) -> Result<Vec<RunContent>> {
     let mut contents = Vec::new();
     match content {
-        RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. } => contents.push(content),
-        RunContent::Field(field) => append_cached_note_contents(field, &mut contents),
+        RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. } => {
+            contents.push(content.clone())
+        }
+        RunContent::Field(field) => append_cached_note_contents(field, view, &mut contents)?,
         _ => {}
     }
-    contents
+    Ok(contents)
 }
 
-fn paragraph_note_references(paragraph: &CT_P, view: RevisionView) -> Vec<NoteRef> {
-    project_paragraph_runs(paragraph, view)
-        .into_iter()
-        .flat_map(|projected| projected.run.content.iter())
-        .flat_map(content_note_references)
-        .filter_map(|content| match content {
-            RunContent::FootnoteRef { id, .. } => Some(NoteRef {
-                stream: NoteStream::Footnote,
-                id: *id,
-            }),
-            RunContent::EndnoteRef { id, .. } => Some(NoteRef {
-                stream: NoteStream::Endnote,
-                id: *id,
-            }),
-            _ => None,
-        })
-        .collect()
+fn paragraph_note_references(paragraph: &CT_P, view: RevisionView) -> Result<Vec<NoteRef>> {
+    let mut result = Vec::new();
+    for projected in project_paragraph_runs(paragraph, view) {
+        for content in &projected.run.content {
+            for content in content_note_references(content, view)? {
+                match content {
+                    RunContent::FootnoteRef { id, .. } => result.push(NoteRef {
+                        stream: NoteStream::Footnote,
+                        id,
+                    }),
+                    RunContent::EndnoteRef { id, .. } => result.push(NoteRef {
+                        stream: NoteStream::Endnote,
+                        id,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
-fn body_note_references(input: &LayoutInput) -> Vec<NoteRef> {
-    input
-        .document
-        .body
-        .content
-        .iter()
-        .flat_map(|content| match content {
-            BodyContent::Paragraph(paragraph) => {
-                paragraph_note_references(paragraph, input.revision_view)
-            }
-            BodyContent::Table(_) | BodyContent::ContentControl(_) | BodyContent::RawXml(_) => {
-                Vec::new()
-            }
-        })
-        .collect()
+fn body_note_references(input: &LayoutInput) -> Result<Vec<NoteRef>> {
+    let mut result = Vec::new();
+    for content in &input.document.body.content {
+        if let BodyContent::Paragraph(paragraph) = content {
+            result.extend(paragraph_note_references(paragraph, input.revision_view)?);
+        }
+    }
+    Ok(result)
 }
 
 const fn arc_allocation_bytes<T>() -> usize {
     std::mem::size_of::<T>() + 2 * std::mem::size_of::<usize>()
+}
+
+// Source family/placement is independent of formatting support. Only an
+// unplaced bookmark target removes TargetPage qualification.
+struct PageFieldValue {
+    display: String,
+    target_unplaced: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -3475,6 +4057,7 @@ struct FieldSubstitutionInputs {
     page_number: usize,
     total_pages: usize,
     bookmark_pages: Vec<(usize, usize)>,
+    page_format_context: String,
     font_identity: Vec<FontId>,
     revision_view: RevisionView,
     revision_style: RevisionStyle,
@@ -3598,6 +4181,7 @@ impl Engine {
             last_bookmark_pages: HashMap::new(),
             last_field_source_xml: HashMap::new(),
             last_text_box_owner_indices: HashMap::new(),
+            last_picture_draw_owners: Vec::new(),
             #[cfg(test)]
             owned_context_builds: 0,
             #[cfg(test)]
@@ -3677,7 +4261,7 @@ impl Engine {
 
     /// Lay out the entire document.
     pub fn layout(&mut self, input: &LayoutInput) -> Result<LayoutResult> {
-        self.layout_inner(input, None)
+        self.layout_inner(prepared_semantic_layout_input(input)?, None)
     }
 
     pub(crate) fn measure_content(
@@ -3742,6 +4326,7 @@ impl Engine {
             }
         };
         diagnostics.extend(self.font_manager.current_font_diagnostics().iter().cloned());
+        diagnostics.extend(self.font_manager.word_substitution_diagnostics());
         Ok((height, diagnostics))
     }
 
@@ -3750,7 +4335,8 @@ impl Engine {
         &mut self,
         input: &LayoutInput,
     ) -> Result<(LayoutResult, Vec<WordSourcePath>)> {
-        let sources = SourceRegistry::for_input(input);
+        let input = prepared_semantic_layout_input(input)?;
+        let sources = SourceRegistry::for_input(input.as_ref())?;
         let result = self.layout_inner(input, Some(&sources))?;
         self.last_field_source_xml = sources.field_source_xml;
         self.last_text_box_owner_indices = sources.text_box_owner_indices;
@@ -3769,6 +4355,10 @@ impl Engine {
             std::mem::take(&mut self.last_field_placements),
             std::mem::take(&mut self.last_bookmark_pages),
         )
+    }
+
+    pub(crate) fn take_picture_draw_owners(&mut self) -> Vec<(String, Option<String>)> {
+        std::mem::take(&mut self.last_picture_draw_owners)
     }
 
     pub(crate) fn take_text_box_owner_indices(&mut self) -> HashMap<WordStory, usize> {
@@ -3810,9 +4400,10 @@ impl Engine {
 
     fn layout_inner(
         &mut self,
-        input: &LayoutInput,
+        mut prepared_input: Cow<'_, LayoutInput>,
         sources: Option<&SourceRegistry>,
     ) -> Result<LayoutResult> {
+        let input = prepared_input.as_ref();
         self.navigation_by_source.clear();
         self.numbering_by_source.clear();
         self.bookmark_numbering.clear();
@@ -3828,33 +4419,31 @@ impl Engine {
                     .sequence_snapshot
                     .as_ref()
                     .is_some_and(|s| s.navigation_document.is_some())))
-        .then(|| SourceRegistry::for_input(input));
+        .then(|| SourceRegistry::for_input(input))
+        .transpose()?;
         let sources = sources.or(generated_sources.as_ref());
         // Caller hints never establish provenance or freshness. Derive once,
         // before any retained shaping, furniture or restart cache can be read.
-        let derived_input =
-            if needs_sequences || needs_ref_projection || input.sequence_snapshot.is_some() {
-                let mut derived = input.clone();
-                derived.sequence_snapshot = if (needs_sequences
-                    || needs_ref_projection
-                    || input
-                        .sequence_snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.navigation_document.is_some()))
-                    && input.revision_view == RevisionView::Accepted
-                {
-                    Some(Arc::new(sequence_snapshot(
-                        input,
-                        sources.expect("sequence source registry"),
-                    )?))
-                } else {
-                    None
-                };
-                Some(derived)
+        if needs_sequences || needs_ref_projection || input.sequence_snapshot.is_some() {
+            let snapshot = if (needs_sequences
+                || needs_ref_projection
+                || input
+                    .sequence_snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.navigation_document.is_some()))
+                && input.revision_view == RevisionView::Accepted
+            {
+                Some(Arc::new(sequence_snapshot(
+                    input,
+                    sources.expect("sequence source registry"),
+                )?))
             } else {
                 None
             };
-        let input = derived_input.as_ref().unwrap_or(input);
+            // Reuse the semantic-preparation clone when one was required.
+            prepared_input.to_mut().sequence_snapshot = snapshot;
+        }
+        let input = prepared_input.as_ref();
         // Load user-provided / DOCX-embedded fonts (highest priority). An exact
         // unchanged set is a no-op in a reusable engine.
         let font_context_changed = self
@@ -3865,6 +4454,7 @@ impl Engine {
                 .font_manager
                 .set_caller_aliases(&self.caller_font_aliases);
         self.font_manager.begin_layout();
+        let line_number_context = prepare_word_line_numbers(input, &mut self.font_manager);
         let has_wrapping_drawing = document_has_wrapping_drawing(input);
 
         if font_context_changed {
@@ -3918,41 +4508,48 @@ impl Engine {
         }
 
         let mut reference_seed = None;
-        let mut result =
-            match self.layout_transaction(input, sources, has_wrapping_drawing, None, None) {
-                Ok((first, references)) if needs_ref_projection => {
-                    self.navigation_by_source.clear();
-                    self.numbering_by_source.clear();
-                    self.bookmark_numbering.clear();
-                    self.bookmark_suppressed.clear();
-                    if let Some(pending) = &mut self.pending_paragraph_cache {
-                        pending.clear();
-                    }
-                    if let Some(pending) = &mut self.pending_table_cache {
-                        pending.clear();
-                    }
-                    if let Some(pending) = &mut self.pending_header_footer_cache {
-                        pending.clear();
-                    }
-                    self.pending_paragraph_cache_bytes = 0;
-                    self.pending_table_cache_bytes = 0;
-                    self.pending_header_footer_cache_bytes = 0;
-                    drop(first);
-                    let projected = self
-                        .layout_transaction(
-                            input,
-                            sources,
-                            has_wrapping_drawing,
-                            Some(&references),
-                            None,
-                        )
-                        .map(|(result, _)| result);
-                    reference_seed = Some(references);
-                    projected
+        let mut result = match self.layout_transaction(
+            input,
+            sources,
+            has_wrapping_drawing,
+            None,
+            None,
+            &line_number_context,
+        ) {
+            Ok((first, references)) if needs_ref_projection => {
+                self.navigation_by_source.clear();
+                self.numbering_by_source.clear();
+                self.bookmark_numbering.clear();
+                self.bookmark_suppressed.clear();
+                if let Some(pending) = &mut self.pending_paragraph_cache {
+                    pending.clear();
                 }
-                Ok((result, _)) => Ok(result),
-                Err(error) => Err(error),
-            };
+                if let Some(pending) = &mut self.pending_table_cache {
+                    pending.clear();
+                }
+                if let Some(pending) = &mut self.pending_header_footer_cache {
+                    pending.clear();
+                }
+                self.pending_paragraph_cache_bytes = 0;
+                self.pending_table_cache_bytes = 0;
+                self.pending_header_footer_cache_bytes = 0;
+                drop(first);
+                let projected = self
+                    .layout_transaction(
+                        input,
+                        sources,
+                        has_wrapping_drawing,
+                        Some(&references),
+                        None,
+                        &line_number_context,
+                    )
+                    .map(|(result, _)| result);
+                reference_seed = Some(references);
+                projected
+            }
+            Ok((result, _)) => Ok(result),
+            Err(error) => Err(error),
+        };
         if page_note_restart {
             result = result.and_then(|mut current| {
                 for _ in 0..4 {
@@ -3975,6 +4572,7 @@ impl Engine {
                         has_wrapping_drawing,
                         reference_seed.as_ref(),
                         Some(&pages),
+                        &line_number_context,
                     )?;
                     let stable = note_reference_pages(&next) == pages;
                     current = next;
@@ -4008,7 +4606,7 @@ impl Engine {
             } else if !notes_match {
                 self.paragraph_cache.retain(|entry| {
                     paragraph_note_references(&entry.key.paragraph, entry.key.revision_view)
-                        .is_empty()
+                        .is_ok_and(|references| references.is_empty())
                 });
                 self.paragraph_cache_bytes =
                     self.paragraph_cache.iter().map(|entry| entry.bytes).sum();
@@ -4086,13 +4684,14 @@ impl Engine {
         document_wraps: bool,
         reference_seed: Option<&NumberingState>,
         note_pages: Option<&HashMap<NoteRef, usize>>,
+        line_number_context: &(Option<paginator::WordLineNumberStyle>, Vec<Diagnostic>),
     ) -> Result<(LayoutResult, NumberingState)> {
         let retained_context_matches = self.retained_context_matches_full;
         let styles = &input.styles;
         let mut num_state = reference_seed
             .map(NumberingState::references_only)
             .unwrap_or_default();
-        num_state.set_note_labels(note_labels(input, note_pages));
+        num_state.set_note_labels(note_labels(input, note_pages)?);
         if let Some(sources) = sources {
             for (index, path) in sources.nodes.iter().enumerate() {
                 if path.story == WordStory::Document {
@@ -4105,7 +4704,7 @@ impl Engine {
             }
         }
         let media = MediaRegistry::new(&input.images);
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = line_number_context.1.clone();
         if let Some(failure) = input
             .sequence_snapshot
             .as_ref()
@@ -4185,10 +4784,87 @@ impl Engine {
                     )?;
 
                     if let (Some(registry), Some(source)) = (sources, source)
-                        && let SharedLayoutBlock::Owned { block, .. } = &mut block
+                        && let SharedLayoutBlock::Owned {
+                            block,
+                            semantics: Some(semantics),
+                            ..
+                        } = &mut block
                         && let LayoutBlock::Paragraph(paragraph) = block.as_mut()
                     {
-                        registry.bind_text_boxes(paragraph, Some(source))?;
+                        registry.bind_text_boxes(
+                            paragraph,
+                            Arc::make_mut(&mut semantics.paint),
+                            Some(source),
+                        )?;
+                    }
+
+                    if sect_pr_for_layout.text_direction.as_deref() == Some("tbRl") {
+                        let direct = para.properties.as_ref();
+                        let mut effective = style_resolver::resolve_paragraph_properties(
+                            direct.and_then(|p| p.style_id.as_deref()),
+                            styles,
+                        );
+                        let num_id = direct.and_then(|p| p.num_id).or(effective.num_id);
+                        let level = direct
+                            .and_then(|p| p.num_ilvl)
+                            .or(effective.num_ilvl)
+                            .unwrap_or(0);
+                        if let (Some(id), Some(numbering)) = (num_id, input.numbering.as_ref())
+                            && let Some(properties) =
+                                style_resolver::level_paragraph_properties(id, level, numbering)
+                        {
+                            merge_direct_ppr(&mut effective, properties);
+                        }
+                        if let Some(direct) = direct {
+                            merge_direct_ppr(&mut effective, direct);
+                        }
+                        let policy = (effective.line_rule.as_deref() == Some("exact"))
+                            .then_some(effective.line_spacing)
+                            .flatten()
+                            .filter(|height| height.0 > 0)
+                            .and_then(|height| match effective.text_alignment.as_deref() {
+                                None | Some("auto" | "center") => Some((height.to_pt(), true)),
+                                Some("baseline") => Some((height.to_pt(), false)),
+                                _ => None,
+                            });
+                        if let Some(policy) = policy {
+                            block = match block {
+                                SharedLayoutBlock::Paragraph {
+                                    block,
+                                    mut semantics,
+                                    body_index,
+                                } => {
+                                    semantics.tb_rl_exact_baseline = Some(policy);
+                                    SharedLayoutBlock::Paragraph {
+                                        block,
+                                        semantics,
+                                        body_index,
+                                    }
+                                }
+                                SharedLayoutBlock::Owned {
+                                    block,
+                                    border_group_before,
+                                    reflow_direction,
+                                    body_index,
+                                    mut semantics,
+                                } => {
+                                    // Preserve list and anchor ownership. Owned paragraphs
+                                    // already carry the same baseline policy into pagination.
+                                    semantics
+                                        .as_mut()
+                                        .expect("owned Word paragraph retains its paint")
+                                        .tb_rl_exact_baseline = Some(policy);
+                                    SharedLayoutBlock::Owned {
+                                        block,
+                                        border_group_before,
+                                        reflow_direction,
+                                        body_index,
+                                        semantics,
+                                    }
+                                }
+                                SharedLayoutBlock::Table { .. } => unreachable!(),
+                            };
+                        }
                     }
 
                     if let Some(source) = source {
@@ -4202,6 +4878,7 @@ impl Engine {
                         };
                         let mut facts = num_state.remove_navigation(source).unwrap_or_else(|| {
                             crate::ParagraphNavigation {
+                                omitted_by_table: false,
                                 level: None,
                                 suppressed_numbering: false,
                                 accepted_runs: 0,
@@ -4214,7 +4891,7 @@ impl Engine {
                         facts.accepted_runs =
                             project_paragraph_runs(para, input.revision_view).len();
                         if !excluded_owner_for_source(input, source) {
-                            facts.text = projected_paragraph_text(para, input.revision_view);
+                            facts.text = projected_paragraph_text(para, input.revision_view)?;
                             facts.style = para.properties.as_ref().and_then(|p| p.style_id.clone());
                         }
                         if facts.level.is_some() {
@@ -4233,7 +4910,7 @@ impl Engine {
                         let geometry = section_page_geometry(
                             sect_pr,
                             input,
-                            &mut self.font_manager,
+                            line_number_context.0,
                             &mut diagnostics,
                         );
                         let header_footer = layout_header_footer(
@@ -4253,6 +4930,8 @@ impl Engine {
                             });
                         block::collapse_shared_border_groups(&mut current_blocks);
                         sections.push(paginator::SharedSection {
+                            line_number_style: line_number_context.0,
+                            written_tb_rl_band: sect_pr.text_direction.as_deref() == Some("tbRl"),
                             continuous: sect_pr.section_type
                                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
                             blocks: std::mem::take(&mut current_blocks),
@@ -4291,9 +4970,14 @@ impl Engine {
                 }
                 // Accepting every tracked change removes a table whose rows
                 // are all deleted, so it leaves no block or spacing behind.
-                MainStoryLayoutItem::Table(tbl, _)
+                MainStoryLayoutItem::Table(tbl, path)
                     if input.revision_view == RevisionView::Accepted
-                        && tbl.accepted_view_removes() => {}
+                        && tbl.accepted_view_removes() =>
+                {
+                    if let Some(registry) = sources.as_ref() {
+                        registry.record_table_omission(&WordStory::Document, &path, &mut num_state);
+                    }
+                }
                 MainStoryLayoutItem::Table(tbl, path) => {
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
@@ -4331,7 +5015,7 @@ impl Engine {
         let final_geometry = section_page_geometry(
             &final_sect_pr,
             input,
-            &mut self.font_manager,
+            line_number_context.0,
             &mut diagnostics,
         );
         let final_hf = layout_header_footer(
@@ -4351,6 +5035,8 @@ impl Engine {
             });
         block::collapse_shared_border_groups(&mut current_blocks);
         sections.push(paginator::SharedSection {
+            line_number_style: line_number_context.0,
+            written_tb_rl_band: final_sect_pr.text_direction.as_deref() == Some("tbRl"),
             continuous: final_sect_pr.section_type
                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
             blocks: current_blocks,
@@ -4423,7 +5109,32 @@ impl Engine {
         )?;
 
         let mut font_trace = self.font_manager.current_layout_fonts().to_vec();
+        let producer_paints = if sections.len() == 1 {
+            sections[0]
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    SharedLayoutBlock::Paragraph { semantics, .. } => {
+                        Some(RestartPaint::Paragraph(Arc::clone(&semantics.paint)))
+                    }
+                    SharedLayoutBlock::Owned {
+                        block,
+                        semantics: Some(semantics),
+                        ..
+                    } if matches!(block.as_ref(), LayoutBlock::Paragraph(_)) => {
+                        Some(RestartPaint::Paragraph(Arc::clone(&semantics.paint)))
+                    }
+                    SharedLayoutBlock::Table { semantics, .. } => {
+                        Some(RestartPaint::Table(semantics.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        } else {
+            None
+        };
         let restart_record_eligible = sections.len() == 1
+            && producer_paints.is_some()
             && sections[0].blocks.len() == input.document.body.content.len()
             && input.document.background_xml.is_none()
             && !document_wraps
@@ -4454,23 +5165,26 @@ impl Engine {
                     !matches!(content, BodyContent::Paragraph(paragraph) if paragraph_has_field(paragraph))
                         && restart_block_is_safe(block)
                 });
+        let current_body_notes = body_note_references(input)?;
         let reusable_restart_record = restart_record_eligible
             && retained_context_matches
             && self.restart_cache.as_ref().is_some_and(|cache| {
-                cache.font_trace == font_trace
+                cache.paint.len() == cache.body.len()
+                    && cache.font_trace == font_trace
                     && cache.with_provenance == sources.is_some()
                     && cache
                         .body
                         .iter()
                         .flat_map(|entry| entry.note_references().iter().copied())
-                        .eq(body_note_references(input))
+                        .eq(current_body_notes.iter().copied())
             });
         let reusable_restart = restart_eligible && reusable_restart_record;
         let mut restart_identity_memo =
             RestartBodyIdentityMemo::new(input.document.body.content.len());
         let body_unchanged = reusable_restart_record
             && self.restart_cache.as_ref().is_some_and(|cache| {
-                cache.body.len() == input.document.body.content.len()
+                cache.paint.as_slice() == producer_paints.as_deref().unwrap_or(&[])
+                    && cache.body.len() == input.document.body.content.len()
                     && input
                         .document
                         .body
@@ -4492,7 +5206,9 @@ impl Engine {
                 .zip(&cache.body)
                 .enumerate()
                 .position(|(index, (current, previous))| {
-                    !previous.matches_memoized(current, index, &mut restart_identity_memo)
+                    cache.paint.get(index)
+                        != producer_paints.as_ref().and_then(|paint| paint.get(index))
+                        || !previous.matches_memoized(current, index, &mut restart_identity_memo)
                 })
                 .unwrap_or_else(|| input.document.body.content.len().min(cache.body.len()))
         });
@@ -4505,9 +5221,11 @@ impl Engine {
                 .iter()
                 .enumerate()
                 .rev()
-                .zip(cache.body.iter().rev())
-                .take_while(|((index, current), previous)| {
-                    previous.matches_memoized(current, *index, &mut restart_identity_memo)
+                .zip(cache.body.iter().enumerate().rev())
+                .take_while(|((index, current), (old_index, previous))| {
+                    cache.paint.get(*old_index)
+                        == producer_paints.as_ref().and_then(|paint| paint.get(*index))
+                        && previous.matches_memoized(current, *index, &mut restart_identity_memo)
                 })
                 .count()
         });
@@ -4567,189 +5285,302 @@ impl Engine {
             });
 
         let mut page_sections = Vec::new();
-        let (mut pages, mut outlines, mut checkpoints, mut body_fragments) = if restart_eligible {
-            let mut recorded = paginator::paginate_shared_single_section_recorded(
-                &sections[0],
-                &self.font_manager,
-                &media,
-                &notes,
-                restart_checkpoint,
-                tail_source.map(|(stop, _)| stop),
-            );
-            #[cfg(test)]
-            {
-                self.page_layout_invocations = recorded.pages.len();
-            }
-            if recorded.stopped_at.is_none() {
-                // Completing a changed region must include references retained
-                // in the prefix, while continuing in the actual final flow band.
-                let references = body_note_references(input);
-                paginator::append_endnote_pages_for_references(
-                    &mut recorded.pages,
-                    &references,
+        let (mut pages, mut outlines, mut checkpoints, mut body_fragments, mut page_policies) =
+            if restart_eligible {
+                let mut recorded = paginator::paginate_shared_single_section_recorded(
+                    &sections[0],
+                    &self.font_manager,
+                    &media,
                     &notes,
-                    final_geometry.clone(),
-                    restart_checkpoint.map_or(0, |checkpoint| checkpoint.page_count),
-                    restart_checkpoint.map_or(1, |checkpoint| checkpoint.next_header_page_number),
-                    recorded.last_flow_space,
+                    restart_checkpoint,
+                    tail_source.map(|(stop, _)| stop),
                 );
-            }
-            for page in &mut recorded.pages {
-                mark_remaining_artifacts(&mut page.elements);
-            }
-            let mut body_fragments = vec![Vec::new(); input.document.body.content.len()];
-            if let Some(checkpoint) = restart_checkpoint
-                && let Some(cache) = self.restart_cache.as_ref()
-            {
-                for (body_index, fragments) in cache
-                    .body_fragments
-                    .iter()
-                    .enumerate()
-                    .take(checkpoint.next_block_index)
+                if let Some(failure) = recorded.furniture_failure.take() {
+                    return Err(LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    )));
+                }
+                #[cfg(test)]
                 {
-                    body_fragments[body_index].clone_from(fragments);
+                    self.page_layout_invocations = recorded.pages.len();
                 }
-            }
-            for (body_index, fragment) in recorded.body_fragments.drain(..) {
-                if let Some(fragments) = body_fragments.get_mut(body_index) {
-                    fragments.push(fragment);
-                }
-            }
-            let mut pages = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
-                self.restart_cache
-                    .as_ref()
-                    .expect("a restart checkpoint belongs to retained pages")
-                    .raw_pages[..checkpoint.page_count]
-                    .iter()
-                    .map(Arc::clone)
-                    .collect()
-            });
-            pages.extend(recorded.pages.into_iter().map(Arc::new));
-            let mut outlines = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
-                self.restart_cache
-                    .as_ref()
-                    .expect("a restart checkpoint belongs to retained outlines")
-                    .outlines
-                    .iter()
-                    .filter(|outline| outline.page_index < checkpoint.page_count)
-                    .cloned()
-                    .collect()
-            });
-            outlines.extend(recorded.outlines);
-            let mut checkpoints = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
-                self.restart_cache
-                    .as_ref()
-                    .expect("a restart checkpoint belongs to retained state")
-                    .checkpoints
-                    .iter()
-                    .copied()
-                    .filter(|candidate| candidate.page_count <= checkpoint.page_count)
-                    .collect()
-            });
-            checkpoints.extend(recorded.checkpoints);
-            if let (Some(stopped), Some((_, old_tail))) = (recorded.stopped_at, tail_source) {
-                debug_assert_eq!(stopped.page_count, old_tail.page_count);
-                let cache = self.restart_cache.as_ref().expect("restart cache exists");
-                pages.extend(
-                    cache.raw_pages[old_tail.page_count..]
-                        .iter()
-                        .map(Arc::clone),
-                );
-                outlines.extend(
-                    cache
-                        .outlines
-                        .iter()
-                        .filter(|outline| outline.page_index >= old_tail.page_count)
-                        .cloned(),
-                );
-                let block_delta =
-                    stopped.next_block_index as isize - old_tail.next_block_index as isize;
-                checkpoints.extend(
-                    cache
-                        .checkpoints
-                        .iter()
-                        .filter(|candidate| candidate.page_count > old_tail.page_count)
-                        .map(|candidate| paginator::PaginationCheckpoint {
-                            next_block_index: candidate
-                                .next_block_index
-                                .checked_add_signed(block_delta)
-                                .expect("common suffix block index remains in range"),
-                            page_count: candidate.page_count,
-                            next_header_page_number: candidate.next_header_page_number,
+                if recorded.stopped_at.is_none() {
+                    // Completing a changed region must include references retained
+                    // in the prefix, while continuing in the actual final flow band.
+                    let references = body_note_references(input)?;
+                    paginator::append_endnote_pages_for_references(
+                        &mut recorded.pages,
+                        &mut recorded.paint,
+                        &references,
+                        &notes,
+                        final_geometry.clone(),
+                        restart_checkpoint.map_or(0, |checkpoint| checkpoint.page_count),
+                        restart_checkpoint
+                            .map_or(1, |checkpoint| checkpoint.next_header_page_number),
+                        recorded.last_flow_space,
+                        Some(&paginator::EndnoteFurniture {
+                            section: &sections[0],
+                            section_index: 0,
+                            fm: &self.font_manager,
+                            media: media.media(),
                         }),
-                );
-                for (body_index, fragments) in cache
-                    .body_fragments
-                    .iter()
-                    .enumerate()
-                    .skip(old_tail.next_block_index)
+                    )
+                    .map_err(|failure| {
+                        LayoutError::Layout(format!(
+                            "section {} page {}: {}",
+                            failure.section + 1,
+                            failure.page,
+                            failure.reason
+                        ))
+                    })?;
+                }
+                recorded.paint.validate(&recorded.pages)?;
+                recorded.paint.boundaries.clear();
+                for (page, policies) in recorded.pages.iter_mut().zip(&mut recorded.paint.policies)
                 {
-                    if let Some(destination) = body_fragments.get_mut(body_index) {
-                        destination.clone_from(fragments);
+                    mark_remaining_artifacts(&mut page.elements, policies)?;
+                }
+                let mut body_fragments = vec![Vec::new(); input.document.body.content.len()];
+                if let Some(checkpoint) = restart_checkpoint
+                    && let Some(cache) = self.restart_cache.as_ref()
+                {
+                    for (body_index, fragments) in cache
+                        .body_fragments
+                        .iter()
+                        .enumerate()
+                        .take(checkpoint.next_block_index)
+                    {
+                        body_fragments[body_index].clone_from(fragments);
                     }
                 }
-            }
-            checkpoints.sort_unstable_by_key(|checkpoint| checkpoint.next_block_index);
-            checkpoints.dedup();
-            (pages, outlines, checkpoints, body_fragments)
-        } else {
-            let mut pagination =
-                paginator::paginate_shared_sections(&sections, &self.font_manager, &media, &notes);
-            #[cfg(test)]
-            {
-                self.page_layout_invocations = pagination.pages.len();
-            }
-            // Endnotes read at the end of the document, so they follow the last
-            // body page rather than sitting at the foot of their reference's page.
-            if input.note_defaults[1]
-                .as_ref()
-                .and_then(|policy| policy.pos.as_deref())
-                .unwrap_or("docEnd")
-                == "docEnd"
-            {
-                paginator::append_endnote_pages_at_document_end(
-                    &mut pagination.pages,
-                    &notes,
-                    final_geometry.clone(),
-                    pagination.last_flow_space,
-                    &pagination.endnotes_placed,
-                );
-            } else if !pagination.endnotes_placed.is_empty() {
-                paginator::append_endnote_pages_at_document_end(
-                    &mut pagination.pages,
-                    &notes,
-                    final_geometry.clone(),
-                    None,
-                    &pagination.endnotes_placed,
-                );
-            } else {
-                paginator::append_endnote_pages(
-                    &mut pagination.pages,
-                    &notes,
-                    final_geometry.clone(),
-                );
-            }
-            apply_page_background(&mut pagination.pages, input);
-            for page in &mut pagination.pages {
-                mark_remaining_artifacts(&mut page.elements);
-            }
-            page_sections = pagination.page_sections;
-            let mut body_fragments = vec![Vec::new(); input.document.body.content.len()];
-            for (body_index, fragment) in pagination.body_fragments {
-                if let Some(fragments) = body_fragments.get_mut(body_index) {
-                    fragments.push(fragment);
+                for (body_index, fragment) in recorded.body_fragments.drain(..) {
+                    if let Some(fragments) = body_fragments.get_mut(body_index) {
+                        fragments.push(fragment);
+                    }
                 }
-            }
-            (
-                pagination.pages.into_iter().map(Arc::new).collect(),
-                pagination.outlines,
-                Vec::new(),
-                body_fragments,
-            )
-        };
+                let mut pages = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
+                    self.restart_cache
+                        .as_ref()
+                        .expect("a restart checkpoint belongs to retained pages")
+                        .raw_pages[..checkpoint.page_count]
+                        .iter()
+                        .map(Arc::clone)
+                        .collect()
+                });
+                let mut policies = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
+                    self.restart_cache
+                        .as_ref()
+                        .expect("retained prefix owns policies")
+                        .raw_policies[..checkpoint.page_count]
+                        .to_vec()
+                });
+                policies.append(&mut recorded.paint.policies);
+                pages.extend(recorded.pages.into_iter().map(Arc::new));
+                let mut outlines = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
+                    self.restart_cache
+                        .as_ref()
+                        .expect("a restart checkpoint belongs to retained outlines")
+                        .outlines
+                        .iter()
+                        .filter(|outline| outline.page_index < checkpoint.page_count)
+                        .cloned()
+                        .collect()
+                });
+                outlines.extend(recorded.outlines);
+                let mut checkpoints = restart_checkpoint.map_or_else(Vec::new, |checkpoint| {
+                    self.restart_cache
+                        .as_ref()
+                        .expect("a restart checkpoint belongs to retained state")
+                        .checkpoints
+                        .iter()
+                        .copied()
+                        .filter(|candidate| candidate.page_count <= checkpoint.page_count)
+                        .collect()
+                });
+                checkpoints.extend(recorded.checkpoints);
+                if let (Some(stopped), Some((_, old_tail))) = (recorded.stopped_at, tail_source) {
+                    debug_assert_eq!(stopped.page_count, old_tail.page_count);
+                    let cache = self.restart_cache.as_ref().expect("restart cache exists");
+                    policies.extend_from_slice(&cache.raw_policies[old_tail.page_count..]);
+                    pages.extend(
+                        cache.raw_pages[old_tail.page_count..]
+                            .iter()
+                            .map(Arc::clone),
+                    );
+                    outlines.extend(
+                        cache
+                            .outlines
+                            .iter()
+                            .filter(|outline| outline.page_index >= old_tail.page_count)
+                            .cloned(),
+                    );
+                    let block_delta =
+                        stopped.next_block_index as isize - old_tail.next_block_index as isize;
+                    checkpoints.extend(
+                        cache
+                            .checkpoints
+                            .iter()
+                            .filter(|candidate| candidate.page_count > old_tail.page_count)
+                            .map(|candidate| paginator::PaginationCheckpoint {
+                                next_block_index: candidate
+                                    .next_block_index
+                                    .checked_add_signed(block_delta)
+                                    .expect("common suffix block index remains in range"),
+                                page_count: candidate.page_count,
+                                next_header_page_number: candidate.next_header_page_number,
+                            }),
+                    );
+                    for (body_index, fragments) in cache
+                        .body_fragments
+                        .iter()
+                        .enumerate()
+                        .skip(old_tail.next_block_index)
+                    {
+                        if let Some(destination) = body_fragments.get_mut(body_index) {
+                            destination.clone_from(fragments);
+                        }
+                    }
+                }
+                checkpoints.sort_unstable_by_key(|checkpoint| checkpoint.next_block_index);
+                checkpoints.dedup();
+                (pages, outlines, checkpoints, body_fragments, policies)
+            } else {
+                let mut pagination = paginator::paginate_shared_sections(
+                    &sections,
+                    &self.font_manager,
+                    &media,
+                    &notes,
+                );
+                if let Some(failure) = pagination.furniture_failure.take() {
+                    return Err(LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    )));
+                }
+                #[cfg(test)]
+                {
+                    self.page_layout_invocations = pagination.pages.len();
+                }
+                // Endnotes read at the end of the document, so they follow the last
+                // body page rather than sitting at the foot of their reference's page.
+                if input.note_defaults[1]
+                    .as_ref()
+                    .and_then(|policy| policy.pos.as_deref())
+                    .unwrap_or("docEnd")
+                    == "docEnd"
+                {
+                    paginator::append_endnote_pages_at_document_end(
+                        &mut pagination.pages,
+                        &mut pagination.paint,
+                        &notes,
+                        final_geometry.clone(),
+                        pagination.last_flow_space,
+                        &pagination.endnotes_placed,
+                        sections
+                            .last()
+                            .map(|section| paginator::EndnoteFurniture {
+                                section,
+                                section_index: sections.len() - 1,
+                                fm: &self.font_manager,
+                                media: media.media(),
+                            })
+                            .as_ref(),
+                    )
+                    .map_err(|failure| {
+                        LayoutError::Layout(format!(
+                            "section {} page {}: {}",
+                            failure.section + 1,
+                            failure.page,
+                            failure.reason
+                        ))
+                    })?;
+                } else if !pagination.endnotes_placed.is_empty() {
+                    paginator::append_endnote_pages_at_document_end(
+                        &mut pagination.pages,
+                        &mut pagination.paint,
+                        &notes,
+                        final_geometry.clone(),
+                        None,
+                        &pagination.endnotes_placed,
+                        sections
+                            .last()
+                            .map(|section| paginator::EndnoteFurniture {
+                                section,
+                                section_index: sections.len() - 1,
+                                fm: &self.font_manager,
+                                media: media.media(),
+                            })
+                            .as_ref(),
+                    )
+                    .map_err(|failure| {
+                        LayoutError::Layout(format!(
+                            "section {} page {}: {}",
+                            failure.section + 1,
+                            failure.page,
+                            failure.reason
+                        ))
+                    })?;
+                } else {
+                    paginator::append_endnote_pages_at_document_end(
+                        &mut pagination.pages,
+                        &mut pagination.paint,
+                        &notes,
+                        final_geometry.clone(),
+                        None,
+                        &[],
+                        sections
+                            .last()
+                            .map(|section| paginator::EndnoteFurniture {
+                                section,
+                                section_index: sections.len() - 1,
+                                fm: &self.font_manager,
+                                media: media.media(),
+                            })
+                            .as_ref(),
+                    )
+                    .map_err(|failure| {
+                        LayoutError::Layout(format!(
+                            "section {} page {}: {}",
+                            failure.section + 1,
+                            failure.page,
+                            failure.reason
+                        ))
+                    })?;
+                }
+                apply_page_background(&mut pagination.pages, &mut pagination.paint, input)?;
+                pagination.paint.validate(&pagination.pages)?;
+                pagination.paint.boundaries.clear();
+                for (page, policies) in pagination
+                    .pages
+                    .iter_mut()
+                    .zip(&mut pagination.paint.policies)
+                {
+                    mark_remaining_artifacts(&mut page.elements, policies)?;
+                }
+                page_sections = pagination.page_sections;
+                let mut body_fragments = vec![Vec::new(); input.document.body.content.len()];
+                for (body_index, fragment) in pagination.body_fragments {
+                    if let Some(fragments) = body_fragments.get_mut(body_index) {
+                        fragments.push(fragment);
+                    }
+                }
+                (
+                    pagination.pages.into_iter().map(Arc::new).collect(),
+                    pagination.outlines,
+                    Vec::new(),
+                    body_fragments,
+                    pagination.paint.policies,
+                )
+            };
         if body_unchanged
             && let Some(cache) = self.restart_cache.as_ref()
             && cache.raw_pages.len() == pages.len()
+            && cache.raw_policies == page_policies
         {
             for (page, retained) in pages.iter_mut().zip(&cache.raw_pages) {
                 *page = Arc::clone(retained);
@@ -4761,6 +5592,15 @@ impl Engine {
         if sources.is_none() {
             body_fragments.clear();
         }
+        if page_policies.len() != pages.len() {
+            return Err(LayoutError::Layout(
+                "page paint companion count mismatch".into(),
+            ));
+        }
+        for (page, policies) in pages.iter().zip(&page_policies) {
+            policies.validate(&page.elements)?;
+        }
+        let mut raw_policies = restart_record_eligible.then(|| page_policies.clone());
         let mut raw_pages = restart_record_eligible.then(|| pages.clone());
 
         if page_sections.is_empty() {
@@ -5037,6 +5877,33 @@ impl Engine {
                 sequence_boundary
             })
             .collect::<Vec<_>>();
+        let mut section_formats = document_sections(&input.document)
+            .into_iter()
+            .map(section_page_number_format)
+            .collect::<Vec<_>>();
+        // Pagination supplies this same implicit final section when no body
+        // sectPr exists. It is qualified absence, not an unknown owner index.
+        if input.document.body.sect_pr.is_none() {
+            section_formats.push(Some("decimal".into()));
+        }
+        let mut section_pages = HashMap::<usize, std::collections::HashSet<usize>>::new();
+        for record in &self.last_page_sections {
+            section_pages
+                .entry(record.section_index)
+                .or_default()
+                .insert(record.physical_page);
+        }
+        let section_page_counts = section_pages
+            .into_iter()
+            .map(|(section, pages)| (section, pages.len()))
+            .collect::<HashMap<_, _>>();
+        let mut placements_by_page = HashMap::<usize, Vec<&crate::WordFieldPlacement>>::new();
+        for placement in &self.last_field_placements {
+            placements_by_page
+                .entry(placement.physical_page)
+                .or_default()
+                .push(placement);
+        }
         let mut substitution_inputs = Vec::with_capacity(pages.len());
         let mut reuse_result_pages = vec![false; pages.len()];
         for (page_index, page) in pages.iter_mut().enumerate() {
@@ -5045,6 +5912,8 @@ impl Engine {
             {
                 reuse_result_pages[page_index] = self.restart_cache.as_ref().is_some_and(|cache| {
                     cache.substitution_inputs.get(page_index) == Some(&None)
+                        && cache.raw_policies.get(page_index) == page_policies.get(page_index)
+                        && cache.policies.len() == cache.pages.len()
                         && cache
                             .raw_pages
                             .get(page_index)
@@ -5053,11 +5922,87 @@ impl Engine {
                 substitution_inputs.push(None);
                 continue;
             }
+            let placements = placements_by_page
+                .get(&page.page_number)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut page_field_values = HashMap::new();
+            let mut format_context = Vec::new();
+            if let Some(sources) = sources {
+                for placement in placements {
+                    let Some((instruction, stored)) = sources.page_fields.get(&placement.source)
+                    else {
+                        continue;
+                    };
+                    let locked = sources
+                        .field_source_contexts
+                        .get(&placement.source)
+                        .is_some_and(|(_, locked, _)| *locked);
+                    let target = (instruction.name == "PAGEREF")
+                        .then(|| {
+                            field_text_argument(instruction, 0)
+                                .and_then(|name| page_ref_id(input, name))
+                                .and_then(|target| self.last_bookmark_pages.get(&target))
+                        })
+                        .flatten();
+                    let owner =
+                        target.map_or(placement.section_index, |target| target.section_index);
+                    let section_format = if matches!(instruction.name.as_str(), "PAGE" | "PAGEREF")
+                    {
+                        section_formats.get(owner).and_then(Option::as_deref)
+                    } else {
+                        Some("decimal")
+                    };
+                    let value = match instruction.name.as_str() {
+                        "PAGE" => Some(placement.displayed_page),
+                        "NUMPAGES" => Some(total_pages),
+                        "SECTION" => Some(placement.section_index + 1),
+                        "SECTIONPAGES" => Some(
+                            *section_page_counts
+                                .get(&placement.section_index)
+                                .unwrap_or(&0),
+                        ),
+                        "PAGEREF" => target.map(|target| target.displayed_page),
+                        _ => None,
+                    };
+                    format_context.push((placement.source.node.get(), placement.source.index, format!("{instruction:?}{owner:?}{section_format:?}{target:?}{locked:?}{value:?}{stored:?}")));
+                    let result = if locked {
+                        Err("locked owner".into())
+                    } else {
+                        value
+                            .ok_or_else(|| {
+                                "bookmark target is missing, ambiguous or unplaced".to_owned()
+                            })
+                            .and_then(|value| {
+                                format_page_field_result(instruction, value, section_format)
+                            })
+                    };
+                    let value = result.unwrap_or_else(|reason| {
+                        diagnostics.push(Diagnostic {
+                            message: format!(
+                                "{} field {:?} retained stored display: {reason}",
+                                instruction.name, placement.source
+                            ),
+                        });
+                        stored.clone()
+                    });
+                    page_field_values.insert(
+                        placement.source,
+                        PageFieldValue {
+                            display: value,
+                            target_unplaced: instruction.name == "PAGEREF" && target.is_none(),
+                        },
+                    );
+                }
+            }
+            format_context.sort_unstable();
+            let page_format_context = format!("{format_context:?}");
             let inputs = FieldSubstitutionInputs {
                 page_index,
                 page_number: page.displayed_page_number,
                 total_pages,
                 bookmark_pages: bookmark_identity.clone(),
+                page_format_context,
                 font_identity: font_trace.clone(),
                 revision_view: input.revision_view,
                 revision_style: input.revision_style,
@@ -5069,12 +6014,20 @@ impl Engine {
                         .get(page_index)
                         .and_then(Option::as_ref)
                         == Some(&inputs)
+                        && cache.raw_policies.get(page_index) == page_policies.get(page_index)
+                        && cache.policies.len() == cache.pages.len()
                         && cache
                             .raw_pages
                             .get(page_index)
                             .is_some_and(|retained| Arc::ptr_eq(page, retained))
                 });
             if reusable {
+                page_policies[page_index] = self
+                    .restart_cache
+                    .as_ref()
+                    .expect("reusable page owns final policy")
+                    .policies[page_index]
+                    .clone();
                 reuse_result_pages[page_index] = true;
                 substitution_inputs.push(Some(inputs));
                 continue;
@@ -5086,55 +6039,59 @@ impl Engine {
                 .iter()
                 .find(|record| record.physical_page == page.page_number)
                 .map_or(0, |record| record.section_index);
-            let section_pages = self
-                .last_page_sections
+            let section_pages = *section_page_counts.get(&section_index).unwrap_or(&0);
+            let field_sections = placements
                 .iter()
-                .filter(|record| record.section_index == section_index)
-                .map(|record| record.physical_page)
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            let field_sections = self
-                .last_field_placements
-                .iter()
-                .filter(|placement| placement.physical_page == page.page_number)
                 .map(|placement| {
-                    let count = self
-                        .last_page_sections
-                        .iter()
-                        .filter(|record| record.section_index == placement.section_index)
-                        .map(|record| record.physical_page)
-                        .collect::<std::collections::HashSet<_>>()
-                        .len();
                     (
                         placement.source,
-                        (placement.section_index + 1, count, placement.displayed_page),
+                        (
+                            placement.section_index + 1,
+                            *section_page_counts
+                                .get(&placement.section_index)
+                                .unwrap_or(&0),
+                            placement.displayed_page,
+                        ),
                     )
                 })
                 .collect();
-            substitute_fields(
-                &mut page.elements,
+            let mut painted = PaintedElements::from_parts(
+                std::mem::take(&mut page.elements),
+                std::mem::take(&mut page_policies[page_index]),
+            )?;
+            let mut occurrence_state = substitute_fields(
+                &mut painted,
                 page_num,
                 total_pages,
                 (section_index + 1, section_pages),
                 &field_sections,
                 &bookmark_pages,
+                &page_field_values,
                 input.sequence_snapshot.as_deref(),
                 sequence_boundaries[page_index],
                 &mut self.font_manager,
-            );
+            )?;
             if let Some(values) = styleref_values.get(&page.page_number) {
                 let mut changes = Vec::new();
                 substitute_styleref(
-                    &mut page.elements,
+                    &mut painted,
                     values,
                     &mut std::collections::HashSet::new(),
                     &mut self.font_manager,
                     &mut changes,
-                );
+                    &mut occurrence_state,
+                )?;
                 if !changes.is_empty() {
-                    realign_tab_aligned_text(&mut page.elements, &changes);
+                    realign_tab_aligned_text(painted.coordinate_elements_mut(), &changes);
                 }
             }
+            for diagnostic in occurrence_state.diagnostics {
+                push_unique_diagnostic(&mut diagnostics, diagnostic.message);
+            }
+            let (elements, mut policies) = painted.into_parts()?;
+            policies.retire_annotations();
+            policies.validate(&elements)?;
+            (page.elements, page_policies[page_index]) = (elements, policies);
             substitution_inputs.push(Some(inputs));
         }
 
@@ -5149,7 +6106,10 @@ impl Engine {
             let mut rebuilt_start = pages.len();
             let mut rebuilt_end = 0;
             for (page_index, (page, retained)) in pages.iter().zip(&cache.raw_pages).enumerate() {
-                if Arc::ptr_eq(page, retained) {
+                if Arc::ptr_eq(page, retained)
+                    && raw_policies.as_ref().and_then(|maps| maps.get(page_index))
+                        == cache.raw_policies.get(page_index)
+                {
                     reuse_result_pages[page_index] = true;
                 } else {
                     rebuilt_start = rebuilt_start.min(page_index);
@@ -5213,7 +6173,10 @@ impl Engine {
         };
         if let Some(cache) = self.restart_cache.as_ref() {
             for (page_index, reuse) in reuse_result_pages.into_iter().enumerate() {
-                if reuse && let Some(retained) = cache.pages.get(page_index) {
+                if reuse
+                    && cache.policies.get(page_index) == page_policies.get(page_index)
+                    && let Some(retained) = cache.pages.get(page_index)
+                {
                     pages[page_index] = Arc::clone(retained);
                 }
             }
@@ -5277,10 +6240,15 @@ impl Engine {
             }
             body_fragments.shrink_to_fit();
             let mut candidate = RestartCache {
+                paint: producer_paints.expect("restart candidate has actual Word producers"),
                 body,
                 with_provenance: sources.is_some(),
                 body_fragments: body_fragments.clone(),
                 raw_pages: std::mem::take(raw_pages),
+                raw_policies: raw_policies
+                    .take()
+                    .expect("raw artifacts retain companion maps"),
+                policies: page_policies.clone(),
                 pages: std::mem::take(retained_pages),
                 substitution_inputs,
                 outlines: outlines.clone(),
@@ -5292,6 +6260,7 @@ impl Engine {
             for inputs in candidate.substitution_inputs.iter_mut().flatten() {
                 inputs.bookmark_pages.shrink_to_fit();
                 inputs.font_identity.shrink_to_fit();
+                inputs.page_format_context.shrink_to_fit();
             }
             let bytes = if body_complete {
                 restart_cache_bytes(&candidate)
@@ -5376,7 +6345,9 @@ impl Engine {
         }
         let mut result = LayoutResult::new(pages, fonts, metadata, outlines);
         diagnostics.extend(self.font_manager.current_font_diagnostics().iter().cloned());
+        diagnostics.extend(self.font_manager.word_substitution_diagnostics());
         result.diagnostics = diagnostics;
+        self.last_picture_draw_owners = media.picture_draw_owners_since(0);
         result.structure = Some(structure);
         let references = num_state.references_only();
         self.bookmark_numbering
@@ -5433,7 +6404,7 @@ impl Engine {
             // by later blocks. The conservative boundary is the first such
             // block, after which no retained block is read in this layout.
             self.paragraph_cache_reads_enabled = false;
-            let (block, reflow_direction) = layout_paragraph_with_source_and_direction(
+            let (block, reflow_direction, paint) = layout_paragraph_with_source_and_direction(
                 paragraph,
                 content_width,
                 styles,
@@ -5447,6 +6418,14 @@ impl Engine {
                 doc_grid,
             )?;
             return Ok(SharedLayoutBlock::Owned {
+                semantics: Some(ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
+                    border_group_before: false,
+                    source_node,
+                    structure_id: block.structure_id,
+                    reflow_direction,
+                    paint: Arc::new(paint),
+                }),
                 border_group_before: false,
                 block: Box::new(LayoutBlock::Paragraph(block)),
                 reflow_direction,
@@ -5456,7 +6435,7 @@ impl Engine {
 
         let fingerprint = paragraph_fingerprint(paragraph);
         let notes_allow_reuse = self.paragraph_cache_notes_match
-            || paragraph_note_references(paragraph, input.revision_view).is_empty();
+            || paragraph_note_references(paragraph, input.revision_view)?.is_empty();
         if self.paragraph_cache_reads_enabled
             && notes_allow_reuse
             && let Some(entry) = self.paragraph_cache.iter().find(|entry| {
@@ -5475,10 +6454,12 @@ impl Engine {
             return Ok(SharedLayoutBlock::Paragraph {
                 block: Arc::clone(&entry.block),
                 semantics: ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node,
                     structure_id: None,
                     reflow_direction: entry.reflow_direction,
+                    paint: Arc::clone(&entry.paint),
                 },
                 body_index: None,
             });
@@ -5500,7 +6481,8 @@ impl Engine {
             doc_grid,
         );
         let font_trace = self.font_manager.finish_paragraph_font_events();
-        let (mut block, reflow_direction) = block_result?;
+        let (mut block, reflow_direction, paint) = block_result?;
+        let paint = Arc::new(paint);
         self.paragraph_cache_builds += 1;
 
         let cached_diagnostics = diagnostics[diagnostics_start..].to_vec();
@@ -5508,6 +6490,7 @@ impl Engine {
             let bytes = paragraph_cache_entry_bytes(
                 paragraph,
                 &block,
+                Some(&paint),
                 &cached_diagnostics,
                 font_contribution_trace_bytes(&font_trace),
             );
@@ -5522,6 +6505,7 @@ impl Engine {
                     doc_grid: doc_grid.cloned(),
                 },
                 block: Arc::clone(&block),
+                paint: Arc::clone(&paint),
                 diagnostics: cached_diagnostics,
                 font_trace,
                 reflow_direction,
@@ -5530,10 +6514,12 @@ impl Engine {
             return Ok(SharedLayoutBlock::Paragraph {
                 block,
                 semantics: ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node,
                     structure_id: None,
                     reflow_direction,
+                    paint: Arc::clone(&paint),
                 },
                 body_index: None,
             });
@@ -5541,6 +6527,14 @@ impl Engine {
 
         rebind_paragraph_source(&mut block, source_node)?;
         Ok(SharedLayoutBlock::Owned {
+            semantics: Some(ParagraphSemantics {
+                tb_rl_exact_baseline: None,
+                border_group_before: false,
+                source_node,
+                structure_id: block.structure_id,
+                reflow_direction,
+                paint,
+            }),
             border_group_before: false,
             block: Box::new(LayoutBlock::Paragraph(block)),
             reflow_direction,
@@ -5609,6 +6603,9 @@ impl Engine {
             self.font_manager
                 .replay_font_trace_events(&entry.font_trace)?;
             self.table_cache_hits += 1;
+            if let Some(sources) = sources {
+                record_cached_table_omissions(table, &entry.block, sources, story, path, numbering);
+            }
             return Ok(SharedLayoutBlock::Table {
                 block: Arc::clone(&entry.block),
                 semantics: table_semantics(
@@ -6013,6 +7010,9 @@ fn paragraph_is_restart_record_source_safe(paragraph: &CT_P, styles: &CT_Styles)
         })
 }
 
+// Drawing content is excluded by paragraph_source_is_cache_safe, including
+// through table_is_cache_safe. Picture owners therefore execute fresh on these
+// paths. Only the header/footer VML cache captures and replays picture owners.
 fn paragraph_is_cache_safe(paragraph: &CT_P, styles: &CT_Styles) -> bool {
     paragraph_source_is_cache_safe(paragraph, styles, false, false)
 }
@@ -6126,9 +7126,10 @@ fn paragraph_has_field(paragraph: &CT_P) -> bool {
 
 fn paragraph_has_note_reference(paragraph: &CT_P) -> bool {
     paragraph.runs.iter().any(|run| {
-        run.content
-            .iter()
-            .any(|content| !content_note_references(content).is_empty())
+        run.content.iter().any(|content| {
+            !content_note_references(content, RevisionView::Tracked)
+                .is_ok_and(|references| references.is_empty())
+        })
     })
 }
 
@@ -6330,6 +7331,8 @@ fn table_semantics(
                                     table::CellBlock::Paragraph(_),
                                     CellBlockSemantics::Paragraph(retained),
                                 ) => CellBlockSemantics::Paragraph(ParagraphSemantics {
+                                    paint: Arc::clone(&retained.paint),
+                                    tb_rl_exact_baseline: None,
                                     border_group_before: retained.border_group_before,
                                     source_node: sources
                                         .and_then(|sources| sources.id(story, &source_path)),
@@ -6412,7 +7415,7 @@ fn table_cache_entry_bytes(
         );
     std::mem::size_of::<TableCacheEntry>()
         .saturating_add(table_key_retained_bytes(&key.table))
-        .saturating_add(table_block_retained_bytes(block))
+        .saturating_add(table_block_retained_bytes(block, Some(semantics)))
         .saturating_add(table_semantics_retained_bytes(semantics))
         .saturating_add(2 * std::mem::size_of::<usize>())
         .saturating_add(font_trace_bytes)
@@ -6437,8 +7440,13 @@ fn table_semantics_retained_bytes(semantics: &TableSemantics) -> usize {
                     .saturating_mul(std::mem::size_of::<CellBlockSemantics>()),
             );
             for block in &cell.blocks {
-                if let CellBlockSemantics::Table(table) = block {
-                    bytes = bytes.saturating_add(table_semantics_retained_bytes(table));
+                match block {
+                    CellBlockSemantics::Table(table) => {
+                        bytes = bytes.saturating_add(table_semantics_retained_bytes(table))
+                    }
+                    CellBlockSemantics::Paragraph(paragraph) => {
+                        bytes = bytes.saturating_add(word_paint_arc_bytes(&paragraph.paint))
+                    }
                 }
             }
         }
@@ -6805,7 +7813,10 @@ fn table_key_retained_bytes(table: &CT_Tbl) -> usize {
         )
 }
 
-fn table_block_retained_bytes(block: &table::TableBlock) -> usize {
+fn table_block_retained_bytes(
+    block: &table::TableBlock,
+    semantics: Option<&TableSemantics>,
+) -> usize {
     fn border_bytes(borders: &rdocx_oxml::table::CT_TblBorders) -> usize {
         [
             &borders.top,
@@ -6827,31 +7838,56 @@ fn table_block_retained_bytes(block: &table::TableBlock) -> usize {
     let rows = block
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_index, row)| {
             row.cells
                 .capacity()
                 .saturating_mul(std::mem::size_of::<table::TableCell>())
                 .saturating_add(
                     row.cells
                         .iter()
-                        .map(|cell| {
+                        .enumerate()
+                        .map(|(cell_index, cell)| {
                             cell.blocks
                                 .capacity()
                                 .saturating_mul(std::mem::size_of::<table::CellBlock>())
                                 .saturating_add(
                                     cell.blocks
                                         .iter()
-                                        .map(|block| match block {
-                                            table::CellBlock::Paragraph(paragraph) => {
-                                                paragraph_cache_entry_bytes(
-                                                    &CT_P::new(),
-                                                    paragraph,
-                                                    &[],
-                                                    0,
-                                                )
-                                            }
-                                            table::CellBlock::Table(table) => {
-                                                table_block_retained_bytes(table)
+                                        .enumerate()
+                                        .map(|(block_index, block)| {
+                                            let companion = semantics
+                                                .and_then(|semantics| semantics.rows.get(row_index))
+                                                .and_then(|row| row.cells.get(cell_index))
+                                                .and_then(|cell| cell.blocks.get(block_index));
+                                            match block {
+                                                table::CellBlock::Paragraph(paragraph) => {
+                                                    paragraph_cache_entry_bytes(
+                                                        &CT_P::new(),
+                                                        paragraph,
+                                                        match companion {
+                                                            Some(
+                                                                CellBlockSemantics::Paragraph(
+                                                                    semantics,
+                                                                ),
+                                                            ) => Some(semantics.paint.as_ref()),
+                                                            _ => None,
+                                                        },
+                                                        &[],
+                                                        0,
+                                                    )
+                                                }
+                                                table::CellBlock::Table(table) => {
+                                                    table_block_retained_bytes(
+                                                        table,
+                                                        match companion {
+                                                            Some(CellBlockSemantics::Table(
+                                                                semantics,
+                                                            )) => Some(semantics),
+                                                            _ => None,
+                                                        },
+                                                    )
+                                                }
                                             }
                                         })
                                         .fold(0usize, usize::saturating_add),
@@ -6969,11 +8005,15 @@ fn restart_block_is_safe<B: LayoutBlockLike>(block: &B) -> bool {
         restart_record_block_is_safe(block)
             && paragraph.lines.iter().all(|line| {
                 line.items.iter().all(|item| match item {
-                    LineItem::Text(text) | LineItem::Marker(text) => text.field_kind.is_none(),
-                    LineItem::MultilingualText(text) => text.base().field_kind.is_none(),
+                    LineItem::Text(text) | LineItem::Marker(text) => {
+                        text.field_kind.is_none() && text.field_source.is_none()
+                    }
+                    LineItem::MultilingualText(text) => {
+                        text.base().field_kind.is_none() && text.base().field_source.is_none()
+                    }
                     LineItem::Tab {
                         leader: Some(text), ..
-                    } => text.field_kind.is_none(),
+                    } => text.field_kind.is_none() && text.field_source.is_none(),
                     _ => true,
                 })
             })
@@ -6988,7 +8028,17 @@ fn restart_record_block_is_safe<B: LayoutBlockLike>(block: &B) -> bool {
             && paragraph.lines.iter().all(|line| {
                 line.items.iter().all(|item| match item {
                     LineItem::Text(_) | LineItem::Marker(_) => true,
-                    LineItem::MultilingualText(_) => false,
+                    LineItem::MultilingualText(span) => paragraph
+                        .paint
+                        .or_else(|| {
+                            paragraph
+                                .semantics
+                                .map(|semantics| semantics.paint.as_ref())
+                        })
+                        .and_then(|paint| paint.legacy_cache.as_ref())
+                        .is_some_and(|proof| {
+                            multilingual_cache_bytes(span, Some(proof)) != usize::MAX
+                        }),
                     LineItem::Tab {
                         leader: Some(_), ..
                     } => true,
@@ -6998,7 +8048,9 @@ fn restart_record_block_is_safe<B: LayoutBlockLike>(block: &B) -> bool {
                 })
             })
     } else {
-        block.table().is_some()
+        block.table().is_some_and(|table| {
+            table_block_retained_bytes(table.block, table.semantics) != usize::MAX
+        })
     }
 }
 
@@ -7006,8 +8058,10 @@ fn page_has_substitution_state(page: &PageFrame) -> bool {
     let mut found = false;
     oxml_layout::walk(&page.elements, &mut |element, _| {
         found |= match element {
-            PositionedElement::Text(run) => run.field_kind.is_some(),
-            PositionedElement::MultilingualText(run) => run.field_kind.is_some(),
+            PositionedElement::Text(run) => run.field_kind.is_some() || run.field_source.is_some(),
+            PositionedElement::MultilingualText(run) => {
+                run.field_kind.is_some() || run.field_source.is_some()
+            }
             _ => false,
         };
     });
@@ -7071,11 +8125,45 @@ fn restart_cache_bytes(cache: &RestartCache) -> usize {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<FontId>()),
         );
-    let body_bytes = cache
-        .body
+    let paint_bytes = cache
+        .paint
+        .capacity()
+        .saturating_mul(std::mem::size_of::<RestartPaint>())
+        .saturating_add(
+            cache
+                .paint
+                .iter()
+                .map(|paint| match paint {
+                    RestartPaint::Paragraph(paint) => word_paint_arc_bytes(paint),
+                    RestartPaint::Table(semantics) => table_semantics_retained_bytes(semantics),
+                })
+                .fold(0usize, usize::saturating_add),
+        );
+    let policy_bytes = [&cache.raw_policies, &cache.policies]
         .iter()
-        .map(RestartBodyEntry::bytes)
+        .map(|maps| {
+            maps.capacity()
+                .saturating_mul(std::mem::size_of::<PaintPolicies>())
+                .saturating_add(
+                    maps.iter()
+                        .map(|map| {
+                            map.retained_bytes()
+                                .and_then(|bytes| {
+                                    bytes.checked_sub(std::mem::size_of::<PaintPolicies>())
+                                })
+                                .unwrap_or(usize::MAX)
+                        })
+                        .fold(0usize, usize::saturating_add),
+                )
+        })
         .fold(0usize, usize::saturating_add);
+    let body_bytes = paint_bytes.saturating_add(policy_bytes).saturating_add(
+        cache
+            .body
+            .iter()
+            .map(RestartBodyEntry::bytes)
+            .fold(0usize, usize::saturating_add),
+    );
     debug_assert_eq!(cache.raw_pages.len(), cache.pages.len());
     let page_bytes = cache
         .raw_pages
@@ -7117,6 +8205,7 @@ fn restart_cache_bytes(cache: &RestartCache) -> usize {
                         .capacity()
                         .saturating_mul(std::mem::size_of::<FontId>()),
                 )
+                .saturating_add(inputs.page_format_context.capacity())
         })
         .fold(0usize, usize::saturating_add);
     std::mem::size_of::<RestartCache>()
@@ -7243,21 +8332,68 @@ fn rebind_multilingual_source(
 ) -> Result<()> {
     let mut base = text.base().clone();
     rebind_text_source(&mut base, source_node);
-    *text = oxml_layout::MultilingualTextSegment::new(
-        base,
-        text.logical_index(),
-        text.language().map(str::to_owned),
-        text.script(),
-        text.direction(),
-        text.bidi_level(),
-        text.x_advances().to_vec(),
-        text.y_advances().to_vec(),
-        text.x_offsets().to_vec(),
-        text.y_offsets().to_vec(),
-        text.clusters().to_vec(),
-        text.break_after(),
-    )?;
+    *text = text
+        .clone()
+        .with_base_and_advances(base, text.x_advances().to_vec())?;
     Ok(())
+}
+
+fn rebind_positioned_sources(elements: &mut [PositionedElement], node: Option<SourceNodeId>) {
+    for element in elements {
+        match element {
+            PositionedElement::Text(run) => {
+                if let Some(source) = &mut run.source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.source = None;
+                    }
+                }
+                if let Some(source) = &mut run.field_source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.field_source = None;
+                    }
+                }
+                if let Some(source) = &mut run.note_reference_source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.note_reference_source = None;
+                    }
+                }
+            }
+            PositionedElement::MultilingualText(run) => {
+                if let Some(source) = &mut run.source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.source = None;
+                    }
+                }
+                if let Some(source) = &mut run.field_source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.field_source = None;
+                    }
+                }
+                if let Some(source) = &mut run.note_reference_source {
+                    if let Some(node) = node {
+                        source.node = node;
+                    } else {
+                        run.note_reference_source = None;
+                    }
+                }
+            }
+            PositionedElement::Group(group) => rebind_positioned_sources(&mut group.children, node),
+            PositionedElement::MarkedContent { children, .. } => {
+                rebind_positioned_sources(children, node)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn rebind_paragraph_source(
@@ -7275,6 +8411,9 @@ fn rebind_paragraph_source(
                     leader: Some(leader),
                     ..
                 } => rebind_text_source(leader, source_node),
+                LineItem::Group { group, .. } => {
+                    rebind_positioned_sources(&mut group.children, source_node)
+                }
                 _ => {}
             }
         }
@@ -7290,6 +8429,9 @@ fn rebind_paragraph_source(
                 }
                 InlineItem::HyphenatedText { segment, .. } => {
                     rebind_text_source(segment, source_node)
+                }
+                InlineItem::Group { group, .. } => {
+                    rebind_positioned_sources(&mut group.children, source_node)
                 }
                 _ => {}
             }
@@ -7328,20 +8470,9 @@ fn remap_text_box_sources(
     ) -> Result<()> {
         let mut base = value.base().clone();
         text(&mut base, nodes)?;
-        *value = oxml_layout::MultilingualTextSegment::new(
-            base,
-            value.logical_index(),
-            value.language().map(str::to_owned),
-            value.script(),
-            value.direction(),
-            value.bidi_level(),
-            value.x_advances().to_vec(),
-            value.y_advances().to_vec(),
-            value.x_offsets().to_vec(),
-            value.y_offsets().to_vec(),
-            value.clusters().to_vec(),
-            value.break_after(),
-        )?;
+        *value = value
+            .clone()
+            .with_base_and_advances(base, value.x_advances().to_vec())?;
         Ok(())
     }
     fn remap_elements(
@@ -7436,6 +8567,7 @@ fn rebind_header_footer_sources(
     relationship_id: &str,
     part: &rdocx_oxml::header_footer::CT_HdrFtr,
     blocks: &mut [ParagraphBlock],
+    facts: &mut [paginator::HeaderFooterBlockSemantics],
     sources: Option<&SourceRegistry>,
 ) -> Result<()> {
     let story = match story_kind {
@@ -7446,15 +8578,37 @@ fn rebind_header_footer_sources(
             relationship_id: relationship_id.to_owned(),
         },
     };
-    for (paragraph_index, block) in blocks.iter_mut().enumerate() {
+    if blocks.len() != facts.len() {
+        return Err(LayoutError::Layout(
+            "furniture source paint count mismatch".into(),
+        ));
+    }
+    for (paragraph_index, (block, facts)) in blocks.iter_mut().zip(facts).enumerate() {
         debug_assert!(paragraph_index < part.paragraphs.len());
         let source = sources.and_then(|sources| sources.id(&story, &[paragraph_index]));
         rebind_paragraph_source(block, source)?;
+        let paint = Arc::make_mut(&mut facts.paint);
+        paint.rebind_source(source)?;
         if let Some(registry) = sources {
-            registry.bind_text_boxes(block, source)?;
+            registry.bind_text_boxes(block, paint, source)?;
         }
     }
     Ok(())
+}
+
+fn picture_draw_owner_bytes(owners: &Vec<(String, Option<String>)>) -> usize {
+    owners
+        .capacity()
+        .saturating_mul(std::mem::size_of::<(String, Option<String>)>())
+        .saturating_add(
+            owners
+                .iter()
+                .map(|(id, story)| {
+                    id.capacity()
+                        .saturating_add(story.as_ref().map_or(0, String::capacity))
+                })
+                .fold(0, usize::saturating_add),
+        )
 }
 
 fn header_footer_cache_entry_bytes(
@@ -7468,12 +8622,23 @@ fn header_footer_cache_entry_bytes(
         .paragraphs
         .iter()
         .zip(&content.blocks)
-        .map(|(paragraph, block)| paragraph_cache_entry_bytes(paragraph, block, &[], 0))
+        .zip(&content.directions)
+        .map(|((paragraph, block), facts)| {
+            paragraph_cache_entry_bytes(paragraph, block, Some(&facts.paint), &[], 0)
+        })
         .fold(0usize, usize::saturating_add);
     let direction_bytes = content
         .directions
-        .capacity()
-        .saturating_mul(std::mem::size_of::<(TextDirection, f64)>());
+        .iter()
+        .map(paginator::HeaderFooterBlockSemantics::retained_bytes)
+        .fold(0usize, usize::saturating_add)
+        .saturating_add(
+            content
+                .directions
+                .capacity()
+                .saturating_sub(content.directions.len())
+                .saturating_mul(std::mem::size_of::<paginator::HeaderFooterBlockSemantics>()),
+        );
     let diagnostic_bytes = diagnostics
         .capacity()
         .saturating_mul(std::mem::size_of::<Diagnostic>())
@@ -7665,9 +8830,63 @@ fn header_footer_cache_entry_bytes(
         .saturating_add(font_contribution_trace_bytes(font_trace))
 }
 
+fn word_paint_arc_bytes(paint: &WordParagraphPaint) -> usize {
+    paint
+        .retained_bytes()
+        .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+        .unwrap_or(usize::MAX)
+}
+
+fn multilingual_cache_bytes(
+    span: &oxml_layout::MultilingualTextSegment,
+    proof: Option<&WordLegacyCache>,
+) -> usize {
+    let Some(proof) = proof else {
+        return usize::MAX;
+    };
+    if !span.uses_legacy_shaping() || span.kerning_override().is_none() {
+        return usize::MAX;
+    }
+    let base = span.base();
+    let bytes = (|| {
+        let mut bytes = base
+            .text
+            .capacity()
+            .checked_add(
+                base.glyph_ids
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<u16>())?,
+            )?
+            .checked_add(
+                base.advances
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<f64>())?,
+            )?
+            .checked_add(base.hyperlink_url.as_ref().map_or(0, String::capacity))?;
+        for values in [
+            span.x_advances(),
+            span.y_advances(),
+            span.x_offsets(),
+            span.y_offsets(),
+        ] {
+            bytes = bytes.checked_add(values.len().checked_mul(std::mem::size_of::<f64>())?)?;
+        }
+        bytes
+            .checked_add(
+                span.clusters()
+                    .len()
+                    .checked_mul(std::mem::size_of::<oxml_layout::GlyphCluster>())?,
+            )?
+            .checked_add(span.language().map_or(0, str::len))?
+            .checked_add(proof.language_bytes_per_span)
+    })();
+    bytes.unwrap_or(usize::MAX)
+}
+
 fn paragraph_cache_entry_bytes(
     paragraph: &CT_P,
     block: &ParagraphBlock,
+    paint: Option<&WordParagraphPaint>,
     diagnostics: &[Diagnostic],
     font_trace_bytes: usize,
 ) -> usize {
@@ -7790,24 +9009,25 @@ fn paragraph_cache_entry_bytes(
             + text.advances.capacity() * std::mem::size_of::<f64>()
             + text.hyperlink_url.as_ref().map_or(0, String::capacity)
     }
-    fn inline_bytes(item: &InlineItem) -> usize {
+    fn inline_bytes(item: &InlineItem, proof: Option<&WordLegacyCache>) -> usize {
         match item {
             InlineItem::Text(text) | InlineItem::Marker(text) => text_bytes(text),
-            InlineItem::MultilingualText(_) => usize::MAX,
+            InlineItem::MultilingualText(span) => multilingual_cache_bytes(span, proof),
             InlineItem::Group { .. } => usize::MAX,
             _ => 0,
         }
     }
-    fn line_item_bytes(item: &LineItem) -> usize {
+    fn line_item_bytes(item: &LineItem, proof: Option<&WordLegacyCache>) -> usize {
         match item {
             LineItem::Text(text) | LineItem::Marker(text) => text_bytes(text),
-            LineItem::MultilingualText(_) => usize::MAX,
+            LineItem::MultilingualText(span) => multilingual_cache_bytes(span, proof),
             LineItem::Tab { leader, .. } => leader.as_ref().map_or(0, text_bytes),
             LineItem::Group { .. } => usize::MAX,
             _ => 0,
         }
     }
 
+    let proof = paint.and_then(|paint| paint.legacy_cache.as_ref());
     let paragraph_bytes = paragraph_key_bytes(paragraph);
     let line_bytes = block
         .lines
@@ -7824,7 +9044,7 @@ fn paragraph_cache_entry_bytes(
                         .saturating_add(
                             line.items
                                 .iter()
-                                .map(line_item_bytes)
+                                .map(|item| line_item_bytes(item, proof))
                                 .fold(0usize, usize::saturating_add),
                         )
                 })
@@ -7842,7 +9062,7 @@ fn paragraph_cache_entry_bytes(
                 reflow
                     .items
                     .iter()
-                    .map(inline_bytes)
+                    .map(|item| inline_bytes(item, proof))
                     .fold(0usize, usize::saturating_add),
             )
             .saturating_add(
@@ -7878,6 +9098,7 @@ fn paragraph_cache_entry_bytes(
         );
     std::mem::size_of::<ParagraphCacheEntry>()
         .saturating_add(arc_allocation_bytes::<ParagraphBlock>())
+        .saturating_add(paint.map_or(0, word_paint_arc_bytes))
         .saturating_add(paragraph_bytes)
         .saturating_add(line_bytes)
         .saturating_add(reflow_bytes)
@@ -8015,10 +9236,14 @@ fn table_fingerprint(table: &CT_Tbl) -> u64 {
 }
 
 /// Apply page background color from `w:background` element to all pages.
-fn apply_page_background(pages: &mut [PageFrame], input: &LayoutInput) {
+fn apply_page_background(
+    pages: &mut [PageFrame],
+    paint: &mut paginator::PagePaintRecords,
+    input: &LayoutInput,
+) -> Result<()> {
     let bg_xml = match &input.document.background_xml {
         Some(xml) => xml,
-        None => return,
+        None => return Ok(()),
     };
 
     // Parse w:color attribute from background XML
@@ -8026,24 +9251,50 @@ fn apply_page_background(pages: &mut [PageFrame], input: &LayoutInput) {
     let color = extract_background_color(xml_str);
     let color = match color {
         Some(c) => c,
-        None => return,
+        None => return Ok(()),
     };
 
     // Insert a full-page FilledRect at position 0 on every page (renders underneath everything)
-    for page in pages.iter_mut() {
-        page.elements.insert(
-            0,
-            PositionedElement::FilledRect {
-                rect: Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: page.width,
-                    height: page.height,
-                },
-                color,
+    paint.validate(pages)?;
+    for (index, page) in pages.iter_mut().enumerate() {
+        let mut painted = PaintedElements::from_parts(
+            std::mem::take(&mut page.elements),
+            std::mem::take(&mut paint.policies[index]),
+        )?;
+        let mut background = PaintedElements::non_field(vec![PositionedElement::FilledRect {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: page.width,
+                height: page.height,
             },
-        );
+            color,
+        }])?;
+        painted.splice_at(&[], 0..0, &mut background)?;
+        (page.elements, paint.policies[index]) = painted.into_parts()?;
+        let boundary = &mut paint.boundaries[index];
+        boundary.behind_end = boundary
+            .behind_end
+            .checked_add(1)
+            .ok_or_else(|| LayoutError::Layout("background paint overflow".into()))?;
+        boundary.regular_end = boundary
+            .regular_end
+            .checked_add(1)
+            .ok_or_else(|| LayoutError::Layout("background paint overflow".into()))?;
+        boundary.body_front_end = boundary
+            .body_front_end
+            .checked_add(1)
+            .ok_or_else(|| LayoutError::Layout("background paint overflow".into()))?;
+        boundary.furniture_front_end = boundary
+            .furniture_front_end
+            .checked_add(1)
+            .ok_or_else(|| LayoutError::Layout("background paint overflow".into()))?;
+        boundary.elements_len = boundary
+            .elements_len
+            .checked_add(1)
+            .ok_or_else(|| LayoutError::Layout("background paint overflow".into()))?;
     }
+    paint.validate(pages)
 }
 
 /// Extract the background color hex from w:background XML.
@@ -8241,140 +9492,562 @@ fn placed_styleref_values(
     values
 }
 
-fn substitute_styleref(
-    elements: &mut Vec<PositionedElement>,
-    values: &HashMap<FieldSource, String>,
-    seen: &mut std::collections::HashSet<FieldSource>,
+fn render_annotation_replacement(
+    recipe: Arc<WordAnnotationRecipe>,
+    value: &str,
+    placement: [u64; 4],
     fonts: &mut FontManager,
-    changes: &mut Vec<FieldWidthChange>,
-) {
-    for element in elements.iter_mut() {
-        match element {
-            PositionedElement::Text(run) => {
-                let Some((source, value)) = run
-                    .field_source
-                    .and_then(|source| values.get(&source).map(|value| (source, value)))
-                else {
-                    continue;
-                };
-                let value = if seen.contains(&source) {
-                    ""
-                } else {
-                    value.as_str()
-                };
-                if let Ok(shaped) = fonts.shape_text(run.font_id, value, run.font_size) {
-                    let old_width: f64 = run.advances.iter().sum();
-                    run.text = value.to_owned();
-                    run.glyph_ids = shaped.glyph_ids;
-                    run.advances = shaped.advances;
-                    seen.insert(source);
-                    if let Some(aligned) = run.tab_aligned {
-                        changes.push(FieldWidthChange {
-                            aligned,
-                            baseline: run.origin.y,
-                            font_size: run.font_size,
-                            x: run.origin.x,
-                            delta: run.advances.iter().sum::<f64>() - old_width,
-                        });
-                    }
-                }
+) -> Result<(PaintedElements, Vec<Diagnostic>)> {
+    let decode_color = |bits: [u64; 4]| Color {
+        r: f64::from_bits(bits[0]),
+        g: f64::from_bits(bits[1]),
+        b: f64::from_bits(bits[2]),
+        a: f64::from_bits(bits[3]),
+    };
+    let style = &recipe.style;
+    let base = AnnotationBase {
+        occurrence: Some(recipe.occurrence),
+        field_kind: recipe.field_kind,
+        kern: style.kern,
+        font_id: style.font_id,
+        font_size: f64::from_bits(style.font_size),
+        color: decode_color(style.color),
+        bold: style.bold,
+        italic: style.italic,
+        baseline_offset: f64::from_bits(style.baseline_offset),
+        spacing: f64::from_bits(style.spacing),
+        underline: style.underline,
+        strike: style.strike,
+        dstrike: style.dstrike,
+        highlight: style.highlight.map(decode_color),
+        font_family: style.font_family.as_deref(),
+        fallback_emphasis: recipe.fallback_emphasis.as_ref(),
+    };
+    let mut items = Vec::new();
+    let mut styles = HashMap::new();
+    let mut diagnostics = Vec::new();
+    if value.is_empty() {
+        push_empty_field_annotation(
+            &mut items,
+            &mut styles,
+            recipe.kind.clone(),
+            &base,
+            recipe.source_span,
+        )?;
+    } else {
+        let mut applied = match &recipe.kind {
+            WordAnnotationKind::EastAsian(layout) => push_east_asian_layout_text(
+                &mut items,
+                &mut styles,
+                fonts,
+                layout,
+                value,
+                &base,
+                recipe.source_span,
+            )?,
+            WordAnnotationKind::Emphasis(mark) => push_emphasis_marked_text(
+                &mut items,
+                &mut styles,
+                fonts,
+                &mut diagnostics,
+                mark,
+                value,
+                &base,
+            )?,
+        };
+        if !applied && let Some(mark) = &recipe.fallback_emphasis {
+            applied = push_emphasis_marked_text(
+                &mut items,
+                &mut styles,
+                fonts,
+                &mut diagnostics,
+                mark,
+                value,
+                &base,
+            )?;
+        }
+        if !applied {
+            let mut shaped =
+                fonts.shape_text_with_kerning(base.font_id, value, base.font_size, base.kern)?;
+            for advance in &mut shaped.advances {
+                *advance += base.spacing;
             }
-            PositionedElement::MultilingualText(run) => {
-                let Some((source, value)) = run
-                    .field_source
-                    .and_then(|source| values.get(&source).map(|value| (source, value)))
-                else {
-                    continue;
-                };
-                let value = if seen.contains(&source) {
-                    ""
-                } else {
-                    value.as_str()
-                };
-                if value.is_empty() {
-                    seen.insert(source);
-                    run.logical_text.clear();
-                    run.glyph_ids.clear();
-                    run.x_advances.clear();
-                    run.y_advances.clear();
-                    run.x_offsets.clear();
-                    run.y_offsets.clear();
-                    run.clusters.clear();
-                    continue;
-                }
-                let segment = TextSegment {
+            shaped.width = shaped.advances.iter().sum();
+            let baseline = f64::from_bits(placement[1]) - base.baseline_offset;
+            let mut output = PaintedElements::default();
+            let mut children = Vec::new();
+            if let Some(color) = base.highlight {
+                children.push(PositionedElement::FilledRect {
+                    rect: Rect {
+                        x: f64::from_bits(placement[0]),
+                        y: f64::from_bits(placement[2]),
+                        width: shaped.width,
+                        height: f64::from_bits(placement[3]),
+                    },
+                    color,
+                });
+            }
+            let mut policies = PaintPolicies::default();
+            policies.emit(
+                &mut children,
+                PositionedElement::Text(GlyphRun {
+                    origin: Point {
+                        x: f64::from_bits(placement[0]),
+                        y: baseline,
+                    },
+                    font_id: base.font_id,
+                    font_size: base.font_size,
+                    glyph_ids: shaped.glyph_ids,
+                    advances: shaped.advances,
                     text: value.to_owned(),
-                    direction: run.direction,
-                    source: run.source,
-                    font_id: run.font_id,
-                    font_size: run.font_size,
-                    glyph_ids: Vec::new(),
-                    advances: Vec::new(),
-                    width: 0.0,
-                    ascent: 0.0,
-                    descent: 0.0,
-                    line_gap: 0.0,
-                    color: run.color,
-                    bold: run.bold,
-                    italic: run.italic,
-                    underline: None,
-                    strike: false,
-                    dstrike: false,
-                    highlight: None,
-                    baseline_offset: 0.0,
-                    hyperlink_url: None,
-                    field_kind: run.field_kind,
-                    field_source: run.field_source,
-                    note: run.note,
-                    note_reference_source: run.note_reference_source,
+                    source: recipe.source_span,
+                    color: base.color,
+                    bold: base.bold,
+                    italic: base.italic,
+                    field_kind: base.field_kind,
+                    field_source: Some(recipe.occurrence.source),
+                    note: None,
+                    note_reference_source: None,
+                    tab_aligned: None,
+                }),
+                annotation_field_owner(&base),
+            )?;
+            let metrics = fonts.metrics(base.font_id, base.font_size)?;
+            let mut decorations = Vec::new();
+            push_annotation_decorations(
+                &mut decorations,
+                &base,
+                baseline,
+                shaped.width,
+                metrics.ascent,
+                metrics.descent,
+            );
+            for decoration in &mut decorations {
+                let PositionedElement::Line { start, end, .. } = decoration else {
+                    return Err(LayoutError::Layout(
+                        "annotation fallback decoration kind changed".into(),
+                    ));
                 };
-                if let Ok(mut shaped) = fonts.shape_multilingual_text(
+                start.x += f64::from_bits(placement[0]);
+                end.x += f64::from_bits(placement[0]);
+            }
+            children.extend(decorations);
+            output.append(&mut PaintedElements::from_parts(children, policies)?)?;
+            let (roots, mut policies) = output
+                .wrap(PositionedElement::Group(GroupElement {
+                    transform: Transform::IDENTITY,
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: Vec::new(),
+                }))?
+                .into_parts()?;
+            let count = policies.field_count();
+            policies.attach_annotation(
+                &roots,
+                &[0],
+                recipe,
+                WordAnnotationRootKind::Group,
+                count,
+                placement,
+            )?;
+            return Ok((PaintedElements::from_parts(roots, policies)?, diagnostics));
+        }
+    }
+    let mut output = PaintedElements::default();
+    let mut x = f64::from_bits(placement[0]);
+    for (index, item) in items.into_iter().enumerate() {
+        let InlineItem::Group {
+            width,
+            baseline,
+            mut group,
+            ..
+        } = item
+        else {
+            return Err(LayoutError::Layout(
+                "annotation replacement lost its atomic producer".into(),
+            ));
+        };
+        let owner = styles
+            .get(&index)
+            .and_then(|style| style.annotation.as_ref())
+            .ok_or_else(|| {
+                LayoutError::Layout("annotation replacement lost its private companion".into())
+            })?;
+        let y = baseline.map_or(f64::from_bits(placement[2]), |baseline| {
+            f64::from_bits(placement[1]) - baseline
+        });
+        group.transform = group.transform.then(Transform {
+            e: x,
+            f: y,
+            ..Transform::IDENTITY
+        });
+        let children = PaintedElements::from_parts(
+            std::mem::take(&mut group.children),
+            owner.policies.clone(),
+        )?;
+        output.append(&mut children.wrap(PositionedElement::Group(group))?)?;
+        x += width;
+    }
+    let (roots, mut policies) = output
+        .wrap(PositionedElement::Group(GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children: Vec::new(),
+        }))?
+        .into_parts()?;
+    let count = policies.field_count();
+    policies.attach_annotation(
+        &roots,
+        &[0],
+        recipe,
+        if value.is_empty() {
+            WordAnnotationRootKind::EmptySpan
+        } else {
+            WordAnnotationRootKind::Group
+        },
+        count,
+        placement,
+    )?;
+    Ok((PaintedElements::from_parts(roots, policies)?, diagnostics))
+}
+
+fn field_replacement(
+    element: &PositionedElement,
+    value: &str,
+    policy: Option<(bool, bool)>,
+    occurrence: Option<WordFieldOccurrence>,
+    fonts: &mut FontManager,
+) -> Result<PaintedElements> {
+    let owner = policy.map_or(FieldPaintOwner::Neutral, |(kern, legacy)| {
+        FieldPaintOwner::Word {
+            kern,
+            legacy,
+            occurrence,
+        }
+    });
+    let mut output = PaintedElements::default();
+    match element {
+        PositionedElement::Text(run) => {
+            let shaped = if let Some((kern, _)) = policy {
+                fonts.shape_text_with_kerning(run.font_id, value, run.font_size, kern)?
+            } else {
+                fonts.shape_text(run.font_id, value, run.font_size)?
+            };
+            let mut replacement = run.clone();
+            replacement.text = value.to_owned();
+            replacement.glyph_ids = shaped.glyph_ids;
+            replacement.advances = shaped.advances;
+            let element = PositionedElement::Text(replacement);
+            if run.field_kind.is_some() || run.field_source.is_some() {
+                output.push_field(element, owner)?;
+            } else {
+                output.push_non_field(element)?;
+            }
+        }
+        PositionedElement::MultilingualText(run) => {
+            if policy.is_some_and(|(_, legacy)| legacy) {
+                return Err(LayoutError::Layout(
+                    "legacy field owner reached a rich positioned leaf".into(),
+                ));
+            }
+            if value.is_empty() {
+                let mut replacement = run.clone();
+                replacement.logical_text.clear();
+                replacement.glyph_ids.clear();
+                replacement.x_advances.clear();
+                replacement.y_advances.clear();
+                replacement.x_offsets.clear();
+                replacement.y_offsets.clear();
+                replacement.clusters.clear();
+                let element = PositionedElement::MultilingualText(replacement);
+                if run.field_kind.is_some() || run.field_source.is_some() {
+                    output.push_field(element, owner)?;
+                } else {
+                    output.push_non_field(element)?;
+                }
+                return Ok(output);
+            }
+            let segment = TextSegment {
+                text: value.to_owned(),
+                direction: run.direction,
+                source: run.source,
+                font_id: run.font_id,
+                font_size: run.font_size,
+                glyph_ids: Vec::new(),
+                advances: Vec::new(),
+                width: 0.0,
+                ascent: 0.0,
+                descent: 0.0,
+                line_gap: 0.0,
+                color: run.color,
+                bold: run.bold,
+                italic: run.italic,
+                underline: None,
+                strike: false,
+                dstrike: false,
+                highlight: None,
+                baseline_offset: 0.0,
+                hyperlink_url: None,
+                field_kind: run.field_kind,
+                field_source: run.field_source,
+                note: run.note,
+                note_reference_source: run.note_reference_source,
+            };
+            let mut spans = if let Some((kern, legacy)) = policy {
+                fonts.shape_paragraph_with_kerning(
+                    vec![(segment, run.language.clone())],
+                    run.direction,
+                    true,
+                    &[kern],
+                    legacy,
+                )?
+            } else {
+                fonts.shape_multilingual_text(
                     segment,
                     run.language.as_deref(),
                     run.direction,
                     true,
-                ) && shaped.len() == 1
-                    && let Some(shaped) = shaped.pop()
-                {
-                    run.font_id = shaped.font_id();
-                    run.glyph_ids = shaped.glyph_ids().to_vec();
-                    run.x_advances = shaped.x_advances().to_vec();
-                    run.y_advances = shaped.y_advances().to_vec();
-                    run.x_offsets = shaped.x_offsets().to_vec();
-                    run.y_offsets = shaped.y_offsets().to_vec();
-                    run.clusters = shaped.clusters().to_vec();
-                    run.logical_text = value.to_owned();
-                    run.script = shaped.script();
-                    run.language = shaped.language().map(str::to_owned);
-                    run.direction = shaped.direction();
-                    run.bidi_level = shaped.bidi_level();
-                    seen.insert(source);
+                )?
+            };
+            if spans.len() == 1 {
+                let mut child = run.clone();
+                apply_multilingual_field_span(
+                    &mut child,
+                    &spans.pop().expect("one field span"),
+                    run.logical_index,
+                );
+                if child.field_kind.is_some() || child.field_source.is_some() {
+                    output.push_field(PositionedElement::MultilingualText(child), owner)?;
+                } else {
+                    output.push_non_field(PositionedElement::MultilingualText(child))?;
                 }
+            } else {
+                let natural_width = spans.iter().map(|span| span.width()).sum::<f64>();
+                if spans.is_empty() || !natural_width.is_finite() {
+                    return Err(LayoutError::Layout("invalid rich field replacement".into()));
+                }
+                let items = spans
+                    .into_iter()
+                    .map(InlineItem::MultilingualText)
+                    .collect::<Vec<_>>();
+                let params = oxml_layout::LineBreakParams {
+                    available_width: natural_width.max(f64::EPSILON),
+                    wrap: false,
+                    ..Default::default()
+                };
+                let lines = break_multilingual_into_lines(&items, &params, fonts, run.direction)?;
+                let [line] = lines.as_slice() else {
+                    return Err(LayoutError::Layout(
+                        "rich field replacement crossed a line".into(),
+                    ));
+                };
+                let mut x = run.origin.x;
+                for item in &line.items {
+                    let LineItem::MultilingualText(span) = item else {
+                        return Err(LayoutError::Layout(
+                            "rich field replacement lost its producer".into(),
+                        ));
+                    };
+                    let mut child = run.clone();
+                    apply_multilingual_field_span(&mut child, span, run.logical_index);
+                    child.origin.x = x;
+                    x += span.width();
+                    if child.field_kind.is_some() || child.field_source.is_some() {
+                        output.push_field(PositionedElement::MultilingualText(child), owner)?;
+                    } else {
+                        output.push_non_field(PositionedElement::MultilingualText(child))?;
+                    }
+                }
+                output = output.wrap(PositionedElement::Group(GroupElement {
+                    transform: Transform::IDENTITY,
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: Vec::new(),
+                }))?;
             }
-            PositionedElement::Group(group) => {
-                substitute_styleref(&mut group.children, values, seen, fonts, changes)
-            }
-            PositionedElement::MarkedContent { children, .. } => {
-                substitute_styleref(children, values, seen, fonts, changes)
-            }
-            _ => {}
+        }
+        _ => {
+            return Err(LayoutError::Layout(
+                "field replacement requires a glyph leaf".into(),
+            ));
         }
     }
-    elements.retain(|element| match element {
-        PositionedElement::Text(run) => {
-            !(run.text.is_empty()
-                && run
-                    .field_source
-                    .is_some_and(|source| values.contains_key(&source)))
+    Ok(output)
+}
+
+struct FieldOccurrenceState {
+    annotated: std::collections::HashSet<WordFieldOccurrence>,
+    consumed: std::collections::HashSet<WordFieldOccurrence>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl FieldOccurrenceState {
+    fn new(painted: &PaintedElements) -> Result<Self> {
+        let occurrences = painted.policies().annotation_occurrences()?;
+        let mut annotated = std::collections::HashSet::new();
+        annotated
+            .try_reserve(occurrences.len())
+            .map_err(|_| LayoutError::Layout("annotation occurrence allocation refused".into()))?;
+        annotated.extend(occurrences);
+        Ok(Self {
+            annotated,
+            consumed: std::collections::HashSet::new(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    fn consume(&mut self, occurrence: WordFieldOccurrence) -> Result<()> {
+        self.consumed
+            .try_reserve(1)
+            .map_err(|_| LayoutError::Layout("annotation traversal allocation refused".into()))?;
+        self.consumed.insert(occurrence);
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn late_field_value(
+    kind: FieldKind,
+    source: Option<FieldSource>,
+    page_number: usize,
+    total_pages: usize,
+    section_values: (usize, usize),
+    field_sections: &HashMap<FieldSource, (usize, usize, usize)>,
+    bookmark_pages: &HashMap<usize, usize>,
+    page_field_values: &HashMap<FieldSource, PageFieldValue>,
+    sequence: Option<&crate::WordSequenceSnapshot>,
+    sequence_boundary: usize,
+) -> (Option<String>, bool) {
+    let sections = source
+        .and_then(|source| field_sections.get(&source))
+        .copied()
+        .unwrap_or((section_values.0, section_values.1, page_number));
+    let result = source.and_then(|source| page_field_values.get(&source));
+    let value = if let Some(value) = result {
+        Some(value.display.clone())
+    } else {
+        match kind {
+            FieldKind::Page => Some(sections.2.to_string()),
+            FieldKind::NumPages => Some(total_pages.to_string()),
+            FieldKind::Section => Some(sections.0.to_string()),
+            FieldKind::SectionPages => Some(sections.1.to_string()),
+            FieldKind::TargetPage(target) => bookmark_pages.get(&target).map(ToString::to_string),
+            FieldKind::SequenceRepeat => {
+                sequence_repeat_display(sequence, source, sequence_boundary)
+            }
+            FieldKind::Target(_) | FieldKind::SequenceContext(_) => None,
         }
-        PositionedElement::MultilingualText(run) => {
-            !(run.logical_text.is_empty()
-                && run
-                    .field_source
-                    .is_some_and(|source| values.contains_key(&source)))
+    };
+    let clear = matches!(kind, FieldKind::TargetPage(_))
+        && (result.is_some_and(|value| value.target_unplaced) || value.is_none());
+    (value, clear)
+}
+
+fn substitute_styleref(
+    painted: &mut PaintedElements,
+    values: &HashMap<FieldSource, String>,
+    seen: &mut std::collections::HashSet<FieldSource>,
+    fonts: &mut FontManager,
+    changes: &mut Vec<FieldWidthChange>,
+    state: &mut FieldOccurrenceState,
+) -> Result<()> {
+    painted.policies().validate(painted.elements())?;
+    let mut index = 0;
+    while index < painted.len() {
+        if let Some((recipe, _, placement)) = painted.policies().annotation(&[index]) {
+            let source = recipe.occurrence.source;
+            let Some(value) = values.get(&source) else {
+                index += 1;
+                continue;
+            };
+            if state.consumed.contains(&recipe.occurrence) || value.is_empty() {
+                painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+                state.consume(recipe.occurrence)?;
+                continue;
+            }
+            let (mut replacement, diagnostics) =
+                render_annotation_replacement(Arc::clone(&recipe), value, placement, fonts)?;
+            state.consume(recipe.occurrence)?;
+            painted.splice_at(&[], index..index + 1, &mut replacement)?;
+            state.diagnostics.extend(diagnostics);
+            index += 1;
+            continue;
         }
-        _ => true,
-    });
+        let element = &painted.elements()[index];
+        if let Some(children_len) = match element {
+            PositionedElement::Group(group) => Some(group.children.len()),
+            PositionedElement::MarkedContent { children, .. } => Some(children.len()),
+            _ => None,
+        } {
+            let mut children =
+                painted.splice_at(&[index], 0..children_len, &mut PaintedElements::default())?;
+            substitute_styleref(&mut children, values, seen, fonts, changes, state)?;
+            painted.splice_at(&[index], 0..0, &mut children)?;
+            index += 1;
+            continue;
+        }
+        let source = match element {
+            PositionedElement::Text(run) => run.field_source,
+            PositionedElement::MultilingualText(run) => run.field_source,
+            _ => None,
+        };
+        let Some((source, value)) =
+            source.and_then(|source| values.get(&source).map(|value| (source, value)))
+        else {
+            index += 1;
+            continue;
+        };
+        let policy = painted.policies().required(&[index])?;
+        let occurrence = painted.policies().field_occurrence(&[index])?;
+        let annotated_owner = occurrence.filter(|occurrence| state.annotated.contains(occurrence));
+        let consumed = annotated_owner.map_or_else(
+            || seen.contains(&source),
+            |occurrence| state.consumed.contains(&occurrence),
+        );
+        let value = if consumed { "" } else { value.as_str() };
+        if let Some(occurrence) = annotated_owner {
+            state.consume(occurrence)?;
+        } else {
+            seen.try_reserve(1)
+                .map_err(|_| LayoutError::Layout("field traversal allocation refused".into()))?;
+            seen.insert(source);
+        }
+        if value.is_empty() {
+            if let PositionedElement::Text(old) = element
+                && let Some(aligned) = old.tab_aligned
+            {
+                changes.push(FieldWidthChange {
+                    aligned,
+                    baseline: old.origin.y,
+                    font_size: old.font_size,
+                    x: old.origin.x,
+                    delta: -old.advances.iter().sum::<f64>(),
+                });
+            }
+            painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+            continue;
+        }
+        let mut replacement = field_replacement(element, value, policy, occurrence, fonts)?;
+        if let (PositionedElement::Text(old), [PositionedElement::Text(new)]) =
+            (element, replacement.elements())
+            && let Some(aligned) = old.tab_aligned
+        {
+            changes.push(FieldWidthChange {
+                aligned,
+                baseline: old.origin.y,
+                font_size: old.font_size,
+                x: old.origin.x,
+                delta: new.advances.iter().sum::<f64>() - old.advances.iter().sum::<f64>(),
+            });
+        }
+        painted.splice_at(&[], index..index + 1, &mut replacement)?;
+        index += 1;
+    }
+    Ok(())
 }
 
 fn sequence_event_boundary(elements: &[PositionedElement], previous: usize) -> usize {
@@ -8416,16 +10089,18 @@ fn sequence_repeat_display(
 /// stays on its stop with the value in place of the placeholder.
 #[allow(clippy::too_many_arguments)]
 fn substitute_fields(
-    elements: &mut Vec<PositionedElement>,
+    elements: &mut PaintedElements,
     page_number: usize,
     total_pages: usize,
     section_values: (usize, usize),
     field_sections: &HashMap<FieldSource, (usize, usize, usize)>,
     bookmark_pages: &HashMap<usize, usize>,
+    page_field_values: &HashMap<FieldSource, PageFieldValue>,
     sequence: Option<&crate::WordSequenceSnapshot>,
     sequence_boundary: usize,
     fm: &mut FontManager,
-) {
+) -> Result<FieldOccurrenceState> {
+    let mut state = FieldOccurrenceState::new(elements)?;
     let mut changes = Vec::new();
     substitute_field_values(
         elements,
@@ -8434,14 +10109,17 @@ fn substitute_fields(
         section_values,
         field_sections,
         bookmark_pages,
+        page_field_values,
         sequence,
         sequence_boundary,
         fm,
         &mut changes,
-    );
+        &mut state,
+    )?;
     if !changes.is_empty() {
-        realign_tab_aligned_text(elements, &changes);
+        realign_tab_aligned_text(elements.coordinate_elements_mut(), &changes);
     }
+    Ok(state)
 }
 
 /// A tab-aligned field whose value is wider or narrower than its placeholder.
@@ -8634,208 +10312,265 @@ fn realign_tab_leader(run: &mut GlyphRun, changes: &[FieldWidthChange]) {
 
 #[allow(clippy::too_many_arguments)]
 fn substitute_field_values(
-    elements: &mut Vec<PositionedElement>,
+    painted: &mut PaintedElements,
     page_number: usize,
     total_pages: usize,
     section_values: (usize, usize),
     field_sections: &HashMap<FieldSource, (usize, usize, usize)>,
     bookmark_pages: &HashMap<usize, usize>,
+    page_field_values: &HashMap<FieldSource, PageFieldValue>,
     sequence: Option<&crate::WordSequenceSnapshot>,
     sequence_boundary: usize,
     fm: &mut FontManager,
     changes: &mut Vec<FieldWidthChange>,
-) {
-    for element in elements.iter_mut() {
-        match element {
-            PositionedElement::Text(run) => {
-                let Some(fk) = run.field_kind else {
-                    continue;
-                };
-                let section_values = run
-                    .field_source
-                    .and_then(|source| field_sections.get(&source))
-                    .copied()
-                    .unwrap_or((section_values.0, section_values.1, page_number));
-                let value = match fk {
-                    FieldKind::Page => section_values.2.to_string(),
-                    FieldKind::NumPages => total_pages.to_string(),
-                    FieldKind::Section => section_values.0.to_string(),
-                    FieldKind::SectionPages => section_values.1.to_string(),
-                    FieldKind::TargetPage(target) => {
-                        let Some(page) = bookmark_pages.get(&target) else {
-                            run.field_kind = None;
-                            continue;
-                        };
-                        page.to_string()
-                    }
-                    FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
-                    FieldKind::SequenceRepeat => {
-                        let Some(value) =
-                            sequence_repeat_display(sequence, run.field_source, sequence_boundary)
-                        else {
-                            continue;
-                        };
-                        value
-                    }
-                };
-                if let Ok(shaped) = fm.shape_text(run.font_id, &value, run.font_size) {
-                    let placeholder: f64 = run.advances.iter().sum();
-                    run.text = value;
-                    run.glyph_ids = shaped.glyph_ids;
-                    run.advances = shaped.advances;
-                    let delta = run.advances.iter().sum::<f64>() - placeholder;
-                    if let Some(aligned) = run.tab_aligned
-                        && delta.abs() > 1e-9
-                    {
-                        changes.push(FieldWidthChange {
-                            aligned,
-                            baseline: run.origin.y,
-                            font_size: run.font_size,
-                            x: run.origin.x,
-                            delta,
-                        });
-                    }
-                }
+    state: &mut FieldOccurrenceState,
+) -> Result<()> {
+    painted.policies().validate(painted.elements())?;
+    let mut index = 0;
+    while index < painted.len() {
+        if let Some((recipe, _, placement)) = painted.policies().annotation(&[index]) {
+            let Some(kind) = recipe.field_kind else {
+                index += 1;
+                continue;
+            };
+            if matches!(kind, FieldKind::Target(_) | FieldKind::SequenceContext(_)) {
+                return Err(LayoutError::Layout(
+                    "structural marker became a visible annotation".into(),
+                ));
             }
-            // A field shaped as rich text takes its value without moving
-            // the tab-aligned text around it: `MultilingualGlyphRun` carries
-            // no `tab_aligned`, so such text stays where its placeholder
-            // put it.
-            PositionedElement::MultilingualText(run) => {
-                let Some(fk) = run.field_kind else {
-                    continue;
-                };
-                let section_values = run
-                    .field_source
-                    .and_then(|source| field_sections.get(&source))
-                    .copied()
-                    .unwrap_or((section_values.0, section_values.1, page_number));
-                let value = match fk {
-                    FieldKind::Page => section_values.2.to_string(),
-                    FieldKind::NumPages => total_pages.to_string(),
-                    FieldKind::Section => section_values.0.to_string(),
-                    FieldKind::SectionPages => section_values.1.to_string(),
-                    FieldKind::TargetPage(target) => {
-                        let Some(page) = bookmark_pages.get(&target) else {
-                            run.field_kind = None;
-                            continue;
-                        };
-                        page.to_string()
-                    }
-                    FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
-                    FieldKind::SequenceRepeat => {
-                        let Some(value) =
-                            sequence_repeat_display(sequence, run.field_source, sequence_boundary)
-                        else {
-                            continue;
-                        };
-                        value
-                    }
-                };
-                let segment = TextSegment {
-                    text: value.clone(),
-                    direction: run.direction,
-                    source: run.source,
-                    font_id: run.font_id,
-                    font_size: run.font_size,
-                    glyph_ids: Vec::new(),
-                    advances: Vec::new(),
-                    width: 0.0,
-                    ascent: 0.0,
-                    descent: 0.0,
-                    line_gap: 0.0,
-                    color: run.color,
-                    bold: run.bold,
-                    italic: run.italic,
-                    underline: None,
-                    strike: false,
-                    dstrike: false,
-                    highlight: None,
-                    baseline_offset: 0.0,
-                    hyperlink_url: None,
-                    field_kind: run.field_kind,
-                    field_source: run.field_source,
-                    note: run.note,
-                    note_reference_source: run.note_reference_source,
-                };
-                if let Ok(mut shaped) = fm.shape_multilingual_text(
-                    segment,
-                    run.language.as_deref(),
-                    run.direction,
-                    true,
-                ) && shaped.len() == 1
-                {
-                    let Some(shaped) = shaped.pop() else {
-                        continue;
-                    };
-                    run.font_id = shaped.font_id();
-                    run.glyph_ids = shaped.glyph_ids().to_vec();
-                    run.x_advances = shaped.x_advances().to_vec();
-                    run.y_advances = shaped.y_advances().to_vec();
-                    run.x_offsets = shaped.x_offsets().to_vec();
-                    run.y_offsets = shaped.y_offsets().to_vec();
-                    run.clusters = shaped.clusters().to_vec();
-                    run.logical_text = value;
-                    run.script = shaped.script();
-                    run.language = shaped.language().map(str::to_owned);
-                    run.direction = shaped.direction();
-                    run.bidi_level = shaped.bidi_level();
-                }
+            if state.consumed.contains(&recipe.occurrence) {
+                painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+                continue;
             }
-            PositionedElement::Group(group) => substitute_fields(
-                &mut group.children,
+            let (value, clear_kind) = late_field_value(
+                kind,
+                Some(recipe.occurrence.source),
                 page_number,
                 total_pages,
                 section_values,
                 field_sections,
                 bookmark_pages,
+                page_field_values,
                 sequence,
                 sequence_boundary,
-                fm,
-            ),
-            PositionedElement::MarkedContent { children, .. } => substitute_field_values(
-                children,
-                page_number,
-                total_pages,
-                section_values,
-                field_sections,
-                bookmark_pages,
-                sequence,
-                sequence_boundary,
-                fm,
-                changes,
-            ),
-            _ => {}
+            );
+            if let Some(value) = value {
+                let recipe = if clear_kind {
+                    let mut changed = recipe.as_ref().clone();
+                    changed.field_kind = None;
+                    Arc::new(changed)
+                } else {
+                    recipe
+                };
+                let (mut replacement, diagnostics) =
+                    render_annotation_replacement(Arc::clone(&recipe), &value, placement, fm)?;
+                state.consume(recipe.occurrence)?;
+                painted.splice_at(&[], index..index + 1, &mut replacement)?;
+                state.diagnostics.extend(diagnostics);
+            } else if clear_kind {
+                painted.clear_annotation_kind(&[index])?;
+            }
+            index += 1;
+            continue;
         }
+        let element = &painted.elements()[index];
+        let (children_len, group) = match element {
+            PositionedElement::Group(group) => (Some(group.children.len()), true),
+            PositionedElement::MarkedContent { children, .. } => (Some(children.len()), false),
+            _ => (None, false),
+        };
+        if let Some(children_len) = children_len {
+            let mut children =
+                painted.splice_at(&[index], 0..children_len, &mut PaintedElements::default())?;
+            if group {
+                let mut local_changes = Vec::new();
+                substitute_field_values(
+                    &mut children,
+                    page_number,
+                    total_pages,
+                    section_values,
+                    field_sections,
+                    bookmark_pages,
+                    page_field_values,
+                    sequence,
+                    sequence_boundary,
+                    fm,
+                    &mut local_changes,
+                    state,
+                )?;
+                if !local_changes.is_empty() {
+                    realign_tab_aligned_text(children.coordinate_elements_mut(), &local_changes);
+                }
+            } else {
+                substitute_field_values(
+                    &mut children,
+                    page_number,
+                    total_pages,
+                    section_values,
+                    field_sections,
+                    bookmark_pages,
+                    page_field_values,
+                    sequence,
+                    sequence_boundary,
+                    fm,
+                    changes,
+                    state,
+                )?;
+            }
+            let empty = children.len() == 0;
+            painted.splice_at(&[index], 0..0, &mut children)?;
+            if empty && !group {
+                painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        let (kind, source) = match element {
+            PositionedElement::Text(run) => (run.field_kind, run.field_source),
+            PositionedElement::MultilingualText(run) => (run.field_kind, run.field_source),
+            _ => (None, None),
+        };
+        let Some(kind) = kind else {
+            index += 1;
+            continue;
+        };
+        let policy = painted.policies().required(&[index])?;
+        let occurrence = painted.policies().field_occurrence(&[index])?;
+        if matches!(kind, FieldKind::Target(_) | FieldKind::SequenceContext(_)) {
+            painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+            continue;
+        }
+        let annotated_owner = occurrence.filter(|occurrence| state.annotated.contains(occurrence));
+        if annotated_owner.is_some_and(|occurrence| state.consumed.contains(&occurrence)) {
+            painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+            continue;
+        }
+        let (value, clear_kind) = late_field_value(
+            kind,
+            source,
+            page_number,
+            total_pages,
+            section_values,
+            field_sections,
+            bookmark_pages,
+            page_field_values,
+            sequence,
+            sequence_boundary,
+        );
+        let mut leaf = match element {
+            PositionedElement::Text(run) => PositionedElement::Text(run.clone()),
+            PositionedElement::MultilingualText(run) => {
+                PositionedElement::MultilingualText(run.clone())
+            }
+            _ => unreachable!(),
+        };
+        if clear_kind {
+            match &mut leaf {
+                PositionedElement::Text(run) => run.field_kind = None,
+                PositionedElement::MultilingualText(run) => run.field_kind = None,
+                _ => unreachable!(),
+            }
+        }
+        if let Some(value) = value {
+            let mut replacement = field_replacement(&leaf, &value, policy, occurrence, fm)?;
+            if let (PositionedElement::Text(old), [PositionedElement::Text(new)]) =
+                (element, replacement.elements())
+                && let Some(aligned) = old.tab_aligned
+            {
+                let delta = new.advances.iter().sum::<f64>() - old.advances.iter().sum::<f64>();
+                if delta.abs() > 1e-9 {
+                    changes.push(FieldWidthChange {
+                        aligned,
+                        baseline: old.origin.y,
+                        font_size: old.font_size,
+                        x: old.origin.x,
+                        delta,
+                    });
+                }
+            }
+            if let Some(occurrence) = annotated_owner {
+                state.consume(occurrence)?;
+            }
+            painted.splice_at(&[], index..index + 1, &mut replacement)?;
+        } else if clear_kind {
+            let mut replacement = PaintedElements::default();
+            let still_field = match &leaf {
+                PositionedElement::Text(run) => {
+                    run.field_kind.is_some() || run.field_source.is_some()
+                }
+                PositionedElement::MultilingualText(run) => {
+                    run.field_kind.is_some() || run.field_source.is_some()
+                }
+                _ => false,
+            };
+            if still_field {
+                replacement.push_field(
+                    leaf,
+                    policy.map_or(FieldPaintOwner::Neutral, |(kern, legacy)| {
+                        FieldPaintOwner::Word {
+                            kern,
+                            legacy,
+                            occurrence,
+                        }
+                    }),
+                )?;
+            } else {
+                replacement.push_non_field(leaf)?;
+            }
+            painted.splice_at(&[], index..index + 1, &mut replacement)?;
+        }
+        index += 1;
     }
-    elements.retain(|element| match element {
-        PositionedElement::Text(run) => !matches!(
-            run.field_kind,
-            Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))
-        ),
-        PositionedElement::MultilingualText(run) => !matches!(
-            run.field_kind,
-            Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))
-        ),
-        PositionedElement::MarkedContent { children, .. } => !children.is_empty(),
-        _ => true,
-    });
+    Ok(())
 }
 
-fn mark_remaining_artifacts(elements: &mut Vec<PositionedElement>) {
-    let unmarked = std::mem::take(elements);
-    *elements = unmarked
-        .into_iter()
-        .map(|element| match element {
-            PositionedElement::MarkedContent { .. } | PositionedElement::LinkAnnotation { .. } => {
-                element
-            }
-            _ => PositionedElement::MarkedContent {
+fn apply_multilingual_field_span(
+    run: &mut oxml_layout::MultilingualGlyphRun,
+    span: &oxml_layout::MultilingualTextSegment,
+    logical_base: usize,
+) {
+    run.font_id = span.font_id();
+    run.glyph_ids = span.glyph_ids().to_vec();
+    run.x_advances = span.x_advances().to_vec();
+    run.y_advances = span.y_advances().to_vec();
+    run.x_offsets = span.x_offsets().to_vec();
+    run.y_offsets = span.y_offsets().to_vec();
+    run.clusters = span.clusters().to_vec();
+    run.logical_text = span.text().to_owned();
+    run.logical_index = logical_base + span.logical_index();
+    run.script = span.script();
+    run.language = span.language().map(str::to_owned);
+    run.direction = span.direction();
+    run.bidi_level = span.bidi_level();
+}
+
+fn mark_remaining_artifacts(
+    elements: &mut Vec<PositionedElement>,
+    policies: &mut PaintPolicies,
+) -> Result<()> {
+    policies.validate(elements)?;
+    let mut painted =
+        PaintedElements::from_parts(std::mem::take(elements), std::mem::take(policies))?;
+    for index in 0..painted.len() {
+        if matches!(
+            &painted.elements()[index],
+            PositionedElement::MarkedContent { .. } | PositionedElement::LinkAnnotation { .. }
+        ) {
+            continue;
+        }
+        let child = painted.splice_at(&[], index..index + 1, &mut PaintedElements::default())?;
+        painted.splice_at(
+            &[],
+            index..index,
+            &mut child.wrap(PositionedElement::MarkedContent {
                 structure: None,
-                children: vec![element],
-            },
-        })
-        .collect();
+                children: Vec::new(),
+            })?,
+        )?;
+    }
+    (*elements, *policies) = painted.into_parts()?;
+    Ok(())
 }
 
 struct StructureBuilder {
@@ -8904,9 +10639,14 @@ fn assign_shared_document_structure(
                     lists.clear();
                     assign_shared_table_structure(&mut builder, block, semantics, root);
                 }
-                SharedLayoutBlock::Owned { block, .. } => match block.as_mut() {
+                SharedLayoutBlock::Owned {
+                    block, semantics, ..
+                } => match block.as_mut() {
                     LayoutBlock::Paragraph(paragraph) => {
                         assign_owned_paragraph_structure(&mut builder, paragraph, root, &mut lists);
+                        if let Some(semantics) = semantics {
+                            semantics.structure_id = paragraph.structure_id;
+                        }
                     }
                     LayoutBlock::Table(table) => {
                         lists.clear();
@@ -9194,6 +10934,37 @@ fn excluded_owner_for_source(input: &LayoutInput, source: SourceNodeId) -> bool 
     })
 }
 
+// Cache-safe tables have direct rows/cells and no removed revisions or controls.
+// Replay the returned layout's actual omission decisions against current source paths.
+fn record_cached_table_omissions(
+    source: &CT_Tbl,
+    block: &table::TableBlock,
+    sources: &SourceRegistry,
+    story: &WordStory,
+    path: &[usize],
+    state: &mut NumberingState,
+) {
+    for (ri, (row, laid_out)) in source.rows.iter().zip(&block.rows).enumerate() {
+        for (ci, (cell, placed)) in row.cells.iter().zip(&laid_out.cells).enumerate() {
+            let mut cell_path = path.to_vec();
+            cell_path.extend([ri, ci]);
+            if placed.is_vmerge_continue {
+                sources.record_table_omission(story, &cell_path, state);
+                continue;
+            }
+            for (index, (content, block)) in cell.content.iter().zip(&placed.blocks).enumerate() {
+                if let (CellContent::Table(source), table::CellBlock::Table(block)) =
+                    (content, block)
+                {
+                    let mut nested = cell_path.clone();
+                    nested.push(index);
+                    record_cached_table_omissions(source, block, sources, story, &nested, state);
+                }
+            }
+        }
+    }
+}
+
 fn record_table_navigation(
     table: &crate::table::TableBlock,
     semantics: &TableSemantics,
@@ -9251,6 +11022,163 @@ fn detect_heading_level(para: &CT_P, styles: &CT_Styles) -> Option<u32> {
     None
 }
 
+/// Whether `style_id` names a table of contents level, "toc 1" to "toc 9".
+fn is_toc_paragraph_style(style_id: &str, styles: &CT_Styles) -> bool {
+    let id_level = |id: &str| {
+        id.get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("toc"))
+            && id[3..]
+                .trim()
+                .parse::<u32>()
+                .is_ok_and(|n| (1..=9).contains(&n))
+    };
+    // Match the existing TOC style-name lookup: the whole name is trimmed and
+    // compared to "toc N". A producer name such as "toc 1 " therefore matches.
+    let name_level =
+        |name: &str| (1..=9).any(|n| name.trim().eq_ignore_ascii_case(&format!("toc {n}")));
+    id_level(style_id)
+        || styles
+            .get_by_id(style_id)
+            .and_then(|style| style.name.as_deref())
+            .is_some_and(name_level)
+}
+
+/// Whether `style_id` is the Hyperlink character style.
+fn is_hyperlink_character_style(style_id: &str, styles: &CT_Styles) -> bool {
+    style_id == "Hyperlink"
+        || styles
+            .get_by_id(style_id)
+            .and_then(|style| style.name.as_deref())
+            .is_some_and(|name| name.eq_ignore_ascii_case("Hyperlink"))
+}
+
+fn computed_layout_field(
+    field: &rdocx_oxml::text::Field,
+    source: Option<FieldSource>,
+    source_node: Option<SourceNodeId>,
+    input: &LayoutInput,
+    num_state: &NumberingState,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (Option<String>, Option<FieldKind>) {
+    let instruction = field.effective_instruction();
+    let page_family = matches!(
+        instruction.name.as_str(),
+        "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+    );
+    let (computed_value, field_kind) = if page_family && field.locked() == Some(true) {
+        (None, None)
+    } else if page_family && let Err(reason) = validate_page_field_instruction(&instruction) {
+        diagnostics.push(Diagnostic {
+            message: format!("{} retained stored display: {reason}", instruction.name),
+        });
+        (None, None)
+    } else {
+        match instruction.name.as_str() {
+            "PAGE" => (Some("99".to_owned()), Some(FieldKind::Page)),
+            "NUMPAGES" => (Some("99".to_owned()), Some(FieldKind::NumPages)),
+            "SECTION" => (Some("99".to_owned()), Some(FieldKind::Section)),
+            "SECTIONPAGES" => (Some("99".to_owned()), Some(FieldKind::SectionPages)),
+            "SEQ" => {
+                let result =
+                    source.and_then(|source| input.sequence_snapshot.as_ref()?.field_value(source));
+                match result {
+                    Some(Ok(value)) => (Some(value.to_owned()), None),
+                    Some(Err(message)) => {
+                        if source.is_some_and(|source| {
+                            input.sequence_snapshot.as_ref().is_some_and(|snapshot| {
+                                snapshot.repeat_requests.contains_key(&source)
+                            })
+                        }) {
+                            (Some(String::new()), Some(FieldKind::SequenceRepeat))
+                        } else {
+                            diagnostics.push(Diagnostic {
+                                message: message.to_owned(),
+                            });
+                            (None, None)
+                        }
+                    }
+                    None => {
+                        diagnostics.push(Diagnostic { message: "SEQ retains its stored display without accepted source-qualified context".into() });
+                        (None, None)
+                    }
+                }
+            }
+            "REF" => {
+                let Some(bookmark) = field_text_argument(&instruction, 0) else {
+                    return (None, None);
+                };
+                if let Some(text) = bookmark_text(input, bookmark) {
+                    match numbered_ref_text(
+                        &instruction,
+                        bookmark,
+                        text,
+                        num_state,
+                        source_node,
+                        if field_has_switch(&instruction, "p") {
+                            input
+                                .sequence_snapshot
+                                .as_ref()
+                                .zip(source)
+                                .ok_or_else(|| {
+                                    "REF relative source lacks an accepted physical binding"
+                                        .to_owned()
+                                })
+                                .and_then(|(snapshot, source)| {
+                                    snapshot
+                                        .bookmark_relative_position(bookmark, source)
+                                        .map(Some)
+                                })
+                        } else {
+                            Ok(None)
+                        },
+                    )
+                    .and_then(|value| format_numeric_field_display(&instruction, value))
+                    {
+                        Ok(value) => (Some(value), None),
+                        Err(message) => {
+                            diagnostics.push(Diagnostic {
+                                message: format!("{message}, stored REF display retained"),
+                            });
+                            (None, None)
+                        }
+                    }
+                } else {
+                    diagnostics.push(Diagnostic {
+                        message: format!(
+                            "REF target {bookmark} was not found, stored display retained"
+                        ),
+                    });
+                    (None, None)
+                }
+            }
+            "PAGEREF" => {
+                let Some(bookmark) = field_text_argument(&instruction, 0) else {
+                    return (None, None);
+                };
+                if bookmark_text(input, bookmark).is_none() {
+                    diagnostics.push(Diagnostic {
+                        message: format!(
+                            "PAGEREF target {bookmark} was not found, stored display retained"
+                        ),
+                    });
+                    (None, None)
+                } else if let Some(target) = page_ref_id(input, bookmark) {
+                    (Some("99".to_owned()), Some(FieldKind::TargetPage(target)))
+                } else {
+                    (None, None)
+                }
+            }
+            _ => (None, None),
+        }
+    };
+    let (computed_value, field_kind) = if field.locked() == Some(true) {
+        (None, None)
+    } else {
+        (computed_value, field_kind)
+    };
+    (computed_value, field_kind)
+}
+
 /// Lay out a single paragraph into a ParagraphBlock.
 pub fn layout_paragraph(
     para: &CT_P,
@@ -9302,9 +11230,11 @@ pub(crate) fn layout_paragraph_with_grid(
         None,
         None,
         None,
+        None,
         doc_grid,
         false,
     )
+    .map(|(block, _)| block)
 }
 
 pub(crate) fn layout_paragraph_with_source(
@@ -9333,8 +11263,10 @@ pub(crate) fn layout_paragraph_with_source(
         None,
         None,
         None,
+        None,
         false,
     )
+    .map(|(block, _)| block)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9350,9 +11282,9 @@ pub(crate) fn layout_paragraph_with_source_and_direction(
     source_node: Option<SourceNodeId>,
     navigation_node: Option<SourceNodeId>,
     doc_grid: Option<&CT_DocGrid>,
-) -> Result<(ParagraphBlock, TextDirection)> {
+) -> Result<(ParagraphBlock, TextDirection, WordParagraphPaint)> {
     let mut direction = TextDirection::Auto;
-    let block = layout_paragraph_with_source_and_table(
+    let (block, paint) = layout_paragraph_with_source_and_table(
         para,
         available_width,
         styles,
@@ -9365,11 +11297,12 @@ pub(crate) fn layout_paragraph_with_source_and_direction(
         navigation_node,
         None,
         None,
+        None,
         Some(&mut direction),
         doc_grid,
         false,
     )?;
-    Ok((block, direction))
+    Ok((block, direction, paint))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9385,10 +11318,11 @@ pub(crate) fn layout_paragraph_with_source_in_table(
     source_node: Option<SourceNodeId>,
     table_properties: Option<&rdocx_oxml::properties::CT_PPr>,
     table_run_properties: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     doc_grid: Option<&CT_DocGrid>,
-) -> Result<(ParagraphBlock, TextDirection)> {
+) -> Result<(ParagraphBlock, TextDirection, WordParagraphPaint)> {
     let mut direction = TextDirection::Auto;
-    let block = layout_paragraph_with_source_and_table(
+    let (block, paint) = layout_paragraph_with_source_and_table(
         para,
         available_width,
         styles,
@@ -9401,11 +11335,12 @@ pub(crate) fn layout_paragraph_with_source_in_table(
         source_node,
         table_properties,
         table_run_properties,
+        cell_shading,
         Some(&mut direction),
         doc_grid,
         true,
     )?;
-    Ok((block, direction))
+    Ok((block, direction, paint))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9422,10 +11357,11 @@ fn layout_paragraph_with_source_and_table(
     navigation_node: Option<SourceNodeId>,
     table_properties: Option<&rdocx_oxml::properties::CT_PPr>,
     table_run_properties: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     reflow_direction_out: Option<&mut TextDirection>,
     doc_grid: Option<&CT_DocGrid>,
     in_table_cell: bool,
-) -> Result<ParagraphBlock> {
+) -> Result<(ParagraphBlock, WordParagraphPaint)> {
     // Resolve paragraph properties
     let para_style_id = para.properties.as_ref().and_then(|p| p.style_id.as_deref());
 
@@ -9484,6 +11420,7 @@ fn layout_paragraph_with_source_and_table(
         num_state.record_navigation(
             source,
             crate::ParagraphNavigation {
+                omitted_by_table: false,
                 level: heading_level,
                 text: heading_text.clone(),
                 style: (!cache_only)
@@ -9532,12 +11469,18 @@ fn layout_paragraph_with_source_and_table(
         .and_then(|shd| shd.fill.as_ref())
         .filter(|f| f != &"auto")
         .map(|f| Color::from_hex(f));
+    // Text in the automatic colour contrasts with the fill behind it, the
+    // paragraph's own or else the cell's.
+    let automatic_color = automatic_text_color(shading.or(cell_shading));
+    let toc_paragraph =
+        para_style_id.is_some_and(|style_id| is_toc_paragraph_style(style_id, styles));
 
     // Convert runs to inline items
     let mut inline_items = Vec::new();
     let mut multilingual_styles = HashMap::<usize, WordMultilingualStyle>::new();
     let mut requested_context_bytes = 0usize;
     let mut requested_context_entries = 0usize;
+    let current_bookmarks = para.current_bookmark_projection();
 
     if let Some(source_node) = source_node {
         for name in para
@@ -9589,7 +11532,7 @@ fn layout_paragraph_with_source_and_table(
                 .chars()
                 .any(|character| (0xf000..=0xf0ff).contains(&(character as u32)))
             {
-                fm.resolve_symbol_text(
+                fm.resolve_word_symbol_text(
                     marker_font_family,
                     marker_bold,
                     marker_italic,
@@ -9606,10 +11549,17 @@ fn layout_paragraph_with_source_and_table(
                 .map(|id| (marker.marker_text.clone(), id))
             };
             if let Ok((display_text, font_id)) = display_selection
-                && let Ok(shaped) = fm.shape_text(font_id, &display_text, marker_font_size)
+                && let Ok(shaped) = fm.shape_text_with_kerning(
+                    font_id,
+                    &display_text,
+                    marker_font_size,
+                    marker_rpr
+                        .kern
+                        .is_some_and(|threshold| threshold.to_pt() <= marker_font_size),
+                )
             {
                 let metrics = fm.metrics(font_id, marker_font_size)?;
-                for message in fm.unknown_symbol_diagnostics(
+                for message in fm.unknown_word_symbol_diagnostics(
                     font_id,
                     marker_font_family,
                     &marker.marker_text,
@@ -9620,8 +11570,9 @@ fn layout_paragraph_with_source_and_table(
                 let color = marker_rpr
                     .color
                     .as_ref()
+                    .filter(|c| c.as_str() != "auto")
                     .map(|c| Color::from_hex(c))
-                    .unwrap_or(Color::BLACK);
+                    .unwrap_or(automatic_color);
 
                 // The level's run properties affect numbering ink, not the
                 // counter or paragraph heading. The suffix keeps its normal
@@ -9630,6 +11581,10 @@ fn layout_paragraph_with_source_and_table(
                     multilingual_styles.insert(
                         inline_items.len(),
                         WordMultilingualStyle {
+                            kern: marker_rpr
+                                .kern
+                                .is_some_and(|threshold| threshold.to_pt() <= marker_font_size),
+                            origin: WordInputOrigin::AtomicMarker,
                             requested_family: fm.copy_font_request_context(
                                 marker_font_family,
                                 &mut requested_context_bytes,
@@ -9669,7 +11624,23 @@ fn layout_paragraph_with_source_and_table(
                 match marker.suffix {
                     ST_LvlSuffix::Tab => inline_items.push(InlineItem::Tab),
                     ST_LvlSuffix::Space => {
-                        let shaped = fm.shape_text(font_id, " ", marker_font_size)?;
+                        multilingual_styles.insert(
+                            inline_items.len(),
+                            WordMultilingualStyle {
+                                kern: marker_rpr
+                                    .kern
+                                    .is_some_and(|threshold| threshold.to_pt() <= marker_font_size),
+                                ..Default::default()
+                            },
+                        );
+                        let shaped = fm.shape_text_with_kerning(
+                            font_id,
+                            " ",
+                            marker_font_size,
+                            marker_rpr
+                                .kern
+                                .is_some_and(|threshold| threshold.to_pt() <= marker_font_size),
+                        )?;
                         inline_items.push(InlineItem::Text(TextSegment {
                             text: " ".to_owned(),
                             direction: TextDirection::Auto,
@@ -9752,44 +11723,167 @@ fn layout_paragraph_with_source_and_table(
     // Process ordinary and revision-wrapped runs in their preserved order.
     let mut projection_char_offset = 0usize;
     let mut equation_cursor = 0usize;
-    let projected_runs = project_paragraph_runs(para, input.revision_view);
-    let projected_run_count = projected_runs.len();
-    let stored_caches = projected_runs
+    let original_runs = project_paragraph_runs(para, input.revision_view);
+    let projected_run_count = original_runs.len();
+    let mut prepared_runs = Vec::with_capacity(original_runs.len());
+    let mut original_indices = Vec::with_capacity(original_runs.len());
+    for projected in &original_runs {
+        let mut indices = Vec::new();
+        for (slot, content) in projected.run.content.iter().enumerate() {
+            if let RunContent::Field(field) = content {
+                field
+                    .validate_for_attachment()
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                indices.push((slot, field_indices.get(&std::ptr::from_ref(field)).copied()));
+            }
+        }
+        let prepared = if indices.is_empty() {
+            None
+        } else {
+            let mut run = projected.run.clone();
+            for (slot, _) in &indices {
+                let RunContent::Field(field) = &mut run.content[*slot] else {
+                    unreachable!()
+                };
+                field
+                    .normalize_cached_result_owner()
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?;
+            }
+            Some(run)
+        };
+        prepared_runs.push(prepared);
+        original_indices.push(indices);
+    }
+    let mut field_indices = field_indices;
+    let projected_runs = original_runs
         .iter()
-        .map(|projected| {
-            let [RunContent::Field(field)] = projected.run.content.as_slice() else {
-                return None;
-            };
-            let mut references = Vec::new();
-            append_cached_note_contents(field, &mut references);
-            (!references.is_empty())
-                .then(|| stored_note_cache_runs(field, projected.run.properties.as_ref()))
+        .enumerate()
+        .map(|(index, projected)| {
+            let run = prepared_runs[index].as_ref().unwrap_or(projected.run);
+            for (slot, source_index) in &original_indices[index] {
+                if let (RunContent::Field(field), Some(source_index)) =
+                    (&run.content[*slot], source_index)
+                {
+                    let mut pending = vec![field];
+                    let mut next = *source_index;
+                    while let Some(field) = pending.pop() {
+                        field_indices.insert(std::ptr::from_ref(field), next);
+                        next += 1;
+                        pending.extend(field.all_nested_fields_in_source_order().into_iter().rev());
+                    }
+                }
+            }
+            ProjectedRun { run, ..*projected }
         })
         .collect::<Vec<_>>();
+    let mut computed_fields = HashMap::new();
+    for projected in &projected_runs {
+        for content in &projected.run.content {
+            if let RunContent::Field(field) = content {
+                let source = source_node
+                    .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
+                    .map(|(node, index)| FieldSource { node, index });
+                let computed = if matches!(
+                    projected.revision,
+                    Some(RevisionKind::Deletion | RevisionKind::MoveFrom)
+                ) {
+                    (None, None)
+                } else {
+                    computed_layout_field(field, source, source_node, input, num_state, diagnostics)
+                };
+                computed_fields.insert(std::ptr::from_ref(field), computed);
+            }
+        }
+    }
+    let mut stored_caches = Vec::with_capacity(projected_runs.len());
+    let mut stored_char_lengths = Vec::with_capacity(projected_runs.len());
+    for projected in &projected_runs {
+        let cache = if let [RunContent::Field(field)] = projected.run.content.as_slice() {
+            let source = source_node
+                .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
+                .map(|(node, index)| FieldSource { node, index });
+            let cache = stored_note_cache_runs(
+                field,
+                projected.run.properties.as_ref(),
+                input.revision_view,
+                source,
+                matches!(
+                    projected.revision,
+                    Some(RevisionKind::Deletion | RevisionKind::MoveFrom)
+                ),
+                Some(input),
+                false,
+            )?;
+            stored_char_lengths.push(
+                cache
+                    .iter()
+                    .map(|stored| stored.run.text().chars().count())
+                    .sum::<usize>(),
+            );
+            let has_notes = cache.iter().any(|stored| {
+                stored.run.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. }
+                    )
+                })
+            });
+            let stored = computed_fields
+                .get(&std::ptr::from_ref(field))
+                .is_none_or(|(value, _)| value.is_none());
+            (has_notes || stored).then_some(cache)
+        } else {
+            stored_char_lengths.push(projected.run.text().chars().count());
+            None
+        };
+        stored_caches.push(cache);
+    }
     let mut expanded = Vec::new();
     for (index, (projected, cache)) in projected_runs.into_iter().zip(&stored_caches).enumerate() {
         let start = projection_char_offset;
-        projection_char_offset += projected.run.text().chars().count();
+        projection_char_offset += stored_char_lengths[index];
         if let Some(cache) = cache {
-            for (cache_index, run) in cache.iter().enumerate() {
+            let mut stored_start = start;
+            for (cache_index, stored) in cache.iter().enumerate() {
                 expanded.push((
                     index,
-                    ProjectedRun { run, ..projected },
-                    start,
+                    ProjectedRun {
+                        run: &stored.run,
+                        force_underline: projected.force_underline || stored.force_underline,
+                        force_strike: projected.force_strike || stored.force_strike,
+                        revision: stored.revision.or(projected.revision),
+                        ..projected
+                    },
+                    stored_start,
                     true,
                     cache_index == 0,
+                    stored.source,
+                    stored.field_kind,
+                    stored.occurrence,
                 ));
+                stored_start += stored.run.text().chars().count();
             }
         } else {
-            expanded.push((index, projected, start, false, true));
+            expanded.push((index, projected, start, false, true, None, None, None));
         }
     }
-    for (projected_index, projected, projected_run_start, stored_cache, first) in expanded {
+    for (
+        projected_index,
+        projected,
+        projected_run_start,
+        stored_cache,
+        first,
+        stored_source,
+        stored_field_kind,
+        stored_occurrence,
+    ) in expanded
+    {
         let run = projected.run;
         if first {
             push_targeted_bookmark_markers(
                 &mut inline_items,
-                para,
+                &mut multilingual_styles,
+                &current_bookmarks,
                 projected_index,
                 input,
                 fm,
@@ -9808,7 +11902,27 @@ fn layout_paragraph_with_source_and_table(
                     .and_then(|rel_id| input.hyperlink_urls.get(rel_id).cloned())
             });
 
-        let run_style_id = run.properties.as_ref().and_then(|p| p.style_id.as_deref());
+        // Word writes each entry of a table of contents as a hyperlink to a
+        // `_Toc` bookmark whose runs carry the Hyperlink character style, and
+        // draws the entry in its TOC paragraph style without that style's
+        // colour and underline. LibreOffice does the same.
+        let toc_entry = toc_paragraph
+            && projected
+                .hyperlink_index
+                .and_then(|index| para.hyperlinks.get(index))
+                .or_else(|| {
+                    let run_index = projected.ordinary_run_index?;
+                    para.hyperlinks.iter().find(|hyperlink| {
+                        (hyperlink.run_start..hyperlink.run_end).contains(&run_index)
+                    })
+                })
+                .and_then(|hyperlink| hyperlink.anchor.as_deref())
+                .is_some_and(|anchor| anchor.starts_with("_Toc"));
+        let run_style_id = run
+            .properties
+            .as_ref()
+            .and_then(|p| p.style_id.as_deref())
+            .filter(|style_id| !(toc_entry && is_hyperlink_character_style(style_id, styles)));
 
         let resolved_rpr = style_resolver::resolve_run_properties(
             para_style_id,
@@ -9831,7 +11945,7 @@ fn layout_paragraph_with_source_and_table(
             &mut inline_items,
             fm,
             effective_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0),
-            resolve_run_color(&effective_rpr, input.theme.as_ref()),
+            resolve_run_color(&effective_rpr, input.theme.as_ref(), automatic_color),
             available_width,
             input.math_properties.as_ref(),
             diagnostics,
@@ -9856,6 +11970,7 @@ fn layout_paragraph_with_source_and_table(
                         input,
                         para_style_id,
                         table_run_properties,
+                        automatic_color,
                     },
                     fm,
                 )?
@@ -9886,7 +12001,7 @@ fn layout_paragraph_with_source_and_table(
         let (color, underline) = tracked_marks(
             &projected,
             input.revision_style,
-            resolve_run_color(&effective_rpr, input.theme.as_ref()),
+            resolve_run_color(&effective_rpr, input.theme.as_ref(), automatic_color),
             convert::underline(effective_rpr.underline),
         );
         let strike = projected.force_strike || effective_rpr.strike.unwrap_or(false);
@@ -9923,9 +12038,119 @@ fn layout_paragraph_with_source_and_table(
         let font_id = fm.resolve_font_for_text(font_family.as_deref(), bold, italic, &run_text)?;
         let metrics = fm.metrics(font_id, font_size)?;
 
+        // Stored-display expansion replaces the sole Field run with its
+        // cache runs. Its instruction events still belong before that display.
+        if stored_cache && first {
+            let owner_run = prepared_runs[projected_index]
+                .as_ref()
+                .unwrap_or(original_runs[projected_index].run);
+            if let [RunContent::Field(field)] = owner_run.content.as_slice() {
+                push_sequence_context_markers(
+                    field,
+                    input.sequence_snapshot.as_deref().zip(source_node),
+                    &field_indices,
+                    font_id,
+                    &mut inline_items,
+                    &mut multilingual_styles,
+                );
+            }
+        }
         let run_inline_start = inline_items.len();
         let content_char_starts = projected_content_char_starts(run);
-        for (content_index, content) in run.content.iter().enumerate() {
+        let note_events = if num_state.note_body_context.is_some() {
+            crate::notes::run_note_events(run)?
+        } else {
+            Vec::new()
+        };
+        for (content_index, content) in run
+            .content
+            .iter()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            for (_, event) in note_events
+                .iter()
+                .filter(|(position, _)| *position == content_index)
+            {
+                if matches!(event.as_str(), "separator" | "continuationSeparator") {
+                    let width = available_width
+                        * if event == "continuationSeparator" {
+                            1.0
+                        } else {
+                            crate::notes::SEPARATOR_WIDTH_FRACTION
+                        };
+                    inline_items.push(InlineItem::Group {
+                        width,
+                        height: 0.0,
+                        baseline: None,
+                        group: GroupElement {
+                            transform: Transform::IDENTITY,
+                            clip: None,
+                            opacity: 1.0,
+                            effects: Vec::new(),
+                            children: vec![PositionedElement::Line {
+                                start: Point { x: 0.0, y: 0.0 },
+                                end: Point { x: width, y: 0.0 },
+                                width: 0.5,
+                                color,
+                                dash_pattern: None,
+                            }],
+                        },
+                    });
+                } else if let Some(note) = num_state.note_body_context
+                    && ((note.stream == NoteStream::Footnote && event == "footnoteRef")
+                        || (note.stream == NoteStream::Endnote && event == "endnoteRef"))
+                {
+                    let text = num_state.note_label(note);
+                    let (size, rise) = if matches!(
+                        effective_rpr.vert_align.as_deref(),
+                        Some("superscript" | "subscript")
+                    ) {
+                        (font_size, baseline_offset)
+                    } else {
+                        (font_size * 0.58, font_size * 0.33 + baseline_offset)
+                    };
+                    let marker_font =
+                        fm.resolve_font_for_text(font_family.as_deref(), bold, italic, &text)?;
+                    let shaped = fm.shape_text_with_kerning(
+                        marker_font,
+                        &text,
+                        size,
+                        style_resolver::word_kerning_enabled(&effective_rpr),
+                    )?;
+                    let marker_metrics = fm.metrics(marker_font, size)?;
+                    inline_items.push(InlineItem::Text(TextSegment {
+                        text,
+                        direction: TextDirection::Auto,
+                        source: None,
+                        font_id: marker_font,
+                        font_size: size,
+                        glyph_ids: shaped.glyph_ids,
+                        advances: shaped.advances,
+                        width: shaped.width,
+                        ascent: marker_metrics.ascent,
+                        descent: marker_metrics.descent,
+                        line_gap: 0.0,
+                        color,
+                        bold,
+                        italic,
+                        underline,
+                        strike,
+                        dstrike,
+                        highlight,
+                        baseline_offset: rise,
+                        hyperlink_url: current_hyperlink_url.clone(),
+                        field_kind: None,
+                        field_source: None,
+                        note: None,
+                        note_reference_source: None,
+                    }));
+                }
+            }
+            let Some(content) = content else {
+                break;
+            };
             let content_char_start = projected_run_start + content_char_starts[content_index];
             match content {
                 RunContent::Text(ct_text) | RunContent::DeletedText(ct_text) => {
@@ -9935,7 +12160,7 @@ fn layout_paragraph_with_source_and_table(
                         ct_text.text.clone()
                     };
 
-                    if text.is_empty() {
+                    if text.is_empty() && stored_source.is_none() && stored_field_kind.is_none() {
                         continue;
                     }
 
@@ -9956,6 +12181,10 @@ fn layout_paragraph_with_source_and_table(
                     };
 
                     let annotation_base = AnnotationBase {
+                        fallback_emphasis: effective_rpr.emphasis_mark.as_ref(),
+                        occurrence: stored_occurrence,
+                        field_kind: stored_field_kind,
+                        kern: style_resolver::word_kerning_enabled(&effective_rpr),
                         font_id,
                         font_size,
                         color,
@@ -9970,9 +12199,37 @@ fn layout_paragraph_with_source_and_table(
                         font_family: font_family.as_deref(),
                     };
 
+                    if text.is_empty() && stored_occurrence.is_some() {
+                        let kind = effective_rpr
+                            .east_asian_layout
+                            .as_deref()
+                            .filter(|layout| {
+                                layout.combine == Some(true) || layout.vert == Some(true)
+                            })
+                            .map(|layout| WordAnnotationKind::EastAsian(layout.clone()))
+                            .or_else(|| {
+                                effective_rpr
+                                    .emphasis_mark
+                                    .as_ref()
+                                    .filter(|mark| emphasis_mark_glyph(mark).is_some())
+                                    .map(|mark| WordAnnotationKind::Emphasis(mark.clone()))
+                            });
+                        if let Some(kind) = kind {
+                            push_empty_field_annotation(
+                                &mut inline_items,
+                                &mut multilingual_styles,
+                                kind,
+                                &annotation_base,
+                                source,
+                            )?;
+                            continue;
+                        }
+                    }
+
                     if let Some(layout) = effective_rpr.east_asian_layout.as_deref()
                         && push_east_asian_layout_text(
                             &mut inline_items,
+                            &mut multilingual_styles,
                             fm,
                             layout,
                             &text,
@@ -9986,6 +12243,7 @@ fn layout_paragraph_with_source_and_table(
                     if let Some(ref mark) = effective_rpr.emphasis_mark
                         && push_emphasis_marked_text(
                             &mut inline_items,
+                            &mut multilingual_styles,
                             fm,
                             diagnostics,
                             mark,
@@ -9996,7 +12254,12 @@ fn layout_paragraph_with_source_and_table(
                         continue;
                     }
 
-                    let mut shaped = fm.shape_text(font_id, &text, font_size)?;
+                    let mut shaped = fm.shape_text_with_kerning(
+                        font_id,
+                        &text,
+                        font_size,
+                        style_resolver::word_kerning_enabled(&effective_rpr),
+                    )?;
 
                     // Apply character spacing from run properties, plus the
                     // section character grid when one is in force.
@@ -10029,8 +12292,8 @@ fn layout_paragraph_with_source_and_table(
                         highlight,
                         baseline_offset,
                         hyperlink_url: current_hyperlink_url.clone(),
-                        field_kind: None,
-                        field_source: None,
+                        field_kind: stored_field_kind,
+                        field_source: stored_source,
                         note: None,
                         note_reference_source: None,
                     };
@@ -10038,6 +12301,14 @@ fn layout_paragraph_with_source_and_table(
                     multilingual_styles.insert(
                         item_index,
                         WordMultilingualStyle {
+                            occurrence: stored_occurrence,
+                            annotation: None,
+                            kern: style_resolver::word_kerning_enabled(&effective_rpr),
+                            origin: if stored_field_kind.is_some() {
+                                WordInputOrigin::PlainField
+                            } else {
+                                WordInputOrigin::Text
+                            },
                             requested_family: fm.copy_font_request_context(
                                 font_family.as_deref(),
                                 &mut requested_context_bytes,
@@ -10050,7 +12321,9 @@ fn layout_paragraph_with_source_and_table(
                             spacing: word_character_advance_pt(&effective_rpr, grid_char_space_pt),
                         },
                     );
-                    if automatic_hyphenation && let Some(language) = effective_rpr.language.as_ref()
+                    if automatic_hyphenation
+                        && !stored_cache
+                        && let Some(language) = effective_rpr.language.as_ref()
                     {
                         inline_items.push(InlineItem::HyphenatedText {
                             segment,
@@ -10090,6 +12363,7 @@ fn layout_paragraph_with_source_and_table(
                                 )?,
                             }
                         } else {
+                            media.record_picture_draw_owner(&inline.embed_id);
                             InlineItem::Image {
                                 width,
                                 height,
@@ -10116,126 +12390,18 @@ fn layout_paragraph_with_source_and_table(
                     }
                 }
                 RunContent::Field(field) => {
-                    let instruction = field.effective_instruction();
-                    if let Some((snapshot, node)) =
-                        input.sequence_snapshot.as_ref().zip(source_node)
-                    {
-                        let mut pending = vec![field];
-                        while let Some(owner) = pending.pop() {
-                            if let Some(index) =
-                                field_indices.get(&std::ptr::from_ref(owner)).copied()
-                            {
-                                let source = FieldSource { node, index };
-                                if let Some(event) = snapshot.event_sources.get(&source) {
-                                    push_structural_field_marker(
-                                        &mut inline_items,
-                                        FieldKind::SequenceContext(*event),
-                                        font_id,
-                                        source_node,
-                                        Some(source),
-                                    );
-                                }
-                            }
-                            pending.extend(owner.nested_fields_in_source_order().into_iter().rev());
-                        }
-                    }
-                    let (computed_value, field_kind) = match instruction.name.as_str() {
-                        "PAGE" => (Some("99".to_owned()), Some(FieldKind::Page)),
-                        "NUMPAGES" => (Some("99".to_owned()), Some(FieldKind::NumPages)),
-                        "SECTION" => (Some("99".to_owned()), Some(FieldKind::Section)),
-                        "SECTIONPAGES" => (Some("99".to_owned()), Some(FieldKind::SectionPages)),
-                        "SEQ" => {
-                            let source = source_node
-                                .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
-                                .map(|(node, index)| FieldSource { node, index });
-                            let result = source.and_then(|source| {
-                                input.sequence_snapshot.as_ref()?.field_value(source)
-                            });
-                            match result {
-                                Some(Ok(value)) => (Some(value.to_owned()), None),
-                                Some(Err(message)) => {
-                                    if source.is_some_and(|source| {
-                                        input.sequence_snapshot.as_ref().is_some_and(|snapshot| {
-                                            snapshot.repeat_requests.contains_key(&source)
-                                        })
-                                    }) {
-                                        (Some(String::new()), Some(FieldKind::SequenceRepeat))
-                                    } else {
-                                        diagnostics.push(Diagnostic {
-                                            message: message.to_owned(),
-                                        });
-                                        (None, None)
-                                    }
-                                }
-                                None => {
-                                    diagnostics.push(Diagnostic { message: "SEQ retains its stored display without accepted source-qualified context".into() });
-                                    (None, None)
-                                }
-                            }
-                        }
-                        "REF" => {
-                            let Some(bookmark) = field_text_argument(&instruction, 0) else {
-                                continue;
-                            };
-                            if let Some(text) = bookmark_text(input, bookmark) {
-                                match numbered_ref_text(
-                                    &instruction,
-                                    bookmark,
-                                    text,
-                                    num_state,
-                                    source_node,
-                                    if field_has_switch(&instruction, "p") {
-                                        source_node.zip(field_indices.get(&std::ptr::from_ref(field)).copied())
-                                            .and_then(|(node, index)| input.sequence_snapshot.as_ref().map(|snapshot| (snapshot, FieldSource { node, index })))
-                                            .ok_or_else(|| "REF relative source lacks an accepted physical binding".to_owned())
-                                            .and_then(|(snapshot, source)| snapshot.bookmark_relative_position(bookmark, source).map(Some))
-                                    } else { Ok(None) },
-                                )
-                                .and_then(|value| format_numeric_field_display(&instruction, value))
-                                {
-                                    Ok(value) => (Some(value), None),
-                                    Err(message) => {
-                                        diagnostics.push(Diagnostic {
-                                            message: format!(
-                                                "{message}, stored REF display retained"
-                                            ),
-                                        });
-                                        (None, None)
-                                    }
-                                }
-                            } else {
-                                diagnostics.push(Diagnostic {
-                                    message: format!(
-                                        "REF target {bookmark} was not found, stored display retained"
-                                    ),
-                                });
-                                (None, None)
-                            }
-                        }
-                        "PAGEREF" => {
-                            let Some(bookmark) = field_text_argument(&instruction, 0) else {
-                                continue;
-                            };
-                            if bookmark_text(input, bookmark).is_none() {
-                                diagnostics.push(Diagnostic {
-                                    message: format!(
-                                        "PAGEREF target {bookmark} was not found, stored display retained"
-                                    ),
-                                });
-                                (None, None)
-                            } else if let Some(target) = page_ref_id(input, bookmark) {
-                                (Some("99".to_owned()), Some(FieldKind::TargetPage(target)))
-                            } else {
-                                (None, None)
-                            }
-                        }
-                        _ => (None, None),
-                    };
-                    let (computed_value, field_kind) = if field.locked() == Some(true) {
-                        (None, None)
-                    } else {
-                        (computed_value, field_kind)
-                    };
+                    push_sequence_context_markers(
+                        field,
+                        input.sequence_snapshot.as_deref().zip(source_node),
+                        &field_indices,
+                        font_id,
+                        &mut inline_items,
+                        &mut multilingual_styles,
+                    );
+                    let (computed_value, field_kind) = computed_fields
+                        .get(&std::ptr::from_ref(field))
+                        .cloned()
+                        .unwrap_or((None, None));
                     let stored_segments = field.effective_display_field_segments();
                     let segments: Vec<(Cow<'_, str>, Option<&CT_RPr>, &rdocx_oxml::text::Field)> =
                         if let Some(value) = computed_value.as_deref() {
@@ -10271,8 +12437,11 @@ fn layout_paragraph_with_source_and_table(
                                 _ => None,
                             }
                         };
-                        let segment_style_id =
-                            stored_properties.and_then(|properties| properties.style_id.as_deref());
+                        let segment_style_id = stored_properties
+                            .and_then(|properties| properties.style_id.as_deref())
+                            .filter(|style_id| {
+                                !(toc_entry && is_hyperlink_character_style(style_id, styles))
+                            });
                         let mut segment_rpr = if stored_properties.is_some() {
                             style_resolver::resolve_run_properties(
                                 para_style_id,
@@ -10301,7 +12470,7 @@ fn layout_paragraph_with_source_and_table(
                         let (segment_color, segment_underline) = tracked_marks(
                             &projected,
                             input.revision_style,
-                            resolve_run_color(&segment_rpr, input.theme.as_ref()),
+                            resolve_run_color(&segment_rpr, input.theme.as_ref(), automatic_color),
                             convert::underline(segment_rpr.underline),
                         );
                         let segment_strike =
@@ -10356,8 +12525,12 @@ fn layout_paragraph_with_source_and_table(
                                 if segment_rpr.caps == Some(true) {
                                     text = text.to_uppercase();
                                 }
-                                let mut shaped =
-                                    fm.shape_text(segment_font_id, &text, segment_font_size)?;
+                                let mut shaped = fm.shape_text_with_kerning(
+                                    segment_font_id,
+                                    &text,
+                                    segment_font_size,
+                                    style_resolver::word_kerning_enabled(&segment_rpr),
+                                )?;
                                 let extra =
                                     word_character_advance_pt(&segment_rpr, grid_char_space_pt);
                                 if extra != 0.0 {
@@ -10370,6 +12543,14 @@ fn layout_paragraph_with_source_and_table(
                                 multilingual_styles.insert(
                                     item_index,
                                     WordMultilingualStyle {
+                                        occurrence: None,
+                                        annotation: None,
+                                        kern: style_resolver::word_kerning_enabled(&segment_rpr),
+                                        origin: if segment_field_kind.is_some() {
+                                            WordInputOrigin::PlainField
+                                        } else {
+                                            WordInputOrigin::Text
+                                        },
                                         requested_family: fm.copy_font_request_context(
                                             segment_font_family.as_deref(),
                                             &mut requested_context_bytes,
@@ -10448,7 +12629,12 @@ fn layout_paragraph_with_source_and_table(
                     } else {
                         (font_size * 0.58, font_size * 0.33 + baseline_offset)
                     };
-                    let shaped = fm.shape_text(font_id, &marker, sup_size)?;
+                    let shaped = fm.shape_text_with_kerning(
+                        font_id,
+                        &marker,
+                        sup_size,
+                        style_resolver::word_kerning_enabled(&effective_rpr),
+                    )?;
                     let sup_metrics = fm.metrics(font_id, sup_size)?;
                     let revision_marker = input.revision_view == RevisionView::Tracked
                         && projected.ordinary_run_index.is_none();
@@ -10499,7 +12685,7 @@ fn layout_paragraph_with_source_and_table(
                     let Some(symbol) = char::from_u32(u32::from(*char_code)) else {
                         continue;
                     };
-                    let (text, symbol_font_id) = fm.resolve_symbol_text(
+                    let (text, symbol_font_id) = fm.resolve_word_symbol_text(
                         Some(font.as_str()),
                         bold,
                         italic,
@@ -10507,8 +12693,13 @@ fn layout_paragraph_with_source_and_table(
                         false,
                     )?;
                     let symbol_metrics = fm.metrics(symbol_font_id, font_size)?;
-                    let shaped = fm.shape_text(symbol_font_id, &text, font_size)?;
-                    for message in fm.unknown_symbol_diagnostics(
+                    let shaped = fm.shape_text_with_kerning(
+                        symbol_font_id,
+                        &text,
+                        font_size,
+                        style_resolver::word_kerning_enabled(&effective_rpr),
+                    )?;
+                    for message in fm.unknown_word_symbol_diagnostics(
                         symbol_font_id,
                         Some(font),
                         &symbol.to_string(),
@@ -10519,6 +12710,14 @@ fn layout_paragraph_with_source_and_table(
                     multilingual_styles.insert(
                         inline_items.len(),
                         WordMultilingualStyle {
+                            occurrence: stored_occurrence,
+                            annotation: None,
+                            kern: style_resolver::word_kerning_enabled(&effective_rpr),
+                            origin: if stored_field_kind.is_some() {
+                                WordInputOrigin::PlainField
+                            } else {
+                                WordInputOrigin::Text
+                            },
                             requested_family: fm.copy_font_request_context(
                                 Some(font),
                                 &mut requested_context_bytes,
@@ -10563,7 +12762,12 @@ fn layout_paragraph_with_source_and_table(
                         // hyphen is drawn without becoming a break
                         // opportunity. A plain U+002D would become one.
                         let text = "\u{2011}".to_owned();
-                        let shaped = fm.shape_text(font_id, &text, font_size)?;
+                        let shaped = fm.shape_text_with_kerning(
+                            font_id,
+                            &text,
+                            font_size,
+                            style_resolver::word_kerning_enabled(&effective_rpr),
+                        )?;
                         inline_items.push(InlineItem::Text(TextSegment {
                             text,
                             direction: TextDirection::Auto,
@@ -10608,6 +12812,7 @@ fn layout_paragraph_with_source_and_table(
             multilingual_styles
                 .entry(index)
                 .or_insert_with(|| WordMultilingualStyle {
+                    kern: style_resolver::word_kerning_enabled(&effective_rpr),
                     requested_family: fm.copy_font_request_context(
                         font_family.as_deref(),
                         &mut requested_context_bytes,
@@ -10631,7 +12836,7 @@ fn layout_paragraph_with_source_and_table(
         &mut inline_items,
         fm,
         equation_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0),
-        resolve_run_color(&equation_rpr, input.theme.as_ref()),
+        resolve_run_color(&equation_rpr, input.theme.as_ref(), automatic_color),
         available_width,
         input.math_properties.as_ref(),
         diagnostics,
@@ -10639,14 +12844,21 @@ fn layout_paragraph_with_source_and_table(
 
     push_targeted_bookmark_markers(
         &mut inline_items,
-        para,
+        &mut multilingual_styles,
+        &current_bookmarks,
         projected_run_count,
         input,
         fm,
         source_node,
     )?;
 
-    let attributed_empty_paragraph = inline_items.is_empty();
+    let attributed_empty_paragraph = inline_items.is_empty()
+        || inline_items.iter().enumerate().all(|(index, _)| {
+            multilingual_styles
+                .get(&index)
+                .and_then(|style| style.annotation.as_ref())
+                .is_some_and(|annotation| annotation.kind == WordAnnotationRootKind::EmptySpan)
+        });
     if attributed_empty_paragraph {
         let mut caret_rpr = style_resolver::resolve_run_properties(
             para_style_id,
@@ -10666,36 +12878,80 @@ fn layout_paragraph_with_source_and_table(
             resolve_font_family(&caret_rpr, input.theme.as_ref(), WordFontSlot::Ascii);
         let font_id = fm.resolve_font_for_metrics(font_family.as_deref(), bold, italic)?;
         let metrics = fm.metrics(font_id, font_size)?;
-        inline_items.push(InlineItem::Text(TextSegment {
-            text: String::new(),
-            direction: TextDirection::Auto,
-            source: source_node.map(|node| SourceSpan {
-                node,
-                char_start: 0,
-                char_end: 0,
-            }),
-            font_id,
-            font_size,
-            glyph_ids: Vec::new(),
-            advances: Vec::new(),
-            width: 0.0,
-            ascent: metrics.ascent,
-            descent: metrics.descent,
-            line_gap: 0.0,
-            color: resolve_run_color(&caret_rpr, input.theme.as_ref()),
-            bold,
-            italic,
-            underline: None,
-            strike: false,
-            dstrike: false,
-            highlight: None,
-            baseline_offset: 0.0,
-            hyperlink_url: None,
-            field_kind: None,
-            field_source: None,
-            note: None,
-            note_reference_source: None,
-        }));
+        if inline_items.is_empty() {
+            multilingual_styles.insert(
+                inline_items.len(),
+                WordMultilingualStyle {
+                    kern: style_resolver::word_kerning_enabled(&caret_rpr),
+                    ..Default::default()
+                },
+            );
+            inline_items.push(InlineItem::Text(TextSegment {
+                text: String::new(),
+                direction: TextDirection::Auto,
+                source: source_node.map(|node| SourceSpan {
+                    node,
+                    char_start: 0,
+                    char_end: 0,
+                }),
+                font_id,
+                font_size,
+                glyph_ids: Vec::new(),
+                advances: Vec::new(),
+                width: 0.0,
+                ascent: metrics.ascent,
+                descent: metrics.descent,
+                line_gap: 0.0,
+                color: resolve_run_color(&caret_rpr, input.theme.as_ref(), automatic_color),
+                bold,
+                italic,
+                underline: None,
+                strike: false,
+                dstrike: false,
+                highlight: None,
+                baseline_offset: 0.0,
+                hyperlink_url: None,
+                field_kind: None,
+                field_source: None,
+                note: None,
+                note_reference_source: None,
+            }));
+        } else {
+            // These atomic roots stand in for the ordinary empty caret. A
+            // baseline-bearing Group retains its supplied metrics during Word
+            // restoration, so include the same external leading here. Exact
+            // spacing retains the line breaker's original font metrics.
+            let (ascent, descent) = if matches!(
+                convert::line_spacing(&effective_ppr),
+                oxml_layout::LineSpacing::Exact(_)
+            ) {
+                (metrics.ascent, metrics.descent)
+            } else {
+                let word = fm.word_line_metrics(font_id, font_size)?;
+                (word.ascent + word.line_gap, word.descent)
+            };
+            for item in &mut inline_items {
+                let InlineItem::Group {
+                    height,
+                    baseline,
+                    group,
+                    ..
+                } = item
+                else {
+                    return Err(LayoutError::Layout(
+                        "empty annotation lost its atomic root".into(),
+                    ));
+                };
+                *height = ascent + descent;
+                *baseline = Some(ascent);
+                let [PositionedElement::Text(base)] = group.children.as_mut_slice() else {
+                    return Err(LayoutError::Layout(
+                        "empty annotation lost its base leaf".into(),
+                    ));
+                };
+                base.origin.y = ascent;
+            }
+        }
     }
 
     let layout_direction = match base_direction {
@@ -10765,35 +13021,83 @@ fn layout_paragraph_with_source_and_table(
     let uses_exact_word_baseline = uses_multilingual_layout
         && effective_ppr.line_rule.as_deref() == Some("exact")
         && effective_ppr.line_spacing.is_some();
-    if uses_multilingual_layout {
-        inline_items = shape_word_multilingual_items(
-            fm,
-            inline_items,
-            &multilingual_styles,
-            layout_direction,
-            !line_params.wrap,
-            uses_exact_word_baseline,
-        )?;
-    } else {
-        for (index, item) in inline_items.iter().enumerate() {
-            let requested = multilingual_styles
+    let structural_count = multilingual_styles
+        .values()
+        .filter(|style| style.origin == WordInputOrigin::Structural)
+        .count();
+    let mut producers = Vec::new();
+    let mut language_bytes = None;
+    let mut uniform_language_bytes = true;
+    for (index, item) in inline_items.iter().enumerate() {
+        if let InlineItem::Text(_) | InlineItem::Marker(_) | InlineItem::HyphenatedText { .. } =
+            item
+        {
+            let style = multilingual_styles
                 .get(&index)
-                .and_then(|style| style.requested_family.as_deref());
-            match item {
-                InlineItem::Text(segment)
-                | InlineItem::Marker(segment)
-                | InlineItem::HyphenatedText { segment, .. } => {
-                    fm.record_font_contribution(segment.font_id, requested, &segment.text)?;
-                }
-                _ => {}
+                .ok_or_else(|| LayoutError::Layout("Word text lacks producer proof".into()))?;
+            let language = match item {
+                InlineItem::HyphenatedText { language, .. } => Some(language.clone()),
+                _ => None,
+            };
+            let bytes = language.as_ref().map_or(0, String::len);
+            if language_bytes.is_some_and(|previous| previous != bytes) {
+                uniform_language_bytes = false;
             }
+            language_bytes = Some(bytes);
+            producers.push(WordLegacyProducer {
+                kern: style.kern,
+                language,
+                structural: style.origin == WordInputOrigin::Structural,
+                atomic_marker: style.origin == WordInputOrigin::AtomicMarker,
+            });
         }
     }
-    let mut lines = if uses_multilingual_layout {
-        break_multilingual_into_lines(&inline_items, &line_params, fm, layout_direction)?
-    } else {
-        break_into_lines(&inline_items, &line_params, fm)?
+    let mut paint = WordParagraphPaint {
+        rich_layout: uses_multilingual_layout,
+        plain_field_policy: Some((false, true)),
+        structural_count,
+        legacy_cache: (!uses_multilingual_layout && uniform_language_bytes).then_some(
+            WordLegacyCache {
+                language_bytes_per_span: language_bytes.unwrap_or(0),
+                producers,
+            },
+        ),
+        ..Default::default()
     };
+    let shaped = shape_word_multilingual_items(
+        fm,
+        inline_items,
+        &multilingual_styles,
+        layout_direction,
+        !line_params.wrap,
+        uses_exact_word_baseline,
+        !uses_multilingual_layout,
+    )?;
+    inline_items = shaped.items;
+    paint.input_annotations = shaped.annotations;
+    paint.field_occurrences = shaped.occurrences;
+    let (mut lines, origins) = oxml_layout::line::break_into_lines_with_opaque_origins(
+        &inline_items,
+        &line_params,
+        fm,
+        uses_multilingual_layout.then_some(layout_direction),
+    )?;
+    paint.bind_annotation_origins(&lines, &origins)?;
+    let actual_structural = lines
+        .iter()
+        .flat_map(|line| &line.items)
+        .filter(|item| match item {
+            LineItem::Text(base) | LineItem::Marker(base) => {
+                base.field_kind.is_some() || base.field_source.is_some()
+            }
+            _ => false,
+        })
+        .count();
+    if actual_structural != paint.structural_count {
+        return Err(LayoutError::Layout(
+            "Word structural producer count changed in line breaking".into(),
+        ));
+    }
     convert::restore_word_line_heights(
         &mut lines,
         line_params.line_spacing,
@@ -10820,7 +13124,7 @@ fn layout_paragraph_with_source_and_table(
     result.heading_text = heading_level.map(|_| heading_text);
     result.change_bar = change_bar_color(para, input);
     result.list = list_num_id.map(|num_id| (num_id, list_ilvl.min(8) as u8));
-    result.anchored = collect_anchored_drawings(
+    let (anchored, anchors) = collect_anchored_drawings(
         para,
         styles,
         input,
@@ -10830,6 +13134,8 @@ fn layout_paragraph_with_source_and_table(
         diagnostics,
         source_node,
     )?;
+    result.anchored = anchored;
+    paint.anchors = anchors;
     // `inline_items` is finished with here and would otherwise be dropped, so
     // handing it to the reflow costs nothing but the memory it already holds.
     // `Engine::layout` frees it again unless the document wraps.
@@ -10839,19 +13145,20 @@ fn layout_paragraph_with_source_and_table(
         grid_line_pitch_pt,
         paragraph_mark,
     }));
-    Ok(result)
+    Ok((result, paint))
 }
 
 fn push_targeted_bookmark_markers(
     items: &mut Vec<InlineItem>,
-    paragraph: &CT_P,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
+    markers: &[rdocx_oxml::text::BookmarkMarker],
     projected_run_index: usize,
     input: &LayoutInput,
     fm: &mut FontManager,
     source_node: Option<SourceNodeId>,
 ) -> Result<()> {
     let mut font_id = None;
-    for marker in paragraph.bookmark_markers.iter().filter(|marker| {
+    for marker in markers.iter().filter(|marker| {
         let marker_run_index = match input.revision_view {
             RevisionView::Accepted => marker.projected_run_index(),
             RevisionView::Tracked => marker.tracked_run_index(),
@@ -10873,6 +13180,7 @@ fn push_targeted_bookmark_markers(
             };
             push_structural_field_marker(
                 items,
+                styles,
                 FieldKind::Target(target),
                 resolved_font,
                 source_node,
@@ -10883,13 +13191,51 @@ fn push_targeted_bookmark_markers(
     Ok(())
 }
 
+fn push_sequence_context_markers(
+    field: &rdocx_oxml::text::Field,
+    source: Option<(&crate::WordSequenceSnapshot, SourceNodeId)>,
+    field_indices: &HashMap<*const rdocx_oxml::text::Field, u32>,
+    font_id: oxml_layout::FontId,
+    items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
+) {
+    let Some((snapshot, node)) = source else {
+        return;
+    };
+    let mut pending = vec![field];
+    while let Some(owner) = pending.pop() {
+        if let Some(index) = field_indices.get(&std::ptr::from_ref(owner)).copied() {
+            let source = FieldSource { node, index };
+            if let Some(event) = snapshot.event_sources.get(&source) {
+                push_structural_field_marker(
+                    items,
+                    styles,
+                    FieldKind::SequenceContext(*event),
+                    font_id,
+                    Some(node),
+                    Some(source),
+                );
+            }
+        }
+        pending.extend(owner.nested_fields_in_source_order().into_iter().rev());
+    }
+}
+
 fn push_structural_field_marker(
     items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
     kind: FieldKind,
     font_id: oxml_layout::FontId,
     source_node: Option<SourceNodeId>,
     field_source: Option<FieldSource>,
 ) {
+    styles.insert(
+        items.len(),
+        WordMultilingualStyle {
+            origin: WordInputOrigin::Structural,
+            ..Default::default()
+        },
+    );
     let segment = TextSegment {
         text: "\u{2060}".to_owned(),
         direction: TextDirection::Auto,
@@ -10981,7 +13327,7 @@ fn document_has_section_fields(input: &LayoutInput) -> bool {
     visit_input_paragraphs(input, &mut |paragraph| {
         found |= project_paragraph_runs(paragraph, input.revision_view).iter().any(|projected|
             projected.run.content.iter().any(|content| matches!(content, RunContent::Field(field)
-                if matches!(field.effective_instruction().name.as_str(), "SECTION" | "SECTIONPAGES"))));
+                if std::iter::once(field).chain(field.all_nested_fields_in_source_order()).any(|owner| matches!(owner.effective_instruction().name.as_str(), "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF")))));
     });
     found
 }
@@ -11162,6 +13508,287 @@ fn numbered_ref_text(
     Ok(value)
 }
 
+// Borrowed admission precedes the recursive predicate, any clone and all
+// deferred semantic factories. The caller's source model remains untouched.
+fn prepared_semantic_layout_input(input: &LayoutInput) -> Result<Cow<'_, LayoutInput>> {
+    let validate = || -> rdocx_oxml::Result<()> {
+        input.document.validate_resource_limits()?;
+        for body in input.story_bodies.values() {
+            body.validate_resource_limits()?;
+        }
+        for part in input.headers.values().chain(input.footers.values()) {
+            for paragraph in &part.paragraphs {
+                paragraph.validate_resource_limits()?;
+            }
+        }
+        for notes in [input.footnotes.as_ref(), input.endnotes.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            for note in &notes.footnotes {
+                for paragraph in &note.paragraphs {
+                    paragraph.validate_resource_limits()?;
+                }
+            }
+        }
+        Ok(())
+    };
+    validate().map_err(|error| LayoutError::Layout(error.to_string()))?;
+    let mut needs_projection = false;
+    // This is the existing authoritative story selection, including its
+    // drawing children. Raw foreign payload is never promoted to a model.
+    visit_input_paragraphs(input, &mut |p| {
+        needs_projection |= paragraph_has_semantic_revision(p);
+    });
+    // Direct-run revisions can belong to a block control without a paragraph.
+    needs_projection |= body_has_semantic_revision(&input.document.body.content)
+        || input
+            .story_bodies
+            .values()
+            .any(|b| body_has_semantic_revision(&b.content));
+    if !needs_projection {
+        return Ok(Cow::Borrowed(input));
+    }
+    let mut prepared = input.clone();
+    prepare_layout_body_projection(&mut prepared.document.body.content)
+        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+    for (header, parts) in [
+        (true, &mut prepared.headers),
+        (false, &mut prepared.footers),
+    ] {
+        for (id, part) in parts {
+            let story = if header {
+                WordStory::Header {
+                    relationship_id: id.clone(),
+                }
+            } else {
+                WordStory::Footer {
+                    relationship_id: id.clone(),
+                }
+            };
+            if let Some(body) = prepared.story_bodies.get_mut(&story) {
+                prepare_layout_body_projection(&mut body.content)
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?;
+            } else {
+                for paragraph in &mut part.paragraphs {
+                    prepare_layout_paragraph_projection(paragraph)
+                        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                }
+            }
+        }
+    }
+    for (footnote, notes) in [
+        (true, &mut prepared.footnotes),
+        (false, &mut prepared.endnotes),
+    ] {
+        if let Some(notes) = notes {
+            for note in &mut notes.footnotes {
+                if note.note_type != rdocx_oxml::footnotes::NoteType::Normal {
+                    continue;
+                }
+                let story = if footnote {
+                    WordStory::Footnote { id: note.id }
+                } else {
+                    WordStory::Endnote { id: note.id }
+                };
+                if let Some(body) = prepared.story_bodies.get_mut(&story) {
+                    prepare_layout_body_projection(&mut body.content)
+                        .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                } else {
+                    for paragraph in &mut note.paragraphs {
+                        prepare_layout_paragraph_projection(paragraph)
+                            .map_err(|error| LayoutError::Layout(error.to_string()))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(Cow::Owned(prepared))
+}
+
+fn paragraph_has_semantic_revision(p: &CT_P) -> bool {
+    !p.revisions.is_empty()
+        || p.content_controls
+            .iter()
+            .any(|(_, _, _, c)| control_has_semantic_revision(c))
+        || p.runs.iter().any(run_has_semantic_revision)
+}
+
+fn run_has_semantic_revision(run: &CT_R) -> bool {
+    run.content
+        .iter()
+        .filter_map(|c| match c {
+            RunContent::Drawing(d) => Some(d),
+            _ => None,
+        })
+        .chain(run.alt_drawings.iter())
+        .any(|drawing| {
+            drawing
+                .anchor
+                .as_ref()
+                .and_then(|a| a.shape.as_ref())
+                .is_some_and(|shape| {
+                    shape.text_body.as_ref().map_or_else(
+                        || shape.text.iter().any(paragraph_has_semantic_revision),
+                        |b| body_has_semantic_revision(&b.content),
+                    )
+                })
+        })
+}
+
+fn control_has_semantic_revision(control: &CT_Sdt) -> bool {
+    !control.revisions().is_empty()
+        || control.content.iter().any(|c| match c {
+            SdtContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+            SdtContent::Table(t) => table_has_semantic_revision(t),
+            SdtContent::Row(r) => row_has_semantic_revision(r),
+            SdtContent::Cell(c) => cell_has_semantic_revision(c),
+            SdtContent::Run(r) => run_has_semantic_revision(r),
+            SdtContent::ContentControl(c) => control_has_semantic_revision(c),
+            SdtContent::RawXml(_) => false,
+        })
+}
+
+fn table_has_semantic_revision(table: &CT_Tbl) -> bool {
+    table
+        .content_controls
+        .iter()
+        .any(|(_, _, c)| control_has_semantic_revision(c))
+        || table.rows.iter().any(row_has_semantic_revision)
+}
+
+fn row_has_semantic_revision(row: &CT_Row) -> bool {
+    row.content_controls
+        .iter()
+        .any(|(_, _, c)| control_has_semantic_revision(c))
+        || row.cells.iter().any(cell_has_semantic_revision)
+}
+
+fn cell_has_semantic_revision(cell: &CT_Tc) -> bool {
+    cell.content.iter().any(|c| match c {
+        CellContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+        CellContent::Table(t) => table_has_semantic_revision(t),
+        CellContent::ContentControl(c) => control_has_semantic_revision(c),
+    })
+}
+
+fn body_has_semantic_revision(body: &[BodyContent]) -> bool {
+    body.iter().any(|c| match c {
+        BodyContent::Paragraph(p) => paragraph_has_semantic_revision(p),
+        BodyContent::Table(t) => table_has_semantic_revision(t),
+        BodyContent::ContentControl(c) => control_has_semantic_revision(c),
+        BodyContent::RawXml(_) => false,
+    })
+}
+
+fn prepare_layout_paragraph_projection(value: &mut CT_P) -> rdocx_oxml::Result<()> {
+    for (_, _, revision) in &mut value.revisions {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_layout_paragraph_projection(paragraph)?;
+        }
+    }
+    for (_, _, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for run in &mut value.runs {
+        prepare_layout_run_projection(run)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_run_projection(value: &mut CT_R) -> rdocx_oxml::Result<()> {
+    for drawing in value
+        .content
+        .iter_mut()
+        .filter_map(|content| {
+            if let RunContent::Drawing(drawing) = content {
+                Some(drawing)
+            } else {
+                None
+            }
+        })
+        .chain(value.alt_drawings.iter_mut())
+    {
+        let shape = drawing
+            .anchor
+            .as_mut()
+            .and_then(|anchor| anchor.shape.as_mut());
+        if let Some(shape) = shape {
+            if let Some(body) = &mut shape.text_body {
+                prepare_layout_body_projection(&mut body.content)?;
+            } else {
+                for paragraph in &mut shape.text {
+                    prepare_layout_paragraph_projection(paragraph)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_control_projection(value: &mut CT_Sdt) -> rdocx_oxml::Result<()> {
+    for (_, revision) in value.physical_revisions_mut() {
+        if let Some(paragraph) = revision.physical_content_paragraph_mut()? {
+            prepare_layout_paragraph_projection(paragraph)?;
+        }
+    }
+    for child in &mut value.content {
+        match child {
+            SdtContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            SdtContent::Table(t) => prepare_layout_table_projection(t)?,
+            SdtContent::Row(r) => prepare_layout_row_projection(r)?,
+            SdtContent::Cell(c) => prepare_layout_cell_projection(c)?,
+            SdtContent::Run(r) => prepare_layout_run_projection(r)?,
+            SdtContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_table_projection(value: &mut CT_Tbl) -> rdocx_oxml::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for row in &mut value.rows {
+        prepare_layout_row_projection(row)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_row_projection(value: &mut CT_Row) -> rdocx_oxml::Result<()> {
+    for (_, _, control) in &mut value.content_controls {
+        prepare_layout_control_projection(control)?;
+    }
+    for cell in &mut value.cells {
+        prepare_layout_cell_projection(cell)?;
+    }
+    Ok(())
+}
+
+fn prepare_layout_cell_projection(value: &mut CT_Tc) -> rdocx_oxml::Result<()> {
+    for content in &mut value.content {
+        match content {
+            CellContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            CellContent::Table(t) => prepare_layout_table_projection(t)?,
+            CellContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+        }
+    }
+    Ok(())
+}
+
+fn prepare_layout_body_projection(values: &mut [BodyContent]) -> rdocx_oxml::Result<()> {
+    for value in values {
+        match value {
+            BodyContent::Paragraph(p) => prepare_layout_paragraph_projection(p)?,
+            BodyContent::Table(t) => prepare_layout_table_projection(t)?,
+            BodyContent::ContentControl(c) => prepare_layout_control_projection(c)?,
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn document_has_ref_projection(input: &LayoutInput) -> bool {
     let paragraph_has_ref = |paragraph: &CT_P| {
         project_paragraph_runs(paragraph, input.revision_view)
@@ -11239,8 +13866,9 @@ fn note_reference_pages(result: &LayoutResult) -> HashMap<NoteRef, usize> {
 fn note_labels(
     input: &LayoutInput,
     note_pages: Option<&HashMap<NoteRef, usize>>,
-) -> HashMap<NoteRef, String> {
+) -> Result<HashMap<NoteRef, String>> {
     let mut labels = HashMap::new();
+    let mut preparation_error = None;
     let mut counts = [None::<u32>, None::<u32>];
     let mut last_pages = [None::<usize>, None::<usize>];
     let mut section_ends = input
@@ -11290,13 +13918,21 @@ fn note_labels(
         {
             let mut visit = |paragraph: &CT_P| {
                 for projected in project_paragraph_runs(paragraph, input.revision_view) {
-                    for item in projected
+                    let references = projected
                         .run
                         .content
                         .iter()
-                        .flat_map(content_note_references)
-                    {
-                        let (family, stream, id, custom_mark) = match item {
+                        .map(|content| content_note_references(content, input.revision_view))
+                        .collect::<Result<Vec<_>>>();
+                    let references = match references {
+                        Ok(references) => references,
+                        Err(error) => {
+                            preparation_error = Some(error);
+                            return;
+                        }
+                    };
+                    for item in references.into_iter().flatten() {
+                        let (family, stream, id, custom_mark) = match &item {
                             RunContent::FootnoteRef { id, custom_mark } => {
                                 (0, NoteStream::Footnote, *id, custom_mark.as_deref())
                             }
@@ -11368,7 +14004,10 @@ fn note_labels(
         }
         first_index = end.saturating_add(1);
     }
-    labels
+    if let Some(error) = preparation_error {
+        return Err(error);
+    }
+    Ok(labels)
 }
 
 fn visit_table_paragraphs<'a>(table: &'a CT_Tbl, accepted: bool, visit: &mut impl FnMut(&'a CT_P)) {
@@ -11455,9 +14094,13 @@ fn bookmark_range_in_paragraphs(
     let mut starts: HashMap<i32, Vec<BookmarkStart<'_>>> = HashMap::new();
     let mut ends: HashMap<i32, Vec<OrderedBodyRunPosition>> = HashMap::new();
     let mut encounter = 0usize;
+    let current_bookmarks = paragraphs
+        .iter()
+        .map(|paragraph| paragraph.current_bookmark_projection())
+        .collect::<Vec<_>>();
     for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
         let projected_run_count = project_paragraph_runs(paragraph, input.revision_view).len();
-        for marker in &paragraph.bookmark_markers {
+        for marker in &current_bookmarks[paragraph_index] {
             let Some(id) = marker.id() else {
                 continue;
             };
@@ -11635,7 +14278,21 @@ fn render_word_chart(
         None => Err("relationship was not resolved from the document part".to_owned()),
     };
     match rendered {
-        Ok(group) => Ok(group),
+        Ok(group) => {
+            if let Some(Ok(chart)) = input.charts.get(relationship_id) {
+                for code in oxml_chart::unsupported_number_formats(&chart.chart)
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?
+                {
+                    push_unique_diagnostic(
+                        diagnostics,
+                        format!(
+                            "Word chart relationship {relationship_id}: number format `{code}` is not supported and its labels use General"
+                        ),
+                    );
+                }
+            }
+            Ok(group)
+        }
         Err(detail) => {
             diagnostics.push(Diagnostic {
                 message: format!("Word chart relationship {relationship_id}: {detail}"),
@@ -11664,8 +14321,9 @@ fn collect_anchored_drawings(
     num_state: &mut NumberingState,
     diagnostics: &mut Vec<Diagnostic>,
     source_node: Option<SourceNodeId>,
-) -> Result<Vec<block::AnchoredDrawing>> {
+) -> Result<(Vec<block::AnchoredDrawing>, Vec<WordAnchorPaint>)> {
     let mut out = Vec::new();
+    let mut paints = Vec::new();
 
     // Drawings written plainly, and drawings recovered from an
     // mc:AlternateContent block, are both anchored the same way.
@@ -11692,7 +14350,11 @@ fn collect_anchored_drawings(
                 None
             };
 
+            let mut content_paint = WordAnchorPaint::Image;
             let content = if let Some(relationship_id) = anchor.chart_rel_id.as_deref() {
+                content_paint = WordAnchorPaint::Group {
+                    policies: Default::default(),
+                };
                 block::AnchoredContent::Group(render_word_chart(
                     relationship_id,
                     anchor.extent_cx.to_pt(),
@@ -11706,9 +14368,11 @@ fn collect_anchored_drawings(
                     Some(shape) => {
                         // A shape's text box wraps at the shape width.
                         let mut text = Vec::new();
+                        let mut paragraph_paints = Vec::new();
                         if let Some(body) = &shape.text_body {
-                            let mut local_sources =
-                                source_node.map(|_| SourceRegistry::for_body(input, body));
+                            let mut local_sources = source_node
+                                .map(|_| SourceRegistry::for_body(input, body))
+                                .transpose()?;
                             let mut inverse = None;
                             if input.sequence_snapshot.is_some()
                                 && let Some(parent) = source_node
@@ -11734,21 +14398,26 @@ fn collect_anchored_drawings(
                                         let node = local_sources.as_ref().and_then(|sources| {
                                             sources.id(&WordStory::Document, &path)
                                         });
-                                        let mut block = layout_paragraph_with_source(
-                                            paragraph,
-                                            anchor.extent_cx.to_pt(),
-                                            styles,
-                                            input,
-                                            media,
-                                            fm,
-                                            num_state,
-                                            diagnostics,
-                                            node,
-                                        )?;
+                                        let (mut block, _, mut paint) =
+                                            layout_paragraph_with_source_and_direction(
+                                                paragraph,
+                                                anchor.extent_cx.to_pt(),
+                                                styles,
+                                                input,
+                                                media,
+                                                fm,
+                                                num_state,
+                                                diagnostics,
+                                                node,
+                                                node,
+                                                None,
+                                            )?;
                                         if let Some(sources) = &local_sources {
-                                            sources.bind_text_boxes(&mut block, node)?;
+                                            sources
+                                                .bind_text_boxes(&mut block, &mut paint, node)?;
                                         }
                                         text.push(block);
+                                        paragraph_paints.push(paint);
                                     }
                                     MainStoryLayoutItem::Table(table, path) => {
                                         let (table, semantics) =
@@ -11771,23 +14440,28 @@ fn collect_anchored_drawings(
                                             page_height: anchor.extent_cy.to_pt(),
                                             ..PageGeometry::default()
                                         };
-                                        text.extend(paginator::story_table_rows(
+                                        for (block, paint) in paginator::story_table_rows(
                                             &table,
                                             &semantics,
                                             &geometry,
                                             media.media(),
-                                        ));
+                                        )? {
+                                            text.push(block);
+                                            paragraph_paints.push(paint);
+                                        }
                                     }
                                 }
                             }
                             if let Some(inverse) = &inverse {
-                                for paragraph in &mut text {
+                                for (paragraph, paint) in text.iter_mut().zip(&mut paragraph_paints)
+                                {
                                     remap_text_box_sources(paragraph, inverse)?;
+                                    paint.remap_sources(inverse)?;
                                 }
                             }
                         } else {
                             for p in &shape.text {
-                                text.push(layout_paragraph_with_source(
+                                let (block, _, paint) = layout_paragraph_with_source_and_direction(
                                     p,
                                     anchor.extent_cx.to_pt(),
                                     styles,
@@ -11797,9 +14471,16 @@ fn collect_anchored_drawings(
                                     num_state,
                                     diagnostics,
                                     source_node.map(|_| CACHE_SOURCE_NODE),
-                                )?);
+                                    source_node.map(|_| CACHE_SOURCE_NODE),
+                                    None,
+                                )?;
+                                text.push(block);
+                                paragraph_paints.push(paint);
                             }
                         }
+                        content_paint = WordAnchorPaint::Shape {
+                            paragraphs: paragraph_paints,
+                        };
                         block::AnchoredContent::Shape {
                             preset: block::ShapePreset::from_prst(shape.preset.as_deref()),
                             fill: shape.solid_fill.as_deref().map(Color::from_hex),
@@ -11808,12 +14489,16 @@ fn collect_anchored_drawings(
                     }
                     None if anchor.embed_id.is_empty() => continue,
                     None => {
+                        media.record_picture_draw_owner(&anchor.embed_id);
                         let media_id = media
                             .id_for_relationship_with_diagnostic(&anchor.embed_id, diagnostics);
                         if let Some((opacity, rotation)) = anchor.picture_effects() {
                             let width = anchor.extent_cx.to_pt();
                             let height = anchor.extent_cy.to_pt();
                             let image = media.media().get(&media_id);
+                            content_paint = WordAnchorPaint::Group {
+                                policies: Default::default(),
+                            };
                             block::AnchoredContent::Group(GroupElement {
                                 transform: Transform::rotate_about(
                                     rotation,
@@ -11844,6 +14529,7 @@ fn collect_anchored_drawings(
                 }
             };
 
+            paints.push(content_paint);
             out.push(block::AnchoredDrawing {
                 rotation_degrees: if shape.is_some() {
                     anchor.shape_rotation_degrees().unwrap_or(0.0)
@@ -11870,7 +14556,7 @@ fn collect_anchored_drawings(
             });
         }
     }
-    Ok(out)
+    Ok((out, paints))
 }
 
 /// Merge direct paragraph properties (only fields explicitly set in the XML).
@@ -11891,6 +14577,9 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     if direct.line_spacing.is_some() {
         effective.line_spacing = direct.line_spacing;
     }
+    if direct.text_alignment.is_some() {
+        effective.text_alignment = direct.text_alignment.clone();
+    }
     if direct.line_rule.is_some() {
         effective.line_rule = direct.line_rule.clone();
     }
@@ -11906,10 +14595,10 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     if direct.ind_end.is_some() {
         effective.ind_end = direct.ind_end;
     }
-    if direct.ind_first_line.is_some() {
+    // `w:firstLine` and `w:hanging` are one property, the first-line indent,
+    // so a level that sets either replaces both.
+    if direct.ind_first_line.is_some() || direct.ind_hanging.is_some() {
         effective.ind_first_line = direct.ind_first_line;
-    }
-    if direct.ind_hanging.is_some() {
         effective.ind_hanging = direct.ind_hanging;
     }
     if direct.keep_next.is_some() {
@@ -12149,14 +14838,58 @@ fn sect_pr_page_borders(sect_pr: &CT_SectPr) -> Option<PageBorderFrame> {
 fn sect_pr_line_numbers(sect_pr: &CT_SectPr) -> Option<LineNumbering> {
     let numbering = sect_pr.line_numbers.as_deref()?;
     Some(LineNumbering {
-        count_by: numbering.count_by.unwrap_or(1).max(1),
-        start: numbering.start.unwrap_or(1),
+        count_by: numbering.count_by?.max(1),
+        start: numbering.start.unwrap_or(0),
         distance: numbering
             .distance
             .map_or(AUTOMATIC_LINE_NUMBER_DISTANCE, |value| value.to_pt()),
         restart: numbering.restart.unwrap_or(ST_LineNumberRestart::NewPage),
         font_id: None,
     })
+}
+
+fn prepare_word_line_numbers(
+    input: &LayoutInput,
+    fonts: &mut FontManager,
+) -> (Option<paginator::WordLineNumberStyle>, Vec<Diagnostic>) {
+    if !document_sections(&input.document)
+        .into_iter()
+        .any(|section| sect_pr_line_numbers(section).is_some())
+    {
+        return (None, Vec::new());
+    }
+    let mut diagnostics = Vec::new();
+    let properties = style_resolver::line_number_properties(&input.styles, &mut diagnostics);
+    let size = properties.sz.map_or(11.0, |value| value.to_pt());
+    let bold = properties.bold.unwrap_or(false);
+    let italic = properties.italic.unwrap_or(false);
+    let family = resolve_font_family(&properties, input.theme.as_ref(), WordFontSlot::Ascii);
+    let font_id = if size.is_finite() && size > 0.0 {
+        match fonts.resolve_font(family.as_deref(), bold, italic) {
+            Ok(font) => Some(font),
+            Err(error) => {
+                diagnostics.push(Diagnostic {
+                    message: format!("line-number font could not be resolved: {error}"),
+                });
+                None
+            }
+        }
+    } else {
+        diagnostics.push(Diagnostic {
+            message: "line-number nominal font size must be finite and positive".into(),
+        });
+        None
+    };
+    (
+        Some(paginator::WordLineNumberStyle {
+            font_id,
+            size,
+            bold,
+            italic,
+            kerning: style_resolver::word_kerning_enabled(&properties),
+        }),
+        diagnostics,
+    )
 }
 
 /// Page geometry for one whole section, with the state `sect_pr_to_geometry`
@@ -12169,7 +14902,7 @@ fn sect_pr_line_numbers(sect_pr: &CT_SectPr) -> Option<LineNumbering> {
 fn section_page_geometry(
     sect_pr: &CT_SectPr,
     input: &LayoutInput,
-    font_manager: &mut FontManager,
+    line_number_style: Option<paginator::WordLineNumberStyle>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> PageGeometry {
     let mut geometry = sect_pr_to_geometry(sect_pr);
@@ -12208,17 +14941,13 @@ fn section_page_geometry(
     }
     geometry.do_not_use_html_paragraph_auto_spacing = input.do_not_use_html_paragraph_auto_spacing;
     if let Some(line_numbers) = geometry.line_numbers.as_mut() {
-        line_numbers.font_id = font_manager.resolve_font(Some("serif"), false, false).ok();
+        line_numbers.font_id = line_number_style.and_then(|style| style.font_id);
     }
     geometry
 }
 
 fn section_page_number_start(sect_pr: &CT_SectPr) -> Option<usize> {
-    sect_pr
-        .page_number
-        .as_ref()?
-        .start
-        .map(|value| value as usize)
+    effective_section_page_number(sect_pr).start
 }
 
 fn xml_local_name(name: &[u8]) -> &[u8] {
@@ -12591,26 +15320,30 @@ fn layout_header_footer_variant(
                     (
                         entry.content.clone(),
                         entry.diagnostics.clone(),
+                        entry.picture_draw_owners.clone(),
                         entry.font_trace.clone(),
                     )
                 })
         })
         .flatten();
-    if let Some((mut content, cached_diagnostics, font_trace)) = hit {
+    if let Some((mut content, cached_diagnostics, picture_draw_owners, font_trace)) = hit {
         rebind_header_footer_sources(
             story_kind,
             relationship_id,
             part,
             &mut content.blocks,
+            &mut content.directions,
             sources,
         )?;
         diagnostics.extend(cached_diagnostics);
+        media.replay_picture_draw_owners(&picture_draw_owners);
         engine.font_manager.replay_font_trace_events(&font_trace)?;
         engine.header_footer_cache_hits += 1;
         return Ok(content);
     }
 
     let diagnostics_start = diagnostics.len();
+    let owners_start = media.picture_draw_owner_checkpoint();
     engine.font_manager.begin_paragraph_font_trace();
     let content_result = layout_header_footer_variant_uncached(
         story_kind,
@@ -12631,13 +15364,16 @@ fn layout_header_footer_variant(
     let mut content = content_result?;
     engine.header_footer_cache_builds += 1;
     let cached_diagnostics = diagnostics[diagnostics_start..].to_vec();
+    let picture_draw_owners = media.picture_draw_owners_since(owners_start);
     if let Some(font_trace) = font_trace {
         let bytes =
             header_footer_cache_entry_bytes(&key, &content, &cached_diagnostics, &font_trace);
+        let bytes = bytes.saturating_add(picture_draw_owner_bytes(&picture_draw_owners));
         engine.stage_header_footer_cache_entry(HeaderFooterCacheEntry {
             key,
             content: content.clone(),
             diagnostics: cached_diagnostics,
+            picture_draw_owners,
             font_trace,
             bytes,
         });
@@ -12647,6 +15383,7 @@ fn layout_header_footer_variant(
         relationship_id,
         part,
         &mut content.blocks,
+        &mut content.directions,
         sources,
     )?;
     Ok(content)
@@ -12714,9 +15451,26 @@ fn layout_header_footer_variant_uncached(
                 } else {
                     sources.and_then(|sources| sources.id(&story, &path))
                 };
-                let (mut block, direction) = layout_paragraph_with_source_and_direction(
+                let mut properties = style_resolver::resolve_paragraph_properties(
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.style_id.as_deref()),
+                    styles,
+                );
+                if let Some(direct) = &paragraph.properties {
+                    properties.merge_from(direct);
+                }
+                let frame = properties
+                    .frame
+                    .filter(|frame| frame.drop_cap.as_deref().is_none_or(|kind| kind == "none"));
+                let measure = frame
+                    .as_ref()
+                    .and_then(|frame| frame.w)
+                    .map_or(width, |value| value.to_pt().max(1.0));
+                let (mut block, direction, mut paint) = layout_paragraph_with_source_and_direction(
                     paragraph,
-                    width,
+                    measure,
                     styles,
                     input,
                     &part_media,
@@ -12728,10 +15482,20 @@ fn layout_header_footer_variant_uncached(
                     None,
                 )?;
                 if !cache_source && let Some(registry) = sources {
-                    registry.bind_text_boxes(&mut block, source)?;
+                    registry.bind_text_boxes(&mut block, &mut paint, source)?;
                 }
                 blocks.push(block);
-                directions.push((direction, 0.0));
+                directions.push(paginator::HeaderFooterBlockSemantics {
+                    paint: Arc::new(paint),
+                    direction,
+                    placement: frame.map_or(paginator::HeaderFooterPlacement::Flow, |properties| {
+                        paginator::HeaderFooterPlacement::Frame {
+                            properties,
+                            paragraphs: 1,
+                        }
+                    }),
+                    ..Default::default()
+                });
             }
             MainStoryLayoutItem::Table(table, path) => {
                 let (table, semantics) = table::layout_table_with_provenance(
@@ -12749,31 +15513,109 @@ fn layout_header_footer_variant_uncached(
                     None,
                 )?;
                 let rows =
-                    paginator::story_table_rows(&table, &semantics, &geometry, part_media.media());
-                directions.extend(std::iter::repeat_n((TextDirection::Auto, 0.0), rows.len()));
-                blocks.extend(rows);
+                    paginator::story_table_rows(&table, &semantics, &geometry, part_media.media())?;
+                let table = Arc::new(table);
+                let semantics = Arc::new(semantics);
+                directions.extend(rows.iter().enumerate().map(|(row, (_, paint))| {
+                    paginator::HeaderFooterBlockSemantics {
+                        paint: Arc::new(paint.clone()),
+                        placement: paginator::HeaderFooterPlacement::TableRow {
+                            table: Arc::clone(&table),
+                            semantics: Arc::clone(&semantics),
+                            row,
+                        },
+                        ..Default::default()
+                    }
+                }));
+                blocks.extend(rows.into_iter().map(|(block, _)| block));
             }
         }
     }
-    let groups = block::paragraph_border_groups(&blocks.iter().map(Some).collect::<Vec<_>>());
-    for index in 0..blocks.len() {
-        let (top, bottom) = groups[index];
-        if top {
-            directions[index].1 = if input.do_not_use_html_paragraph_auto_spacing {
-                blocks[index - 1].space_after + blocks[index].space_before
-            } else {
-                blocks[index - 1]
-                    .space_after
-                    .max(blocks[index].space_before)
+    let mut index = 0;
+    while index < blocks.len() {
+        if let paginator::HeaderFooterPlacement::Frame { properties, .. } =
+            &directions[index].placement
+        {
+            let properties = properties.clone();
+            let mut count = 1;
+            while index + count < blocks.len()
+                && matches!(&directions[index + count].placement, paginator::HeaderFooterPlacement::Frame { properties: next, .. } if *next == properties)
+            {
+                directions[index + count].placement =
+                    paginator::HeaderFooterPlacement::FrameContinuation;
+                count += 1;
+            }
+            directions[index].placement = paginator::HeaderFooterPlacement::Frame {
+                properties,
+                paragraphs: count,
             };
+            price_furniture_paragraphs(
+                &mut blocks[index..index + count],
+                &mut directions[index..index + count],
+                input.do_not_use_html_paragraph_auto_spacing,
+            );
+            index += count;
+        } else {
+            index += 1;
         }
-        blocks[index].remove_group_border_edges(top, bottom);
+    }
+    let ordinary = blocks
+        .iter()
+        .zip(&directions)
+        .map(|(block, facts)| {
+            matches!(facts.placement, paginator::HeaderFooterPlacement::Flow).then_some(block)
+        })
+        .collect::<Vec<_>>();
+    let groups = block::paragraph_border_groups(&ordinary);
+    let mut after: f64 = 0.0;
+    for index in 0..blocks.len() {
+        let flow = matches!(
+            &directions[index].placement,
+            paginator::HeaderFooterPlacement::Flow
+        ) || matches!(&directions[index].placement, paginator::HeaderFooterPlacement::TableRow { table, .. } if table.floating.is_none());
+        if !flow {
+            continue;
+        }
+        let gap = if input.do_not_use_html_paragraph_auto_spacing {
+            after + blocks[index].space_before
+        } else {
+            after.max(blocks[index].space_before)
+        };
+        directions[index].flow_gap = gap;
+        if matches!(
+            directions[index].placement,
+            paginator::HeaderFooterPlacement::Flow
+        ) {
+            directions[index].border_gap = if groups[index].0 { gap } else { 0.0 };
+            blocks[index].remove_group_border_edges(groups[index].0, groups[index].1);
+        }
+        after = blocks[index].space_after;
     }
     Ok(HeaderFooterVariantContent {
         blocks,
         directions,
         watermark,
     })
+}
+
+fn price_furniture_paragraphs(
+    blocks: &mut [ParagraphBlock],
+    facts: &mut [paginator::HeaderFooterBlockSemantics],
+    additive: bool,
+) {
+    let groups = block::paragraph_border_groups(&blocks.iter().map(Some).collect::<Vec<_>>());
+    let mut after: f64 = 0.0;
+    for (index, block) in blocks.iter_mut().enumerate() {
+        let gap = if additive {
+            after + block.space_before
+        } else {
+            after.max(block.space_before)
+        };
+        facts[index].flow_gap = gap;
+        facts[index].border_gap = if groups[index].0 { gap } else { 0.0 };
+        block.remove_group_border_edges(groups[index].0, groups[index].1);
+        after = block.space_after;
+    }
 }
 
 fn layout_watermark(
@@ -12863,6 +15705,7 @@ fn layout_watermark(
                 });
                 return Ok(None);
             };
+            media.record_related_picture_draw_owner(relationship_id, header_relationship_id);
             let data = image.data.clone();
             vec![PositionedElement::Image {
                 rect: Rect {
@@ -13257,6 +16100,161 @@ fn combine_bracket_pair(brackets: Option<&str>) -> (&'static str, &'static str) 
     }
 }
 
+fn annotation_recipe(
+    kind: WordAnnotationKind,
+    base: &AnnotationBase<'_>,
+    source_span: Option<SourceSpan>,
+) -> Result<Option<Arc<WordAnnotationRecipe>>> {
+    let Some(occurrence) = base.occurrence else {
+        return Ok(None);
+    };
+    let color = |color: Color| {
+        [
+            color.r.to_bits(),
+            color.g.to_bits(),
+            color.b.to_bits(),
+            color.a.to_bits(),
+        ]
+    };
+    if [base.font_size, base.baseline_offset, base.spacing]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(LayoutError::Layout(
+            "nonfinite Word annotation producer".into(),
+        ));
+    }
+    let font_family = base
+        .font_family
+        .map(|family| {
+            let mut value = String::new();
+            value
+                .try_reserve_exact(family.len())
+                .map_err(|_| LayoutError::Layout("annotation family allocation refused".into()))?;
+            value.push_str(family);
+            Ok(value)
+        })
+        .transpose()?;
+    Ok(Some(Arc::new(WordAnnotationRecipe {
+        occurrence,
+        fallback_emphasis: if matches!(kind, WordAnnotationKind::EastAsian(_)) {
+            base.fallback_emphasis.cloned()
+        } else {
+            None
+        },
+        field_kind: base.field_kind,
+        source_span,
+        kind,
+        style: WordAnnotationStyle {
+            font_id: base.font_id,
+            font_size: base.font_size.to_bits(),
+            color: color(base.color),
+            bold: base.bold,
+            italic: base.italic,
+            baseline_offset: base.baseline_offset.to_bits(),
+            spacing: base.spacing.to_bits(),
+            underline: base.underline,
+            strike: base.strike,
+            dstrike: base.dstrike,
+            highlight: base.highlight.map(color),
+            font_family,
+            kern: base.kern,
+        },
+    })))
+}
+
+fn annotation_field_owner(base: &AnnotationBase<'_>) -> FieldPaintOwner {
+    base.occurrence
+        .map_or(FieldPaintOwner::Neutral, |occurrence| {
+            FieldPaintOwner::Word {
+                kern: base.kern,
+                legacy: true,
+                occurrence: Some(occurrence),
+            }
+        })
+}
+
+fn register_inline_annotation(
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
+    slot: usize,
+    recipe: Option<Arc<WordAnnotationRecipe>>,
+    policies: PaintPolicies,
+    kind: WordAnnotationRootKind,
+) {
+    if let Some(recipe) = recipe {
+        styles.insert(
+            slot,
+            WordMultilingualStyle {
+                kern: recipe.style.kern,
+                origin: WordInputOrigin::Annotation,
+                occurrence: Some(recipe.occurrence),
+                annotation: Some(WordInputAnnotation {
+                    slot,
+                    recipe,
+                    policies,
+                    kind,
+                }),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn push_empty_field_annotation(
+    items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
+    kind: WordAnnotationKind,
+    base: &AnnotationBase<'_>,
+    source: Option<SourceSpan>,
+) -> Result<()> {
+    let recipe = annotation_recipe(kind, base, source)?;
+    let occurrence = base.occurrence.ok_or_else(|| {
+        LayoutError::Layout("empty annotation lacks its known field owner".into())
+    })?;
+    let mut children = PaintedElements::default();
+    children.push_field(
+        PositionedElement::Text(GlyphRun {
+            origin: Point { x: 0.0, y: 0.0 },
+            font_id: base.font_id,
+            font_size: base.font_size,
+            glyph_ids: Vec::new(),
+            advances: Vec::new(),
+            text: String::new(),
+            source,
+            color: base.color,
+            bold: base.bold,
+            italic: base.italic,
+            field_kind: base.field_kind,
+            field_source: Some(occurrence.source),
+            note: None,
+            note_reference_source: None,
+            tab_aligned: None,
+        }),
+        annotation_field_owner(base),
+    )?;
+    let (children, policies) = children.into_parts()?;
+    register_inline_annotation(
+        styles,
+        items.len(),
+        recipe,
+        policies,
+        WordAnnotationRootKind::EmptySpan,
+    );
+    items.push(InlineItem::Group {
+        width: 0.0,
+        height: 0.0,
+        baseline: Some(0.0),
+        group: GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children,
+        },
+    });
+    Ok(())
+}
+
 /// Lay one run out under `w:eastAsianLayout`, or report that it does not apply.
 ///
 /// `w:combine` compresses the run into one base-character advance inside the
@@ -13268,12 +16266,14 @@ fn combine_bracket_pair(brackets: Option<&str>) -> (&'static str, &'static str) 
 #[allow(clippy::too_many_arguments)]
 fn push_east_asian_layout_text(
     inline_items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
     fm: &mut FontManager,
     layout: &CT_EastAsianLayout,
     text: &str,
     base: &AnnotationBase<'_>,
     source: Option<SourceSpan>,
 ) -> Result<bool> {
+    let recipe = annotation_recipe(WordAnnotationKind::EastAsian(layout.clone()), base, source)?;
     let combine = layout.combine == Some(true);
     let vert = layout.vert == Some(true);
     if !combine && !vert {
@@ -13282,7 +16282,7 @@ fn push_east_asian_layout_text(
     let metrics = fm.metrics(base.font_id, base.font_size)?;
     let ascent = metrics.ascent.max(0.0);
     let descent = metrics.descent.max(0.0);
-    let mut shaped = fm.shape_text(base.font_id, text, base.font_size)?;
+    let mut shaped = fm.shape_text_with_kerning(base.font_id, text, base.font_size, base.kern)?;
     if base.spacing != 0.0 {
         for advance in &mut shaped.advances {
             *advance += base.spacing;
@@ -13305,7 +16305,7 @@ fn push_east_asian_layout_text(
     let group_ascent = ascent + raise.max(0.0);
     let group_descent = descent + (-raise).max(0.0);
     let baseline = group_ascent - raise;
-    let glyph_run = |x: f64, y: f64, shaped: &ShapedText, text: &str| {
+    let glyph_run = |x: f64, y: f64, shaped: &ShapedText, text: &str, field_base: bool| {
         PositionedElement::Text(GlyphRun {
             origin: Point { x, y },
             font_id: base.font_id,
@@ -13317,8 +16317,12 @@ fn push_east_asian_layout_text(
             color: base.color,
             bold: base.bold,
             italic: base.italic,
-            field_kind: None,
-            field_source: None,
+            field_kind: if field_base { base.field_kind } else { None },
+            field_source: if field_base {
+                base.occurrence.map(|owner| owner.source)
+            } else {
+                None
+            },
             note: None,
             note_reference_source: None,
             tab_aligned: None,
@@ -13330,16 +16334,21 @@ fn push_east_asian_layout_text(
         let (open, close) = combine_bracket_pair(layout.combine_brackets.as_deref());
         let open_shaped = match open.is_empty() {
             true => None,
-            false => Some(fm.shape_text(base.font_id, open, base.font_size)?),
+            false => {
+                Some(fm.shape_text_with_kerning(base.font_id, open, base.font_size, base.kern)?)
+            }
         };
         let close_shaped = match close.is_empty() {
             true => None,
-            false => Some(fm.shape_text(base.font_id, close, base.font_size)?),
+            false => {
+                Some(fm.shape_text_with_kerning(base.font_id, close, base.font_size, base.kern)?)
+            }
         };
         let open_width = open_shaped.as_ref().map_or(0.0, |shaped| shaped.width);
         let close_width = close_shaped.as_ref().map_or(0.0, |shaped| shaped.width);
         let width = open_width + cell + close_width;
         let mut children = Vec::new();
+        let mut policies = PaintPolicies::default();
         if let Some(highlight) = base.highlight {
             children.push(PositionedElement::FilledRect {
                 rect: Rect {
@@ -13352,23 +16361,46 @@ fn push_east_asian_layout_text(
             });
         }
         if let Some(ref open_shaped) = open_shaped {
-            children.push(glyph_run(0.0, baseline, open_shaped, open));
+            children.push(glyph_run(0.0, baseline, open_shaped, open, false));
         }
-        children.push(PositionedElement::Group(GroupElement {
-            transform: Transform {
-                a: cell / shaped.width,
-                e: open_width,
-                ..Transform::IDENTITY
-            },
-            clip: None,
-            opacity: 1.0,
-            effects: Vec::new(),
-            children: vec![glyph_run(0.0, baseline, &shaped, text)],
-        }));
+        let mut base_children = PaintedElements::default();
+        let base_glyph = glyph_run(0.0, baseline, &shaped, text, true);
+        if base.occurrence.is_some() {
+            base_children.push_field(base_glyph, annotation_field_owner(base))?;
+        } else {
+            base_children.push_non_field(base_glyph)?;
+        }
+        policies.append(
+            &mut children,
+            base_children.wrap(PositionedElement::Group(GroupElement {
+                transform: Transform {
+                    a: cell / shaped.width,
+                    e: open_width,
+                    ..Transform::IDENTITY
+                },
+                clip: None,
+                opacity: 1.0,
+                effects: Vec::new(),
+                children: Vec::new(),
+            }))?,
+        )?;
         if let Some(ref close_shaped) = close_shaped {
-            children.push(glyph_run(open_width + cell, baseline, close_shaped, close));
+            children.push(glyph_run(
+                open_width + cell,
+                baseline,
+                close_shaped,
+                close,
+                false,
+            ));
         }
         push_annotation_decorations(&mut children, base, baseline, width, ascent, descent);
+        register_inline_annotation(
+            styles,
+            inline_items.len(),
+            recipe.clone(),
+            policies,
+            WordAnnotationRootKind::Group,
+        );
         inline_items.push(InlineItem::Group {
             width,
             height: group_ascent + group_descent,
@@ -13403,6 +16435,7 @@ fn push_east_asian_layout_text(
     let compressed = layout.vert_compress == Some(true) && base_advance < thickness;
     let width = if compressed { base_advance } else { thickness };
     let mut children = Vec::new();
+    let mut policies = PaintPolicies::default();
     if let Some(highlight) = base.highlight {
         children.push(PositionedElement::FilledRect {
             rect: Rect {
@@ -13414,7 +16447,11 @@ fn push_east_asian_layout_text(
             color: highlight,
         });
     }
-    children.push(glyph_run(0.0, baseline, &shaped, text));
+    policies.emit(
+        &mut children,
+        glyph_run(0.0, baseline, &shaped, text, true),
+        annotation_field_owner(base),
+    )?;
     push_annotation_decorations(&mut children, base, baseline, shaped.width, ascent, descent);
     // Rotate about the group origin, then bring the rotated box back into
     // positive x, then narrow it when `w:vertCompress` asked for that.
@@ -13428,6 +16465,13 @@ fn push_east_asian_layout_text(
             ..Transform::IDENTITY
         });
     }
+    register_inline_annotation(
+        styles,
+        inline_items.len(),
+        recipe,
+        policies,
+        WordAnnotationRootKind::Group,
+    );
     inline_items.push(InlineItem::Group {
         width,
         height: shaped.width,
@@ -13446,6 +16490,10 @@ fn push_east_asian_layout_text(
 
 /// The base run style an annotation draws against.
 struct AnnotationBase<'a> {
+    fallback_emphasis: Option<&'a ST_Em>,
+    occurrence: Option<WordFieldOccurrence>,
+    field_kind: Option<FieldKind>,
+    kern: bool,
     font_id: FontId,
     font_size: f64,
     color: Color,
@@ -13514,12 +16562,14 @@ fn push_annotation_decorations(
 /// is the policy the uncovered-character path already follows.
 fn push_emphasis_marked_text(
     inline_items: &mut Vec<InlineItem>,
+    styles: &mut HashMap<usize, WordMultilingualStyle>,
     fm: &mut FontManager,
     diagnostics: &mut Vec<Diagnostic>,
     mark: &ST_Em,
     text: &str,
     base: &AnnotationBase<'_>,
 ) -> Result<bool> {
+    let recipe = annotation_recipe(WordAnnotationKind::Emphasis(mark.clone()), base, None)?;
     let Some((glyph, above)) = emphasis_mark_glyph(mark) else {
         return Ok(false);
     };
@@ -13527,7 +16577,7 @@ fn push_emphasis_marked_text(
     let mark_size = base.font_size * EMPHASIS_MARK_SCALE;
     let mark_font =
         fm.resolve_font_for_text(base.font_family, base.bold, base.italic, &mark_text)?;
-    let mark_shaped = fm.shape_text(mark_font, &mark_text, mark_size)?;
+    let mark_shaped = fm.shape_text_with_kerning(mark_font, &mark_text, mark_size, base.kern)?;
     if mark_shaped.glyph_ids.is_empty() || mark_shaped.glyph_ids.contains(&0) {
         push_unique_diagnostic(
             diagnostics,
@@ -13561,7 +16611,8 @@ fn push_emphasis_marked_text(
     };
 
     for chunk in emphasis_chunks(text) {
-        let mut shaped = fm.shape_text(base.font_id, chunk, base.font_size)?;
+        let mut shaped =
+            fm.shape_text_with_kerning(base.font_id, chunk, base.font_size, base.kern)?;
         if base.spacing != 0.0 {
             for advance in &mut shaped.advances {
                 *advance += base.spacing;
@@ -13570,6 +16621,7 @@ fn push_emphasis_marked_text(
         }
         let characters = chunk.chars().collect::<Vec<_>>();
         let mut children = Vec::new();
+        let mut policies = PaintPolicies::default();
         if let Some(highlight) = base.highlight {
             children.push(PositionedElement::FilledRect {
                 rect: Rect {
@@ -13581,26 +16633,30 @@ fn push_emphasis_marked_text(
                 color: highlight,
             });
         }
-        children.push(PositionedElement::Text(GlyphRun {
-            origin: Point {
-                x: 0.0,
-                y: baseline,
-            },
-            font_id: base.font_id,
-            font_size: base.font_size,
-            glyph_ids: shaped.glyph_ids.clone(),
-            advances: shaped.advances.clone(),
-            text: chunk.to_owned(),
-            source: None,
-            color: base.color,
-            bold: base.bold,
-            italic: base.italic,
-            field_kind: None,
-            field_source: None,
-            note: None,
-            note_reference_source: None,
-            tab_aligned: None,
-        }));
+        policies.emit(
+            &mut children,
+            PositionedElement::Text(GlyphRun {
+                origin: Point {
+                    x: 0.0,
+                    y: baseline,
+                },
+                font_id: base.font_id,
+                font_size: base.font_size,
+                glyph_ids: shaped.glyph_ids.clone(),
+                advances: shaped.advances.clone(),
+                text: chunk.to_owned(),
+                source: None,
+                color: base.color,
+                bold: base.bold,
+                italic: base.italic,
+                field_kind: base.field_kind,
+                field_source: base.occurrence.map(|owner| owner.source),
+                note: None,
+                note_reference_source: None,
+                tab_aligned: None,
+            }),
+            annotation_field_owner(base),
+        )?;
         push_annotation_decorations(&mut children, base, baseline, shaped.width, ascent, descent);
 
         // One mark per base character. Glyphs and characters correspond one
@@ -13648,6 +16704,13 @@ fn push_emphasis_marked_text(
         {
             fm.record_font_contribution(mark_font, base.font_family, &mark_text)?;
         }
+        register_inline_annotation(
+            styles,
+            inline_items.len(),
+            recipe.clone(),
+            policies,
+            WordAnnotationRootKind::Group,
+        );
         inline_items.push(InlineItem::Group {
             width: shaped.width,
             height: group_ascent + group_descent,
@@ -13682,6 +16745,8 @@ struct AnnotationContext<'a> {
     input: &'a LayoutInput,
     para_style_id: Option<&'a str>,
     table_run_properties: Option<&'a CT_RPr>,
+    /// The colour of text in the automatic colour, black or white.
+    automatic_color: Color,
 }
 
 /// Shape a sequence of runs onto one baseline.
@@ -13729,7 +16794,12 @@ fn measure_annotation_line(
             word_font_slot_for_text(&text, effective_rpr.font_hint.as_deref()),
         );
         let font_id = fm.resolve_font_for_text(family.as_deref(), bold, italic, &text)?;
-        let shaped = fm.shape_text(font_id, &text, font_size)?;
+        let shaped = fm.shape_text_with_kerning(
+            font_id,
+            &text,
+            font_size,
+            style_resolver::word_kerning_enabled(&effective_rpr),
+        )?;
         let metrics = fm.metrics(font_id, font_size)?;
         fm.record_font_contribution(font_id, family.as_deref(), &text)?;
         if line.runs.is_empty() {
@@ -13748,7 +16818,11 @@ fn measure_annotation_line(
             advances: shaped.advances,
             text,
             source: None,
-            color: resolve_run_color(&effective_rpr, context.input.theme.as_ref()),
+            color: resolve_run_color(
+                &effective_rpr,
+                context.input.theme.as_ref(),
+                context.automatic_color,
+            ),
             bold,
             italic,
             field_kind: None,
@@ -13871,10 +16945,13 @@ fn ruby_inline_item(
 
 /// Resolve the effective color for a run, considering theme colors.
 ///
-/// Priority: literal color (non-auto) > theme color > black.
+/// Priority: solid text fill > resolved theme color > literal fallback > `automatic`, the
+/// automatic colour that [`automatic_text_color`] gives for the fill behind
+/// the text.
 fn resolve_run_color(
     rpr: &rdocx_oxml::properties::CT_RPr,
     theme: Option<&rdocx_oxml::theme::Theme>,
+    automatic: Color,
 ) -> Color {
     if let Some((hex, alpha)) = rpr.solid_text_fill() {
         let mut color = Color::from_hex(&hex);
@@ -13907,7 +16984,24 @@ fn resolve_run_color(
         .as_ref()
         .filter(|c| c.as_str() != "auto")
         .map(|c| Color::from_hex(c))
-        .unwrap_or(Color::BLACK)
+        .unwrap_or(automatic)
+}
+
+/// The automatic text colour on `fill`: white on a dark fill, black on a
+/// light one or on none. Word draws automatic text in whichever contrasts
+/// with the shading behind it. The coefficients and the luminance floor of
+/// 156 in 255 are the donor's chosen policy, not a pinned LibreOffice source.
+fn automatic_text_color(fill: Option<Color>) -> Color {
+    let Some(fill) = fill else {
+        return Color::BLACK;
+    };
+    let byte = |channel: f64| (channel.clamp(0.0, 1.0) * 255.0).round();
+    let luminance = (76.0 * byte(fill.r) + 151.0 * byte(fill.g) + 29.0 * byte(fill.b)) / 256.0;
+    if luminance.floor() <= 156.0 {
+        Color::WHITE
+    } else {
+        Color::BLACK
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14135,20 +17229,13 @@ fn apply_word_multilingual_spacing(
     if exact_word_baseline {
         base.ascent = base.font_size * WORD_EXACT_LINE_BASELINE_EM;
     }
-    oxml_layout::MultilingualTextSegment::new(
-        base,
-        segment.logical_index(),
-        segment.language().map(str::to_owned),
-        segment.script(),
-        segment.direction(),
-        segment.bidi_level(),
-        x_advances,
-        segment.y_advances().to_vec(),
-        segment.x_offsets().to_vec(),
-        segment.y_offsets().to_vec(),
-        segment.clusters().to_vec(),
-        segment.break_after(),
-    )
+    segment.with_base_and_advances(base, x_advances)
+}
+
+struct WordShapedItems {
+    items: Vec<InlineItem>,
+    annotations: Vec<WordInputAnnotation>,
+    occurrences: Vec<(usize, WordFieldOccurrence)>,
 }
 
 fn shape_word_multilingual_items(
@@ -14158,99 +17245,158 @@ fn shape_word_multilingual_items(
     base_direction: TextDirection,
     no_wrap: bool,
     exact_word_baseline: bool,
-) -> Result<Vec<InlineItem>> {
+    legacy_shaping: bool,
+) -> Result<WordShapedItems> {
     let mut styled = Vec::new();
+    let mut kern = Vec::new();
     for (index, item) in legacy_items.iter().enumerate() {
-        let Some(segment) = multilingual_candidate(item) else {
-            continue;
+        let segment = match item {
+            InlineItem::Text(segment) | InlineItem::HyphenatedText { segment, .. } => segment,
+            _ => continue,
         };
-        if let Some(style) = styles.get(&index) {
+        let style = styles
+            .get(&index)
+            .ok_or_else(|| LayoutError::Layout("Word text lacks its producer context".into()))?;
+        if style.origin == WordInputOrigin::Structural
+            || (!legacy_shaping
+                && (style.origin == WordInputOrigin::PlainField || segment.text.is_empty()))
+        {
+            continue;
+        }
+        if legacy_shaping {
+            styled.push((segment.clone(), None));
+            kern.push(style.kern);
+        } else {
             for (byte_start, byte_end, slot) in word_language_ranges(&segment.text) {
                 let mut slice = word_multilingual_segment_slice(segment, byte_start, byte_end)?;
                 slice.direction = style.direction;
                 styled.push((slice, word_language_for_slot(style, slot)));
+                kern.push(style.kern);
             }
-        } else {
-            let language = match item {
-                InlineItem::HyphenatedText { language, .. } => Some(language.clone()),
-                _ => None,
-            };
-            styled.push((segment.clone(), language));
         }
     }
-    let mut shaped = VecDeque::from(font_manager.shape_multilingual_paragraph(
+    let mut shaped = VecDeque::from(font_manager.shape_paragraph_with_kerning(
         styled,
         base_direction,
         no_wrap,
+        &kern,
+        legacy_shaping,
     )?);
     let mut items = Vec::with_capacity(legacy_items.len());
+    let mut annotations = Vec::new();
+    let mut occurrences = Vec::new();
+    let mut logical_index = 0usize;
     for (index, mut item) in legacy_items.into_iter().enumerate() {
-        let requested = styles
-            .get(&index)
-            .and_then(|style| style.requested_family.as_deref());
-        let Some(segment) = multilingual_candidate(&item) else {
-            match &item {
-                InlineItem::Text(segment)
-                | InlineItem::Marker(segment)
-                | InlineItem::HyphenatedText { segment, .. } => {
-                    font_manager.record_font_contribution(
-                        segment.font_id,
-                        requested,
-                        &segment.text,
-                    )?;
-                }
-                _ => {}
+        let style = styles.get(&index);
+        let requested = style.and_then(|style| style.requested_family.as_deref());
+        let segment = match &item {
+            InlineItem::Text(segment) | InlineItem::HyphenatedText { segment, .. }
+                if style.is_some_and(|style| {
+                    matches!(
+                        style.origin,
+                        WordInputOrigin::Text | WordInputOrigin::PlainField
+                    )
+                }) =>
+            {
+                Some(segment)
+            }
+            _ => None,
+        };
+        let Some(segment) = segment else {
+            if let InlineItem::Text(segment) | InlineItem::Marker(segment) = &item {
+                font_manager.record_font_contribution(segment.font_id, requested, &segment.text)?;
             }
             if exact_word_baseline {
                 match &mut item {
-                    InlineItem::Text(segment)
-                    | InlineItem::Marker(segment)
-                    | InlineItem::HyphenatedText { segment, .. } => {
-                        segment.ascent = segment.font_size * WORD_EXACT_LINE_BASELINE_EM;
+                    InlineItem::Text(segment) | InlineItem::Marker(segment) => {
+                        segment.ascent = segment.font_size * WORD_EXACT_LINE_BASELINE_EM
                     }
                     _ => {}
                 }
             }
+            if let Some(annotation) = style.and_then(|style| style.annotation.as_ref()) {
+                let mut annotation = annotation.clone();
+                annotation.slot = items.len();
+                annotations.push(annotation);
+            }
             items.push(item);
             continue;
         };
+        // Former plain field inputs were not part of the rich batch. Their
+        // local factory preserves their own legacy Unicode shaping context.
+        let mut owner_shaped = if !legacy_shaping
+            && (style.is_some_and(|style| style.origin == WordInputOrigin::PlainField)
+                || segment.text.is_empty())
+        {
+            Some(VecDeque::from(font_manager.shape_paragraph_with_kerning(
+                vec![(
+                    segment.clone(),
+                    style.and_then(|style| style.language.clone()),
+                )],
+                base_direction,
+                no_wrap,
+                &[style.is_some_and(|style| style.kern)],
+                true,
+            )?))
+        } else {
+            None
+        };
         let target_bytes = segment.text.len();
         let mut consumed_bytes = 0usize;
-        while consumed_bytes < target_bytes {
-            let span = shaped.pop_front().ok_or_else(|| {
-                oxml_layout::LayoutError::Layout(
-                    "multilingual Word shaping lost a styled text run".to_owned(),
-                )
-            })?;
+        loop {
+            let span = owner_shaped
+                .as_mut()
+                .unwrap_or(&mut shaped)
+                .pop_front()
+                .ok_or_else(|| LayoutError::Layout("Word shaping lost a styled text run".into()))?;
             consumed_bytes = consumed_bytes
                 .checked_add(span.text().len())
-                .filter(|consumed| *consumed <= target_bytes)
+                .filter(|n| *n <= target_bytes)
                 .ok_or_else(|| {
-                    oxml_layout::LayoutError::Layout(
-                        "multilingual Word shaping crossed a styled text boundary".to_owned(),
-                    )
+                    LayoutError::Layout("Word shaping crossed a styled text boundary".into())
                 })?;
-            let spacing = styles.get(&index).map_or(0.0, |style| style.spacing);
-            let span = apply_word_multilingual_spacing(span, spacing, exact_word_baseline)?;
-            font_manager.record_font_contribution(span.base().font_id, requested, span.text())?;
-            if let InlineItem::HyphenatedText { language, .. } = &item
-                && !needs_word_multilingual_layout(span.text())
-            {
-                items.push(InlineItem::HyphenatedText {
-                    segment: span.base().clone(),
-                    language: language.clone(),
-                });
+            let span = apply_word_multilingual_spacing(
+                span,
+                style.map_or(0.0, |style| style.spacing),
+                exact_word_baseline,
+            )?;
+            let legacy = span.uses_legacy_shaping()
+                || (matches!(item, InlineItem::HyphenatedText { .. })
+                    && !needs_word_multilingual_layout(span.text()));
+            let span = if let InlineItem::HyphenatedText { language, .. } = &item {
+                span.with_hyphenation_language(Some(language.clone()))
             } else {
-                items.push(InlineItem::MultilingualText(span));
+                span
+            };
+            let span = span.with_logical_index_and_legacy_shaping(logical_index, legacy);
+            logical_index = logical_index
+                .checked_add(1)
+                .ok_or_else(|| LayoutError::Layout("Word logical span ordinal overflow".into()))?;
+            font_manager.record_font_contribution(span.base().font_id, requested, span.text())?;
+            if let Some(occurrence) = style.and_then(|style| style.occurrence) {
+                occurrences.push((span.logical_index(), occurrence));
             }
+            items.push(InlineItem::MultilingualText(span));
+            if consumed_bytes == target_bytes {
+                break;
+            }
+        }
+        if owner_shaped.is_some_and(|owner| !owner.is_empty()) {
+            return Err(LayoutError::Layout(
+                "Word shaping left an unmatched plain owner span".into(),
+            ));
         }
     }
     if !shaped.is_empty() {
-        return Err(oxml_layout::LayoutError::Layout(
-            "multilingual Word shaping produced an unmatched text run".to_owned(),
+        return Err(LayoutError::Layout(
+            "Word shaping produced an unmatched text run".into(),
         ));
     }
-    Ok(items)
+    Ok(WordShapedItems {
+        items,
+        annotations,
+        occurrences,
+    })
 }
 
 /// Convert a highlight color enum to an RGBA Color.
@@ -14358,6 +17504,127 @@ fn highlight_to_color(h: ST_HighlightColor) -> Option<Color> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx281_picture_owners_follow_fresh_cache_and_transaction_custody() {
+        use rdocx_oxml::drawing::{CT_Anchor, CT_Drawing, CT_Inline};
+        fn picture(id: &str, anchor: bool) -> CT_P {
+            let mut paragraph = CT_P::new();
+            let drawing = if anchor {
+                CT_Drawing::anchor(CT_Anchor::background(id, 254_000, 254_000))
+            } else {
+                CT_Drawing::inline(CT_Inline::new(id, 254_000, 254_000))
+            };
+            paragraph.add_run("").content = vec![RunContent::Drawing(drawing)];
+            paragraph
+        }
+        let mut input = cacheable_header_footer_input("owner body");
+        let mut table = CT_Tbl::new();
+        let mut row = CT_Row::new();
+        let mut cell = CT_Tc::new();
+        cell.content = vec![CellContent::Paragraph(picture("rIdCell", false))];
+        row.cells.push(cell);
+        table.rows.push(row);
+        input.document.body.content.extend([
+            BodyContent::Paragraph(Box::new(picture("rIdBody", false))),
+            BodyContent::Paragraph(Box::new(picture("rIdAnchor", true))),
+            BodyContent::Table(Box::new(table)),
+        ]);
+        for id in ["rIdBody", "rIdAnchor", "rIdCell", "rIdUnused"] {
+            input.images.insert(
+                id.into(),
+                ImageData {
+                    data: vec![1, 2, 3, 4],
+                    content_type: "image/png".into(),
+                },
+            );
+        }
+        let mut expected = vec![
+            ("rIdBody".into(), None),
+            ("rIdAnchor".into(), None),
+            ("rIdCell".into(), None),
+            ("rIdWatermark".into(), Some("rId-default-header".into())),
+        ];
+        expected.sort();
+        let mut engine = Engine::new_deterministic().unwrap();
+        for _ in 0..2 {
+            let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+                .unwrap()
+                .picture_draw_owners()
+                .to_vec();
+            actual.sort();
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            engine.header_footer_cache_hits > 0,
+            "VML owner replay must run"
+        );
+        for entry in &engine.header_footer_cache {
+            let owned_bytes = header_footer_cache_entry_bytes(
+                &entry.key,
+                &entry.content,
+                &entry.diagnostics,
+                &entry.font_trace,
+            )
+            .saturating_add(picture_draw_owner_bytes(&entry.picture_draw_owners));
+            assert!(
+                entry.bytes >= owned_bytes,
+                "owner snapshots must be charged before admission"
+            );
+        }
+        // Reference projection retries the transaction with a fresh registry.
+        let mut reference = CT_P::new();
+        reference.add_run("").content = vec![RunContent::Field(Field::new("REF missing", "old"))];
+        input
+            .document
+            .body
+            .content
+            .push(BodyContent::Paragraph(Box::new(reference)));
+        let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+            .unwrap()
+            .picture_draw_owners()
+            .to_vec();
+        actual.sort();
+        assert_eq!(actual, expected);
+        // A resolved related owner has its real story id, even with identical bytes.
+        input
+            .headers
+            .get_mut("rId-first-header")
+            .unwrap()
+            .paragraphs = vec![picture("rIdBody", false), picture("rIdAnchor", true)];
+        for id in ["rIdBody", "rIdAnchor"] {
+            input.images.insert(
+                format!("rId-first-header\0{id}"),
+                ImageData {
+                    data: vec![1, 2, 3, 4],
+                    content_type: "image/png".into(),
+                },
+            );
+            expected.push((id.into(), Some("rId-first-header".into())));
+        }
+        expected.sort();
+        let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+            .unwrap()
+            .picture_draw_owners()
+            .to_vec();
+        actual.sort();
+        assert_eq!(actual, expected);
+        input.images.remove("rId-default-header\0rIdWatermark");
+        let missing = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        assert!(
+            !missing
+                .picture_draw_owners()
+                .iter()
+                .any(|(id, _)| id == "rIdWatermark")
+        );
+        let clean = make_input_with_text("no pictures after previous layouts");
+        assert!(
+            crate::layout_document_with_reusable_engine(&mut engine, &clean)
+                .unwrap()
+                .picture_draw_owners()
+                .is_empty()
+        );
+    }
+
     use super::*;
     use crate::input::ImageData;
     use oxml_layout::{MediaId, MultilingualGlyphRun, TextScript};
@@ -14486,6 +17753,11 @@ mod tests {
                             if text.field_kind == Some(FieldKind::SequenceRepeat) =>
                         {
                             Some(text)
+                        }
+                        InlineItem::MultilingualText(span)
+                            if span.base().field_kind == Some(FieldKind::SequenceRepeat) =>
+                        {
+                            Some(span.base())
                         }
                         _ => None,
                     })
@@ -14812,7 +18084,7 @@ mod tests {
             paragraph.runs.push(run);
             input.document.body.add_paragraph(paragraph);
         }
-        let sources = SourceRegistry::for_input(&input);
+        let sources = SourceRegistry::for_input(&input).unwrap();
         let snapshot = evaluate_sequence_fields(&input).unwrap();
         assert_eq!(snapshot.main_events().len(), 256);
         assert_eq!(
@@ -15072,11 +18344,11 @@ mod tests {
         };
 
         assert_eq!(
-            projected_paragraph_text(paragraph, RevisionView::Accepted),
+            projected_paragraph_text(paragraph, RevisionView::Accepted).unwrap(),
             "control inserted tail"
         );
         assert_eq!(
-            projected_paragraph_text(paragraph, RevisionView::Tracked),
+            projected_paragraph_text(paragraph, RevisionView::Tracked).unwrap(),
             "control inserted deleted tail"
         );
     }
@@ -15140,11 +18412,11 @@ mod tests {
             };
 
             assert_eq!(
-                projected_paragraph_text(paragraph, RevisionView::Accepted),
+                projected_paragraph_text(paragraph, RevisionView::Accepted).unwrap(),
                 "inserted control tail"
             );
             assert_eq!(
-                projected_paragraph_text(paragraph, RevisionView::Tracked),
+                projected_paragraph_text(paragraph, RevisionView::Tracked).unwrap(),
                 "inserted control tail"
             );
         }
@@ -15180,7 +18452,7 @@ mod tests {
             panic!("expected paragraph");
         };
         for view in [RevisionView::Accepted, RevisionView::Tracked] {
-            assert_eq!(projected_paragraph_text(paragraph, view), "nested");
+            assert_eq!(projected_paragraph_text(paragraph, view).unwrap(), "nested");
         }
         assert!(paragraph_has_visible_revision(paragraph));
     }
@@ -15200,7 +18472,10 @@ mod tests {
         };
 
         for view in [RevisionView::Accepted, RevisionView::Tracked] {
-            assert_eq!(projected_paragraph_text(paragraph, view), "visible inline");
+            assert_eq!(
+                projected_paragraph_text(paragraph, view).unwrap(),
+                "visible inline"
+            );
         }
         assert!(!paragraph_has_visible_revision(paragraph));
     }
@@ -15237,12 +18512,26 @@ mod tests {
         let items = &block.reflow.expect("reflow items retained").items;
         let revision_index = items
             .iter()
-            .position(|item| matches!(item, InlineItem::Text(text) if text.text == "before"))
+            .position(|item| match item {
+                InlineItem::Text(text) => text.text == "before",
+                InlineItem::MultilingualText(span) => span.text() == "before",
+                _ => false,
+            })
             .expect("revision text");
         let target_index = items
             .iter()
             .position(|item| {
-                matches!(item, InlineItem::Text(text) if matches!(text.field_kind, Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))))
+                let text = match item {
+                    InlineItem::Text(text) | InlineItem::Marker(text) => Some(text),
+                    InlineItem::MultilingualText(span) => Some(span.base()),
+                    _ => None,
+                };
+                text.is_some_and(|text| {
+                    matches!(
+                        text.field_kind,
+                        Some(FieldKind::Target(_) | FieldKind::SequenceContext(_))
+                    )
+                })
             })
             .expect("PAGEREF target");
         assert!(revision_index < target_index);
@@ -15482,11 +18771,11 @@ mod tests {
             panic!("expected paragraph");
         };
         assert_eq!(
-            projected_paragraph_text(paragraph, RevisionView::Accepted),
+            projected_paragraph_text(paragraph, RevisionView::Accepted).unwrap(),
             "new"
         );
         assert_eq!(
-            projected_paragraph_text(paragraph, RevisionView::Tracked),
+            projected_paragraph_text(paragraph, RevisionView::Tracked).unwrap(),
             "newold"
         );
     }
@@ -15517,7 +18806,7 @@ mod tests {
         let mut fonts = FontManager::new_deterministic().expect("bundled fonts load");
         let mut numbering = NumberingState::new();
         let mut diagnostics = Vec::new();
-        let anchored = collect_anchored_drawings(
+        let (anchored, _) = collect_anchored_drawings(
             paragraph,
             &input.styles,
             &input,
@@ -15567,6 +18856,7 @@ mod tests {
             .flat_map(|line| &line.items)
             .filter_map(|item| match item {
                 oxml_layout::LineItem::Text(segment) => Some(segment),
+                oxml_layout::LineItem::MultilingualText(span) => Some(span.base()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -15625,6 +18915,9 @@ mod tests {
             .flat_map(|line| &line.items)
             .filter_map(|item| match item {
                 oxml_layout::LineItem::Text(segment) if segment.text == "11" => Some(segment),
+                oxml_layout::LineItem::MultilingualText(span) if span.text() == "11" => {
+                    Some(span.base())
+                }
                 _ => None,
             })
             .next()
@@ -15740,7 +19033,7 @@ mod tests {
                 panic!("expected paragraph");
             };
             assert_eq!(
-                projected_paragraph_text(paragraph, RevisionView::Tracked),
+                projected_paragraph_text(paragraph, RevisionView::Tracked).unwrap(),
                 expected
             );
 
@@ -15773,7 +19066,7 @@ mod tests {
             panic!("expected paragraph");
         };
         assert_eq!(
-            projected_paragraph_text(paragraph, RevisionView::Tracked),
+            projected_paragraph_text(paragraph, RevisionView::Tracked).unwrap(),
             "controlled property"
         );
 
@@ -16499,6 +19792,11 @@ mod tests {
                 LineItem::Text(segment) if segment.field_kind == Some(FieldKind::Page) => {
                     Some(segment)
                 }
+                LineItem::MultilingualText(segment)
+                    if segment.base().field_kind == Some(FieldKind::Page) =>
+                {
+                    Some(segment.base())
+                }
                 _ => None,
             })
             .expect("computed field remains substitutable");
@@ -16542,7 +19840,7 @@ mod tests {
         let mut fonts = FontManager::new_deterministic().expect("bundled fonts load");
         let mut numbering = NumberingState::new();
         let mut diagnostics = Vec::new();
-        let (block, direction) = layout_paragraph_with_source_and_direction(
+        let (block, direction, _) = layout_paragraph_with_source_and_direction(
             paragraph,
             468.0,
             &input.styles,
@@ -16585,6 +19883,103 @@ mod tests {
             vec![FieldKind::Page, FieldKind::NumPages],
             "logical extraction keeps the stored field sequence"
         );
+
+        // Equal plain field values retain their own policy and old Text paint
+        // beside a genuine rich sibling, with one global assembly ordinal set.
+        let mut mixed = input.clone();
+        let BodyContent::Paragraph(paragraph) = &mut mixed.document.body.content[0] else {
+            unreachable!()
+        };
+        let drawing = paragraph.runs.pop().unwrap();
+        paragraph.runs.clear();
+        for kern in [None, Some(rdocx_oxml::units::HalfPoint(0))] {
+            let mut run = CT_R::new("");
+            run.properties = Some(CT_RPr {
+                kern,
+                font_ascii: Some("Carlito".into()),
+                ..Default::default()
+            });
+            run.content = vec![RunContent::Field(Field::new("PAGE", "AVATAR"))];
+            paragraph.runs.push(run);
+        }
+        paragraph.runs.push(CT_R::new(" العربية  "));
+        paragraph.runs.push(drawing);
+        let BodyContent::Paragraph(paragraph) = &mixed.document.body.content[0] else {
+            unreachable!()
+        };
+        let (block, _, _) = layout_paragraph_with_source_and_direction(
+            paragraph,
+            468.0,
+            &mixed.styles,
+            &mixed,
+            &MediaRegistry::new(&mixed.images),
+            &mut fonts,
+            &mut NumberingState::new(),
+            &mut Vec::new(),
+            SourceNodeId::new(1),
+            SourceNodeId::new(1),
+            None,
+        )
+        .unwrap();
+        let spans = block
+            .reflow
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                InlineItem::MultilingualText(span) => Some(span),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            spans
+                .windows(2)
+                .all(|pair| pair[0].logical_index() < pair[1].logical_index())
+        );
+        let fields = spans
+            .iter()
+            .filter(|span| span.base().field_kind == Some(FieldKind::Page))
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|span| (
+                    span.text(),
+                    span.kerning_override(),
+                    span.uses_legacy_shaping()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("99", Some(false), true), ("99", Some(true), true)]
+        );
+        // The existing computed producer uses fixed "99" placeholders.
+        // Equal glyph values must not erase the opposite source policies.
+        assert_eq!(fields[0].glyph_ids(), fields[1].glyph_ids());
+        assert_eq!(fields[0].x_advances(), fields[1].x_advances());
+        assert!(spans.iter().any(|span| !span.uses_legacy_shaping()));
+        let mut engine = Engine::new_deterministic().unwrap();
+        for _ in 0..2 {
+            let actual = engine.layout(&mixed).unwrap();
+            let fresh = Engine::new_deterministic().unwrap().layout(&mixed).unwrap();
+            assert_layout_results_equal(&actual, &fresh);
+            let mut plain_fields = 0;
+            oxml_layout::walk(&actual.pages[0].elements, &mut |element, _| match element {
+                PositionedElement::Text(run) if run.field_kind == Some(FieldKind::Page) => {
+                    plain_fields += 1
+                }
+                PositionedElement::MultilingualText(run)
+                    if run.field_kind == Some(FieldKind::Page) =>
+                {
+                    panic!(
+                        "plain field changed publication convention: {}",
+                        run.logical_text
+                    )
+                }
+                _ => {}
+            });
+            assert_eq!(plain_fields, 2);
+        }
     }
 
     #[test]
@@ -17003,12 +20398,25 @@ mod tests {
         assert_eq!(warm_sources, fresh_sources);
         assert_ne!(cold_sources, warm_sources);
         assert_eq!(engine.header_footer_cache_counts(), (6, 6));
-        assert_eq!(warm.diagnostics.len(), 6);
-        assert!(warm.diagnostics.iter().all(|diagnostic| {
-            diagnostic
-                .message
-                .starts_with("cached header/footer diagnostic")
-        }));
+        assert_eq!(
+            warm.diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic
+                    .message
+                    .starts_with("cached header/footer diagnostic"))
+                .count(),
+            6
+        );
+        assert_eq!(
+            warm.diagnostics.len(),
+            7,
+            "six cached facts plus one substitution fact"
+        );
+        assert!(
+            warm.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("substituted: selected"))
+        );
         let header_source = warm
             .pages
             .iter()
@@ -17341,12 +20749,29 @@ mod tests {
             .lines
             .iter_mut()
             .flat_map(|line| &mut line.items)
-            .find_map(|item| match item {
-                LineItem::Text(text) => Some(text),
-                _ => None,
-            })
+            .find(|item| matches!(item, LineItem::Text(_) | LineItem::MultilingualText(_)))
             .expect("template has text");
-        text.advances = vec![0.0; HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1];
+        match text {
+            LineItem::Text(text) => {
+                text.advances = vec![0.0; HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1];
+            }
+            LineItem::MultilingualText(span) => {
+                // Keep the checked rich span valid while growing the owned
+                // advance capacity that multilingual_cache_bytes charges.
+                let mut base = span.base().clone();
+                base.advances.reserve(HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1);
+                *span = span
+                    .clone()
+                    .with_base_and_advances(base, span.x_advances().to_vec())
+                    .expect("same rich span with additional advance capacity");
+                assert!(span.base().advances.capacity() * 8 > HEADER_FOOTER_CACHE_MAX_BYTES);
+                eprintln!(
+                    "HF_CACHE oversized rich template advance capacity {}",
+                    span.base().advances.capacity()
+                );
+            }
+            _ => unreachable!("selected a text template"),
+        }
         entry.bytes = header_footer_cache_entry_bytes(
             &entry.key,
             &entry.content,
@@ -17381,21 +20806,63 @@ mod tests {
             SourceNodeId::new(1),
         )
         .expect("paragraph lays out");
-        let text_items = block
-            .reflow
-            .expect("line-breaking inputs retained")
-            .items
+        let items = block.reflow.expect("line-breaking inputs retained").items;
+        let item_count = items.len();
+        let text_items = items
             .into_iter()
             .filter_map(|item| match item {
                 InlineItem::Text(segment) => Some(segment),
+                InlineItem::MultilingualText(segment) => Some(segment.base().clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(text_items.len(), 1);
-        assert_eq!(text_items[0].text, "financial planning");
-        assert_eq!(text_items[0].source.expect("source span").char_start, 0);
-        assert_eq!(text_items[0].source.expect("source span").char_end, 18);
+        assert!(!text_items.is_empty());
+        assert_eq!(
+            text_items.len(),
+            item_count,
+            "no explicit break/control item was added"
+        );
+        assert_eq!(
+            text_items
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<String>(),
+            "financial planning"
+        );
+        let mut next = 0;
+        for segment in &text_items {
+            let source = segment.source.expect("source span");
+            assert_eq!(source.node, SourceNodeId::new(1).unwrap());
+            assert_eq!(source.char_start, next);
+            next += segment.text.chars().count() as u32;
+            assert_eq!(source.char_end, next);
+        }
+        assert_eq!(next, 18);
+        // The approved legacy factory selects Unicode shaping cuts before
+        // shared line breaking. Compare those actual cuts, not one old Text carrier.
+        let mut whole = text_items[0].clone();
+        whole.text = "financial planning".to_owned();
+        whole.source.as_mut().unwrap().char_end = 18;
+        let shared = fonts
+            .shape_paragraph_with_kerning(
+                vec![(whole, None)],
+                TextDirection::LeftToRight,
+                false,
+                &[false],
+                true,
+            )
+            .expect("shared legacy Unicode shaping cuts");
+        assert_eq!(
+            text_items
+                .iter()
+                .map(|segment| (segment.text.as_str(), segment.source))
+                .collect::<Vec<_>>(),
+            shared
+                .iter()
+                .map(|segment| (segment.text(), segment.base().source))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -17572,7 +21039,7 @@ mod tests {
                 .resolve_font(Some(&family), run.bold, run.italic)
                 .expect("field font resolves");
             let unspaced = fonts
-                .shape_text(font_id, &run.logical_text, run.font_size)
+                .shape_text_with_kerning(font_id, &run.logical_text, run.font_size, false)
                 .expect("field text reshapes");
             assert_eq!(run.x_advances.len(), unspaced.advances.len());
             assert!(
@@ -17979,7 +21446,7 @@ mod tests {
                     .resolve_font(Some(&family), run.bold, run.italic)
                     .expect("bundled run font resolves");
                 let independently_shaped = fonts
-                    .shape_text(font_id, &run.text, run.font_size)
+                    .shape_text_with_kerning(font_id, &run.text, run.font_size, false)
                     .expect("emitted chunk reshapes");
                 assert_eq!(run.glyph_ids, independently_shaped.glyph_ids, "{text}");
                 assert_eq!(run.advances, independently_shaped.advances, "{text}");
@@ -19105,8 +22572,22 @@ mod tests {
                 .expect("header retains reflow inputs")
                 .items
                 .iter()
-                .any(|item| matches!(item, InlineItem::HyphenatedText { .. }))
+                .any(|item| matches!(item, InlineItem::MultilingualText(span)
+                    if span.uses_legacy_shaping()
+                        && span.text() == "representation"))
         );
+
+        let visible = block
+            .lines
+            .iter()
+            .flat_map(|line| &line.items)
+            .filter_map(|item| match item {
+                LineItem::Text(text) => Some(text.text.as_str()),
+                LineItem::MultilingualText(text) => Some(text.base().text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, "repre-sentation");
 
         let rebound = SourceNodeId::new(74).expect("header source ID");
         rebind_paragraph_source(&mut block, Some(rebound)).expect("source rebinding succeeds");
@@ -19120,8 +22601,8 @@ mod tests {
                 .all(|item| {
                     !matches!(
                         item,
-                        InlineItem::HyphenatedText { segment, .. }
-                            if !segment.source.is_some_and(|source| source.node == rebound)
+                        InlineItem::MultilingualText(segment)
+                            if !segment.base().source.is_some_and(|source| source.node == rebound)
                     )
                 })
         );
@@ -19419,6 +22900,119 @@ mod tests {
                 .iter()
                 .any(|page| has_semantic_mark(&page.elements))
         );
+
+        // An Owned paragraph's pre-assignment companion must not turn body
+        // prose or a continued list item into an Artifact during painting.
+        fn text_marks(
+            elements: &[PositionedElement],
+            inherited: Option<StructureId>,
+            marks: &mut Vec<(String, Option<StructureId>)>,
+        ) {
+            for element in elements {
+                match element {
+                    PositionedElement::MarkedContent {
+                        structure,
+                        children,
+                        ..
+                    } => {
+                        text_marks(children, *structure, marks);
+                    }
+                    PositionedElement::Group(group) => {
+                        text_marks(&group.children, inherited, marks);
+                    }
+                    PositionedElement::Text(run) => marks.push((run.text.clone(), inherited)),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut owned_input = make_input_with_text("sharedcontrol");
+        let owned_body = CT_P::from_xml_fragment(
+            format!(
+                "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:bookmarkStart w:id=\"1\" w:name=\"owned\"/><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>",
+                "ownedbody ".repeat(600)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(!paragraph_is_cache_safe(&owned_body, &owned_input.styles));
+        owned_input.document.body.add_paragraph(owned_body);
+        let mut list_body = CT_P::new();
+        list_body.add_run(&"listbody ".repeat(600));
+        list_body.properties = Some(CT_PPr {
+            num_id: Some(1),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        assert!(!paragraph_is_cache_safe(&list_body, &owned_input.styles));
+        owned_input.document.body.add_paragraph(list_body);
+        owned_input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(
+            br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#,
+        ).unwrap());
+        let mut owned_engine = Engine::new_deterministic().unwrap();
+        let cold = owned_engine.layout_with_provenance(&owned_input).unwrap();
+        let warm = owned_engine.layout_with_provenance(&owned_input).unwrap();
+        let fresh = Engine::new_deterministic()
+            .unwrap()
+            .layout_with_provenance(&owned_input)
+            .unwrap();
+        assert_eq!(owned_engine.last_shared_block_counts, (1, 0));
+        assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
+        assert_eq!(format!("{warm:?}"), format!("{fresh:?}"));
+        for result in [&cold.0, &warm.0, &fresh.0] {
+            let structure = result.structure.as_ref().unwrap();
+            for (word, continued, list) in [
+                ("sharedcontrol", false, false),
+                ("ownedbody", true, false),
+                ("listbody", true, true),
+            ] {
+                let mut identities = std::collections::HashSet::new();
+                let mut pages = 0;
+                for page in &result.pages {
+                    let mut marks = Vec::new();
+                    text_marks(&page.elements, None, &mut marks);
+                    let selected = marks
+                        .iter()
+                        .filter(|(text, _)| text.split_whitespace().any(|token| token == word))
+                        .collect::<Vec<_>>();
+                    pages += usize::from(!selected.is_empty());
+                    for (_, identity) in selected {
+                        identities.insert(identity.unwrap_or_else(|| {
+                            panic!("{word} body paint lost its assigned structure")
+                        }));
+                    }
+                }
+                assert!(
+                    pages > usize::from(continued),
+                    "{word} paints its continuations"
+                );
+                assert_eq!(
+                    identities.len(),
+                    1,
+                    "{word} keeps one physical paragraph owner"
+                );
+                let identity = *identities.iter().next().unwrap();
+                let paragraph = structure
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == identity)
+                    .unwrap();
+                assert_eq!(paragraph.role, StructureRole::Paragraph);
+                let parent = structure
+                    .nodes
+                    .iter()
+                    .find(|node| node.children.contains(&identity))
+                    .unwrap();
+                assert_eq!(
+                    parent.role,
+                    if list {
+                        StructureRole::ListItem
+                    } else {
+                        StructureRole::Document
+                    }
+                );
+            }
+        }
     }
 
     fn safe_table(text: &str) -> CT_Tbl {
@@ -19569,7 +23163,11 @@ mod tests {
         .expect("real header cache container lays out")
         .expect("header content exists");
         assert_eq!(
-            semantics.first_header_directions,
+            semantics
+                .first_header_directions
+                .iter()
+                .map(|facts| (facts.direction, facts.border_gap))
+                .collect::<Vec<_>>(),
             [(TextDirection::RightToLeft, 0.0)],
             "the production header cache container retains its resolved paragraph base"
         );
@@ -19959,7 +23557,7 @@ mod tests {
             top: Some(edge),
             ..Default::default()
         });
-        assert!(table_block_retained_bytes(&retained_border_block) > TABLE_CACHE_MAX_BYTES);
+        assert!(table_block_retained_bytes(&retained_border_block, None) > TABLE_CACHE_MAX_BYTES);
 
         let mut unsafe_table = safe_table("numbered cell");
         unsafe_table.rows[0].cells[0].paragraphs_mut()[0]
@@ -21223,9 +24821,31 @@ mod tests {
                 .saturating_add(1);
             assert_eq!(page.page_number, index + 1);
             assert_eq!(page.displayed_page_number, expected);
+            let note_owner = result
+                .pages
+                .iter()
+                .find_map(|owner_page| {
+                    let mut owns = false;
+                    oxml_layout::walk(&owner_page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && run
+                                .note
+                                .is_some_and(|note| note.stream == NoteStream::Endnote)
+                        {
+                            owns = true;
+                        }
+                    });
+                    owns.then_some(owner_page.displayed_page_number)
+                })
+                .expect("actual body reference owner");
+            assert_ne!(
+                note_owner, page.displayed_page_number,
+                "printed page differs from its note's body owner"
+            );
             assert!(
-                rendered_text(page).contains(&format!("ENDNOTE_PAGE={expected}")),
-                "PAGE substitution must use the continued displayed number"
+                rendered_text(page).contains(&format!("ENDNOTE_PAGE={note_owner}")),
+                "PAGE uses actual note reference owner, printed continuation keeps {expected}: {}",
+                rendered_text(page)
             );
         };
 
@@ -21707,6 +25327,9 @@ mod tests {
         }
         fn assert_capacity_rejected(label: &str, mutate: impl FnOnce(&mut RestartCache)) {
             let mut candidate = RestartCache {
+                paint: Vec::new(),
+                raw_policies: Vec::new(),
+                policies: Vec::new(),
                 body: Vec::new(),
                 with_provenance: false,
                 body_fragments: Vec::new(),
@@ -21763,7 +25386,7 @@ mod tests {
                 y_position: 0.0,
             });
         });
-        for nested in ["bookmark targets", "font identity"] {
+        for nested in ["bookmark targets", "font identity", "page format context"] {
             assert_capacity_rejected(&format!("{nested} capacity is charged"), |cache| {
                 cache
                     .substitution_inputs
@@ -21771,6 +25394,11 @@ mod tests {
                         page_index: 0,
                         page_number: 1,
                         total_pages: 1,
+                        page_format_context: if nested == "page format context" {
+                            String::with_capacity(over_limit::<u8>())
+                        } else {
+                            String::new()
+                        },
                         bookmark_pages: if nested == "bookmark targets" {
                             Vec::with_capacity(over_limit::<(usize, usize)>())
                         } else {
@@ -22163,10 +25791,12 @@ mod tests {
             let bytes = paragraph_cache_entry_bytes(
                 &paragraph,
                 &template.block,
+                Some(&template.paint),
                 &template.diagnostics,
                 font_contribution_trace_bytes(&template.font_trace),
             );
             bounded.publish_paragraph_cache_entry(ParagraphCacheEntry {
+                paint: Arc::clone(&template.paint),
                 fingerprint: paragraph_fingerprint(&paragraph),
                 key: ParagraphCacheKey {
                     paragraph,
@@ -22182,7 +25812,10 @@ mod tests {
                 bytes,
             });
         }
-        assert_eq!(bounded.paragraph_cache.len(), PARAGRAPH_CACHE_MAX_ENTRIES);
+        // Complete producer proof charges may reach the byte ceiling before
+        // the entry ceiling. Both bounds and the actual FIFO suffix matter.
+        assert!(!bounded.paragraph_cache.is_empty());
+        assert!(bounded.paragraph_cache.len() <= PARAGRAPH_CACHE_MAX_ENTRIES);
         assert!(bounded.paragraph_cache_bytes <= PARAGRAPH_CACHE_MAX_BYTES);
         assert_eq!(
             bounded
@@ -22192,7 +25825,10 @@ mod tests {
                 .key
                 .paragraph
                 .text(),
-            "eviction paragraph 1"
+            format!(
+                "eviction paragraph {}",
+                PARAGRAPH_CACHE_MAX_ENTRIES + 1 - bounded.paragraph_cache.len()
+            )
         );
     }
 
@@ -22224,9 +25860,22 @@ mod tests {
         engine
             .layout(&input)
             .expect("transactional layout succeeds");
+        // The retained Word producer proof can reach the byte ceiling before
+        // the entry ceiling. Both bounds still constrain staging.
+        assert!(engine.pending_paragraph_cache_peak_entries > 0);
+        assert!(engine.pending_paragraph_cache_peak_entries <= PARAGRAPH_CACHE_MAX_ENTRIES);
         assert_eq!(
-            engine.pending_paragraph_cache_peak_entries,
-            PARAGRAPH_CACHE_MAX_ENTRIES
+            engine
+                .paragraph_cache
+                .front()
+                .expect("actual FIFO suffix retained")
+                .key
+                .paragraph
+                .text(),
+            format!(
+                "staged paragraph {}",
+                PARAGRAPH_CACHE_MAX_ENTRIES * 2 - engine.paragraph_cache.len()
+            )
         );
         assert!(engine.pending_paragraph_cache_peak_bytes <= PARAGRAPH_CACHE_MAX_BYTES);
     }
@@ -22236,6 +25885,13 @@ mod tests {
         let input = make_input_with_text("reflow accounting template");
         let mut engine = Engine::new_deterministic().expect("bundled fonts load");
         engine.layout(&input).expect("template layout succeeds");
+        let paint = Arc::clone(
+            &engine
+                .paragraph_cache
+                .front()
+                .expect("actual Word producer retained")
+                .paint,
+        );
         let template = engine
             .paragraph_cache
             .front()
@@ -22244,6 +25900,7 @@ mod tests {
             .clone();
         let mut retained = match &template.lines[0].items[0] {
             LineItem::Text(text) => text.clone(),
+            LineItem::MultilingualText(span) => span.base().clone(),
             other => panic!("expected text line item, got {other:?}"),
         };
         retained.advances = vec![0.0; PARAGRAPH_CACHE_MAX_BYTES / 8 + 1];
@@ -22258,12 +25915,13 @@ mod tests {
         let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
             panic!("body paragraph");
         };
-        let bytes = paragraph_cache_entry_bytes(paragraph, &block, &[], 0);
+        let bytes = paragraph_cache_entry_bytes(paragraph, &block, Some(&paint), &[], 0);
         assert!(bytes > PARAGRAPH_CACHE_MAX_BYTES);
 
         engine.paragraph_cache.clear();
         engine.paragraph_cache_bytes = 0;
         engine.publish_paragraph_cache_entry(ParagraphCacheEntry {
+            paint: Arc::clone(&paint),
             fingerprint: paragraph_fingerprint(paragraph),
             key: ParagraphCacheKey {
                 paragraph: paragraph.as_ref().clone(),
@@ -22320,6 +25978,13 @@ mod tests {
         let input = make_input_with_text("reflow parameter accounting template");
         let mut engine = Engine::new_deterministic().expect("bundled fonts load");
         engine.layout(&input).expect("template layout succeeds");
+        let paint = Arc::clone(
+            &engine
+                .paragraph_cache
+                .front()
+                .expect("actual Word producer retained")
+                .paint,
+        );
         let mut block = engine
             .paragraph_cache
             .front()
@@ -22330,7 +25995,7 @@ mod tests {
         let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
             panic!("body paragraph");
         };
-        let baseline = paragraph_cache_entry_bytes(paragraph, &block, &[], 0);
+        let baseline = paragraph_cache_entry_bytes(paragraph, &block, Some(&paint), &[], 0);
         let reflow = block.reflow.as_mut().expect("cache retains reflow inputs");
         reflow.params.tab_stops = vec![
             oxml_layout::TabStop {
@@ -22342,7 +26007,7 @@ mod tests {
         ];
         reflow.params.line_prefix_widths = vec![0.0; 5];
         reflow.params.line_suffix_widths = vec![0.0; 7];
-        let with_parameters = paragraph_cache_entry_bytes(paragraph, &block, &[], 0);
+        let with_parameters = paragraph_cache_entry_bytes(paragraph, &block, Some(&paint), &[], 0);
         let expected =
             3 * std::mem::size_of::<oxml_layout::TabStop>() + 12 * std::mem::size_of::<f64>();
         assert_eq!(with_parameters - baseline, expected);
@@ -22353,6 +26018,13 @@ mod tests {
         let input = make_input_with_text("key accounting template");
         let mut engine = Engine::new_deterministic().expect("bundled fonts load");
         engine.layout(&input).expect("template layout succeeds");
+        let paint = Arc::clone(
+            &engine
+                .paragraph_cache
+                .front()
+                .expect("actual Word producer retained")
+                .paint,
+        );
         let block = engine
             .paragraph_cache
             .front()
@@ -22366,12 +26038,13 @@ mod tests {
         run.content = std::iter::repeat_n(RunContent::Tab, content_count).collect();
         paragraph.runs.push(run);
         assert!(paragraph_is_cache_safe(&paragraph, &input.styles));
-        let bytes = paragraph_cache_entry_bytes(&paragraph, &block, &[], 0);
+        let bytes = paragraph_cache_entry_bytes(&paragraph, &block, Some(&paint), &[], 0);
         assert!(bytes > PARAGRAPH_CACHE_MAX_BYTES);
 
         engine.paragraph_cache.clear();
         engine.paragraph_cache_bytes = 0;
         engine.publish_paragraph_cache_entry(ParagraphCacheEntry {
+            paint: Arc::clone(&paint),
             fingerprint: paragraph_fingerprint(&paragraph),
             key: ParagraphCacheKey {
                 paragraph,
@@ -22665,7 +26338,7 @@ mod tests {
             (RevisionView::Accepted, "AC"),
             (RevisionView::Tracked, "ABC"),
         ] {
-            assert_eq!(projected_paragraph_text(paragraph, view), expected);
+            assert_eq!(projected_paragraph_text(paragraph, view).unwrap(), expected);
             let mut input = make_input_with_text("");
             input.document = document.clone();
             input.revision_view = view;
@@ -23208,6 +26881,7 @@ mod tests {
             paragraph_cache_entry_bytes(
                 paragraph,
                 &block,
+                None,
                 &[],
                 font_contribution_trace_bytes(&events)
             ),
@@ -23331,21 +27005,77 @@ mod tests {
         let input = make_input_with_text("x");
         let mut engine = Engine::new_deterministic().unwrap();
         engine.layout(&input).unwrap();
+        let paint = Arc::clone(
+            &engine
+                .paragraph_cache
+                .front()
+                .expect("actual Word producer retained")
+                .paint,
+        );
         let block = engine.paragraph_cache.front().unwrap().block.as_ref();
         let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
             unreachable!()
         };
-        let baseline = paragraph_cache_entry_bytes(paragraph, block, &[], 0);
+        let baseline = paragraph_cache_entry_bytes(paragraph, block, Some(&paint), &[], 0);
         assert_eq!(
             paragraph_cache_entry_bytes(
                 paragraph,
                 block,
+                Some(&paint),
                 &[],
                 font_contribution_trace_bytes(&events)
             ),
             baseline.saturating_add(font_contribution_trace_bytes(&events))
         );
         drop(events);
+        assert_eq!(
+            paragraph_cache_entry_bytes(paragraph, block, None, &[], 0),
+            usize::MAX
+        );
+        let mut absent = paint.as_ref().clone();
+        absent.legacy_cache = None;
+        assert_eq!(
+            paragraph_cache_entry_bytes(paragraph, block, Some(&absent), &[], 0),
+            usize::MAX
+        );
+        let mut spare = paint.as_ref().clone();
+        let proof = spare.legacy_cache.as_mut().unwrap();
+        proof.producers.reserve_exact(19);
+        assert!(spare.retained_bytes().unwrap() > paint.retained_bytes().unwrap());
+
+        // A glyph-inert kerning change must still invalidate the complete
+        // private producer identity and remain identical to a fresh layout.
+        let mut input = make_input_with_text("i");
+        let mut snapshots = Vec::new();
+        for kern in [None, Some(rdocx_oxml::units::HalfPoint(0))] {
+            let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+                unreachable!()
+            };
+            paragraph.runs[0].properties = Some(CT_RPr {
+                kern,
+                ..Default::default()
+            });
+            let warm = engine.layout(&input).unwrap();
+            let fresh = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            assert_eq!(format!("{warm:?}"), format!("{fresh:?}"));
+            let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
+                unreachable!()
+            };
+            let paint = engine
+                .paragraph_cache
+                .iter()
+                .find(|entry| entry.key.paragraph == **paragraph)
+                .expect("current input owns the retained producer proof")
+                .paint
+                .as_ref()
+                .clone();
+            snapshots.push((warm, paint));
+        }
+        assert_eq!(
+            format!("{:?}", snapshots[0].0.pages),
+            format!("{:?}", snapshots[1].0.pages)
+        );
+        assert_ne!(snapshots[0].1, snapshots[1].1);
     }
 
     #[test]
@@ -23413,6 +27143,645 @@ mod tests {
             input.numbering.as_ref().unwrap().to_xml().unwrap(),
             numbering
         );
+    }
+
+    #[test]
+    fn issue433_direct_table_borders_override_the_style_grid() {
+        // A bordered table style with all six edges single. The first table
+        // keeps its grid, the second turns every edge off in its own
+        // `w:tblBorders`, the third turns off only the inside edges.
+        let edges = |value: &str| {
+            ["top", "left", "bottom", "right", "insideH", "insideV"]
+                .iter()
+                .map(|edge| {
+                    format!(r#"<w:{edge} w:val="{value}" w:sz="4" w:space="0" w:color="auto"/>"#)
+                })
+                .collect::<String>()
+        };
+        let table = |borders: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="4000" w:type="dxa"/>{borders}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let mut input = make_input_with_text("");
+        input.styles = CT_Styles::from_xml(
+            format!(
+                r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="table" w:styleId="TableGrid"><w:name w:val="TableGrid"/><w:tblPr><w:tblBorders>{}</w:tblBorders></w:tblPr></w:style></w:styles>"#,
+                edges("single")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let inside_none = r#"<w:tblBorders><w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/><w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/></w:tblBorders>"#;
+        let mut lines = Vec::new();
+        for borders in [
+            String::new(),
+            format!("<w:tblBorders>{}</w:tblBorders>", edges("none")),
+            inside_none.to_owned(),
+        ] {
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}<w:p/></w:body></w:document>"#,
+                    table(&borders)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            let (mut horizontal, mut vertical) = (Vec::new(), Vec::new());
+            oxml_layout::walk(&output.pages[0].elements, &mut |element, _| {
+                if let PositionedElement::Line { start, end, .. } = element {
+                    if (start.y - end.y).abs() < 1e-6 {
+                        horizontal.push(start.y);
+                    } else if (start.x - end.x).abs() < 1e-6 {
+                        vertical.push(start.x);
+                    }
+                }
+            });
+            // Each cell paints its own edge segments. Count distinct ruled
+            // lines by coordinate so a shared grid edge is one line, while a
+            // genuinely duplicated fourth line still fails the exact pair.
+            let distinct = |mut values: Vec<f64>| {
+                values.sort_by(|left, right| left.total_cmp(right));
+                values.dedup_by(|left, right| (*left - *right).abs() < 1e-6);
+                values.len()
+            };
+            lines.push((distinct(horizontal), distinct(vertical)));
+        }
+        // Style-only TableGrid paints exactly three ruled lines per direction:
+        // the outer edges and the one interior edge of the 2 x 2 grid.
+        assert_eq!(lines[0], (3, 3), "{lines:?}");
+        assert_eq!(lines[1], (0, 0), "{lines:?}");
+        assert!(
+            lines[2].0 > 0 && lines[2].0 < lines[0].0 && lines[2].1 < lines[0].1,
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn issue433_toc_entries_drop_the_hyperlink_character_style() {
+        // Word writes a TOC entry as a hyperlink to a `_Toc` bookmark whose
+        // run carries the Hyperlink style. In a TOC paragraph the entry keeps
+        // the paragraph style's look. The same run in a body paragraph keeps
+        // the Hyperlink colour and underline.
+        let styles_xml = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/></w:style><w:style w:type="paragraph" w:styleId="TOC 1"><w:name w:val="TOC 1"/></w:style><w:style w:type="paragraph" w:styleId="toc 1"><w:name w:val="toc 1"/></w:style><w:style w:type="paragraph" w:styleId="ContentsLevel1"><w:name w:val="toc 1"/></w:style><w:style w:type="paragraph" w:styleId="ContentsTrailing"><w:name w:val="toc 1 "/></w:style><w:style w:type="paragraph" w:styleId="BodyText"><w:name w:val="Body Text"/></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style></w:styles>"#;
+        let layout = |paragraph_style: &str| {
+            let mut input = make_input_with_text("");
+            input.styles = CT_Styles::from_xml(styles_xml).unwrap();
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="{paragraph_style}"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Introduction</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            let (mut color, mut lines) = (None, 0);
+            oxml_layout::walk(&output.pages[0].elements, &mut |element, _| match element {
+                PositionedElement::Text(run) if run.text == "Introduction" => {
+                    color = Some(run.color);
+                }
+                PositionedElement::Line { .. } => lines += 1,
+                _ => {}
+            });
+            (color, lines)
+        };
+        for style in [
+            "TOC1",
+            "TOC 1",
+            "toc 1",
+            "ContentsLevel1",
+            "ContentsTrailing",
+        ] {
+            assert_eq!(layout(style), (Some(Color::BLACK), 0), "{style}");
+        }
+        assert_eq!(layout("BodyText"), (Some(Color::from_hex("0563C1")), 1));
+
+        // The same Hyperlink character style stored on a field's cached result
+        // run is filtered at the stored-segment site, not only at the run-style
+        // site. A body field keeps the Hyperlink colour and underline.
+        let field_layout = |paragraph_style: &str| {
+            let mut input = make_input_with_text("");
+            input.styles = CT_Styles::from_xml(styles_xml).unwrap();
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="{paragraph_style}"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-3&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>FieldEntry</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink></w:p></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            let (mut color, mut lines) = (None, 0);
+            oxml_layout::walk(&output.pages[0].elements, &mut |element, _| match element {
+                PositionedElement::Text(run) if run.text == "FieldEntry" => {
+                    color = Some(run.color);
+                }
+                PositionedElement::Line { .. } => lines += 1,
+                _ => {}
+            });
+            (color, lines)
+        };
+        assert_eq!(field_layout("TOC1"), (Some(Color::BLACK), 0));
+        assert_eq!(
+            field_layout("BodyText"),
+            (Some(Color::from_hex("0563C1")), 1)
+        );
+    }
+
+    #[test]
+    fn direct_hyperlink_color_replaces_style_theme_in_runs_and_stored_fields() {
+        let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="467886" w:themeColor="hyperlink"/><w:u w:val="single"/></w:rPr></w:style></w:styles>"#;
+        let layout = |direct: &str, stored: bool, dark: bool| {
+            let mut input = make_input_with_text("");
+            input.styles = CT_Styles::from_xml(styles).unwrap();
+            let mut theme = rdocx_oxml::theme::Theme::default();
+            theme.colors.hlink = Some("467886".into());
+            theme.colors.accent2 = Some("1077AA".into());
+            input.theme = Some(theme);
+            let run = format!(
+                r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/>{direct}</w:rPr><w:t>COLOUR_CONTROL</w:t></w:r>"#
+            );
+            let content = if stored {
+                format!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-3&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{run}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                )
+            } else {
+                run
+            };
+            let shading = if dark {
+                r#"<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:pPr>"#
+            } else {
+                ""
+            };
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>{shading}<w:hyperlink w:anchor="BodyTarget">{content}</w:hyperlink></w:p></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            let (mut colors, mut underlines) = (Vec::new(), 0);
+            oxml_layout::walk(&output.pages[0].elements, &mut |element, _| match element {
+                PositionedElement::Text(run) if run.text == "COLOUR_CONTROL" => {
+                    colors.push(run.color);
+                }
+                PositionedElement::Line { .. } => underlines += 1,
+                _ => {}
+            });
+            assert_eq!(underlines, 1, "body Hyperlink underline must remain");
+            assert_eq!(colors.len(), 1);
+            colors[0]
+        };
+        assert_eq!(layout("", false, false), Color::from_hex("467886"));
+        for stored in [false, true] {
+            assert_eq!(
+                layout(r#"<w:color w:val="0563C1"/>"#, stored, false),
+                Color::from_hex("0563C1")
+            );
+        }
+        assert_eq!(
+            layout(r#"<w:color w:val="auto"/>"#, false, true),
+            Color::WHITE
+        );
+        assert_eq!(
+            layout(
+                r#"<w:color w:val="FF0000" w:themeColor="accent2"/>"#,
+                false,
+                false
+            ),
+            Color::from_hex("1077AA")
+        );
+    }
+
+    #[test]
+    fn issue433_automatic_text_colour_contrasts_with_the_fill_behind_it() {
+        let cell = |fill: &str, color: &str, text: &str| {
+            let shading = if fill.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:tcPr>"#)
+            };
+            format!(
+                r#"<w:tc>{shading}<w:p><w:r><w:rPr>{color}</w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#
+            )
+        };
+        let auto = r#"<w:color w:val="auto"/>"#;
+        let black = r#"<w:color w:val="000000"/>"#;
+        let control = format!(
+            r#"<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:tcPr><w:sdt><w:sdtContent><w:p><w:r><w:rPr>{auto}</w:rPr><w:t>ControlOnDark</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc>"#
+        );
+        let nested = format!(
+            r#"<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:tcPr><w:tbl><w:tblPr><w:tblW w:w="1000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:rPr>{auto}</w:rPr><w:t>NestedOnNothing</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc>"#
+        );
+        let cells = [
+            cell("000000", "", "OnBlack"),
+            cell("1F3864", auto, "OnNavy"),
+            cell("BFBFBF", "", "OnLightGrey"),
+            cell("", "", "OnNothing"),
+            cell("000000", black, "ExplicitBlack"),
+        ]
+        .concat()
+            + &control
+            + &nested;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(
+            format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/></w:tblGrid><w:tr>{cells}</w:tr></w:tbl><w:p><w:pPr><w:shd w:val="clear" w:color="auto" w:fill="000000"/></w:pPr><w:r><w:t>DarkParagraph</w:t></w:r></w:p><w:p><w:r><w:t>BodyAuto</w:t></w:r></w:p></w:body></w:document>"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let output = deterministic_layout(&input);
+        let mut colors = HashMap::new();
+        oxml_layout::walk(&output.pages[0].elements, &mut |element, _| {
+            if let PositionedElement::Text(run) = element {
+                colors.insert(run.text.clone(), run.color);
+            }
+        });
+        for (text, expected) in [
+            ("OnBlack", Color::WHITE),
+            ("OnNavy", Color::WHITE),
+            ("OnLightGrey", Color::BLACK),
+            ("OnNothing", Color::BLACK),
+            ("ExplicitBlack", Color::BLACK),
+            ("DarkParagraph", Color::WHITE),
+            ("ControlOnDark", Color::WHITE),
+            ("NestedOnNothing", Color::BLACK),
+            ("BodyAuto", Color::BLACK),
+        ] {
+            assert_eq!(colors.get(text), Some(&expected), "{text}: {colors:?}");
+        }
+    }
+
+    #[test]
+    fn issue433_wingdings_2_bullets_map_to_unicode_or_report_the_code() {
+        // U+F0A1 in Wingdings 2 is Word's black square bullet. U+F0A7 has no
+        // bounded mapping and keeps its code with a diagnostic.
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Square item</w:t></w:r></w:p><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr><w:r><w:t>Unmapped item</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+        input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0A1;"/><w:rPr><w:rFonts w:ascii="Wingdings 2" w:hAnsi="Wingdings 2" w:hint="default"/></w:rPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0A7;"/><w:rPr><w:rFonts w:ascii="Wingdings 2" w:hAnsi="Wingdings 2" w:hint="default"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#).unwrap());
+        let output = deterministic_layout(&input);
+        let text = output_text(&output);
+        assert!(
+            text.iter().any(|text| text.trim() == "\u{25a0}"),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|text| text.contains('\u{f0a1}')),
+            "{text:?}"
+        );
+        assert!(
+            text.iter().any(|text| text.contains('\u{f0a7}')),
+            "{text:?}"
+        );
+        assert_eq!(
+            output
+                .diagnostics
+                .iter()
+                .filter(|fact| fact.message.starts_with("Unknown "))
+                .map(|fact| fact.message.as_str())
+                .collect::<Vec<_>>(),
+            ["Unknown Wingdings 2 symbol U+F0A7: original code retained"]
+        );
+
+        // The explicit `w:sym` consumer reaches the same bounded map. F0A1 is
+        // the black square, F0A7 keeps its scalar and reports one diagnostic.
+        let mut sym_input = make_input_with_text("");
+        sym_input.document = CT_Document::from_xml(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:sym w:font="Wingdings 2" w:char="F0A1"/></w:r><w:r><w:sym w:font="Wingdings 2" w:char="F0A7"/></w:r></w:p></w:body></w:document>"#).unwrap();
+        let sym_output = deterministic_layout(&sym_input);
+        let sym_text = output_text(&sym_output);
+        assert!(
+            sym_text.iter().any(|text| text.contains('\u{25a0}')),
+            "{sym_text:?}"
+        );
+        assert!(
+            !sym_text.iter().any(|text| text.contains('\u{f0a1}')),
+            "{sym_text:?}"
+        );
+        assert!(
+            sym_text.iter().any(|text| text.contains('\u{f0a7}')),
+            "{sym_text:?}"
+        );
+        assert_eq!(
+            sym_output
+                .diagnostics
+                .iter()
+                .filter(|fact| fact.message.starts_with("Unknown "))
+                .map(|fact| fact.message.as_str())
+                .collect::<Vec<_>>(),
+            ["Unknown Wingdings 2 symbol U+F0A7: original code retained"]
+        );
+    }
+
+    #[test]
+    fn issue433_cell_vertical_alignment_does_not_stop_a_row_from_splitting() {
+        // Fifteen filler paragraphs, then a one-cell row of 40 paragraphs
+        // that does not fit in the rest of page 1 and has no w:cantSplit.
+        let row_lines_per_page = |valign: &str, row_properties: &str| {
+            let mut input = make_input_with_text("");
+            let mut styles = CT_Styles::new_default();
+            let table_grid = CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>"#).unwrap();
+            styles.styles.extend(table_grid.styles);
+            input.styles = styles;
+            let fillers = (1..=15)
+                .map(|i| format!("<w:p><w:r><w:t>Filler {i}</w:t></w:r></w:p>"))
+                .collect::<String>();
+            let lines = (1..=40)
+                .map(|i| format!("<w:p><w:r><w:t>Row line {i}</w:t></w:r></w:p>"))
+                .collect::<String>();
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{fillers}<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr>{row_properties}<w:tc><w:tcPr>{valign}</w:tcPr>{lines}</w:tc></w:tr></w:tbl><w:p/></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = deterministic_layout(&input);
+            output
+                .pages
+                .iter()
+                .map(|page| {
+                    let mut count = 0;
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && run.text.starts_with("Row")
+                        {
+                            count += 1;
+                        }
+                    });
+                    count
+                })
+                .collect::<Vec<_>>()
+        };
+        let plain = row_lines_per_page("", "");
+        assert_eq!(plain.len(), 2, "{plain:?}");
+        // The issue row starts on page 1 and keeps the original [23, 17] split
+        // within one line. A regression that moves the row to page 2 fails the
+        // first assertion; a different split fails the count window.
+        assert!(plain[0] > 0, "row must start on page 1: {plain:?}");
+        assert!(
+            (plain[0] as i32 - 23).abs() <= 1 && (plain[1] as i32 - 17).abs() <= 1,
+            "row split moved away from the original [23, 17]: {plain:?}"
+        );
+        for valign in ["top", "center", "bottom"] {
+            let aligned = row_lines_per_page(&format!(r#"<w:vAlign w:val="{valign}"/>"#), "");
+            assert_eq!(aligned, plain, "w:vAlign {valign}");
+            assert!(
+                (aligned[0] as i32 - 23).abs() <= 1 && (aligned[1] as i32 - 17).abs() <= 1,
+                "w:vAlign {valign} moved the split: {aligned:?}"
+            );
+        }
+        let whole = row_lines_per_page("", "<w:trPr><w:cantSplit/></w:trPr>");
+        assert_eq!(whole, [0, 40], "cantSplit row moves whole to page 2");
+    }
+
+    #[test]
+    fn issue433_first_line_indent_is_one_property_across_levels() {
+        // BaseInd hangs 720 twips. Derived sets firstLine over it, DerivedH
+        // sets hanging 0, and the third paragraph sets firstLine directly.
+        // Every case starts at the 72.0 pt page margin, where BaseInd's first
+        // line (left 720 less hanging 720) starts.
+        let mut input = make_input_with_text("");
+        input.styles = CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="BaseInd"><w:name w:val="Base Ind"/><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Derived"><w:name w:val="Derived"/><w:basedOn w:val="BaseInd"/><w:pPr><w:ind w:left="0" w:firstLine="0"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="DerivedH"><w:name w:val="Derived H"/><w:basedOn w:val="BaseInd"/><w:pPr><w:ind w:left="0" w:hanging="0"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="FirstLine"><w:name w:val="First Line"/><w:pPr><w:ind w:left="0" w:firstLine="360"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="HangOver"><w:name w:val="Hang Over"/><w:basedOn w:val="FirstLine"/><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr></w:style></w:styles>"#).unwrap();
+        input.document = CT_Document::from_xml(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="BaseInd"/></w:pPr><w:r><w:t>Case0</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:t>Case1</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="BaseInd"/><w:ind w:left="0" w:firstLine="0"/></w:pPr><w:r><w:t>Case2</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="DerivedH"/></w:pPr><w:r><w:t>Case3</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="HangOver"/></w:pPr><w:r><w:t>Case4</w:t></w:r></w:p><w:p><w:pPr><w:ind w:left="720" w:firstLine="360" w:hanging="720"/></w:pPr><w:r><w:t>CaseBoth</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+        let output = deterministic_layout(&input);
+        let mut starts = Vec::new();
+        oxml_layout::walk(&output.pages[0].elements, &mut |element, _| {
+            if let PositionedElement::Text(run) = element
+                && run.text.starts_with("Case")
+            {
+                starts.push((run.text.clone(), run.origin.x));
+            }
+        });
+        assert_eq!(starts.len(), 6, "{starts:?}");
+        for (text, x) in &starts {
+            assert!(
+                (x - 72.0).abs() <= 0.05,
+                "{text} starts at {x}, expected the 72.0 pt margin"
+            );
+        }
+    }
+
+    #[test]
+    fn issue433_direct_first_line_replaces_numbering_level_hanging() {
+        // Exact numbering/indent values and repeated text from the reporter's
+        // 2026-11-08 follow-up. Style-only coverage misses this inheritance path.
+        let mut input = make_input_with_text("");
+        input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="90"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="90"><w:abstractNumId w:val="90"/></w:num></w:numbering>"#).unwrap());
+        let text = "A numbered paragraph long enough to wrap onto several lines, so that where the second line starts can be compared with where the first line and its number start. ".repeat(2);
+        let paragraph = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="90"/></w:numPr><w:ind w:left="0" w:firstLine="720"/></w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+        );
+        input.document = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
+            paragraph.repeat(3)
+        ).as_bytes()).unwrap();
+        let output = deterministic_layout(&input);
+        assert_eq!(output.pages.len(), 1);
+        let mut markers = Vec::new();
+        let mut text_lines: Vec<(f64, f64)> = Vec::new();
+        oxml_layout::walk(&output.pages[0].elements, &mut |element, transform| {
+            if let PositionedElement::Text(run) = element {
+                let origin = transform.apply(run.origin);
+                if matches!(run.text.as_str(), "1." | "2." | "3.") {
+                    markers.push((run.text.clone(), origin));
+                } else if !run.text.trim().is_empty() {
+                    if let Some((_, left)) = text_lines
+                        .iter_mut()
+                        .find(|(y, _)| (*y - origin.y).abs() < 0.05)
+                    {
+                        *left = left.min(origin.x);
+                    } else {
+                        text_lines.push((origin.y, origin.x));
+                    }
+                }
+            }
+        });
+        assert_eq!(markers.len(), 3, "{markers:?}");
+        for (index, (text, origin)) in markers.iter().enumerate() {
+            assert_eq!(text, &format!("{}.", index + 1));
+            assert!((origin.x - 108.0).abs() < 0.05, "{markers:?}");
+            let first_line = text_lines
+                .iter()
+                .find(|(y, _)| (*y - origin.y).abs() < 0.05)
+                .expect("number and first text share a baseline");
+            assert!((first_line.1 - 144.0).abs() < 0.05, "{text_lines:?}");
+        }
+        let wrapped: Vec<_> = text_lines
+            .iter()
+            .filter(|(y, _)| !markers.iter().any(|(_, point)| (*y - point.y).abs() < 0.05))
+            .collect();
+        assert!(
+            wrapped.len() >= 3,
+            "each paragraph must wrap: {text_lines:?}"
+        );
+        assert!(
+            wrapped.iter().all(|(_, x)| (*x - 72.0).abs() < 0.05),
+            "{wrapped:?}"
+        );
+    }
+
+    #[test]
+    fn issue433_tb_rl_paragraph_merge_clears_the_absent_sibling() {
+        // The vertical-text arm merges numbering and direct properties through
+        // the same first-line pair rule. A later level that sets either
+        // attribute replaces both.
+        let styles = CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="BaseInd"><w:name w:val="Base Ind"/><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="FirstLine"><w:name w:val="First Line"/><w:pPr><w:ind w:left="720" w:firstLine="360"/></w:pPr></w:style></w:styles>"#).unwrap();
+        let mut derived_first =
+            style_resolver::resolve_paragraph_properties(Some("BaseInd"), &styles);
+        assert_eq!(
+            derived_first.ind_hanging,
+            Some(rdocx_oxml::units::Twips(720))
+        );
+        let direct_first = CT_PPr {
+            style_id: Some("BaseInd".to_owned()),
+            ind_left: Some(rdocx_oxml::units::Twips(0)),
+            ind_first_line: Some(rdocx_oxml::units::Twips(0)),
+            ..CT_PPr::default()
+        };
+        merge_direct_ppr(&mut derived_first, &direct_first);
+        assert_eq!(
+            derived_first.ind_first_line,
+            Some(rdocx_oxml::units::Twips(0))
+        );
+        assert_eq!(derived_first.ind_hanging, None);
+
+        let mut derived_hanging =
+            style_resolver::resolve_paragraph_properties(Some("FirstLine"), &styles);
+        assert_eq!(
+            derived_hanging.ind_first_line,
+            Some(rdocx_oxml::units::Twips(360))
+        );
+        let direct_hanging = CT_PPr {
+            style_id: Some("FirstLine".to_owned()),
+            ind_left: Some(rdocx_oxml::units::Twips(0)),
+            ind_hanging: Some(rdocx_oxml::units::Twips(0)),
+            ..CT_PPr::default()
+        };
+        merge_direct_ppr(&mut derived_hanging, &direct_hanging);
+        assert_eq!(derived_hanging.ind_first_line, None);
+        assert_eq!(
+            derived_hanging.ind_hanging,
+            Some(rdocx_oxml::units::Twips(0))
+        );
+
+        // The real deterministic engine must enter the `tbRl` arm with a
+        // section direction and observed paragraphs, not only the merge helper.
+        // Each inherited pair clears to the margin; a firstLine-only control
+        // keeps its extra offset so the fixture discriminates.
+        let tb_position = |paragraph: &str| {
+            let mut input = make_input_with_text("");
+            input.styles = styles.clone();
+            input.document = CT_Document::from_xml(
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraph}<w:sectPr><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let mut position = None;
+            oxml_layout::walk(
+                &output.layout.pages[0].elements,
+                &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element
+                        && run.text == "TbProbe"
+                    {
+                        let point = transform.apply(run.origin);
+                        position = Some((point.x, point.y));
+                    }
+                },
+            );
+            position.expect("the tbRl paragraph was laid out")
+        };
+        let run = r#"<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr><w:t>TbProbe</w:t></w:r>"#;
+        let zero = tb_position(&format!(
+            r#"<w:p><w:pPr><w:ind w:left="0" w:firstLine="0"/></w:pPr>{run}</w:p>"#
+        ));
+        assert_eq!(
+            tb_position(&format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="BaseInd"/><w:ind w:left="0" w:firstLine="0"/></w:pPr>{run}</w:p>"#
+            )),
+            zero,
+            "firstLine over hanging base"
+        );
+        assert_eq!(
+            tb_position(&format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="FirstLine"/><w:ind w:left="0" w:hanging="0"/></w:pPr>{run}</w:p>"#
+            )),
+            zero,
+            "hanging 0 over firstLine base"
+        );
+        assert_eq!(
+            tb_position(&format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="BaseInd"/></w:pPr>{run}</w:p>"#
+            )),
+            zero,
+            "hanging base at the margin"
+        );
+        assert_ne!(
+            tb_position(&format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="FirstLine"/></w:pPr>{run}</w:p>"#
+            )),
+            zero,
+            "firstLine-only control keeps its offset"
+        );
+
+        // These merges also publish the vertical exact-line baseline policy.
+        // A baseline-aligned 24pt line starts 19.2pt from the right body edge.
+        // Direct and numbering properties must both override the style's
+        // centered 12pt policy. This checks painted geometry, not a local merge.
+        for via_numbering in [false, true] {
+            let mut input = make_input_with_text("");
+            input.styles = CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Policy"><w:pPr><w:spacing w:line="240" w:lineRule="exact"/><w:textAlignment w:val="center"/></w:pPr></w:style></w:styles>"#).unwrap();
+            input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="none"/><w:lvlText w:val=""/><w:pPr><w:spacing w:line="480" w:lineRule="exact"/><w:textAlignment w:val="baseline"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#).unwrap());
+            let policy = if via_numbering {
+                r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#
+            } else {
+                r#"<w:spacing w:line="480" w:lineRule="exact"/><w:textAlignment w:val="baseline"/>"#
+            };
+            let anchor = if via_numbering {
+                issue424_shape_anchor("paragraph", 0, "112233", 1).replace(
+                    "name=\"Frame anchor\"",
+                    "name=\"Frame anchor\" descr=\"Baseline anchor\"",
+                )
+            } else {
+                String::new()
+            };
+            input.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:pPr><w:pStyle w:val="Policy"/>{policy}</w:pPr>{run}{anchor}</w:p><w:sectPr><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#).as_bytes()).unwrap();
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let structure = output.layout.structure.as_ref().unwrap();
+            assert_eq!(
+                structure
+                    .nodes
+                    .iter()
+                    .any(|node| node.role == StructureRole::ListItem),
+                via_numbering
+            );
+            assert_eq!(
+                structure
+                    .nodes
+                    .iter()
+                    .any(|node| node.role == StructureRole::Figure),
+                via_numbering
+            );
+            let mut painted = None;
+            oxml_layout::walk(
+                &output.layout.pages[0].elements,
+                &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element
+                        && run.text == "TbProbe"
+                    {
+                        painted = Some(transform.apply(run.origin).x);
+                    }
+                },
+            );
+            assert!(
+                (painted.unwrap() - 520.8).abs() < 0.05,
+                "24pt baseline via numbering={via_numbering}: {painted:?}"
+            );
+        }
     }
 
     #[test]
@@ -23657,6 +28026,94 @@ mod tests {
         let result = Engine::new().layout(&input);
         if let Ok(result) = result {
             assert_eq!(result.pages.len(), 1);
+        }
+
+        // A known empty annotated owner uses the opaque origin channel, but
+        // stands on exactly the ordinary source empty paragraph's caret.
+        let mut fm = FontManager::new_deterministic().unwrap();
+        for size in [14, 22, 48] {
+            for spacing in [
+                "",
+                r#"<w:spacing w:line="360"/>"#,
+                r#"<w:spacing w:line="260" w:lineRule="exact"/>"#,
+                r#"<w:spacing w:line="600" w:lineRule="atLeast"/>"#,
+            ] {
+                for cached in [false, true] {
+                    let ppr = format!(
+                        r#"<w:pPr>{spacing}<w:rPr><w:rFonts w:ascii="Carlito"/><w:sz w:val="{size}"/></w:rPr></w:pPr>"#
+                    );
+                    let mut plain = CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{ppr}</w:p>"#).as_bytes()).unwrap();
+                    let properties = CT_RPr {
+                        emphasis_mark: Some(ST_Em::Dot),
+                        ..Default::default()
+                    };
+                    let mut result_run = CT_R::new("");
+                    result_run.properties = Some(properties.clone());
+                    let field = Field::from_raw(
+                        "STYLEREF Missing",
+                        rdocx_oxml::text::FieldForm::Complex,
+                        if cached { vec![result_run] } else { vec![] },
+                    )
+                    .unwrap();
+                    let mut owner = CT_R::new("");
+                    owner.properties = Some(properties);
+                    owner.content = vec![RunContent::Field(field)];
+                    let mut annotated = plain.clone();
+                    annotated.runs.push(owner);
+                    let media = MediaRegistry::new(&input.images);
+                    let mut outputs = Vec::new();
+                    for paragraph in [&mut plain, &mut annotated] {
+                        let (block, _, paint) = layout_paragraph_with_source_and_direction(
+                            paragraph,
+                            468.0,
+                            &input.styles,
+                            &input,
+                            &media,
+                            &mut fm,
+                            &mut NumberingState::default(),
+                            &mut Vec::new(),
+                            SourceNodeId::new(1),
+                            SourceNodeId::new(1),
+                            None,
+                        )
+                        .unwrap();
+                        outputs.push((block, paint));
+                    }
+                    let ordinary = &outputs[0].0.lines[0];
+                    let annotated = &outputs[1].0.lines[0];
+                    assert_eq!(
+                        (
+                            annotated.ascent,
+                            annotated.descent,
+                            annotated.height,
+                            annotated.line_gap
+                        ),
+                        (
+                            ordinary.ascent,
+                            ordinary.descent,
+                            ordinary.height,
+                            ordinary.line_gap
+                        ),
+                        "empty metrics size={size} spacing={spacing} cached={cached}"
+                    );
+                    assert_eq!(outputs[1].1.input_annotations.len(), 1);
+                    assert_eq!(outputs[1].1.line_annotations.len(), 1);
+                    let LineItem::Group {
+                        baseline: Some(baseline),
+                        group,
+                        ..
+                    } = &annotated.items[0]
+                    else {
+                        panic!("owned empty Group")
+                    };
+                    let PositionedElement::Text(base) = &group.children[0] else {
+                        panic!("empty base")
+                    };
+                    assert!(base.text.is_empty());
+                    assert!(base.field_source.is_some());
+                    assert_eq!(base.origin.y, *baseline);
+                }
+            }
         }
     }
 
@@ -23911,7 +28368,7 @@ mod tests {
         let mut diagnostics = Vec::new();
         let media = MediaRegistry::new(&input.images);
 
-        let anchored = collect_anchored_drawings(
+        let (anchored, _) = collect_anchored_drawings(
             &paragraph,
             &input.styles,
             &input,
@@ -24316,6 +28773,19 @@ mod tests {
 
     /// Build a document whose single body paragraph references footnote 1, and
     /// whose footnote 1 is one paragraph made of `note_runs` separate runs.
+    fn authored_note_fixture(note_runs: &[&str], stream: NoteStream) -> CT_P {
+        let marker = if stream == NoteStream::Footnote {
+            "footnoteRef"
+        } else {
+            "endnoteRef"
+        };
+        let mut note=CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:tabs><w:tab w:val="left" w:pos="240"/></w:tabs><w:ind w:left="240" w:hanging="240"/></w:pPr><w:r><w:{marker}/></w:r><w:r><w:tab/></w:r></w:p>"#).as_bytes()).unwrap();
+        for text in note_runs {
+            note.add_run(text);
+        }
+        note
+    }
+
     fn make_input_with_footnote(note_runs: &[&str]) -> LayoutInput {
         use rdocx_oxml::footnotes::{CT_Footnote, CT_Footnotes, NoteType};
         use rdocx_oxml::text::CT_R;
@@ -24331,10 +28801,8 @@ mod tests {
         body.runs.push(marker_run);
         doc.body.add_paragraph(body);
 
-        let mut note = CT_P::new();
-        for text in note_runs {
-            note.add_run(text);
-        }
+        // Historical hanging/tab placement is now explicit source.
+        let note = authored_note_fixture(note_runs, NoteStream::Footnote);
 
         LayoutInput {
             sequence_snapshot: None,
@@ -24387,7 +28855,7 @@ mod tests {
             ind_right: Some(rdocx_oxml::units::Twips(8_500)),
             ..Default::default()
         });
-        note.runs[0].properties = Some(rdocx_oxml::properties::CT_RPr {
+        note.runs.last_mut().unwrap().properties = Some(rdocx_oxml::properties::CT_RPr {
             language: Some("en-US".to_owned()),
             ..Default::default()
         });
@@ -24521,7 +28989,7 @@ mod tests {
             body.runs.push(marker_run);
             doc.body.add_paragraph(body);
 
-            let mut note = CT_P::new();
+            let mut note = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:footnoteRef/></w:r></w:p>"#).unwrap();
             note.add_run("Alpha");
             if with_tab {
                 let mut tab_run = CT_R::new("");
@@ -24661,15 +29129,15 @@ mod tests {
             entries.push(CT_Footnote {
                 id: 0,
                 note_type: NoteType::ContinuationSeparator,
-                paragraphs: vec![CT_P::new()],
+                paragraphs: vec![CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:continuationSeparator/></w:r></w:p>"#).unwrap()],
             });
         }
         entries.push(CT_Footnote {
             id: 1,
             note_type: NoteType::Normal,
             paragraphs: (0..note_paras)
-                .map(|_| {
-                    let mut p = CT_P::new();
+                .map(|index| {
+                    let mut p = if index==0 {CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:footnoteRef/></w:r></w:p>"#).unwrap()}else{CT_P::new()};
                     p.add_run(note_text);
                     p
                 })
@@ -24712,47 +29180,50 @@ mod tests {
         }
     }
 
-    /// Split a page into the glyphs drawn above the note separator and those
-    /// drawn below it. Notes are emitted after body content, so the separator
-    /// is the boundary.
-    fn split_at_separator(
-        page: &oxml_layout::output::PageFrame,
-    ) -> Option<(f64, Vec<f64>, Vec<String>)> {
-        let elements = compatibility_page_elements(page);
-        let separator_index = elements.iter().position(|element| {
+    // Observe note paint in source emission order, including authored special
+    // records carried by translated groups. Do not flatten other test families.
+    fn note_paint(page: &PageFrame) -> Vec<(PositionedElement, Transform)> {
+        let mut elements = Vec::new();
+        oxml_layout::walk(&page.elements, &mut |element, transform| {
+            elements.push((element.clone(), *transform));
+        });
+        elements
+    }
+
+    /// The separator is the paint-order boundary between body and note text.
+    fn split_at_separator(page: &PageFrame) -> Option<(f64, Vec<f64>, Vec<String>)> {
+        let elements = note_paint(page);
+        let separator_index = elements.iter().position(|(element, _)| {
             matches!(element, PositionedElement::Line { width, .. } if (*width - 0.5).abs() < 0.001)
         })?;
-        let PositionedElement::Line { start, end, .. } = elements[separator_index] else {
+        let (PositionedElement::Line { start, end, .. }, transform) = &elements[separator_index]
+        else {
             return None;
         };
-        let separator_y = start.y;
-        let separator_width = end.x - start.x;
-
-        let body_ys: Vec<f64> = elements[..separator_index]
+        let separator_width = transform.apply(*end).x - transform.apply(*start).x;
+        let body_ys = elements[..separator_index]
             .iter()
-            .filter_map(|element| match element {
-                PositionedElement::Text(run) => Some(run.origin.y),
+            .filter_map(|(element, transform)| match element {
+                PositionedElement::Text(run) => Some(transform.apply(run.origin).y),
                 _ => None,
             })
             .collect();
-        let note_text: Vec<String> = elements[separator_index + 1..]
+        let note_text = elements[separator_index + 1..]
             .iter()
-            .filter_map(|element| match element {
+            .filter_map(|(element, _)| match element {
                 PositionedElement::Text(run) => Some(run.text.clone()),
                 _ => None,
             })
             .collect();
-
-        let _ = separator_y;
         Some((separator_width, body_ys, note_text))
     }
 
-    fn separator_y_of(page: &oxml_layout::output::PageFrame) -> Option<f64> {
-        compatibility_page_elements(page)
+    fn separator_y_of(page: &PageFrame) -> Option<f64> {
+        note_paint(page)
             .into_iter()
-            .find_map(|element| match element {
-                PositionedElement::Line { start, width, .. } if (*width - 0.5).abs() < 0.001 => {
-                    Some(start.y)
+            .find_map(|(element, transform)| match element {
+                PositionedElement::Line { start, width, .. } if (width - 0.5).abs() < 0.001 => {
+                    Some(transform.apply(start).y)
                 }
                 _ => None,
             })
@@ -24805,9 +29276,54 @@ mod tests {
     #[test]
     fn a_note_taller_than_its_remaining_space_continues_on_the_next_page() {
         // 120 note paragraphs exceed a single page, so the note has to break.
-        let input = make_noted_document(30, &[25], 120, "Note paragraph line.", true);
+        let mut input = make_noted_document(30, &[25], 120, "Note paragraph line.", true);
+        let note = input
+            .footnotes
+            .as_mut()
+            .unwrap()
+            .footnotes
+            .iter_mut()
+            .find(|note| note.id == 1)
+            .unwrap();
+        for (index, paragraph) in note.paragraphs.iter_mut().enumerate() {
+            *paragraph.runs.last_mut().unwrap() = CT_R::new(&format!("NOTE_INVENTORY_{index:03}"));
+        }
         let mut engine = Engine::new();
         let output = engine.layout(&input).expect("layout succeeds");
+
+        // Inventory note content independently of separator recognition.
+        let inventory: Vec<_> = output
+            .pages
+            .iter()
+            .map(|page| {
+                note_paint(page)
+                    .into_iter()
+                    .filter_map(|(element, _)| match element {
+                        PositionedElement::Text(run) if run.text.starts_with("NOTE_INVENTORY_") => {
+                            Some(run.text)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            inventory.iter().flatten().cloned().collect::<Vec<_>>(),
+            (0..120)
+                .map(|i| format!("NOTE_INVENTORY_{i:03}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(inventory.iter().filter(|text| !text.is_empty()).count() >= 2);
+        let markers: Vec<_> = output
+            .pages
+            .iter()
+            .map(|page| {
+                split_at_separator(page).map_or(0, |(_, _, text)| {
+                    text.iter().filter(|text| text.as_str() == "1").count()
+                })
+            })
+            .collect();
+        assert_eq!(markers.iter().sum::<usize>(), 1, "{markers:?}");
 
         let note_pages: Vec<usize> = output
             .pages
@@ -24837,6 +29353,52 @@ mod tests {
             0,
             "a continuation does not repeat the marker, got {second:?}"
         );
+    }
+
+    #[test]
+    fn continued_note_notice_never_prevents_source_progress() {
+        use rdocx_oxml::footnotes::{CT_Footnote, NoteType};
+        for notice_height in [12, 100] {
+            let mut input = make_noted_document(1, &[0], 0, "", false);
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            section.page_height = Some(rdocx_oxml::Twips(4880));
+            section.margin_top = Some(rdocx_oxml::Twips(1440));
+            section.margin_bottom = Some(rdocx_oxml::Twips(1440));
+            let paragraph = |label: &str, height: i32| {
+                CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p>"#, height * 20).as_bytes()).unwrap()
+            };
+            let notes = input.footnotes.as_mut().unwrap();
+            notes.footnotes[0].paragraphs = vec![
+                paragraph("NOTICE_NOTE_000", 90),
+                paragraph("NOTICE_NOTE_001", 12),
+            ];
+            notes.footnotes.push(CT_Footnote {
+                id: -2,
+                note_type: NoteType::ContinuationNotice,
+                paragraphs: vec![paragraph("CONTINUATION_NOTICE", notice_height)],
+            });
+            let mut engine = Engine::new_deterministic().unwrap();
+            let output = engine
+                .layout(&input)
+                .expect("note-only pages make progress");
+            assert!(output.pages.len() > 1 && output.pages.len() <= 4);
+            let inventory: Vec<_> = output
+                .pages
+                .iter()
+                .flat_map(|page| note_paint(page))
+                .filter_map(|(element, _)| match element {
+                    PositionedElement::Text(run) if run.text.starts_with("NOTICE_NOTE_") => {
+                        Some(run.text)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                inventory,
+                ["NOTICE_NOTE_000", "NOTICE_NOTE_001"],
+                "notice height {notice_height}"
+            );
+        }
     }
 
     #[test]
@@ -25083,7 +29645,9 @@ mod tests {
             panic!("paragraph");
         };
         assert_eq!(
-            paragraph_note_references(paragraph, RevisionView::Accepted).len(),
+            paragraph_note_references(paragraph, RevisionView::Accepted)
+                .unwrap()
+                .len(),
             2
         );
         let output = deterministic_layout(&input);
@@ -25697,6 +30261,27 @@ mod tests {
                 "a wrapNone drawing must not indent any line, got {wrapped_extents:?}"
             );
         }
+        // A front anchor is above later intersecting text on its physical page.
+        let mut engine = Engine::new_deterministic().unwrap();
+        let output = engine.layout(&with).unwrap();
+        let leaves = compatibility_page_elements(&output.pages[0]);
+        let image = leaves
+            .iter()
+            .rposition(|element| matches!(element, PositionedElement::Image { .. }))
+            .unwrap();
+        let last_text = leaves
+            .iter()
+            .rposition(|element| {
+                matches!(
+                    element,
+                    PositionedElement::Text(_) | PositionedElement::MultilingualText(_)
+                )
+            })
+            .unwrap();
+        assert!(
+            image > last_text,
+            "front anchor is painted before later body text"
+        );
     }
 
     #[test]
@@ -25925,8 +30510,14 @@ mod tests {
         use rdocx_oxml::units::Twips;
 
         let note_of = |id: i32| {
-            let mut note = CT_P::new();
-            note.add_run(NOTE_PROSE);
+            let note = authored_note_fixture(
+                &[NOTE_PROSE],
+                if endnotes_instead {
+                    NoteStream::Endnote
+                } else {
+                    NoteStream::Footnote
+                },
+            );
             CT_Footnote {
                 id,
                 note_type: NoteType::Normal,
@@ -26430,6 +31021,35 @@ mod tests {
     }
 
     #[test]
+    fn plain_layout_semantic_input_stays_borrowed() {
+        let input = make_input_with_text("ordinary");
+        assert!(matches!(
+            prepared_semantic_layout_input(&input).unwrap(),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn checked_layout_propagates_deferred_revision_source_refusal() {
+        // Exact existing lower semantic-factory refusal discriminator. The
+        // initial reader retains direct simple-field source without building
+        // the opaque cache runs. Layout must not turn its checked error into
+        // a cached-display success or mutate the caller's physical XML.
+        let uri = format!("urn:{}", "u".repeat(400));
+        let runs = "<w:r><x:opaque/></w:r>".repeat(250);
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins xmlns:x="{uri}" w:id="1" w:author="Ada"><w:fldSimple w:instr="PAGE">{runs}</w:fldSimple></w:ins></w:p></w:body></w:document>"#
+        );
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let before = input.document.to_xml().unwrap();
+        let mut engine = Engine::new_deterministic().unwrap();
+        assert!(engine.layout(&input).is_err());
+        assert!(engine.layout_with_provenance(&input).is_err());
+        assert_eq!(input.document.to_xml().unwrap(), before);
+    }
+
+    #[test]
     fn revision_wrapped_forward_numbered_ref_triggers_two_pass_projection() {
         let field_document = rdocx_oxml::CT_Document::from_xml(
             br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:ins w:id="1" w:author="Ada"><w:fldSimple w:instr="REF numbered_target \n"><w:r><w:t>stored number</w:t></w:r></w:fldSimple></w:ins></w:p></w:body></w:document>"#,
@@ -26467,7 +31087,20 @@ mod tests {
                 .content
                 .push(BodyContent::Paragraph(Box::new(target)));
 
+            let before = input.document.to_xml().unwrap();
             let text = output_text(&deterministic_layout(&input));
+            let (provenance_result, paths) = Engine::new_deterministic()
+                .unwrap()
+                .layout_with_provenance(&input)
+                .unwrap();
+            let provenance_text = output_text(&provenance_result);
+            assert_eq!(provenance_text, text);
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.story == WordStory::Document && p.children == [0])
+            );
+            assert_eq!(input.document.to_xml().unwrap(), before);
             assert!(text.iter().any(|value| value == "1"), "{text:?}");
             assert!(
                 !text.iter().any(|value| value == "stored number"),
@@ -27120,6 +31753,82 @@ mod tests {
                 "{character:?} falls back to the ascii family"
             );
         }
+
+        // Generated numbers have their own source style and skipped-count semantics.
+        let mut input = issue424_furniture_input("", "");
+        input.styles = CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="arbitrary-normal"><w:name w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="arbitrary-number"><w:name w:val="line number"/><w:rPr><w:i/><w:sz w:val="32"/><w:kern w:val="0"/></w:rPr></w:style></w:styles>"#).unwrap();
+        input.document.body.content = (0..3)
+            .map(|index| {
+                let mut paragraph = CT_P::new();
+                paragraph.add_run(&format!("BODY_MARK_{index}"));
+                paragraph.runs[0].properties = Some(CT_RPr {
+                    font_ascii: Some("Carlito".into()),
+                    sz: Some(rdocx_oxml::HalfPoint(48)),
+                    bold: Some(false),
+                    italic: Some(false),
+                    ..Default::default()
+                });
+                BodyContent::Paragraph(Box::new(paragraph))
+            })
+            .collect();
+        for (count_by, start, expected) in [
+            (None, None, vec![]),
+            (Some(0), None, vec![1u64, 2, 3]),
+            (Some(1), None, vec![1, 2, 3]),
+            (Some(3), Some(0), vec![3]),
+            (Some(100), Some(99), vec![100]),
+            (Some(101), Some(100), vec![101]),
+            (Some(1), Some(1), vec![2, 3, 4]),
+            (Some(1), Some(3), vec![4, 5, 6]),
+            (Some(1), Some(32767), vec![32768, 32769, 32770]),
+            (
+                Some(1),
+                Some(u32::MAX),
+                vec![4294967296, 4294967297, 4294967298],
+            ),
+        ] {
+            input.document.body.sect_pr.as_mut().unwrap().line_numbers =
+                Some(Box::new(rdocx_oxml::document::CT_LineNumber {
+                    count_by,
+                    start,
+                    distance: Some(rdocx_oxml::Twips(120)),
+                    ..Default::default()
+                }));
+            let source = input.document.to_xml().unwrap();
+            let output = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            let mut numbers = Vec::new();
+            for page in &output.pages {
+                oxml_layout::walk(&page.elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element
+                        && run.source.is_none()
+                        && let Ok(value) = run.text.parse::<u64>()
+                    {
+                        numbers.push(value);
+                        assert_eq!((run.font_size, run.bold, run.italic), (16.0, true, true));
+                        assert!(
+                            (transform.apply(run.origin).x + run.advances.iter().sum::<f64>()
+                                - 66.0)
+                                .abs()
+                                < 0.001
+                        );
+                        let font = output
+                            .fonts
+                            .iter()
+                            .find(|font| font.id == run.font_id)
+                            .unwrap();
+                        assert!(font.bold && font.italic);
+                    }
+                });
+            }
+            assert_eq!(numbers, expected, "count_by={count_by:?}, start={start:?}");
+            assert_eq!(input.document.to_xml().unwrap(), source);
+        }
+        input.document.body.sect_pr.as_mut().unwrap().line_numbers = None;
+        assert!(
+            prepare_word_line_numbers(&input, &mut FontManager::new_deterministic().unwrap())
+                .0
+                .is_none()
+        );
     }
 
     #[test]
@@ -27651,22 +32360,22 @@ mod tests {
         let inherited = fill("w14", namespace, "123456", 50_000);
         let mut effective = CT_RPr::default();
         effective.merge_from(&inherited);
-        assert_eq!(resolve_run_color(&effective, None).a, 0.5);
+        assert_eq!(resolve_run_color(&effective, None, Color::BLACK).a, 0.5);
         assert_eq!(
-            resolve_run_color(&effective, None).r,
+            resolve_run_color(&effective, None, Color::BLACK).r,
             Color::from_hex("123456").r
         );
         let direct = fill("alias", namespace, "AABBCC", 25_000);
         effective.merge_from(&direct);
-        assert_eq!(resolve_run_color(&effective, None).a, 0.25);
+        assert_eq!(resolve_run_color(&effective, None, Color::BLACK).a, 0.25);
         assert_eq!(
-            resolve_run_color(&effective, None).r,
+            resolve_run_color(&effective, None, Color::BLACK).r,
             Color::from_hex("AABBCC").r
         );
         let foreign = fill("w14", "urn:foreign", "FF0000", 0);
         let original = foreign.revision_xml.clone();
         effective.merge_from(&foreign);
-        assert_eq!(resolve_run_color(&effective, None).a, 0.25);
+        assert_eq!(resolve_run_color(&effective, None, Color::BLACK).a, 0.25);
         assert_eq!(foreign.revision_xml, original);
         assert!(
             fill("w14", namespace, "123456", 100_001)
@@ -27679,5 +32388,3572 @@ mod tests {
                 .unwrap()
                 .contains("xmlns:alias")
         );
+    }
+    /// Give the body section a default header of `lines` paragraphs.
+    fn with_tall_header(input: &mut LayoutInput, top: rdocx_oxml::units::Twips, lines: usize) {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef, HdrFtrType};
+        let mut section = CT_SectPr::default_letter();
+        section.margin_top = Some(top);
+        section.header_refs.push(HdrFtrRef {
+            hdr_ftr_type: HdrFtrType::Default,
+            rel_id: "rIdHeader".into(),
+        });
+        input.document.body.sect_pr = Some(section);
+        let mut header = CT_HdrFtr::new();
+        for line in 1..=lines {
+            let mut paragraph = CT_P::new();
+            paragraph.add_run(&format!("Header line {line}"));
+            header.paragraphs.push(paragraph);
+        }
+        input.headers.insert("rIdHeader".into(), header);
+    }
+
+    #[test]
+    fn issue424_the_first_body_fragment_starts_below_a_header_taller_than_the_top_margin() {
+        // The issue's geometry: a 2 cm top margin, a 1.27 cm header distance
+        // and five header lines, which end well below the margin.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1134), 5);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a header");
+        let fragment = output.body_layout_fragments(0).expect("body fragment")[0];
+        assert_eq!(fragment.physical_page, 1);
+        let mut header_baselines = Vec::new();
+        for element in compatibility_page_elements(&output.layout.pages[0]) {
+            match element {
+                PositionedElement::Text(run) if run.text.starts_with("Header") => {
+                    header_baselines.push(run.origin.y)
+                }
+                PositionedElement::MultilingualText(run)
+                    if run.logical_text.starts_with("Header") =>
+                {
+                    header_baselines.push(run.origin.y)
+                }
+                _ => {}
+            }
+        }
+        header_baselines.sort_by(f64::total_cmp);
+        assert_eq!(header_baselines.len(), 5);
+        let pitch = header_baselines[1] - header_baselines[0];
+        let last = header_baselines[4];
+        assert!(
+            fragment.y > last && fragment.y < last + pitch,
+            "the body starts right under the last header line at {last}, got {}",
+            fragment.y
+        );
+        assert!(fragment.y > 1134.0 / 20.0);
+
+        // A header that fits above the margin leaves the body on it.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), 1);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a short header");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+
+        // A negative top margin is exact, so the tall header overlaps.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(-1440), 8);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with an exact top margin");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+    }
+
+    #[test]
+    fn fitting_endnotes_keep_their_distance_below_a_body_moved_by_its_header() {
+        let measure = |header_lines: usize| {
+            let mut input = make_document_with_both_streams(2, 3);
+            if header_lines > 0 {
+                with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), header_lines);
+            }
+            let output = Engine::new_deterministic()
+                .expect("bundled fonts load")
+                .layout(&input)
+                .expect("layout succeeds");
+            let page = output
+                .pages
+                .iter()
+                .find(|page| page_text(page).contains("ENDNOTETEXT"))
+                .expect("the endnote follows the body on its page");
+            let body = compatibility_page_elements(page)
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("occupies") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let endnote = compatibility_page_elements(page)
+                .into_iter()
+                .find_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("ENDNOTETEXT") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .expect("endnote text");
+            let body_top = body.iter().copied().fold(f64::INFINITY, f64::min);
+            let body_bottom = body.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (body_top, endnote - body_bottom)
+        };
+        let (plain_top, plain_gap) = measure(0);
+        let (moved_top, moved_gap) = measure(8);
+        assert!(
+            moved_top > plain_top,
+            "eight header lines move the body down"
+        );
+        assert!(
+            (moved_gap - plain_gap).abs() < 1e-9,
+            "the endnote follows the moved body as it follows a plain one: {moved_gap} and {plain_gap}"
+        );
+    }
+
+    #[test]
+    fn issue426_paragraphs_table_layout_drops_keep_unplaced_navigation_facts() {
+        // A vertically merged continuation cell and a row the accepted view
+        // removes are never laid out. Navigation still holds a fact for each
+        // of their paragraphs, unplaced, with no outline level and no style.
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Merged away</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right below</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Deleted row</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml).expect("document parses");
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with sources");
+        let mut documented = 0;
+        for index in 1u32.. {
+            let Some(node) = SourceNodeId::new(index) else {
+                break;
+            };
+            let Some(path) = output.source_node(node) else {
+                break;
+            };
+            if path.story == WordStory::Document {
+                documented += 1;
+                assert!(
+                    output.paragraph_navigation_source(node).is_some(),
+                    "{path:?} has navigation facts"
+                );
+            }
+        }
+        assert_eq!(documented, 7);
+        let facts = |wanted: &str| {
+            output
+                .paragraph_navigation()
+                .find(|(_, _, _, text, ..)| *text == wanted)
+                .map(|(_, _, level, _, style, _, page)| (level, style.map(str::to_owned), page))
+                .expect("paragraph facts")
+        };
+        assert_eq!(facts("Before"), (Some(1), Some("Heading1".into()), Some(1)));
+        assert_eq!(facts("Kept"), (None, None, Some(1)));
+        assert_eq!(facts("Merged away").2, None);
+        assert_eq!(facts("Deleted row").2, None);
+    }
+
+    #[test]
+    fn issue424_spaced_furniture_is_measured_and_painted_once() {
+        let measure = |after: i32| {
+            let mut input = make_input_with_text("Body line.");
+            with_tall_header(&mut input, rdocx_oxml::units::Twips(1134), 5);
+            for paragraph in &mut input.headers.get_mut("rIdHeader").unwrap().paragraphs {
+                paragraph.properties = Some(CT_PPr {
+                    space_after: Some(rdocx_oxml::units::Twips(after)),
+                    ..Default::default()
+                });
+            }
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let baselines = compatibility_page_elements(&output.layout.pages[0])
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.starts_with("Header") => {
+                        Some(run.origin.y)
+                    }
+                    PositionedElement::MultilingualText(run)
+                        if run.logical_text.starts_with("Header") =>
+                    {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(baselines.len(), 5);
+            (body, baselines)
+        };
+        let (plain_body, plain) = measure(0);
+        let (spaced_body, spaced) = measure(160);
+        assert!(
+            ((spaced[4] - spaced[0]) - (plain[4] - plain[0]) - 32.0).abs() < 0.01,
+            "four inter-paragraph8pt gaps must paint once: {plain:?} and {spaced:?}"
+        );
+        assert!(
+            (spaced_body - plain_body - 40.0).abs() < 0.01,
+            "all five8pt after gaps must price once: {plain_body} and {spaced_body}"
+        );
+    }
+
+    fn issue424_furniture_input(header: &str, footer: &str) -> LayoutInput {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef};
+        let mut input = make_input_with_text("BODY_MARK");
+        let mut section = CT_SectPr::default_letter();
+        section.margin_top = Some(rdocx_oxml::Twips(720));
+        section.margin_bottom = Some(rdocx_oxml::Twips(720));
+        section.header_distance = Some(rdocx_oxml::Twips(360));
+        section.footer_distance = Some(rdocx_oxml::Twips(360));
+        let namespaces = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        for (content, is_header, id) in [(header, true, "H"), (footer, false, "F")] {
+            if content.is_empty() {
+                continue;
+            }
+            let tag = if is_header { "hdr" } else { "ftr" };
+            let part = CT_HdrFtr::from_xml(
+                format!("<w:{tag} {namespaces}>{content}</w:{tag}>").as_bytes(),
+            )
+            .unwrap();
+            let body = CT_Document::from_xml(
+                format!("<w:document {namespaces}><w:body>{content}</w:body></w:document>")
+                    .as_bytes(),
+            )
+            .unwrap()
+            .body;
+            let story = if is_header {
+                WordStory::Header {
+                    relationship_id: id.into(),
+                }
+            } else {
+                WordStory::Footer {
+                    relationship_id: id.into(),
+                }
+            };
+            input.story_bodies.insert(story, body);
+            let reference = HdrFtrRef {
+                hdr_ftr_type: HdrFtrType::Default,
+                rel_id: id.into(),
+            };
+            if is_header {
+                input.headers.insert(id.into(), part);
+                section.header_refs.push(reference);
+            } else {
+                input.footers.insert(id.into(), part);
+                section.footer_refs.push(reference);
+            }
+        }
+        input.document.body.sect_pr = Some(section);
+        input
+    }
+
+    // Strict furniture reservation tests use real anchored drawings. Paragraph
+    // frames have a different consumer: they reserve main body, not their own
+    // furniture flow. Keep their old authored extents as drawing test inputs.
+    fn issue424_drawing_furniture_input(header: &str, footer: &str) -> LayoutInput {
+        let convert = |story: &str| {
+            if story.is_empty() {
+                return String::new();
+            }
+            let mut doc=CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{story}</w:body></w:document>"#).as_bytes()).unwrap();
+            let mut pending = Vec::new();
+            let mut output = String::new();
+            for item in &mut doc.body.content {
+                let BodyContent::Paragraph(paragraph) = item else {
+                    panic!("drawing fixture paragraphs");
+                };
+                if let Some(frame) = paragraph.properties.as_mut().and_then(|p| p.frame.take()) {
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    paragraph.to_xml(&mut writer).unwrap();
+                    let content = String::from_utf8(writer.into_inner()).unwrap();
+                    let width = frame.w.unwrap().0 * 635;
+                    let height = frame.h.unwrap().0 * 635;
+                    let y = frame.y.map_or(0, |v| v.0) * 635;
+                    let x = frame.x.map_or(0, |v| v.0) * 635;
+                    let vertical = if frame.v_anchor.as_deref() == Some("text") {
+                        "paragraph"
+                    } else {
+                        "page"
+                    };
+                    let wrap = if frame.wrap.as_deref() == Some("notBeside") {
+                        "<wp:wrapTopAndBottom/>"
+                    } else {
+                        "<wp:wrapSquare wrapText=\"bothSides\"/>"
+                    };
+                    let raw = format!(
+                        r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>{x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="{vertical}"><wp:posOffset>{y}</wp:posOffset></wp:positionV><wp:extent cx="{width}" cy="{height}"/>{wrap}<wp:docPr id="1" name="strict obstacle"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+                    );
+                    pending.extend(CT_P::from_xml_fragment(raw.as_bytes()).unwrap().runs);
+                } else {
+                    paragraph.runs.splice(0..0, pending.drain(..));
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    paragraph.to_xml(&mut writer).unwrap();
+                    output.push_str(&String::from_utf8(writer.into_inner()).unwrap());
+                }
+            }
+            assert!(pending.is_empty(), "obstacles need a real flow owner");
+            output
+        };
+        issue424_furniture_input(&convert(header), &convert(footer))
+    }
+
+    fn issue424_positioned_text(output: &crate::WordLayoutResult, prefix: &str) -> Vec<(f64, f64)> {
+        let mut result = Vec::new();
+        oxml_layout::walk(
+            &output.layout.pages[0].elements,
+            &mut |element, transform| {
+                let position = match element {
+                    PositionedElement::Text(run) if run.text.starts_with(prefix) => {
+                        Some(run.origin)
+                    }
+                    PositionedElement::MultilingualText(run)
+                        if run.logical_text.starts_with(prefix) =>
+                    {
+                        Some(run.origin)
+                    }
+                    _ => None,
+                };
+                if let Some(position) = position {
+                    let p = transform.apply(position);
+                    result.push((p.x, p.y));
+                }
+            },
+        );
+        result
+    }
+
+    #[test]
+    fn issue424_selected_blank_stories_and_zero_top_use_only_selected_flow() {
+        use rdocx_oxml::header_footer::HdrFtrRef;
+        let mut outcomes = Vec::new();
+        for (label, first, even) in [
+            ("default", false, false),
+            ("blank first", true, false),
+            ("blank even", false, true),
+        ] {
+            let mut input = make_input_with_text("BODY_MARK");
+            with_tall_header(&mut input, rdocx_oxml::Twips(0), 8);
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            section.title_pg = Some(first);
+            if even {
+                section.page_number = Some(rdocx_oxml::document::CT_PageNumberType::new(2));
+                // The facade materializes this blank-even marker from settings.
+                section.header_refs.push(HdrFtrRef {
+                    hdr_ftr_type: HdrFtrType::Even,
+                    rel_id: String::new(),
+                });
+            }
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let valid = if first || even {
+                body == 0.0 && issue424_positioned_text(&output, "Header").is_empty()
+            } else {
+                body > 36.0
+            };
+            if !valid {
+                outcomes.push(format!("{label}: body={body}"));
+            }
+        }
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+    }
+
+    #[test]
+    fn issue424_tall_footer_reduces_body_band_and_negative_bottom_stays_exact() {
+        let footer = (0..8)
+            .map(|i| format!("<w:p><w:r><w:t>Footer{i}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let measure = |content: &str, bottom: i32| {
+            let mut input = issue424_furniture_input("", content);
+            input.document.body.sect_pr.as_mut().unwrap().margin_bottom =
+                Some(rdocx_oxml::Twips(bottom));
+            let BodyContent::Paragraph(p) = &mut input.document.body.content[0] else {
+                panic!("body");
+            };
+            p.runs[0] = CT_R::new(&"Body line. ".repeat(4000));
+            crate::layout_document_deterministic_with_provenance(&input).unwrap()
+        };
+        let plain = measure("", 720);
+        let positive = measure(&footer, 720);
+        let negative = measure(&footer, -720);
+        let fragment = |out: &crate::WordLayoutResult| out.body_layout_fragments(0).unwrap()[0];
+        assert!(
+            fragment(&positive).height < fragment(&plain).height,
+            "positive footer must reduce first-page body fit"
+        );
+        assert!(
+            (fragment(&negative).height - fragment(&plain).height).abs() < 0.01,
+            "negative margin uses its exact absolute distance"
+        );
+        let last = fragment(&positive).y + fragment(&positive).height;
+        assert!(
+            issue424_positioned_text(&positive, "Footer")[0].1 > last,
+            "footer starts beyond last body fragment"
+        );
+    }
+
+    #[test]
+    fn issue424_floating_furniture_table_uses_its_position_without_pricing_rows_as_flow() {
+        let table = |position: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr>{position}<w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="2400" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>FLOAT_TABLE</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let flow = crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+            &table(""),
+            "",
+        ))
+        .unwrap();
+        let floating = table(
+            r#"<w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpX="480" w:tblpY="3600"/>"#,
+        );
+        let output = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&floating, ""),
+        )
+        .unwrap();
+        let at = issue424_positioned_text(&output, "FLOAT_TABLE");
+        assert_eq!(at.len(), 1);
+        assert!(
+            at[0].1 >= 180.0 && at[0].1 < 210.0,
+            "actual floating table page anchor: {at:?}"
+        );
+        assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+        assert!(
+            flow.body_layout_fragments(0).unwrap()[0].y >= 138.0,
+            "ordinary table consumes its120pt row once"
+        );
+    }
+
+    fn issue424_shape_anchor(relative: &str, offset: i64, color: &str, behind: u8) -> String {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor behindDoc="{behind}"><wp:positionH relativeFrom="page"><wp:posOffset>1016000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="{relative}"><wp:posOffset>{offset}</wp:posOffset></wp:positionV><wp:extent cx="127000" cy="127000"/><wp:wrapNone/><wp:docPr id="1" name="Frame anchor"/><a:graphic><a:graphicData><wps:wsp><wps:spPr><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+        )
+    }
+
+    #[test]
+    fn issue424_adjacent_equal_frames_group_and_preserve_their_anchor_bases() {
+        let frame =
+            r#"<w:framePr w:w="3600" w:hAnchor="page" w:vAnchor="page" w:x="1200" w:y="3600"/>"#;
+        let header = format!(
+            r#"<w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_A</w:t></w:r>{}{}</w:p><w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_B</w:t></w:r></w:p>"#,
+            issue424_shape_anchor("page", 1524000, "112233", 1),
+            issue424_shape_anchor("paragraph", 63500, "445566", 0)
+        );
+        let output = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&header, ""),
+        )
+        .unwrap();
+        let a = issue424_positioned_text(&output, "FRAME_A");
+        let b = issue424_positioned_text(&output, "FRAME_B");
+        assert_eq!((a.len(), b.len()), (1, 1));
+        assert!(
+            a[0].1 >= 180.0 && a[0].1 < 210.0,
+            "frame page position: {a:?}"
+        );
+        assert!(
+            b[0].1 > a[0].1 + 5.0 && b[0].1 < a[0].1 + 30.0,
+            "equal frame paragraphs stack once: {a:?}, {b:?}"
+        );
+        assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+        let mut rectangles = Vec::new();
+        oxml_layout::walk(
+            &output.layout.pages[0].elements,
+            &mut |element, transform| {
+                if let PositionedElement::FilledRect { rect, color } = element
+                    && (*color == Color::from_hex("112233") || *color == Color::from_hex("445566"))
+                {
+                    rectangles.push((
+                        *color,
+                        transform.apply(Point {
+                            x: rect.x,
+                            y: rect.y,
+                        }),
+                    ));
+                }
+            },
+        );
+        assert_eq!(rectangles.len(), 2, "frame anchors occur exactly once");
+        assert!(
+            rectangles
+                .iter()
+                .any(|(color, p)| *color == Color::from_hex("112233")
+                    && p.x == 140.0
+                    && p.y == 300.0),
+            "page offsets use the actual ordinary frame origin: {rectangles:?}"
+        );
+        assert!(
+            rectangles
+                .iter()
+                .any(|(color, p)| *color == Color::from_hex("445566")
+                    && p.x == 140.0
+                    && p.y == 185.0),
+            "paragraph anchor follows framed paragraph: {rectangles:?}"
+        );
+    }
+
+    #[test]
+    fn issue424_frame_page_offset_axes_keep_unframed_and_alignment_policy() {
+        for footer in [false, true] {
+            for (framed, shifted, align_h, align_v) in [
+                (true, false, false, false),
+                (true, true, false, false),
+                (false, false, false, false),
+                (true, false, true, false),
+                (true, false, false, true),
+                (true, false, true, true),
+            ] {
+                let frame = if !framed {
+                    String::new()
+                } else {
+                    format!(
+                        r#"<w:framePr w:w="3600" w:hAnchor="page" w:vAnchor="page" w:x="{}" w:y="{}"/>"#,
+                        if shifted { 1800 } else { 1200 },
+                        if shifted { 4800 } else { 3600 }
+                    )
+                };
+                let mut page = issue424_shape_anchor("page", 1524000, "112233", 1);
+                if align_h {
+                    page = page.replace(
+                        "<wp:posOffset>1016000</wp:posOffset>",
+                        "<wp:align>center</wp:align>",
+                    );
+                }
+                if align_v {
+                    page = page.replace(
+                        "<wp:posOffset>1524000</wp:posOffset>",
+                        "<wp:align>center</wp:align>",
+                    );
+                }
+                let content = format!(
+                    r#"<w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_A</w:t></w:r>{page}{}</w:p>"#,
+                    issue424_shape_anchor("paragraph", 63500, "445566", 0)
+                );
+                let input = if footer {
+                    issue424_furniture_input("", &content)
+                } else {
+                    issue424_furniture_input(&content, "")
+                };
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let mut rectangles = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::FilledRect { rect, color } = element
+                            && (*color == Color::from_hex("112233")
+                                || *color == Color::from_hex("445566"))
+                        {
+                            assert_eq!((rect.width, rect.height), (10.0, 10.0));
+                            rectangles.push((
+                                *color,
+                                transform.apply(Point {
+                                    x: rect.x,
+                                    y: rect.y,
+                                }),
+                            ));
+                        }
+                    },
+                );
+                assert_eq!(rectangles.len(), 2, "each producer paints once");
+                let (_, actual) = rectangles
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("112233"))
+                    .unwrap();
+                let origin = if framed {
+                    if shifted {
+                        (90.0, 240.0)
+                    } else {
+                        (60.0, 180.0)
+                    }
+                } else {
+                    (0.0, 0.0)
+                };
+                assert_eq!(actual.x, if align_h { 301.0 } else { origin.0 + 80.0 });
+                assert_eq!(actual.y, if align_v { 391.0 } else { origin.1 + 120.0 });
+                if framed {
+                    let (_, paragraph) = rectangles
+                        .iter()
+                        .find(|(color, _)| *color == Color::from_hex("445566"))
+                        .unwrap();
+                    assert_eq!(
+                        (paragraph.x, paragraph.y),
+                        (origin.0 + 80.0, origin.1 + 5.0)
+                    );
+                    assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue424_same_owner_spacing_text_and_variant_edits_match_cold_layout() {
+        let mut input = make_input_with_text("BODY_MARK");
+        with_tall_header(&mut input, rdocx_oxml::Twips(720), 5);
+        let owner = &input.headers["rIdHeader"].paragraphs[0] as *const CT_P;
+        let mut engine = Engine::new_deterministic().unwrap();
+        let initial = engine.layout(&input).unwrap();
+        for state in 0..3 {
+            match state {
+                0 => {
+                    input.headers.get_mut("rIdHeader").unwrap().paragraphs[0].properties =
+                        Some(CT_PPr {
+                            space_after: Some(rdocx_oxml::Twips(800)),
+                            ..Default::default()
+                        })
+                }
+                1 => {
+                    let p = &mut input.headers.get_mut("rIdHeader").unwrap().paragraphs[0];
+                    let RunContent::Text(text) = &mut p.runs[0].content[0] else {
+                        panic!("text");
+                    };
+                    text.text = "Header changed text ".repeat(50);
+                }
+                _ => input.document.body.sect_pr.as_mut().unwrap().title_pg = Some(true),
+            }
+            assert_eq!(
+                &input.headers["rIdHeader"].paragraphs[0] as *const CT_P,
+                owner
+            );
+            let warm = engine.layout(&input).unwrap();
+            let cold = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.pages),
+                format!("{:?}", cold.pages),
+                "state{state}"
+            );
+            assert_eq!(
+                format!("{:?}", warm.outlines),
+                format!("{:?}", cold.outlines)
+            );
+            assert_ne!(
+                format!("{:?}", initial.pages),
+                format!("{:?}", warm.pages),
+                "edit must change actual positioned output, state{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_ordinary_frame_defaults_follow_documented_word_behavior() {
+        let position = |properties: &str| {
+            let header = format!(
+                r#"<w:p><w:pPr><w:framePr {properties}/></w:pPr><w:r><w:t>DEFAULT_FRAME</w:t></w:r></w:p><w:p><w:r><w:t>FLOW_TARGET</w:t></w:r></w:p>"#
+            );
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&header, ""),
+            )
+            .unwrap();
+            issue424_positioned_text(&output, "DEFAULT_FRAME")
+        };
+        let mut failures = Vec::new();
+        for (label, original, explicit) in [
+            (
+                "omitted furniture anchors",
+                r#"w:w="2400" w:x="480" w:y="120""#,
+                r#"w:w="2400" w:x="480" w:y="120" w:hAnchor="text" w:vAnchor="margin""#,
+            ),
+            (
+                "nonzero omitted height rule",
+                r#"w:w="2400" w:h="1200" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+                r#"w:w="2400" w:h="1200" w:hRule="atLeast" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+            ),
+            (
+                "zero height exact",
+                r#"w:w="2400" w:h="0" w:hRule="exact" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+                r#"w:w="2400" w:hRule="auto" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+            ),
+        ] {
+            let actual = position(original);
+            let expected = position(explicit);
+            if actual != expected {
+                failures.push(format!("{label}: actual={actual:?}, expected={expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_native_long_note_uses_source_width_markers_separators_and_first_fragment() {
+        use rdocx_oxml::footnotes::{CT_Footnote, CT_Footnotes, NoteType};
+        let p = |text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let header = (0..5)
+            .map(|i| p(&format!("HEAD_{i:02}")))
+            .collect::<String>();
+        let footer = (0..5)
+            .map(|i| p(&format!("FOOT_{i:02}")))
+            .collect::<String>();
+        let mut input = issue424_furniture_input(&header, &footer);
+        let parse = |xml: &str| {
+            CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{xml}</w:p>"#).as_bytes()).unwrap()
+        };
+        let body = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>NOTE_REFERENCE</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#,p("BODY_MARK")).as_bytes()).unwrap();
+        input.document.body.content = body.body.content;
+        input.footnotes=Some(CT_Footnotes { footnotes: vec![
+            CT_Footnote{id:-1,note_type:NoteType::Separator,paragraphs:vec![parse("<w:r><w:separator/></w:r>")]},
+            CT_Footnote{id:0,note_type:NoteType::ContinuationSeparator,paragraphs:vec![parse("<w:r><w:continuationSeparator/></w:r>")]},
+            CT_Footnote{id:1,note_type:NoteType::Normal,paragraphs:(0..130).map(|i| {
+                let doc=CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,p(&format!("NOTE_{i:03}"))).as_bytes()).unwrap();
+                let BodyContent::Paragraph(p)=doc.body.content.into_iter().next().unwrap() else {panic!("paragraph")};*p
+            }).collect()},
+        ]});
+        // Separator paragraphs inherit the same12pt source spacing as Normal.
+        for style in &mut input.styles.styles {
+            if style.style_id == "Normal" {
+                style.ppr = Some(rdocx_oxml::properties::CT_PPr {
+                    space_before: Some(rdocx_oxml::Twips(0)),
+                    space_after: Some(rdocx_oxml::Twips(0)),
+                    line_spacing: Some(rdocx_oxml::Twips(240)),
+                    line_rule: Some("exact".into()),
+                    ..Default::default()
+                });
+            }
+        }
+        let before = format!("{input:?}");
+        let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+        let mut ranges = Vec::new();
+        let mut references = Vec::new();
+        let mut extra_markers = 0;
+        for (page_index, page) in output.layout.pages.iter().enumerate() {
+            let mut notes = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element {
+                    if run.text.starts_with("NOTE_") && run.text != "NOTE_REFERENCE" {
+                        notes.push((run.text.clone(), transform.apply(run.origin)));
+                    }
+                    if run.text == "NOTE_REFERENCE" {
+                        references.push(page_index);
+                    }
+                    if run.text == "1" && run.note.is_none() {
+                        extra_markers += 1;
+                    }
+                }
+            });
+            ranges.push(notes);
+        }
+        assert_eq!(output.layout.pages.len(), 3, "{ranges:?}");
+        assert_eq!(references, vec![0]);
+        assert_eq!(
+            ranges.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![49, 51, 30]
+        );
+        assert_eq!(extra_markers, 0, "source contains no note-body mark");
+        let names = ranges
+            .iter()
+            .flatten()
+            .map(|(text, _)| text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            (0..130).map(|i| format!("NOTE_{i:03}")).collect::<Vec<_>>()
+        );
+        for (_, position) in ranges.iter().flatten() {
+            assert!((position.x - 72.0).abs() < 0.01, "{position:?}");
+        }
+        let header_ascent = issue424_positioned_text(&output, "HEAD_00")[0].1 - 18.0;
+        assert!(
+            (ranges[0][0].1.y - header_ascent - 126.0).abs() < 0.01,
+            "first note starts at its derived band"
+        );
+        assert!(
+            (ranges[2].last().unwrap().1.y - header_ascent - 702.0).abs() < 0.01,
+            "last note finishes at its derived band"
+        );
+        assert_eq!(format!("{input:?}"), before);
+    }
+
+    #[test]
+    fn issue424_native_frame_story_eligibility_and_authored_vertical_presence() {
+        let flow = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FLOW_TARGET</w:t></w:r></w:p>"#;
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            let plain =
+                crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+                    if footer { "" } else { flow },
+                    if footer { flow } else { "" },
+                ))
+                .unwrap();
+            let flow_position = issue424_positioned_text(&plain, "FLOW_TARGET")[0];
+            let origin = if footer { 774.0 - 12.0 } else { 18.0 };
+            let ascent = flow_position.1 - origin;
+            for (anchor, y, top, body_x) in [
+                ("", 120, 42.0, 216.0),
+                (r#"w:vAnchor="margin""#, 120, 42.0, 216.0),
+                (r#"w:vAnchor="page""#, 120, 6.0, 72.0),
+                (r#"w:vAnchor="text""#, 120, origin + 6.0, 72.0),
+                (r#"w:vAnchor="text""#, 100, origin + 5.0, 72.0),
+                (
+                    r#"w:vAnchor="text""#,
+                    140,
+                    origin + 7.0,
+                    if footer { 72.0 } else { 216.0 },
+                ),
+            ] {
+                let frame = format!(
+                    r#"<w:p><w:pPr><w:framePr w:w="2400" w:hAnchor="text" w:x="480" w:y="{y}" {anchor}/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>DEFAULT_FRAME</w:t></w:r></w:p>{flow}"#
+                );
+                let input = issue424_furniture_input(
+                    if footer { "" } else { &frame },
+                    if footer { &frame } else { "" },
+                );
+                let before = format!("{input:?}");
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let actual_flow = issue424_positioned_text(&output, "FLOW_TARGET")[0];
+                let actual_frame = issue424_positioned_text(&output, "DEFAULT_FRAME")[0];
+                let body = issue424_positioned_text(&output, "BODY_MARK")[0];
+                if (actual_flow.0 - flow_position.0).abs() > 0.01
+                    || (actual_flow.1 - flow_position.1).abs() > 0.01
+                    || (actual_frame.0 - 96.0).abs() > 0.01
+                    || (actual_frame.1 - ascent - top).abs() > 0.01
+                    || (body.0 - body_x).abs() > 0.01
+                {
+                    failures.push(format!("footer={footer} anchor={anchor} y={y}:flow={actual_flow:?},frame={actual_frame:?},body={body:?},top={top},ascent={ascent}"));
+                }
+                assert_eq!(format!("{input:?}"), before);
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_drop_caps_keep_existing_fallback_outside_ordinary_frames() {
+        let plain =
+            "<w:p><w:r><w:t>CAP</w:t></w:r></w:p><w:p><w:r><w:t>FOLLOWING</w:t></w:r></w:p>";
+        let baseline = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(plain, ""),
+        )
+        .unwrap();
+        for kind in ["drop", "margin"] {
+            let source = plain.replacen("<w:p>", &format!(r#"<w:p><w:pPr><w:framePr w:dropCap="{kind}" w:lines="3" w:hAnchor="page" w:vAnchor="page" w:y="3600"/></w:pPr>"#), 1);
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&source, ""),
+            )
+            .unwrap();
+            assert_eq!(
+                issue424_positioned_text(&output, "CAP"),
+                issue424_positioned_text(&baseline, "CAP")
+            );
+            assert_eq!(
+                issue424_positioned_text(&output, "FOLLOWING"),
+                issue424_positioned_text(&baseline, "FOLLOWING")
+            );
+            assert_eq!(
+                output.body_layout_fragments(0).unwrap(),
+                baseline.body_layout_fragments(0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_furniture_tables_settle_whole_owners_once_in_story_order() {
+        let table = |label: &str, overlap: &str, x: i32, rows: usize| {
+            let content=(0..rows).map(|row|format!(r#"<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>{label}_{row}</w:t></w:r></w:p></w:tc></w:tr>"#)).collect::<String>();
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpX="{x}" w:tblpY="3600"/><w:tblW w:w="2400" w:type="dxa"/><w:tblOverlap w:val="{overlap}"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>{content}</w:tbl>"#
+            )
+        };
+        let flow_control = "<w:p><w:r><w:t>FLOW_CONTROL</w:t></w:r></w:p>";
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            let baseline_input = issue424_furniture_input(
+                if footer { "" } else { flow_control },
+                if footer { flow_control } else { "" },
+            );
+            let baseline =
+                crate::layout_document_deterministic_with_provenance(&baseline_input).unwrap();
+            let baseline_body = baseline.body_layout_fragments(0).unwrap()[0];
+            for rows in [1, 2] {
+                for (left, right, x, separate) in [
+                    ("never", "overlap", 0, true),
+                    ("overlap", "never", 0, true),
+                    ("never", "never", 0, true),
+                    ("overlap", "overlap", 0, false),
+                    ("never", "never", 4000, false),
+                ] {
+                    let story = format!(
+                        "{}{}{flow_control}",
+                        table("TABLE_A", left, 0, rows),
+                        table("TABLE_B", right, x, rows)
+                    );
+                    let input = issue424_furniture_input(
+                        if footer { "" } else { &story },
+                        if footer { &story } else { "" },
+                    );
+                    let before = format!("{:?}", input);
+                    let output =
+                        crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                    // Preserve this fixture's ordinary inherited FLOW_CONTROL
+                    // spacing. Floating rows must not add body clearance to it.
+                    let body = output.body_layout_fragments(0).unwrap()[0];
+                    assert_eq!(output.layout.pages.len(), baseline.layout.pages.len());
+                    assert!(
+                        (body.x - baseline_body.x).abs() < 0.01
+                            && (body.y - baseline_body.y).abs() < 0.01,
+                        "footer={footer},rows={rows},{left}/{right},x={x}: body={body:?},flow-only={baseline_body:?}"
+                    );
+                    let first = issue424_positioned_text(&output, "TABLE_A_0");
+                    let second = issue424_positioned_text(&output, "TABLE_B_0");
+                    assert_eq!((first.len(), second.len()), (1, 1));
+                    let expected = if separate { 30.0 * rows as f64 } else { 0.0 };
+                    if ((second[0].1 - first[0].1) - expected).abs() > 0.01 {
+                        failures.push(format!("footer={footer},rows={rows},{left}/{right},x={x}: A={first:?},B={second:?},expected dy={expected}"));
+                    }
+                    if rows == 2 {
+                        for label in ["TABLE_A", "TABLE_B"] {
+                            let a = issue424_positioned_text(&output, &format!("{label}_0"));
+                            let b = issue424_positioned_text(&output, &format!("{label}_1"));
+                            assert_eq!(b.len(), 1);
+                            assert!(
+                                (b[0].1 - a[0].1 - 30.0).abs() < 0.01,
+                                "rows share one whole-table origin: {a:?},{b:?}"
+                            );
+                        }
+                    }
+                    assert_eq!(format!("{:?}", input), before);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_furniture_clearance_follows_transitive_obstacles_at_final_origin() {
+        let flow = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FLOW_WORD</w:t></w:r></w:p>"#;
+        let plain = crate::layout_document_deterministic_with_provenance(
+            &issue424_drawing_furniture_input(flow, ""),
+        )
+        .unwrap();
+        let ascent = issue424_positioned_text(&plain, "FLOW_WORD")[0].1 - 18.0;
+        let frame_control = crate::layout_document_deterministic_with_provenance(
+            &issue424_drawing_furniture_input("<w:p><w:r><w:t>FRAME_CONTROL</w:t></w:r></w:p>", ""),
+        )
+        .unwrap();
+        let frame_ascent = issue424_positioned_text(&frame_control, "FRAME_CONTROL")[0].1 - 18.0;
+        let frame = |label: &str, y: i32, footer: bool| {
+            format!(
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{}" w:y="{y}" w:wrap="notBeside"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p>"#,
+                if footer { "text" } else { "page" }
+            )
+        };
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            // Relative footer anchors make the same chain move with its own
+            // bottom-origin preparation, rather than an impossible fixed band.
+            for (second_y, expected_offset) in [(70, 112.0), (78, 120.0), (90, 60.0), (160, 60.0)] {
+                for reverse in [false, true] {
+                    let a = frame("FRAME_A", if footer { 0 } else { 360 }, footer);
+                    let b = frame(
+                        "FRAME_B",
+                        (if footer { second_y - 18 } else { second_y }) * 20,
+                        footer,
+                    );
+                    let story = if reverse {
+                        format!("{b}{a}{flow}")
+                    } else {
+                        format!("{a}{b}{flow}")
+                    };
+                    let input = issue424_drawing_furniture_input(
+                        if footer { "" } else { &story },
+                        if footer { &story } else { "" },
+                    );
+                    let before = format!("{:?}", input);
+                    let output =
+                        crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                    let a = issue424_positioned_text(&output, "FRAME_A")[0].1 - frame_ascent;
+                    let b = issue424_positioned_text(&output, "FRAME_B")[0].1 - frame_ascent;
+                    let actual = issue424_positioned_text(&output, "FLOW_WORD")[0].1 - ascent;
+                    if (actual - a - expected_offset).abs() > 0.01 {
+                        failures.push(format!("footer={footer},reverse={reverse},B={second_y}: flow={actual},A={a},B={b},expected offset={expected_offset}"));
+                    }
+                    for (label, top) in [("A", a), ("B", b)] {
+                        if actual < top + 60.0 - 0.01 && actual + 12.0 > top + 0.01 {
+                            failures.push(format!("footer={footer},reverse={reverse},B={second_y}: final flow band{actual}..{} intersects {label}{top}..{}",actual+12.0,top+60.0));
+                        }
+                    }
+                    assert_eq!(format!("{:?}", input), before);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_decorated_clearance_preserves_actual_field_substitution_and_story_placement() {
+        for (rich, footer, bordered) in [(false, false, true), (true, true, false)] {
+            let anchor = if footer { "text" } else { "page" };
+            let first = if footer { 0 } else { 360 };
+            let later = if footer { 1040 } else { 1400 };
+            let frames = format!(
+                r#"<w:p><w:pPr><w:framePr w:w="100" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{anchor}" w:y="{first}" w:wrap="around"/></w:pPr><w:r><w:t>SIDE_FRAME</w:t></w:r></w:p><w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{anchor}" w:y="{later}" w:wrap="notBeside"/></w:pPr><w:r><w:t>LATER_FRAME</w:t></w:r></w:p>"#
+            );
+            let border = if bordered {
+                r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/></w:pBdr>"#
+            } else {
+                ""
+            };
+            let rtl = if rich { "<w:rtl/>" } else { "" };
+            let words = if rich {
+                "אבגד flowword ".repeat(100)
+            } else {
+                "flowword ".repeat(100)
+            };
+            let flow = format!(
+                r#"<w:p><w:pPr>{border}<w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="link"><w:r><w:rPr>{rtl}<w:highlight w:val="yellow"/></w:rPr><w:t>{words}</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#
+            );
+            let story = format!("{frames}{flow}");
+            let mut input = issue424_drawing_furniture_input(
+                if footer { "" } else { &story },
+                if footer { &story } else { "" },
+            );
+            input
+                .hyperlink_urls
+                .insert("link".into(), "https://example.com/clearance".into());
+            input.document.body.sect_pr.as_mut().unwrap().page_number =
+                Some(rdocx_oxml::document::CT_PageNumberType::new(27));
+            let before = format!("{input:?}");
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(output.layout.pages.len(), 1);
+            let mut fields = Vec::new();
+            let mut boxes = Vec::new();
+            let mut multilingual = 0;
+            oxml_layout::walk(
+                &output.layout.pages[0].elements,
+                &mut |element, transform| match element {
+                    PositionedElement::Text(run) => {
+                        if let Some(kind) = run.field_kind {
+                            fields.push((kind, run.text.clone(), run.field_source.unwrap()));
+                        }
+                    }
+                    PositionedElement::MultilingualText(run) => {
+                        multilingual += 1;
+                        if let Some(kind) = run.field_kind {
+                            fields.push((
+                                kind,
+                                run.logical_text.clone(),
+                                run.field_source.unwrap(),
+                            ));
+                        }
+                    }
+                    PositionedElement::FilledRect { rect, color }
+                        if *color == Color::from_hex("FFFF00") =>
+                    {
+                        boxes.push(transform.transform_rect_bbox(*rect))
+                    }
+                    PositionedElement::LinkAnnotation { rect, url } => {
+                        assert_eq!(url, "https://example.com/clearance");
+                        boxes.push(transform.transform_rect_bbox(*rect));
+                    }
+                    _ => {}
+                },
+            );
+            assert_eq!(fields.len(), 2);
+            assert_eq!(multilingual > 0, rich);
+            assert!(
+                fields
+                    .iter()
+                    .any(|(kind, text, _)| *kind == oxml_layout::FieldKind::Page && text == "27")
+            );
+            assert!(fields.iter().any(|(kind,text,_)|*kind==oxml_layout::FieldKind::NumPages && text=="1"));
+            for (_, _, source) in fields {
+                let path = output.source_node(source.node).unwrap();
+                assert_eq!(path.children, vec![0]);
+                assert_eq!(
+                    path.story,
+                    if footer {
+                        WordStory::Footer {
+                            relationship_id: "F".into(),
+                        }
+                    } else {
+                        WordStory::Header {
+                            relationship_id: "H".into(),
+                        }
+                    }
+                );
+                assert!(
+                    output
+                        .field_placements()
+                        .iter()
+                        .any(|placed| placed.source == source
+                            && placed.physical_page == 1
+                            && placed.displayed_page == 27
+                            && placed.section_index == 0)
+                );
+            }
+            // Auto-height frame text has the same natural baseline as the
+            // ordinary control. Its60pt container defines the blocked band.
+            let control = crate::layout_document_deterministic_with_provenance(
+                &issue424_drawing_furniture_input("<w:p><w:r><w:t>CONTROL</w:t></w:r></w:p>", ""),
+            )
+            .unwrap();
+            let ascent = issue424_positioned_text(&control, "CONTROL")[0].1 - 18.0;
+            let top = issue424_positioned_text(&output, "LATER_FRAME")[0].1 - ascent;
+            assert!(boxes.len() > 10);
+            assert!(
+                boxes.iter().all(|rect| rect.height <= 12.01
+                    && (rect.y + rect.height <= top + 0.01 || rect.y >= top + 60.0 - 0.01)),
+                "actual substituted document occupied bands clear frame: rich={rich},footer={footer}"
+            );
+            assert_eq!(format!("{input:?}"), before);
+        }
+        // Actual public Word output must apply omitted kern as explicit off.
+        let mut input = make_input_with_text("AVATAR To fi");
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        paragraph.runs[0].properties = Some(CT_RPr {
+            font_ascii: Some("Carlito".into()),
+            font_hansi: Some("Carlito".into()),
+            sz: Some(rdocx_oxml::units::HalfPoint(22)),
+            ..Default::default()
+        });
+        let output = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+        let mut reference = FontManager::new_deterministic().unwrap();
+        let face = reference
+            .resolve_font(Some("Carlito"), false, false)
+            .unwrap();
+        let mut seen = 0;
+        for element in compatibility_page_elements(&output.pages[0]) {
+            if let PositionedElement::Text(run) = element {
+                let expected = reference
+                    .shape_text_with_kerning(face, &run.text, 11.0, false)
+                    .unwrap();
+                assert_eq!(run.glyph_ids, expected.glyph_ids);
+                assert_eq!(
+                    run.advances, expected.advances,
+                    "Word omitted kern changed actual painted advances"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0);
+
+        // Threshold inheritance and direct overrides use the nominal size,
+        // including the inclusive tie before superscript display scaling.
+        for (inherited, direct, superscript, expected_kern) in [
+            (None, None, false, false),
+            (Some(22), None, false, true),
+            (Some(22), Some(23), false, false),
+            (None, Some(22), false, true),
+            (None, Some(22), true, true),
+        ] {
+            let mut threshold_input = make_input_with_text("AVATAR To");
+            let normal = threshold_input
+                .styles
+                .styles
+                .iter_mut()
+                .find(|style| style.style_id == "Normal")
+                .unwrap();
+            normal.rpr = Some(CT_RPr {
+                kern: inherited.map(rdocx_oxml::units::HalfPoint),
+                ..Default::default()
+            });
+            let BodyContent::Paragraph(paragraph) = &mut threshold_input.document.body.content[0]
+            else {
+                unreachable!()
+            };
+            paragraph.runs[0].properties = Some(CT_RPr {
+                font_ascii: Some("Carlito".into()),
+                font_hansi: Some("Carlito".into()),
+                sz: Some(rdocx_oxml::units::HalfPoint(22)),
+                kern: direct.map(rdocx_oxml::units::HalfPoint),
+                vert_align: superscript.then(|| "superscript".into()),
+                ..Default::default()
+            });
+            let source = threshold_input.document.to_xml().unwrap();
+            let rendered = Engine::new_deterministic()
+                .unwrap()
+                .layout(&threshold_input)
+                .unwrap();
+            let mut checked = 0;
+            oxml_layout::walk(&rendered.pages[0].elements, &mut |element, _| {
+                if let PositionedElement::Text(run) = element {
+                    let expected = reference
+                        .shape_text_with_kerning(face, &run.text, run.font_size, expected_kern)
+                        .unwrap();
+                    assert_eq!(run.glyph_ids, expected.glyph_ids);
+                    assert_eq!(
+                        run.advances, expected.advances,
+                        "inherit={inherited:?} direct={direct:?} superscript={superscript}"
+                    );
+                    assert_eq!(run.font_size < 11.0, superscript);
+                    checked += 1;
+                }
+            });
+            assert!(checked > 0);
+            assert_eq!(threshold_input.document.to_xml().unwrap(), source);
+        }
+
+        // Stored annotation chunks and ordinary fragments of the same actual
+        // owner share the existing first-result-fragment transaction.
+        for annotation in [0, 1] {
+            for ordinary_first in [None, Some(false), Some(true)] {
+                for instruction in [
+                    "STYLEREF Heading1",
+                    "PAGE",
+                    "NUMPAGES",
+                    "SECTION",
+                    "SECTIONPAGES",
+                ] {
+                    let mut input = make_input_with_text("");
+                    let heading = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>AVATAR To</w:t></w:r></w:p>"#).unwrap();
+                    let mut stored = CT_R::new("STORED LONG");
+                    let mut properties = CT_RPr {
+                        font_ascii: Some("Carlito".into()),
+                        font_hansi: Some("Carlito".into()),
+                        sz: Some(rdocx_oxml::units::HalfPoint(22)),
+                        ..Default::default()
+                    };
+                    if annotation == 0 {
+                        properties.emphasis_mark = Some(ST_Em::Dot);
+                    } else {
+                        properties.east_asian_layout = Some(Box::new(CT_EastAsianLayout {
+                            combine: Some(true),
+                            combine_brackets: Some("square".into()),
+                            ..Default::default()
+                        }));
+                    }
+                    stored.properties = Some(properties);
+                    let ordinary = CT_R::new("ordinary");
+                    let runs = match ordinary_first {
+                        None => vec![stored],
+                        Some(true) => vec![ordinary, stored],
+                        Some(false) => vec![stored, ordinary],
+                    };
+                    let field =
+                        Field::from_raw(instruction, rdocx_oxml::text::FieldForm::Complex, runs)
+                            .unwrap();
+                    let mut field_run = CT_R::new("");
+                    field_run.content = vec![RunContent::Field(field)];
+                    // The finite cached-child kinds enter through a real
+                    // stored outer owner, the same path used by imported XML.
+                    if !instruction.starts_with("STYLEREF") {
+                        let parent = Field::from_raw(
+                            "DATE",
+                            rdocx_oxml::text::FieldForm::Complex,
+                            vec![field_run],
+                        )
+                        .unwrap();
+                        field_run = CT_R::new("");
+                        field_run.content = vec![RunContent::Field(parent)];
+                    }
+                    let mut field_paragraph = CT_P::new();
+                    field_paragraph.runs.push(field_run);
+                    input.document.body.content = vec![
+                        BodyContent::Paragraph(Box::new(heading)),
+                        BodyContent::Paragraph(Box::new(field_paragraph)),
+                    ];
+                    let source = input.document.to_xml().unwrap();
+                    let mut engine = Engine::new_deterministic().unwrap();
+                    let cold = engine.layout_with_provenance(&input).unwrap();
+                    let warm = engine.layout_with_provenance(&input).unwrap();
+                    let fresh = Engine::new_deterministic()
+                        .unwrap()
+                        .layout_with_provenance(&input)
+                        .unwrap();
+                    assert_eq!(format!("{:?}", warm.0), format!("{:?}", fresh.0));
+                    assert_eq!(format!("{:?}", cold.0), format!("{:?}", fresh.0));
+                    let mut field_text = String::new();
+                    let mut decoration_text = String::new();
+                    for page in &cold.0.pages {
+                        oxml_layout::walk(&page.elements, &mut |element, _| {
+                            let (text, source) = match element {
+                                PositionedElement::Text(run) => (&run.text, run.field_source),
+                                PositionedElement::MultilingualText(run) => {
+                                    (&run.logical_text, run.field_source)
+                                }
+                                _ => return,
+                            };
+                            if source.is_some() {
+                                field_text.push_str(text);
+                            } else if text != "AVATAR " && text != "To" {
+                                decoration_text.push_str(text);
+                            }
+                        });
+                    }
+                    assert_eq!(
+                        field_text,
+                        if instruction.starts_with("STYLEREF") {
+                            "AVATAR To"
+                        } else {
+                            "1"
+                        },
+                        "annotation={annotation} first={ordinary_first:?} instruction={instruction}"
+                    );
+                    if ordinary_first != Some(true) {
+                        assert!(!decoration_text.contains("STORED"));
+                    }
+                    assert_eq!(input.document.to_xml().unwrap(), source);
+                }
+            }
+        }
+
+        // Real repeated headers enter both columns of one physical page and
+        // repeat again on a new page. Each physical copy replaces once while
+        // continuation fragments inside that copy are removed.
+        let header = r#"<w:tr><w:trPr><w:tblHeader/><w:trHeight w:val="480" w:hRule="atLeast"/></w:trPr><w:tc><w:p><w:fldSimple w:instr="DATE"><w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:em w:val="dot"/></w:rPr><w:t>STORED LONG</w:t></w:r></w:fldSimple></w:fldSimple></w:p></w:tc></w:tr>"#;
+        let rows = (0..18).map(|index| format!(r#"<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>row{index}</w:t></w:r></w:p></w:tc></w:tr>"#)).collect::<String>();
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr><w:tblW w:w="2500" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2500"/></w:tblGrid>{header}{rows}</w:tbl><w:sectPr><w:pgSz w:w="6000" w:h="4000"/><w:pgMar w:top="200" w:bottom="200" w:left="200" w:right="200"/><w:cols w:num="2" w:space="240"/></w:sectPr></w:body></w:document>"#
+        );
+        let mut repeated_input = make_input_with_text("");
+        repeated_input.document = rdocx_oxml::CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let repeated =
+            crate::layout_document_deterministic_with_provenance(&repeated_input).unwrap();
+        assert!(repeated.layout.pages.len() >= 2);
+        let mut copies = Vec::new();
+        for page in &repeated.layout.pages {
+            let mut values = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let PositionedElement::Text(run) = element
+                    && run.field_kind == Some(FieldKind::Page)
+                {
+                    assert_eq!(run.text, page.displayed_page_number.to_string());
+                    values.push(run.text.clone());
+                }
+            });
+            copies.push(values.len());
+        }
+        assert!(
+            copies[0] >= 2,
+            "both same-page column headers survive: {copies:?}"
+        );
+        assert!(copies[1] >= 1, "new-page header survives: {copies:?}");
+
+        let missing = SharedLayoutBlock::Owned {
+            semantics: None,
+            border_group_before: false,
+            block: Box::new(LayoutBlock::Paragraph(block::build_paragraph_block(
+                Vec::new(),
+                0.0,
+                0.0,
+                None,
+                None,
+                0.0,
+                0.0,
+                None,
+                false,
+                false,
+                false,
+                true,
+            ))),
+            reflow_direction: TextDirection::Auto,
+            body_index: None,
+        };
+        assert!(!missing.paint_owner_valid());
+
+        // Missing is distinct from an explicit neutral field policy, and
+        // identical public values retain opposite owner policies through moves.
+        let mut example = None;
+        oxml_layout::walk(&output.pages[0].elements, &mut |element, _| {
+            if let PositionedElement::Text(run) = element {
+                example.get_or_insert_with(|| run.clone());
+            }
+        });
+        let mut field = example.unwrap();
+        field.source = None;
+        field.field_kind = Some(FieldKind::Page);
+        let element = PositionedElement::Text(field);
+        assert!(
+            PaintedElements::from_parts(vec![element.clone()], PaintPolicies::default()).is_err()
+        );
+        let neutral = PaintedElements::neutral(vec![element.clone()]).unwrap();
+        assert_eq!(neutral.policies().required(&[0]).unwrap(), None);
+        let mut owners = PaintedElements::default();
+        for kern in [false, true] {
+            owners
+                .push_field(
+                    element.clone(),
+                    FieldPaintOwner::Word {
+                        kern,
+                        legacy: true,
+                        occurrence: None,
+                    },
+                )
+                .unwrap();
+        }
+        let before = format!("{:?}", owners);
+        assert!(owners.permute_at(&[], &[0, 1], &[0, 0]).is_err());
+        assert_eq!(format!("{:?}", owners), before);
+        owners.permute_at(&[], &[0, 1], &[1, 0]).unwrap();
+        assert_eq!(
+            owners.policies().required(&[0]).unwrap(),
+            Some((true, true))
+        );
+        assert_eq!(
+            owners.policies().required(&[1]).unwrap(),
+            Some((false, true))
+        );
+        let detached = owners.split_off(1).unwrap();
+        let detached = detached
+            .wrap(PositionedElement::MarkedContent {
+                structure: None,
+                children: Vec::new(),
+            })
+            .unwrap();
+        let mut nested = detached
+            .wrap(PositionedElement::Group(GroupElement {
+                transform: Transform::IDENTITY,
+                clip: None,
+                opacity: 1.0,
+                effects: Vec::new(),
+                children: Vec::new(),
+            }))
+            .unwrap();
+        assert_eq!(
+            nested.policies().required(&[0, 0, 0]).unwrap(),
+            Some((false, true))
+        );
+        let mut removed = nested
+            .splice_at(&[0, 0], 0..1, &mut PaintedElements::default())
+            .unwrap();
+        assert_eq!(
+            removed.policies().required(&[0]).unwrap(),
+            Some((false, true))
+        );
+        owners.append(&mut removed).unwrap();
+        assert_eq!(
+            owners.policies().required(&[1]).unwrap(),
+            Some((false, true))
+        );
+        assert!(nested.policies().validate(nested.elements()).is_ok());
+
+        // Legacy late values publish plain Text even in the presence of RTL
+        // neutrals/spaces. Genuine rich replacement remains publicly valid.
+        let late = field_replacement(&element, "123  ", Some((false, true)), None, &mut reference)
+            .unwrap();
+        assert!(matches!(late.elements(), [PositionedElement::Text(_)]));
+        assert_eq!(late.policies().required(&[0]).unwrap(), Some((false, true)));
+        let arabic_input = make_input_with_text("العربية");
+        let arabic = Engine::new_deterministic()
+            .unwrap()
+            .layout(&arabic_input)
+            .unwrap();
+        let mut rich_field = None;
+        for page in &arabic.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let PositionedElement::MultilingualText(run) = element {
+                    rich_field.get_or_insert_with(|| run.clone());
+                }
+            });
+        }
+        let mut rich_field = rich_field.unwrap();
+        let family = &arabic
+            .fonts
+            .iter()
+            .find(|font| font.id == rich_field.font_id)
+            .unwrap()
+            .family;
+        rich_field.font_id = reference
+            .resolve_font(Some(family), rich_field.bold, rich_field.italic)
+            .unwrap();
+        rich_field.field_kind = Some(FieldKind::Page);
+        rich_field.source = None;
+        rich_field.field_source = None;
+        let rich_element = PositionedElement::MultilingualText(rich_field);
+        let rich_late = field_replacement(
+            &rich_element,
+            "123  ",
+            Some((false, false)),
+            None,
+            &mut reference,
+        )
+        .unwrap();
+        let mut valid = 0;
+        oxml_layout::walk(rich_late.elements(), &mut |element, _| {
+            if let PositionedElement::MultilingualText(run) = element {
+                assert!(run.is_valid());
+                valid += 1;
+            }
+        });
+        assert!(valid > 0);
+        let before = format!("{rich_element:?}");
+        assert!(
+            field_replacement(
+                &rich_element,
+                "123  ",
+                Some((false, true)),
+                None,
+                &mut reference
+            )
+            .is_err()
+        );
+        assert_eq!(format!("{rich_element:?}"), before);
+    }
+
+    #[test]
+    fn issue424_positioned_furniture_wraps_actual_flow_before_measurement() {
+        let text = format!("FLOW_ANCHOR {}", "text around furniture ".repeat(100));
+        let flow = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let baseline = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&flow, ""),
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for (label, prefix, beside) in [
+            (
+                "frame around",
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="360" w:wrap="around"/></w:pPr><w:r><w:t>POSITIONED</w:t></w:r></w:p>"#,
+                true,
+            ),
+            (
+                "frame notBeside",
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="360" w:wrap="notBeside"/></w:pPr><w:r><w:t>POSITIONED</w:t></w:r></w:p>"#,
+                false,
+            ),
+            (
+                "floating table",
+                r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpY="360"/><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="1200" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>POSITIONED</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+                true,
+            ),
+        ] {
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&format!("{prefix}{flow}"), ""),
+            )
+            .unwrap();
+            let actual = issue424_positioned_text(&output, "FLOW_ANCHOR");
+            assert_eq!(actual.len(), 1);
+            let is_frame = label.starts_with("frame");
+            let valid = if is_frame {
+                actual == issue424_positioned_text(&baseline, "FLOW_ANCHOR")
+            } else if beside {
+                actual[0].0 >= 192.0
+            } else {
+                actual[0].1 >= 78.0
+            };
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let plain_body = baseline.body_layout_fragments(0).unwrap()[0].y;
+            if !valid
+                || if is_frame {
+                    (body - plain_body).abs() > 0.01
+                } else {
+                    body <= plain_body
+                }
+            {
+                failures.push(format!(
+                    "{label}: actual={actual:?}, body={body}, plain={plain_body}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_footer_wrapping_prepares_actual_bottom_anchored_flow() {
+        let flow = format!(
+            "<w:p><w:r><w:t>FOOTER_FLOW {}</w:t></w:r></w:p>",
+            "footer around positioned content ".repeat(35)
+        );
+        let plain = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input("", &flow),
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for (label, anchors) in [
+            (
+                "page",
+                r#"w:hAnchor="margin" w:vAnchor="page" w:y="0" w:h="16000""#,
+            ),
+            (
+                "paragraph",
+                r#"w:hAnchor="text" w:vAnchor="text" w:h="1200""#,
+            ),
+        ] {
+            let footer = format!(
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:hRule="exact" w:wrap="around" {anchors}/></w:pPr><w:r><w:t>FOOTER_FRAME</w:t></w:r></w:p>{flow}"#
+            );
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input("", &footer),
+            )
+            .unwrap();
+            let actual = issue424_positioned_text(&output, "FOOTER_FLOW");
+            let baseline = issue424_positioned_text(&plain, "FOOTER_FLOW");
+            let frame = issue424_positioned_text(&output, "FOOTER_FRAME");
+            if actual.len() != 1 || frame.len() != 1 || actual != baseline {
+                failures.push(format!(
+                    "{label}: flow={actual:?}, plain={baseline:?}, frame={frame:?}"
+                ));
+            }
+            if label == "paragraph" && actual.len() == 1 && frame.len() == 1 {
+                assert!(
+                    (actual[0].1 - frame[0].1).abs() < 0.01,
+                    "same actual anchor after bottom preparation: {actual:?} {frame:?}"
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_repeating_footer_state_refuses_without_mutating_source_or_cache() {
+        let flow = "<w:p><w:r><w:t>CYCLE_FLOW</w:t></w:r></w:p>";
+        let plain_input = issue424_drawing_furniture_input("", flow);
+        let plain = crate::layout_document_deterministic_with_provenance(&plain_input).unwrap();
+        let baseline = issue424_positioned_text(&plain, "CYCLE_FLOW")[0].1;
+        let y = ((baseline - 10.0) * 20.0).round() as i32;
+        let footer = format!(
+            r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="400" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="{y}" w:wrap="notBeside"/></w:pPr><w:r><w:t>CYCLE_FRAME</w:t></w:r></w:p>{flow}"#
+        );
+        let input = issue424_drawing_furniture_input("", &footer);
+        let before = format!("{:?}", input);
+        let mut engine = Engine::new_deterministic().unwrap();
+        let error = engine.layout(&input).unwrap_err().to_string();
+        assert!(
+            error.contains("section 1 page 1") && error.contains("repeats a non-stable state"),
+            "{error}"
+        );
+        assert_eq!(format!("{:?}", input), before);
+        let after = crate::layout_document_with_reusable_engine(&mut engine, &plain_input).unwrap();
+        assert_eq!(
+            format!("{:?}", after.layout.pages),
+            format!("{:?}", plain.layout.pages)
+        );
+    }
+
+    #[test]
+    fn issue424_border_group_and_multi_paragraph_cell_price_spacing_once() {
+        for table in [false, true] {
+            let build = |after: i32| {
+                let border = if table {
+                    ""
+                } else {
+                    r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:left w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/><w:right w:val="single" w:sz="8" w:space="2"/><w:between w:val="single" w:sz="8"/></w:pBdr>"#
+                };
+                let paragraphs = (0..3).map(|i|format!(r#"<w:p><w:pPr>{border}<w:spacing w:after="{after}"/></w:pPr><w:r><w:t>GROUP_{i}</w:t></w:r></w:p>"#)).collect::<String>();
+                let header = if table {
+                    format!(
+                        r#"<w:tbl><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc>{paragraphs}</w:tc></w:tr></w:tbl>"#
+                    )
+                } else {
+                    paragraphs
+                };
+                crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+                    &header, "",
+                ))
+                .unwrap()
+            };
+            let plain = build(0);
+            let spaced = build(160);
+            let span = |output: &crate::WordLayoutResult| {
+                issue424_positioned_text(output, "GROUP_2")[0].1
+                    - issue424_positioned_text(output, "GROUP_0")[0].1
+            };
+            assert!(
+                ((span(&spaced) - span(&plain)) - 16.0).abs() < 0.01,
+                "two interior gaps priced once, table={table}"
+            );
+            let body_delta = spaced.body_layout_fragments(0).unwrap()[0].y
+                - plain.body_layout_fragments(0).unwrap()[0].y;
+            assert!(
+                (body_delta - 24.0).abs() < 0.01,
+                "three after spaces priced once, table={table}, delta={body_delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_overflow_notes_keep_selected_furniture_and_cleared_band() {
+        let furniture = (0..5).map(|index|format!(r#"<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:t>FURNITURE_{index}</w:t></w:r></w:p>"#)).collect::<String>();
+        let mut failures = Vec::new();
+        let mut ordinary_continuation = None;
+        for (endnote, direction, alignment) in [
+            (false, None, None),
+            (true, None, None),
+            (true, None, Some(rdocx_oxml::table::ST_VerticalJc::Center)),
+            (
+                true,
+                Some("tbRl"),
+                Some(rdocx_oxml::table::ST_VerticalJc::Bottom),
+            ),
+            (
+                true,
+                Some("btLr"),
+                Some(rdocx_oxml::table::ST_VerticalJc::Center),
+            ),
+        ] {
+            let mut noted = make_noted_document(3, &[0], 130, "OVERFLOW_NOTE", true);
+            let normal = noted
+                .footnotes
+                .as_mut()
+                .unwrap()
+                .footnotes
+                .iter_mut()
+                .find(|note| note.id == 1)
+                .unwrap();
+            for (ordinal, paragraph) in normal.paragraphs.iter_mut().enumerate() {
+                *paragraph.runs.last_mut().unwrap() =
+                    CT_R::new(&format!("OVERFLOW_NOTE_{ordinal:03}"));
+            }
+            let footer = format!(
+                r#"{}<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#,
+                furniture.replace("FURNITURE", "FOOTER")
+            );
+            let mut input =
+                issue424_furniture_input(&furniture.replace("FURNITURE", "HEADER"), &footer);
+            input.document.body.sect_pr.as_mut().unwrap().page_number =
+                Some(rdocx_oxml::document::CT_PageNumberType::new(27));
+            input.document.body.content = noted.document.body.content;
+            if endnote {
+                for item in &mut input.document.body.content {
+                    if let BodyContent::Paragraph(p) = item {
+                        for run in &mut p.runs {
+                            for content in &mut run.content {
+                                if let RunContent::FootnoteRef { id, custom_mark } = content {
+                                    *content = RunContent::EndnoteRef {
+                                        id: *id,
+                                        custom_mark: custom_mark.clone(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                input.endnotes = noted.footnotes;
+            } else {
+                input.footnotes = noted.footnotes;
+            }
+            input.document.body.sect_pr.as_mut().unwrap().text_direction =
+                direction.map(str::to_owned);
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .vertical_alignment = alignment;
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let mut note_count = 0;
+            let mut first_continuation = None;
+            for page in &output.layout.pages {
+                let mut headers = Vec::new();
+                let mut footers = Vec::new();
+                let mut notes = Vec::new();
+                oxml_layout::walk(&page.elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element {
+                        let point = transform.apply(run.origin);
+                        if run.text.contains("HEADER_4") {
+                            headers.push(point.y);
+                        }
+                        if run.text.contains("FOOTER_0") {
+                            footers.push(point.y);
+                        }
+                        if run.text.contains("OVERFLOW_NOTE") {
+                            let first_note_on_page = notes.is_empty();
+                            notes.push(point.y);
+                            note_count += 1;
+                            // Starting a note on a new page selects a different
+                            // special record from carrying an existing note.
+                            if endnote
+                                && page.page_number > 1
+                                && first_note_on_page
+                                && run.text != "OVERFLOW_NOTE_000"
+                                && first_continuation.is_none()
+                            {
+                                first_continuation = Some((point.x, point.y));
+                            }
+                            if (transform.a - 1.0).abs() > 0.01
+                                || transform.b.abs() > 0.01
+                                || transform.c.abs() > 0.01
+                                || (transform.d - 1.0).abs() > 0.01
+                            {
+                                failures.push(format!("endnote={endnote}, direction={direction:?}, alignment={alignment:?}: note rotated with body: {transform:?}"));
+                            }
+                        }
+                    }
+                });
+                let mut page_fields = Vec::new();
+                oxml_layout::walk(&page.elements, &mut |element, _| {
+                    if let PositionedElement::Text(run) = element
+                        && (matches!(
+                            run.field_kind,
+                            Some(oxml_layout::FieldKind::Page | oxml_layout::FieldKind::NumPages)
+                        ))
+                    {
+                        page_fields.push((run.field_kind, run.text.clone(), run.field_source));
+                    }
+                });
+                assert!(
+                    page_fields.iter().any(|(kind, text, source)| *kind
+                        == Some(oxml_layout::FieldKind::Page)
+                        && *text == page.displayed_page_number.to_string()
+                        && source.is_some()),
+                    "actual PAGE with source: {page_fields:?}"
+                );
+                assert!(
+                    page_fields.iter().any(|(kind, text, source)| *kind
+                        == Some(oxml_layout::FieldKind::NumPages)
+                        && *text == output.layout.pages.len().to_string()
+                        && source.is_some()),
+                    "actual NUMPAGES with source: {page_fields:?}"
+                );
+                assert!(
+                    output
+                        .field_placements()
+                        .iter()
+                        .any(|placement| placement.physical_page == page.page_number
+                            && placement.displayed_page == page.displayed_page_number
+                            && placement.section_index == 0)
+                );
+                if notes.is_empty() {
+                    continue;
+                }
+                if headers.len() != 1 || footers.len() != 1 {
+                    failures.push(format!("endnote={endnote}, page{} missing selected furniture: header={headers:?}, footer={footers:?}",page.page_number));
+                    continue;
+                }
+                if notes
+                    .iter()
+                    .any(|y| *y <= headers[0] || *y >= footers[0] - 2.0)
+                {
+                    failures.push(format!("endnote={endnote}, page{} overlaps furniture: header={headers:?}, footer={footers:?}, notes={notes:?}",page.page_number));
+                }
+            }
+            assert_eq!(
+                note_count, 130,
+                "every note paragraph once, endnote={endnote}"
+            );
+            assert!(output.layout.pages.len() > 2);
+            if endnote {
+                if direction.is_none() && alignment.is_none() {
+                    ordinary_continuation = first_continuation;
+                } else {
+                    let expected = ordinary_continuation.expect("ordinary continuation control");
+                    let actual = first_continuation.expect("actual continuation");
+                    if (actual.0 - expected.0).abs() > 0.01 || (actual.1 - expected.1).abs() > 0.01
+                    {
+                        failures.push(format!("endnote top-flow direction={direction:?}, alignment={alignment:?}: actual={actual:?}, expected={expected:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_columns_vertical_alignment_and_line_numbers_use_effective_band() {
+        use rdocx_oxml::document::{CT_Columns, CT_LineNumber, ST_LineNumberRestart};
+        use rdocx_oxml::table::ST_VerticalJc;
+        let furniture = (0..5).map(|i|format!(r#"<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:t>FURN_{i}</w:t></w:r></w:p>"#)).collect::<String>();
+        let input_for = |columns: bool, center: bool| {
+            let mut input = issue424_furniture_input(
+                &furniture.replace("FURN", "HEAD"),
+                &furniture.replace("FURN", "FOOT"),
+            );
+            input.document.body.content = (0..if columns { 100 } else { 1 })
+                .map(|i| {
+                    let mut p = CT_P::new();
+                    p.add_run(&format!("BODY_{i}"));
+                    BodyContent::Paragraph(Box::new(p))
+                })
+                .collect();
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            if columns {
+                section.columns = Some(CT_Columns {
+                    num: Some(2),
+                    space: Some(rdocx_oxml::Twips(720)),
+                    equal_width: Some(true),
+                    sep: Some(true),
+                    columns: Vec::new(),
+                });
+            }
+            if center {
+                section.vertical_alignment = Some(ST_VerticalJc::Center);
+            }
+            section.line_numbers = Some(Box::new(CT_LineNumber {
+                count_by: Some(1),
+                start: Some(1),
+                restart: Some(ST_LineNumberRestart::NewPage),
+                ..Default::default()
+            }));
+            input
+        };
+        let top =
+            crate::layout_document_deterministic_with_provenance(&input_for(false, false)).unwrap();
+        let centered =
+            crate::layout_document_deterministic_with_provenance(&input_for(false, true)).unwrap();
+        let top_fragment = &top.body_layout_fragments(0).unwrap()[0];
+        let center_fragment = &centered.body_layout_fragments(0).unwrap()[0];
+        let ascent = issue424_positioned_text(&top, "BODY_0")[0].1 - top_fragment.y;
+        let footer_top = issue424_positioned_text(&top, "FOOT_0")[0].1 - ascent;
+        let expected = top_fragment.y + (footer_top - top_fragment.y - top_fragment.height) / 2.0;
+        let painted = issue424_positioned_text(&centered, "BODY_0")[0].1 - ascent;
+        assert!(
+            (painted - expected).abs() < 0.01,
+            "painted center actual={painted}, expected={expected}"
+        );
+        assert!(
+            (center_fragment.y - painted).abs() < 0.01,
+            "fragment center actual={}, painted={painted}, expected={expected}",
+            center_fragment.y
+        );
+        assert_eq!(
+            issue424_positioned_text(&top, "HEAD_0"),
+            issue424_positioned_text(&centered, "HEAD_0")
+        );
+        assert_eq!(
+            issue424_positioned_text(&top, "FOOT_0"),
+            issue424_positioned_text(&centered, "FOOT_0")
+        );
+        // Source-equivalent body-band-bottom native control: five exact 12 pt
+        // furniture lines at 18 pt leave the band 78..714 and a 12 pt body at 702.
+        // Word's BODY_MARK bbox top is 701.6088 pt. Bbox and line band remain
+        // distinct observations, rather than fitting either to LibreOffice.
+        let exact_furniture = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FURNITURE</w:t></w:r></w:p>"#).collect::<String>();
+        let mut bottom_input = issue424_furniture_input(&exact_furniture, &exact_furniture);
+        bottom_input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+            CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>BODY_MARK</w:t></w:r></w:p>"#).unwrap(),
+        ))];
+        bottom_input
+            .document
+            .body
+            .sect_pr
+            .as_mut()
+            .unwrap()
+            .vertical_alignment = Some(ST_VerticalJc::Bottom);
+        let bottom = crate::layout_document_deterministic_with_provenance(&bottom_input).unwrap();
+        let body = bottom.body_layout_fragments(0).unwrap()[0];
+        assert_eq!(bottom.layout.pages.len(), 1);
+        assert!((body.x - 72.0).abs() < 0.01);
+        assert!((body.y - 702.0).abs() < 0.01);
+        assert!((body.height - 12.0).abs() < 0.01);
+        let columns =
+            crate::layout_document_deterministic_with_provenance(&input_for(true, false)).unwrap();
+        let mut right = false;
+        for index in 0..100 {
+            for fragment in columns.body_layout_fragments(index).unwrap() {
+                assert!(
+                    fragment.y >= top_fragment.y - 0.01
+                        && fragment.y + fragment.height <= footer_top + 0.01,
+                    "column fragment outside effective band: {fragment:?}"
+                );
+                right |= fragment.x > 300.0;
+            }
+        }
+        assert!(right, "actual second column must be placed");
+        for page in &columns.layout.pages {
+            let mut body = Vec::new();
+            let mut numbers = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element {
+                    let y = transform.apply(run.origin).y;
+                    if run.text.starts_with("BODY_") {
+                        body.push(y);
+                    }
+                    if run.source.is_none() && run.text.parse::<u64>().is_ok() {
+                        numbers.push(y);
+                    }
+                }
+            });
+            assert!(!numbers.is_empty());
+            assert!(
+                numbers
+                    .iter()
+                    .all(|y| body.iter().any(|other| (y - other).abs() < 0.01)),
+                "line numbers follow actual body baselines"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_native_tb_rl_exact_body_uses_written_band_and_separate_baseline_policy() {
+        let furniture = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FURNITURE</w:t></w:r></w:p>"#).collect::<String>();
+        let mut failures = Vec::new();
+        for alignment in ["", "auto", "center", "baseline"] {
+            for (line_height, font_size) in [(12, 11), (24, 11), (12, 16)] {
+                for vertical in [
+                    rdocx_oxml::table::ST_VerticalJc::Top,
+                    rdocx_oxml::table::ST_VerticalJc::Center,
+                    rdocx_oxml::table::ST_VerticalJc::Bottom,
+                ] {
+                    for stories in [0, 1, 2] {
+                        let mut input = issue424_furniture_input(
+                            if stories > 0 { &furniture } else { "" },
+                            if stories == 2 { &furniture } else { "" },
+                        );
+                        let section = input.document.body.sect_pr.as_mut().unwrap();
+                        section.text_direction = Some("tbRl".into());
+                        section.vertical_alignment = Some(vertical);
+                        let xml = format!(
+                            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/><w:textAlignment w:val="{alignment}"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="{}"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#,
+                            line_height * 20,
+                            font_size * 2
+                        );
+                        let xml = if alignment.is_empty() {
+                            xml.replace(r#"<w:textAlignment w:val=""/>"#, "")
+                        } else {
+                            xml
+                        };
+                        input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+                            CT_P::from_xml_fragment(xml.as_bytes()).unwrap(),
+                        ))];
+                        let before = format!("{input:?}");
+                        let mut engine = Engine::new_deterministic().unwrap();
+                        let output =
+                            crate::layout_document_with_reusable_engine(&mut engine, &input)
+                                .unwrap();
+                        let font = engine
+                            .font_manager
+                            .resolve_font_for_metrics(Some("Arial"), false, false)
+                            .unwrap();
+                        let metrics = engine.font_manager.metrics(font, font_size as f64).unwrap();
+                        let baseline = 0.8 * line_height as f64
+                            + if alignment == "baseline" {
+                                0.0
+                            } else {
+                                (metrics.ascent - metrics.descent) / 2.0
+                            };
+                        let fragment = output.body_layout_fragments(0).unwrap()[0];
+                        let position = issue424_positioned_text(&output, "BODY_MARK")[0];
+                        let expected_x = fragment.x + fragment.width - baseline;
+                        // Independently retained Word16.114 paired control offsets.
+                        let native = 0.8 * line_height as f64
+                            + if alignment == "baseline" {
+                                0.0
+                            } else if font_size == 16 {
+                                5.76
+                            } else {
+                                3.84
+                            };
+                        assert!((baseline - native).abs() < 0.5);
+                        if (position.0 - expected_x).abs() > 0.01
+                            || (position.1 - 36.0).abs() > 0.01
+                            || output.layout.pages.len() != 1
+                        {
+                            failures.push(format!("{alignment}/{line_height}/{font_size}/{vertical:?}/{stories}: {position:?}, fragment={fragment:?}, expected_x={expected_x}"));
+                        }
+                        assert_eq!(format!("{input:?}"), before);
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures: {failures:?}",
+            failures.len()
+        );
+    }
+
+    #[test]
+    fn issue424_rotated_line_numbers_follow_the_actual_body_baseline_with_border_padding() {
+        use rdocx_oxml::document::CT_LineNumber;
+
+        for font_size in [11, 16] {
+            for bordered in [false, true] {
+                let mut input = issue424_furniture_input("", "");
+                let section = input.document.body.sect_pr.as_mut().unwrap();
+                section.text_direction = Some("tbRl".into());
+                section.line_numbers = Some(Box::new(CT_LineNumber {
+                    count_by: Some(1),
+                    start: Some(1),
+                    ..Default::default()
+                }));
+                let border = if bordered {
+                    r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="3"/></w:pBdr>"#
+                } else {
+                    ""
+                };
+                let xml = format!(
+                    r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr>{border}<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="{}"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#,
+                    font_size * 2
+                );
+                input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+                    CT_P::from_xml_fragment(xml.as_bytes()).unwrap(),
+                ))];
+                let mut engine = Engine::new_deterministic().unwrap();
+                let output = engine.layout(&input).unwrap();
+                let mut body = None;
+                let mut number = None;
+                oxml_layout::walk(&output.pages[0].elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element {
+                        if run.text == "BODY_MARK" {
+                            body = Some(transform.apply(run.origin).x);
+                        } else if run.text == "2" && run.source.is_none() {
+                            number = Some(transform.apply(run.origin).x);
+                        }
+                    }
+                });
+                assert!(
+                    (body.expect("body glyph") - number.expect("line number")).abs() < 0.001,
+                    "font={font_size}, bordered={bordered}: body={body:?}, number={number:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue424_tb_rl_policy_keeps_equal_width_orientation_cache_and_inherited_alignment_current() {
+        let header = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>HEADER</w:t></w:r></w:p>"#).collect::<String>();
+        let mut input = issue424_furniture_input(&header, "");
+        input.document.body.sect_pr.as_mut().unwrap().page_height = Some(rdocx_oxml::Twips(10800));
+        let paragraph = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#).unwrap();
+        input.document.body.content = vec![BodyContent::Paragraph(Box::new(paragraph))];
+        let mut probe = CT_P::new();
+        probe.add_run("CACHE_PROBE_INITIAL");
+        input.document.body.add_paragraph(probe);
+        let mut engine = Engine::new_deterministic().unwrap();
+        let mut raw = None;
+        let mut observed = HashMap::new();
+        let mut reused = 0;
+        for (iteration, direction) in ["lrTb", "tbRl", "tbRlV", "tbRl", "lrTb"]
+            .into_iter()
+            .enumerate()
+        {
+            input.document.body.sect_pr.as_mut().unwrap().text_direction = Some(direction.into());
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            assert_eq!(warm.body_layout_fragments(0), cold.body_layout_fragments(0));
+            let cached = engine
+                .paragraph_cache
+                .iter()
+                .find(|entry| entry.key.paragraph.text() == "BODY_MARK")
+                .unwrap();
+            assert_eq!(cached.key.content_width_bits, 468.0_f64.to_bits());
+            let lines = format!("{:?}", cached.block.lines);
+            if let Some(raw) = &raw {
+                assert_eq!(
+                    &lines, raw,
+                    "orientation must preserve raw cached line metrics"
+                );
+            } else {
+                raw = Some(lines);
+            }
+            observed.insert(direction, issue424_positioned_text(&warm, "BODY_MARK")[0]);
+            // Section changes conservatively invalidate the existing context.
+            // Edit only a neighboring paragraph within each context to prove
+            // actual reuse of the unchanged, equal-measure body block.
+            let before_hits = engine.paragraph_cache_counts().0;
+            set_body_paragraph_text(&mut input, 1, &format!("CACHE_PROBE_{iteration}"));
+            let reused_warm =
+                crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let reused_cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", reused_warm.layout.pages),
+                format!("{:?}", reused_cold.layout.pages)
+            );
+            let new_hits = engine.paragraph_cache_counts().0 - before_hits;
+            assert!(new_hits > 0, "unchanged paragraph must actually reuse");
+            reused += new_hits;
+        }
+        assert!(
+            reused >= 5,
+            "equal measure must exercise actual paragraph reuse"
+        );
+        assert!((observed["tbRl"].1 - 36.0).abs() < 0.01);
+        assert!(
+            (observed["tbRlV"].1 - 78.0).abs() < 0.01,
+            "same angle is not exact source eligibility"
+        );
+        assert!((observed["tbRl"].0 - observed["tbRlV"].0).abs() > 1.0);
+
+        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".into());
+        let mut inherited = Vec::new();
+        for alignment in ["baseline", "center"] {
+            let defaults = input
+                .styles
+                .doc_defaults
+                .as_mut()
+                .unwrap()
+                .ppr
+                .get_or_insert_with(Default::default);
+            defaults.text_alignment = Some(alignment.into());
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            inherited.push(issue424_positioned_text(&warm, "BODY_MARK")[0].0);
+        }
+        assert!(
+            (inherited[0] - inherited[1] - 3.8134765625).abs() < 0.01,
+            "inherited auto/center remains distinct from baseline: {inherited:?}"
+        );
+    }
+
+    #[test]
+    fn issue424_aligned_rotated_fragments_follow_painted_displacement_and_live_edits() {
+        for direction in ["tbRl", "btLr"] {
+            let mut input = issue424_furniture_input(
+                "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>",
+                "<w:p><w:r><w:t>FOOTER</w:t></w:r></w:p>",
+            );
+            input.document.body.sect_pr.as_mut().unwrap().text_direction = Some(direction.into());
+            let top = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .vertical_alignment = Some(rdocx_oxml::table::ST_VerticalJc::Center);
+            let mut engine = Engine::new_deterministic().unwrap();
+            let center = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let a = &top.body_layout_fragments(0).unwrap()[0];
+            let b = &center.body_layout_fragments(0).unwrap()[0];
+            let ga = issue424_positioned_text(&top, "BODY_MARK")[0];
+            let gb = issue424_positioned_text(&center, "BODY_MARK")[0];
+            assert!(
+                ((b.x - a.x) - (gb.0 - ga.0)).abs() < 0.01
+                    && ((b.y - a.y) - (gb.1 - ga.1)).abs() < 0.01,
+                "rotated displacement must be applied once: {direction}, {a:?}, {b:?}, {ga:?}, {gb:?}"
+            );
+            assert!((b.x - a.x).abs() > 100.0, "must exercise rotated movement");
+            let BodyContent::Paragraph(p) = &mut input.document.body.content[0] else {
+                panic!("paragraph")
+            };
+            p.runs = vec![CT_R::new("BODY_MARK changed same-owner line")];
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            assert_eq!(warm.body_layout_fragments(0), cold.body_layout_fragments(0));
+        }
+    }
+
+    #[test]
+    fn issue424_page_and_text_borders_keep_written_geometry_when_body_clears() {
+        use rdocx_oxml::document::{CT_PageBorders, ST_PageBorderOffset};
+        let header = (0..8)
+            .map(|_| "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>")
+            .collect::<String>();
+        for offset in [ST_PageBorderOffset::Page, ST_PageBorderOffset::Text] {
+            let mut edges = Vec::new();
+            let mut bodies = Vec::new();
+            for tall in [false, true] {
+                let mut input = issue424_furniture_input(if tall { &header } else { "" }, "");
+                let mut edge =
+                    rdocx_oxml::borders::CT_BorderEdge::new(rdocx_oxml::shared::ST_Border::Single);
+                edge.color = Some("246810".into());
+                edge.sz = Some(8);
+                edge.space = Some(3);
+                input.document.body.sect_pr.as_mut().unwrap().page_borders =
+                    Some(Box::new(CT_PageBorders {
+                        offset_from: Some(offset),
+                        top: Some(edge.clone()),
+                        bottom: Some(edge),
+                        ..Default::default()
+                    }));
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let mut positions = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::Line {
+                            start, end, color, ..
+                        } = element
+                            && (*color == Color::from_hex("246810"))
+                        {
+                            positions.push((transform.apply(*start), transform.apply(*end)));
+                        }
+                    },
+                );
+                assert_eq!(positions.len(), 2);
+                edges.push(positions);
+                bodies.push(output.body_layout_fragments(0).unwrap()[0].y);
+            }
+            assert_eq!(
+                edges[0], edges[1],
+                "written border basis is independent of clearance"
+            );
+            assert!(bodies[1] > bodies[0]);
+        }
+    }
+
+    #[test]
+    fn issue424_body_and_nested_cell_anchors_keep_written_margin_reference() {
+        let namespaces = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        for cell in [false, true] {
+            let mut observed = Vec::new();
+            for tall in [false, true] {
+                let paragraph = format!(
+                    "<w:p><w:r><w:t>BODY_MARK</w:t></w:r>{}{}</w:p>",
+                    issue424_shape_anchor("margin", 63500, "112233", 1),
+                    issue424_shape_anchor("paragraph", 0, "445566", 0)
+                );
+                let body = if cell {
+                    format!(
+                        "<w:tbl><w:tblGrid><w:gridCol w:w=\"9360\"/></w:tblGrid><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>"
+                    )
+                } else {
+                    paragraph
+                };
+                let mut input = make_input_with_text("");
+                with_tall_header(&mut input, rdocx_oxml::Twips(720), if tall { 8 } else { 0 });
+                input.document.body.content = CT_Document::from_xml(
+                    format!("<w:document {namespaces}><w:body>{body}</w:body></w:document>")
+                        .as_bytes(),
+                )
+                .unwrap()
+                .body
+                .content;
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let text = issue424_positioned_text(&output, "BODY_MARK");
+                assert_eq!(text.len(), 1);
+                let mut anchors = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::FilledRect { rect, color } = element
+                            && (*color == Color::from_hex("112233")
+                                || *color == Color::from_hex("445566"))
+                        {
+                            anchors.push((
+                                *color,
+                                transform
+                                    .apply(Point {
+                                        x: rect.x,
+                                        y: rect.y,
+                                    })
+                                    .y,
+                            ));
+                        }
+                    },
+                );
+                assert_eq!(anchors.len(), 2);
+                let margin = anchors
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("112233"))
+                    .unwrap()
+                    .1;
+                let paragraph = anchors
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("445566"))
+                    .unwrap()
+                    .1;
+                assert_eq!(margin, 41.0, "cell={cell}, tall={tall}");
+                observed.push((text[0].1, paragraph));
+            }
+            assert!(observed[1].0 > observed[0].0);
+            assert!(
+                ((observed[1].1 - observed[0].1) - (observed[1].0 - observed[0].0)).abs() < 0.01,
+                "paragraph anchors track actual owner, cell={cell}: {observed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue426_nested_control_orphan_and_revision_views_keep_actual_table_facts() {
+        let nested = |text: &str| {
+            format!(
+                "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+            )
+        };
+        let body = format!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>ROOT</w:t></w:r></w:p></w:tc><w:tc>{}</w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>{}<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>OMITTED_CONTROL</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc><w:tc><w:p><w:r><w:t>NEIGHBOR</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="9" w:author="A"/></w:trPr><w:tc><w:p><w:r><w:t>DELETED_ROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t>ORPHAN</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            nested("VISIBLE_NESTED"),
+            nested("OMITTED_NESTED")
+        );
+        let mut failures = Vec::new();
+        for view in [RevisionView::Accepted, RevisionView::Tracked] {
+            let mut input = make_input_with_text("");
+            input.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).as_bytes()).unwrap();
+            input.revision_view = view;
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            for text in [
+                "ROOT",
+                "VISIBLE_NESTED",
+                "NEIGHBOR",
+                "OMITTED_NESTED",
+                "OMITTED_CONTROL",
+                "ORPHAN",
+                "DELETED_ROW",
+            ] {
+                let omitted = matches!(text, "OMITTED_NESTED" | "OMITTED_CONTROL" | "ORPHAN")
+                    || text == "DELETED_ROW" && view == RevisionView::Accepted;
+                match output
+                    .paragraph_navigation()
+                    .find(|(_, _, _, value, ..)| *value == text)
+                {
+                    Some((node, _, level, _, style, _, page)) => {
+                        assert_eq!(output.paragraph_omitted_by_table(node), Some(omitted));
+                        if omitted {
+                            assert_eq!(
+                                (level, style, page),
+                                (None, None, None),
+                                "{view:?}, {text}"
+                            );
+                        } else {
+                            assert!(page.is_some(), "{view:?}, {text}");
+                        }
+                    }
+                    None => failures.push(format!("{view:?}, {text}: missing actual navigation")),
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue426_cached_omission_and_ordinary_sources_match_fresh_physical_paths() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t>ORPHAN_CACHE</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>VISIBLE_CACHE</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml).unwrap();
+        let mut engine = Engine::new_deterministic().unwrap();
+        crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+        assert!(
+            engine.table_cache_counts().0 > 0,
+            "must exercise actual table cache hit"
+        );
+        for output in [&warm, &cold] {
+            for (node, _, _, text, ..) in output.paragraph_navigation() {
+                assert_eq!(
+                    output.paragraph_omitted_by_table(node),
+                    Some(text == "ORPHAN_CACHE")
+                );
+            }
+            assert_eq!(
+                output.paragraph_omitted_by_table(SourceNodeId::new(u32::MAX).unwrap()),
+                None
+            );
+            assert!(
+                output
+                    .paragraph_navigation()
+                    .any(|(_, _, _, text, _, _, page)| text == "ORPHAN_CACHE" && page.is_none())
+            );
+            assert!(
+                output
+                    .paragraph_navigation()
+                    .any(|(_, _, _, text, _, _, page)| text == "VISIBLE_CACHE" && page.is_some())
+            );
+        }
+        assert_eq!(
+            format!("{:?}", warm.layout.pages),
+            format!("{:?}", cold.layout.pages)
+        );
+        assert_eq!(
+            format!("{:?}", warm.paragraph_navigation().collect::<Vec<_>>()),
+            format!("{:?}", cold.paragraph_navigation().collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn issue426_table_omission_keeps_navigation_source_stamp_refusal() {
+        let mut input = make_input_with_text("CURRENT");
+        input
+            .story_part_names
+            .insert(WordStory::Document, "/word/document.xml".into());
+        let mut snapshot = evaluate_sequence_fields(&input).unwrap();
+        snapshot
+            .set_navigation_exclusions(&input, Vec::new())
+            .unwrap();
+        input.sequence_snapshot = Some(Arc::new(snapshot));
+        assert!(crate::layout_document_deterministic_with_provenance(&input).is_ok());
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("paragraph");
+        };
+        paragraph.runs[0] = CT_R::new("CHANGED");
+        let before = input.document.clone();
+        let error = crate::layout_document_deterministic_with_provenance(&input)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("stale navigation exclusion source stamp"),
+            "{error}"
+        );
+        assert_eq!(input.document, before);
+    }
+
+    fn issue423_input(numbering: &str, instruction: &str, rich: bool) -> LayoutInput {
+        let mut input = make_input_with_text("");
+        let rpr = if rich {
+            r#"<w:rPr><w:rtl/><w:lang w:bidi="ar-SA"/></w:rPr>"#
+        } else {
+            ""
+        };
+        let instruction = instruction.replace('&', "&amp;").replace('"', "&quot;");
+        input.document = rdocx_oxml::document::CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="{instruction}"><w:r>{rpr}<w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr>{numbering}</w:sectPr></w:body></w:document>"#
+        ).as_bytes()).unwrap();
+        if rich {
+            let xml = String::from_utf8(input.document.to_xml().unwrap())
+                .unwrap()
+                .replace("<w:p>", "<w:p><w:pPr><w:bidi/></w:pPr>");
+            input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        }
+        assert!(
+            input
+                .document
+                .body
+                .sect_pr
+                .as_ref()
+                .unwrap()
+                .page_number
+                .is_some()
+        );
+        input
+    }
+
+    fn issue423_layout_text(layout: &LayoutResult) -> String {
+        let mut text = String::new();
+        for page in &layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| match element {
+                PositionedElement::Text(run) => text.push_str(&run.text),
+                PositionedElement::MultilingualText(run) => text.push_str(&run.logical_text),
+                _ => {}
+            });
+        }
+        text
+    }
+
+    #[test]
+    fn issue423_standalone_layout_uses_actual_section_and_instruction_in_plain_and_bidi_paragraphs()
+    {
+        let mut failures = Vec::new();
+        for rich in [false, true] {
+            for (fmt, start, instruction, expected) in [
+                ("lowerRoman", 7, "PAGE", "vii"),
+                ("upperLetter", 28, "PAGE", "BB"),
+                ("lowerRoman", 7, r"PAGE \* UPPER", "VII"),
+                ("lowerRoman", 7, r"PAGE \* Arabic", "7"),
+                ("future", 7, r"PAGE \* Arabic", "STORED"),
+                ("decimal", 7, r"PAGE \future", "STORED"),
+            ] {
+                let input = issue423_input(
+                    &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="{start}"/>"#),
+                    instruction,
+                    rich,
+                );
+                let before = input.document.clone();
+                let layout = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+                let actual = issue423_layout_text(&layout);
+                if actual != expected {
+                    failures.push(format!(
+                        "rich={rich} {fmt}/{instruction}: {actual:?} != {expected:?}"
+                    ));
+                }
+                assert_eq!(input.document, before);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_same_owner_format_and_switch_edits_invalidate_substitution_facts() {
+        let mut warm = Engine::new_deterministic().unwrap();
+        let mut input = issue423_input(
+            r#"<w:pgNumType w:fmt="lowerRoman" w:start="7"/>"#,
+            "PAGE",
+            false,
+        );
+        let mut failures = Vec::new();
+        for (fmt, instruction, expected) in [
+            ("lowerRoman", "PAGE", "vii"),
+            ("upperLetter", "PAGE", "G"),
+            ("upperLetter", r"PAGE \* LOWER", "g"),
+            ("decimal", "PAGE", "7"),
+        ] {
+            let replacement = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                instruction,
+                false,
+            );
+            input.document.body.sect_pr = replacement.document.body.sect_pr;
+            input.document.body.content = replacement.document.body.content;
+            let actual = issue423_layout_text(&warm.layout(&input).unwrap());
+            let cold =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if actual != expected || actual != cold {
+                failures.push(format!(
+                    "{fmt}/{instruction} warm={actual:?} cold={cold:?} wanted={expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_shared_formatter_keeps_stages_limits_and_qualified_absence() {
+        let parse = |raw: &str| Field::new(raw, "STORED").effective_instruction();
+        for (value, expected) in [(26, "Z"), (27, "AA"), (28, "BB"), (52, "ZZ"), (53, "AAA")] {
+            assert_eq!(
+                format_page_field_result(&parse("PAGE"), value, Some("upperLetter")).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            format_page_field_result(
+                &parse(r"PAGE \* LOWER \* MERGEFORMAT"),
+                7,
+                Some("upperRoman")
+            )
+            .unwrap(),
+            "vii"
+        );
+        assert_eq!(
+            format_page_field_result(&parse(r#"PAGE \# "000" \* UPPER"#), 7, Some("upperRoman"))
+                .unwrap(),
+            "007"
+        );
+        assert_eq!(
+            format_page_field_result(&parse("PAGE"), 3999, Some("upperRoman")).unwrap(),
+            "MMMCMXCIX"
+        );
+        assert!(format_page_field_result(&parse("PAGE"), 4000, Some("upperRoman")).is_err());
+        assert_eq!(
+            format_page_field_result(&parse("PAGE"), 106496, Some("upperLetter"))
+                .unwrap()
+                .len(),
+            4096
+        );
+        assert!(format_page_field_result(&parse("PAGE"), 106497, Some("upperLetter")).is_err());
+        for raw in [
+            r"PAGE \future",
+            r"PAGE \*",
+            r#"PAGE \* "roman"#,
+            "PAGE unexpected",
+            r"PAGEREF target extra",
+        ] {
+            assert!(
+                format_page_field_result(&parse(raw), 7, Some("decimal")).is_err(),
+                "{raw}"
+            );
+        }
+        for format in [None, Some("future")] {
+            assert!(format_page_field_result(&parse(r"PAGE \* Arabic"), 7, format).is_err());
+        }
+        for (numbering, expected) in [
+            (
+                r#"<q:pgNumType xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:fmt="lowerRoman" w:fmt="upperLetter"/>"#,
+                Some("lowerRoman"),
+            ),
+            (
+                r#"<w:pgNumType xmlns:v="urn:producer" v:fmt="upperLetter"/>"#,
+                Some("decimal"),
+            ),
+            (
+                r#"<w:pgNumType w:fmt="lowerRoman" w:chapSep="hyphen"/>"#,
+                None,
+            ),
+        ] {
+            let input = issue423_input(numbering, "PAGE", false);
+            let before = input.document.clone();
+            assert_eq!(
+                section_page_number_format(input.document.body.sect_pr.as_ref().unwrap())
+                    .as_deref(),
+                expected,
+                "retained source {:?}",
+                input
+                    .document
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .unwrap()
+                    .page_number
+                    .as_ref()
+                    .unwrap()
+                    .raw_xml
+                    .as_ref()
+                    .map(|raw| String::from_utf8_lossy(raw))
+            );
+            assert_eq!(input.document, before);
+        }
+        assert_eq!(
+            section_page_number_format(&CT_SectPr::default_letter()).as_deref(),
+            Some("decimal")
+        );
+    }
+
+    #[test]
+    fn issue423_section_reader_qualifies_first_owner_before_effective_direct_overlay() {
+        for (xml, expected) in [
+            (
+                r#"<q:sectPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:opaque="keep"><q:pgNumType q:fmt="upperLetter" q:start="28"/></q:sectPr>"#,
+                "upperLetter",
+            ),
+            (
+                r#"<q:sectPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" w:opaque="keep"><q:pgNumType q:fmt="lowerRoman" w:fmt="upperLetter"/></q:sectPr>"#,
+                "lowerRoman",
+            ),
+        ] {
+            let section = CT_SectPr::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+            let before = section.clone();
+            assert_eq!(
+                section_page_number_format(&section).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+            assert_eq!(section, before);
+        }
+        let document = rdocx_oxml::document::CT_Document::from_xml(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sectPr><w:pgNumType w:fmt="lowerRoman"/><w:pgNumType w:fmt="decimal"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><w:pgNumType w:fmt="upperLetter"/></w:sectPr></w:sectPrChange></w:sectPr></w:body></w:document>"#).unwrap();
+        let section = document.body.sect_pr.unwrap();
+        assert_eq!(
+            section_page_number_format(&section).as_deref(),
+            Some("decimal")
+        );
+        let mut malformed = section.clone();
+        malformed.page_number.as_mut().unwrap().raw_xml =
+            Some(br#"<v:pgNumType xmlns:v="urn:producer" v:fmt="upperRoman"/>"#.to_vec());
+        assert!(
+            section_page_number_format(&malformed).is_none(),
+            "a later qualified opaque duplicate cannot authorize an unqualified modeled owner"
+        );
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_attribute_overlay_matches_native_controls() {
+        let first = r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>"#;
+        let mut failures = Vec::new();
+        for (name, numbering, start, format, text) in [
+            (
+                "conflict",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="27"/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "format-only",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal"/>"#),
+                12,
+                "decimal",
+                "12",
+            ),
+            (
+                "start-only",
+                format!(r#"{first}<w:pgNumType w:start="27"></w:pgNumType>"#),
+                27,
+                "lowerRoman",
+                "xxvii",
+            ),
+            (
+                "empty",
+                format!("{first}<w:pgNumType/>"),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "proper-position",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="27"/><w:cols/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "original-order",
+                format!(r#"<w:cols/>{first}<w:pgNumType w:fmt="decimal" w:start="27"/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "alias-shadow",
+                format!(
+                    r#"{first}<q:pgNumType xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:fmt="upperLetter" q:start="28" w:fmt="future" w:start="99"/>"#
+                ),
+                28,
+                "upperLetter",
+                "BB",
+            ),
+            (
+                "default",
+                format!(
+                    r#"{first}<pgNumType xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:fmt="decimal" q:start="53"/>"#
+                ),
+                53,
+                "decimal",
+                "53",
+            ),
+            (
+                "no-namespace",
+                format!(
+                    r#"{first}<pgNumType xmlns="" fmt="decimal" start="99"/><w:pgNumType fmt="decimal" start="99"/>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "unknown-opaque-outside-numbering",
+                format!(
+                    r#"{first}<missing:opaque missing:note="keep"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><missing:pgNumType missing:fmt="future"/></w:sectPr></w:sectPrChange>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "foreign-nested",
+                format!(
+                    r#"{first}<v:pgNumType xmlns:v="urn:producer" v:fmt="decimal" v:start="99"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><w:pgNumType w:fmt="decimal" w:start="99"/></w:sectPr></w:sectPrChange>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "triple",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal"/><w:pgNumType w:start="53"/>"#),
+                53,
+                "decimal",
+                "53",
+            ),
+            (
+                "zero",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="0"/>"#),
+                0,
+                "decimal",
+                "0",
+            ),
+        ] {
+            let input = issue423_input(&numbering, "PAGE", false);
+            let section = input.document.body.sect_pr.as_ref().unwrap();
+            let before = input.document.clone();
+            let bytes = input.document.to_xml().unwrap();
+            let actual_start = section_page_number_start(section);
+            let actual_format = section_page_number_format(section);
+            let actual_text =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if actual_start != Some(start)
+                || actual_format.as_deref() != Some(format)
+                || actual_text != text
+            {
+                failures.push(format!("{name}: start={actual_start:?}, format={actual_format:?}, text={actual_text:?}, wanted={start}/{format}/{text}"));
+            }
+            assert_eq!(section.page_number.as_ref().unwrap().start, Some(12));
+            assert_eq!(input.document, before);
+            assert_eq!(input.document.to_xml().unwrap(), bytes);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_refuses_partial_or_unsupported_recovery() {
+        let mut failures = Vec::new();
+        for (name, first, later) in [
+            (
+                "invalid-start",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="bad"/>"#,
+            ),
+            (
+                "overflow-start",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="4294967296"/>"#,
+            ),
+            (
+                "unbound-attribute",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType missing:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "unbound-element",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<missing:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "last-unknown",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="future" w:start="27"/>"#,
+            ),
+            (
+                "first-unknown",
+                r#"w:fmt="future" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "first-chapter",
+                r#"w:fmt="lowerRoman" w:start="12" w:chapStyle="1""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "later-chapter",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:chapSep="hyphen" w:start="27"/>"#,
+            ),
+        ] {
+            let input = issue423_input(
+                &format!("<w:pgNumType {first}/>{later}"),
+                r"PAGE \* Arabic",
+                false,
+            );
+            let section = input.document.body.sect_pr.as_ref().unwrap();
+            let before = input.document.clone();
+            let format = section_page_number_format(section);
+            if matches!(
+                name,
+                "invalid-start" | "overflow-start" | "unbound-attribute" | "unbound-element"
+            ) {
+                assert_eq!(
+                    section_page_number_start(section),
+                    Some(12),
+                    "{name} compatibility fallback"
+                );
+            }
+            let actual =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if format_page_field_result(
+                &Field::new(r"PAGE \* Arabic", "STORED").effective_instruction(),
+                12,
+                format.as_deref(),
+            )
+            .is_ok()
+                || actual != "STORED"
+            {
+                failures.push(format!("{name}: format={format:?}, actual={actual:?}"));
+            }
+            assert_eq!(input.document, before);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_authored_start_and_warm_source_edits_agree() {
+        let mut warm = Engine::new_deterministic().unwrap();
+        let mut failures = Vec::new();
+        for (later, expected) in [
+            (r#"<w:pgNumType w:fmt="decimal"/>"#, "19"),
+            (r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#, "27"),
+            (r#"<w:pgNumType w:fmt="upperLetter" w:start="28"/>"#, "BB"),
+            (r#"<w:pgNumType w:fmt="lowerRoman"/>"#, "xix"),
+        ] {
+            let mut input = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>{later}"#),
+                "PAGE",
+                false,
+            );
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .page_number
+                .as_mut()
+                .unwrap()
+                .start = Some(19);
+            let before = input.document.clone();
+            let actual = issue423_layout_text(&warm.layout(&input).unwrap());
+            let cold =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            let bytes = input.document.to_xml().unwrap();
+            let mut reopened = input.clone();
+            reopened.document = CT_Document::from_xml(&bytes).unwrap();
+            let after_reopen = issue423_layout_text(&warm.layout(&reopened).unwrap());
+            if actual != expected || cold != expected || after_reopen != expected {
+                failures.push(format!("{later}: warm={actual:?}, cold={cold:?}, reopened={after_reopen:?}, expected={expected}"));
+            }
+            assert_eq!(input.document, before);
+            assert_eq!(
+                reopened
+                    .document
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .unwrap()
+                    .page_number
+                    .as_ref()
+                    .unwrap()
+                    .start,
+                Some(19)
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_target_section_edits_reformat_pageref_without_changing_its_instruction() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="decimal" w:start="1"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGEREF target"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>TARGET</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:sectPr><w:pgNumType w:fmt="upperRoman" w:start="7"/></w:sectPr></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        let mut warm = Engine::new_deterministic().unwrap();
+        for (fmt, expected) in [
+            ("upperRoman", "VII"),
+            ("lowerLetter", "g"),
+            ("decimal", "7"),
+        ] {
+            input.document =
+                CT_Document::from_xml(xml.replace("upperRoman", fmt).as_bytes()).unwrap();
+            let before = input.document.clone();
+            let read = |layout: LayoutResult| {
+                let mut values = Vec::new();
+                for page in layout.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && matches!(run.field_kind, Some(FieldKind::TargetPage(_)))
+                        {
+                            values.push(run.text.clone());
+                        }
+                    });
+                }
+                values
+            };
+            let actual = read(warm.layout(&input).unwrap());
+            assert_eq!(actual, [expected]);
+            assert_eq!(
+                actual,
+                read(Engine::new_deterministic().unwrap().layout(&input).unwrap())
+            );
+            assert_eq!(input.document, before);
+        }
+    }
+
+    #[test]
+    fn issue423_selected_header_variants_keep_format_context_on_warm_reuse() {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef};
+        let mut input = make_input_with_text("Body one");
+        for text in ["Body two", "Body three"] {
+            let mut p = CT_P::new();
+            p.add_run(text);
+            p.properties = Some(CT_PPr {
+                page_break_before: Some(true),
+                ..Default::default()
+            });
+            input.document.body.add_paragraph(p);
+        }
+        let mut section = CT_SectPr::default_letter();
+        section.title_pg = Some(true);
+        for (kind, id, instruction) in [
+            (HdrFtrType::First, "first", "PAGE"),
+            (HdrFtrType::Even, "even", r"PAGE \* Arabic"),
+            (HdrFtrType::Default, "default", r"PAGE \* UPPER"),
+        ] {
+            let mut part = CT_HdrFtr::new();
+            let mut p = CT_P::new();
+            let mut r = CT_R::new("");
+            r.content
+                .push(RunContent::Field(Field::new(instruction, "STORED")));
+            p.runs.push(r);
+            part.paragraphs.push(p);
+            input.headers.insert(id.into(), part);
+            section.header_refs.push(HdrFtrRef {
+                hdr_ftr_type: kind,
+                rel_id: id.into(),
+            });
+        }
+        input.document.body.sect_pr = Some(section);
+        let before = input.headers.clone();
+        let mut warm = Engine::new_deterministic().unwrap();
+        for (fmt, expected) in [
+            ("lowerRoman", ["vii", "8", "IX"]),
+            ("upperLetter", ["G", "8", "I"]),
+        ] {
+            input.document.body.sect_pr.as_mut().unwrap().page_number = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                "PAGE",
+                false,
+            )
+            .document
+            .body
+            .sect_pr
+            .unwrap()
+            .page_number;
+            let read = |layout: LayoutResult| {
+                let mut values = Vec::new();
+                for page in layout.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && run.field_kind == Some(FieldKind::Page)
+                        {
+                            values.push(run.text.clone());
+                        }
+                    });
+                }
+                values
+            };
+            let actual = read(warm.layout(&input).unwrap());
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual,
+                read(Engine::new_deterministic().unwrap().layout(&input).unwrap())
+            );
+            assert_eq!(input.headers, before);
+        }
+    }
+
+    #[test]
+    fn issue423_implicit_final_section_is_qualified_absence_not_unknown_source() {
+        for rich in [false, true] {
+            let mut input = issue423_input(
+                r#"<w:pgNumType w:fmt="lowerRoman" w:start="7"/>"#,
+                "PAGE",
+                rich,
+            );
+            input.document.body.sect_pr = None;
+            assert_eq!(
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap()),
+                "1"
+            );
+            let unknown =
+                issue423_input(r#"<w:pgNumType w:fmt="future" w:start="7"/>"#, "PAGE", rich);
+            assert_eq!(
+                issue423_layout_text(
+                    &Engine::new_deterministic()
+                        .unwrap()
+                        .layout(&unknown)
+                        .unwrap()
+                ),
+                "STORED"
+            );
+        }
+    }
+
+    #[test]
+    fn issue423_unsupported_mixed_script_stored_display_is_preserved() {
+        let mut input =
+            issue423_input(r#"<w:pgNumType w:fmt="future" w:start="7"/>"#, "PAGE", true);
+        let xml = String::from_utf8(input.document.to_xml().unwrap())
+            .unwrap()
+            .replace(">STORED<", ">Latin العربية<");
+        input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let before = input.document.clone();
+        let result = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+        assert_eq!(issue423_layout_text(&result), "Latin العربية");
+        assert_eq!(input.document, before);
+    }
+
+    #[test]
+    fn issue423_direct_multilingual_consumer_preserves_zero_one_many_shaped_results() {
+        let mut failures = Vec::new();
+        let mut visual_order_checks = [0; 2];
+        for marked in [false, true] {
+            for (fmt, stored, expected) in [
+                ("lowerRoman", "STORED", "vii"),
+                ("future", "", ""),
+                ("future", "Latin العربية", "Latin العربية"),
+                ("future", "אב العربية", "אב العربية"),
+            ] {
+                let mut input = issue423_input(
+                    &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                    "PAGE",
+                    false,
+                );
+                input.document = CT_Document::from_xml(
+                    String::from_utf8(input.document.to_xml().unwrap())
+                        .unwrap()
+                        .replace(">STORED<", &format!(">{stored}<"))
+                        .as_bytes(),
+                )
+                .unwrap();
+                let registry = SourceRegistry::for_input(&input).unwrap();
+                let (&source, (instruction, cached)) = registry.page_fields.iter().next().unwrap();
+                let result = format_page_field_result(
+                    instruction,
+                    7,
+                    section_page_number_format(input.document.body.sect_pr.as_ref().unwrap())
+                        .as_deref(),
+                );
+                let values = HashMap::from([(
+                    source,
+                    PageFieldValue {
+                        display: result.unwrap_or_else(|_| cached.clone()),
+                        target_unplaced: false,
+                    },
+                )]);
+                let mut fm = FontManager::new_deterministic().unwrap();
+                let font = fm.resolve_font(Some("Carlito"), false, false).unwrap();
+                let segment = TextSegment {
+                    text: "99".into(),
+                    direction: TextDirection::RightToLeft,
+                    source: Some(SourceSpan {
+                        node: source.node,
+                        char_start: 0,
+                        char_end: 2,
+                    }),
+                    font_id: font,
+                    font_size: 11.0,
+                    glyph_ids: Vec::new(),
+                    advances: Vec::new(),
+                    width: 0.0,
+                    ascent: 0.0,
+                    descent: 0.0,
+                    line_gap: 0.0,
+                    color: Color::BLACK,
+                    bold: false,
+                    italic: false,
+                    underline: None,
+                    strike: false,
+                    dstrike: false,
+                    highlight: None,
+                    baseline_offset: 0.0,
+                    hyperlink_url: None,
+                    field_kind: Some(FieldKind::Page),
+                    field_source: Some(source),
+                    note: Some(NoteRef {
+                        stream: NoteStream::Footnote,
+                        id: 7,
+                    }),
+                    note_reference_source: Some(SourceSpan {
+                        node: source.node,
+                        char_start: 0,
+                        char_end: 2,
+                    }),
+                };
+                let shaped = fm
+                    .shape_multilingual_text(
+                        segment,
+                        Some("ar-SA"),
+                        TextDirection::RightToLeft,
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(shaped.len(), 1);
+                let shaped = &shaped[0];
+                let carrier =
+                    PositionedElement::MultilingualText(oxml_layout::MultilingualGlyphRun {
+                        origin: Point { x: 12.0, y: 30.0 },
+                        font_id: shaped.font_id(),
+                        font_size: 11.0,
+                        glyph_ids: shaped.glyph_ids().to_vec(),
+                        x_advances: shaped.x_advances().to_vec(),
+                        y_advances: shaped.y_advances().to_vec(),
+                        x_offsets: shaped.x_offsets().to_vec(),
+                        y_offsets: shaped.y_offsets().to_vec(),
+                        clusters: shaped.clusters().to_vec(),
+                        logical_text: shaped.text().into(),
+                        logical_index: shaped.logical_index(),
+                        source: shaped.base().source,
+                        script: shaped.script(),
+                        language: shaped.language().map(str::to_owned),
+                        direction: shaped.direction(),
+                        bidi_level: shaped.bidi_level(),
+                        color: Color::BLACK,
+                        bold: false,
+                        italic: false,
+                        field_kind: Some(FieldKind::Page),
+                        field_source: Some(source),
+                        note: shaped.base().note,
+                        note_reference_source: shaped.base().note_reference_source,
+                    });
+                let mut elements = vec![if marked {
+                    PositionedElement::MarkedContent {
+                        structure: None,
+                        children: vec![carrier],
+                    }
+                } else {
+                    PositionedElement::Group(GroupElement {
+                        transform: Transform::IDENTITY,
+                        clip: None,
+                        opacity: 1.0,
+                        effects: Vec::new(),
+                        children: vec![carrier],
+                    })
+                }];
+                {
+                    let mut painted =
+                        PaintedElements::neutral(std::mem::take(&mut elements)).unwrap();
+                    substitute_fields(
+                        &mut painted,
+                        7,
+                        9,
+                        (1, 3),
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        &values,
+                        None,
+                        0,
+                        &mut fm,
+                    )
+                    .expect("explicit neutral field substitution");
+                    elements = painted.into_parts().unwrap().0;
+                };
+                let mut spans = Vec::new();
+                oxml_layout::walk(&elements, &mut |element, _| {
+                    if let PositionedElement::MultilingualText(run) = element {
+                        assert!(run.is_valid());
+                        assert_eq!(run.field_source, Some(source));
+                        assert_eq!(
+                            run.note,
+                            Some(NoteRef {
+                                stream: NoteStream::Footnote,
+                                id: 7
+                            })
+                        );
+                        assert_eq!(
+                            run.note_reference_source,
+                            Some(SourceSpan {
+                                node: source.node,
+                                char_start: 0,
+                                char_end: 2
+                            })
+                        );
+                        assert_eq!(run.field_kind, Some(FieldKind::Page));
+                        assert_eq!(
+                            run.source,
+                            Some(SourceSpan {
+                                node: source.node,
+                                char_start: 0,
+                                char_end: 2
+                            })
+                        );
+                        assert_eq!(run.origin.y, 30.0);
+                        spans.push((
+                            run.logical_index,
+                            run.logical_text.clone(),
+                            run.origin.x,
+                            run.x_advances.iter().sum::<f64>(),
+                        ));
+                    }
+                });
+                if stored == "אב العربية" {
+                    visual_order_checks[usize::from(marked)] += 1;
+                    let hebrew = spans
+                        .iter()
+                        .find(|(_, text, _, _)| text.contains("אב"))
+                        .unwrap();
+                    let arabic = spans
+                        .iter()
+                        .find(|(_, text, _, _)| text.contains("العربية"))
+                        .unwrap();
+                    assert!(
+                        arabic.2 < hebrew.2,
+                        "existing bidi visual order must place the Arabic span before the Hebrew span"
+                    );
+                }
+                let mut visual = spans.clone();
+                visual.sort_by(|a, b| a.2.total_cmp(&b.2));
+                for pair in visual.windows(2) {
+                    assert!(
+                        (pair[0].2 + pair[0].3 - pair[1].2).abs() < 1e-6,
+                        "natural adjacent spans must not overlap or invent a gap"
+                    );
+                }
+                spans.sort_by_key(|(logical, _, _, _)| *logical);
+                let actual = spans
+                    .into_iter()
+                    .map(|(_, text, _, _)| text)
+                    .collect::<String>();
+                if actual != expected {
+                    failures.push(format!("marked={marked} fmt={fmt} stored={stored:?} actual={actual:?} expected={expected:?}"));
+                }
+            }
+        }
+        assert_eq!(
+            visual_order_checks,
+            [1, 1],
+            "Group and MarkedContent must each exercise bidi visual order"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_malformed_page_reference_keeps_stored_display_before_pagination() {
+        let mut failures = Vec::new();
+        for instruction in ["PAGEREF", r"PAGEREF \h", "PAGE unexpected", r"PAGE \future"] {
+            let input = issue423_input(
+                r#"<w:pgNumType w:fmt="decimal" w:start="7"/>"#,
+                instruction,
+                false,
+            );
+            let before = input.document.clone();
+            let result = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            let actual = issue423_layout_text(&result);
+            if actual != "STORED" {
+                failures.push(format!("{instruction}: {actual:?} != STORED"));
+            }
+            assert_eq!(input.document, before);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn issue425_ordered_result_views_references_and_cold_warm_identity() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:p><w:fldSimple w:instr="OUTER"><w:ins w:id="7" w:author="Prior"><w:r><w:footnoteReference w:id="1"/></w:r><w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr="INNER"><w:r><w:rPr><w:i/></w:rPr><w:t>old</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt></w:ins><w:del w:id="9" w:author="Prior"><w:r><w:delText>prior</w:delText></w:r></w:del></w:fldSimple></w:p></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS
+        );
+        let mut input = make_input_with_footnote(&["note body"]);
+        input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("field")
+        };
+        assert!(field.cached_result_runs().is_none());
+        field.cached_field_mut(0).unwrap().cached_result = "first".into();
+        ORDERED_STORED_PREPARATION_CALLS.set(0);
+        ORDERED_STORED_OWNED_PROJECTIONS.set(0);
+        let source = FieldSource {
+            node: SourceNodeId::new(1).unwrap(),
+            index: 0,
+        };
+        let accepted = stored_note_cache_runs(
+            field,
+            None,
+            RevisionView::Accepted,
+            Some(source),
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            ORDERED_STORED_PREPARATION_CALLS.get(),
+            2,
+            "each actual root/child is prepared once in this stored traversal"
+        );
+        assert_eq!(
+            ORDERED_STORED_OWNED_PROJECTIONS.get(),
+            1,
+            "one retained root projection, no scalar-child projection copy"
+        );
+        assert_eq!(
+            accepted
+                .iter()
+                .map(|stored| stored.run.text())
+                .collect::<String>(),
+            "first"
+        );
+        assert!(accepted.iter().any(|stored| {
+            stored
+                .run
+                .content
+                .iter()
+                .any(|content| matches!(content, RunContent::FootnoteRef { id: 1, .. }))
+        }));
+        assert!(
+            accepted
+                .iter()
+                .filter(|stored| stored.run.text() == "first")
+                .all(|stored| stored.source == Some(FieldSource { index: 1, ..source }))
+        );
+        let tracked = stored_note_cache_runs(
+            field,
+            None,
+            RevisionView::Tracked,
+            Some(source),
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            tracked
+                .iter()
+                .map(|stored| stored.run.text())
+                .collect::<String>(),
+            "firstprior"
+        );
+        assert!(
+            tracked
+                .iter()
+                .any(|stored| stored.run.text() == "prior" && stored.force_strike)
+        );
+        assert!(
+            tracked
+                .iter()
+                .any(|stored| stored.run.text() == "first" && stored.force_underline)
+        );
+        assert_eq!(
+            field.cached_result, "old",
+            "owned reads do not publish pending lower edits"
+        );
+        assert_eq!(
+            body_note_references(&input).unwrap(),
+            [NoteRef {
+                stream: NoteStream::Footnote,
+                id: 1
+            }]
+        );
+        let mut engine = Engine::new_deterministic().unwrap();
+        let first = engine.layout_with_provenance(&input).unwrap();
+        assert!(output_text(&first.0).concat().contains("first"));
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("field")
+        };
+        field.cached_field_mut(0).unwrap().cached_result = "second".into();
+        let warm = engine.layout_with_provenance(&input).unwrap();
+        let cold = Engine::new_deterministic()
+            .unwrap()
+            .layout_with_provenance(&input)
+            .unwrap();
+        assert_eq!(warm.1, cold.1);
+        assert_eq!(format!("{:?}", warm.0.pages), format!("{:?}", cold.0.pages));
+        assert!(output_text(&warm.0).concat().contains("second"));
+        assert!(!output_text(&warm.0).concat().contains("first"));
+    }
+
+    #[test]
+    fn issue425_ordered_result_computed_policy_retains_current_stored_owners() {
+        for locked in [false, true] {
+            let xml = format!(
+                r#"<w:document xmlns:w="{}"><w:body><w:p><w:fldSimple w:instr="PAGE" {}><w:ins w:id="7" w:author="Prior"><w:r><w:rPr><w:i/></w:rPr><w:t>7</w:t></w:r></w:ins><w:del w:id="9" w:author="Prior"><w:r><w:rPr><w:b/></w:rPr><w:delText>9</w:delText></w:r></w:del></w:fldSimple></w:p></w:body></w:document>"#,
+                rdocx_oxml::namespace::W_NS,
+                if locked { r#"w:fldLock="true""# } else { "" }
+            );
+            let mut input = make_input_with_text("");
+            input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            input.revision_view = RevisionView::Tracked;
+            let result = deterministic_layout(&input);
+            let text = output_text(&result).concat();
+            if locked {
+                assert_eq!(text, "79");
+                let mut inserted = false;
+                let mut deleted = false;
+                for page in &result.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element {
+                            inserted |= run.text == "7" && run.italic;
+                            deleted |= run.text == "9" && run.bold;
+                        }
+                    });
+                }
+                assert!(
+                    inserted && deleted,
+                    "stored Tracked projection retains actual inner formatting"
+                );
+                let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
+                    unreachable!()
+                };
+                let media = MediaRegistry::new(&input.images);
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let block = layout_paragraph(
+                    paragraph,
+                    468.0,
+                    &input.styles,
+                    &input,
+                    &media,
+                    &mut fonts,
+                    &mut NumberingState::new(),
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let segments = block
+                    .lines
+                    .iter()
+                    .flat_map(|line| &line.items)
+                    .filter_map(|item| match item {
+                        oxml_layout::LineItem::Text(segment) => Some(segment),
+                        oxml_layout::LineItem::MultilingualText(span) => Some(span.base()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let inserted = segments
+                    .iter()
+                    .find(|segment| segment.text == "7")
+                    .expect("actual inserted layout segment");
+                let deleted = segments
+                    .iter()
+                    .find(|segment| segment.text == "9")
+                    .expect("actual deleted layout segment");
+                assert!(inserted.italic);
+                assert_eq!(inserted.underline, Some(Underline::Single));
+                assert!(deleted.bold && deleted.strike);
+            } else {
+                assert_eq!(text, "1", "unlocked PAGE keeps computed substitution");
+                let mut italic = false;
+                for page in &result.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element {
+                            italic |= run.text == "1" && run.italic;
+                        }
+                    });
+                }
+                assert!(
+                    italic,
+                    "computed value inherits first accepted stored properties"
+                );
+                let horizontal_marks = result.pages.iter().flat_map(|page| compatibility_page_elements(page))
+                    .filter(|element| matches!(element, PositionedElement::Line { start, end, .. } if start.y == end.y))
+                    .count();
+                assert_eq!(
+                    horizontal_marks, 0,
+                    "computed substitution has no stored deletion strike or insertion underline"
+                );
+            }
+        }
     }
 }

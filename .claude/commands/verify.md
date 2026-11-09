@@ -247,3 +247,43 @@ skipped and why.
   not waive final acceptance. Preserve named pending checks in the handoff.
 - **Updating the hash baseline to make step 5 pass.** The baseline changes only
   through a declared, reviewed delta.
+
+## Strict native compatibility evidence
+
+`--full` consumes the three-host strict SemVer union once at the integrated
+source. First use the reviewed private `_prepare_release_semver_evidence('all',
+owned_directory)` controller in `scripts/sprint_workflow.py`. It collects the
+complete current public CI run, attempt, job and artifact catalog into the
+canonical current sprint state, outside every supplied evidence tree, and
+returns fixed proof directories. Then run:
+
+```bash
+python3 scripts/sprint_workflow.py release-semver all --check-evidence DIR [DIR ...] --refresh-registry
+```
+
+Each deciding caller acquires its own authority context. A saved catalog, packet
+label, caller-supplied digest or an absent context cannot substitute. Frozen
+`--check-evidence` without refresh uses only that independently acquired cutoff,
+local pinned gh, unchanged bundles and the embedded approved root. It performs
+no API, TUF or Cargo acquisition. Newer relevant failed or incomplete attempts
+block older success. The running CI gate consumes completed native and signing
+jobs, while external full verification also requires completed successful CI.
+Owner-only dispatch, forks without signing permission and scheduled jobs do not
+qualify this union. Missing real hosted proof remains pending.
+
+Execution is the separate native acquisition interface:
+
+```bash
+python3 scripts/sprint_workflow.py release-semver all --target HOST_TRIPLE --tool VERIFIED_TOOL_PATH --output NEW_DIR [--reuse-evidence DIR ...]
+```
+
+Use the tracked official archive and executable pins for the genuine native
+host. Repeated reuse options each take one directory. Only authenticated rows
+with unchanged applicable source, baseline, features, compiler, tool and Cargo
+configuration are reused. Missing original provenance or invalidated rows are
+acquired again. Each baseline still undergoes fresh registry applicability and
+checksum authentication. Default and all-feature library views, binary-only
+applicability and exact compiler witnesses remain distinct. First unpublished
+minor lines have explicit empty-line applicability, which is not old-line API
+compatibility. Existing behavioral, CLI, Python, WASM, hash and native gates
+remain required.

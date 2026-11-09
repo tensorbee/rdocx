@@ -42,6 +42,7 @@ mod rtf;
 pub mod run;
 pub mod style;
 mod svg;
+pub use svg::render_page;
 pub mod table;
 mod template;
 pub use template::{TEMPLATE_GRAMMAR_VERSION, TemplateFormatContext};

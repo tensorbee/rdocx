@@ -12,6 +12,8 @@ mod writer;
 
 use oxml_layout::LayoutResult;
 
+pub use image::{ImageDrawClass, classify_image_draw};
+
 pub use conformance::{PdfConformance, PdfError, PdfOptions};
 pub use raster::{RasterError, RasterFormat, RasterOptions, RasterOutput};
 

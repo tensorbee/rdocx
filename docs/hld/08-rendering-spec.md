@@ -671,13 +671,11 @@ x and y advances, x and y offsets, logical clusters, direction, and extraction
 text. PDF paints those exact positions inside logical `ActualText`, raster
 applies the same per-glyph coordinates, and SVG emits searchable logical text.
 The PDF writer emits each rich run with one initial text matrix and relative
-glyph placement. Adjacent runs may share one extracted logical line only when
-their semantic owner, transformed baseline, and contiguous source or logical
-indices agree. The first run owns the complete `ActualText`, later runs use an
-empty replacement, and their paint operators stay in their original order.
-Ambiguous ownership, duplicate or gapped logical indices, and baseline changes
-end the line plan. Nested group transforms are cancelled only while expressing
-the same final glyph positions in page coordinates.
+glyph placement. Each valid rich run carries its own logical text in `ActualText` at that run's
+own text matrix, including a space span. Later words do not receive an empty
+replacement for an earlier word. Paint order, glyph positions and ToUnicode
+mapping remain unchanged. Inherited marked-content extraction text retains its
+existing ownership through nested groups.
 Legacy Latin remains on `GlyphRun` so existing output bytes do not move.
 A PowerPoint line taller than single spacing puts its baseline three quarters of
 the way down, or at the font's ascent share of the line when that is smaller. A
@@ -887,6 +885,45 @@ run fragment. The PDF backend's recursive leaf walk applies the complete nested
 group transform to each annotation rectangle. Unsupported actions never create
 an annotation, but their visible text remains in the line.
 
+## Word first-line indent
+
+`w:firstLine` and `w:hanging` are one property. `CT_PPr::merge_from` and
+`merge_direct_ppr` assign both fields from a source layer when either is
+present, so the absent sibling becomes `None`. The rule applies to numbering
+level properties, direct paragraph properties, the `tbRl` vertical-text arm, and
+the public, EPUB, and ODT paragraph projections. A more specific layer that sets
+one half replaces the pair, matching ECMA-376 Part 1 17.3.1.12. A single `w:ind`
+that carries both attributes keeps its stored values, and the line breaker keeps
+hanging precedence for that same-element case. ODT run properties stay on
+`CT_RPr::merge_from` and do not move when only `w:ind` changes. Twip unit
+rounding is unchanged.
+
+For example, numbering-level `left=1440, hanging=360` followed by direct
+paragraph `left=0, firstLine=720` places the number 36 pt past the page margin.
+Wrapped text starts at the margin because the direct first-line value clears
+the inherited hanging value.
+
+## Word automatic text colour
+
+Run colour follows the resolved inheritance cascade. An effective `auto`
+colour, or no colour after inheritance, takes a contrast colour from the fill
+behind it. A run without its own colour retains an inherited explicit or theme
+colour. A nearer literal or theme selector replaces the whole inherited
+`w:color` declaration, so an explicit run RGB or `auto` does not retain a
+style's theme selector, tint or shade. This rule reaches ordinary runs, stored
+field segments and generated styles through the shared model merge. Within
+one winning declaration, a resolvable theme still takes precedence over its
+cached literal fallback. Existing textFill precedence and tint/shade arithmetic
+are unchanged.
+Black fills and dark navy fills produce white text, a light grey fill produces
+black text, and an unshaded cell or paragraph produces black text. The fill is
+the cell's resolved shading, including a paragraph shading inside that cell, and
+a nested cell resolves its own shading rather than inheriting the outer cell.
+Content-control paragraphs inside a shaded cell follow that cell. A body
+paragraph follows its own paragraph shading. The split is the luminance floor of
+the weighted channels at 156 out of 255. Explicit colours and theme colours keep
+their resolved values. Native Word threshold calibration remains pending.
+
 ## Tables
 
 PresentationML table paint keeps each stored `a:tr/@h` value. The painted row grows when wrapped text, a span, cell margins, or unwrapped vertical text needs more room than the current span. The extra height is added to the last row of that span while later cells are measured. Fills, borders, the table background, and text then use those grown offsets together. A short cell stays at the stored height. Wrapped vertical text does not grow when its longest oriented line already fits the current content height.
@@ -933,6 +970,106 @@ cannot cover them. Table cells retain stored normal-autofit scale and line
 spacing reduction in their resolved text. Shape-to-fit cannot resize an
 independently owned cell extent and is not applied to cell rendering.
 
+**Word shaping and positioned fields.** The effective run cascade resolves Word's
+`w:kern` threshold against nominal `w:sz`, before superscript and annotation scaling.
+An omitted threshold disables kerning. Ordinary Word spans retain explicit on/off
+context through legacy Unicode shaping chunks, wrapping and automatic hyphenation.
+Atomic list labels retain whole-marker shaping and grouping. Structural field markers
+retain their synthetic zero-advance glyphs. Neutral and PowerPoint shaping defaults
+remain separate from the Word producer.
+
+Native parity remains unqualified for three measured legacy compatibility
+kerning/superscript cases, with maximum difference4.946208pt, and one exact
+Word-saved line-number label3bottom edge at0.511225pt against0.5pt. Pending
+S96.1 F-X290 owns only this user-approved four-case release carry. One controlled
+mode15direct-enabled case passes, not every enabled or superscript case.
+These observations do not change the effective threshold, source nominal sizes,
+font identity, superscript or generated-number rules below. Preserve failed raw
+measurements and all unaffected native/source/resource obligations. Historical
+50instance recovery is separately owned by F-X289.
+
+In mixed rich paragraphs, the actual plain computed-field producers retain their
+own legacy factory contexts. The original eligible rich batch remains rich.
+Checked source-order assembly assigns global span ordinals through the neutral
+hidden `with_logical_index_and_legacy_shaping` operation. The old rich-shaped Latin
+hyphenatable results retain their initial glyphs and acquire their former legacy
+split, reflow and Text paint convention. Legacy carriers use former Text bidi
+selection and plain word/whitespace tokenization, including internal trailing
+spaces. They do not enter rich-only shaped-level rebuilding or hanging-space
+ordinal comparisons. Genuine rich spans retain those rich behaviors.
+Right, centre and decimal tabs scan trailing spaces and numeric prefixes only
+for legacy carriers, using their own shaping context. Genuine rich spans keep
+the prior opaque tab fallback, including generic default and explicit-kerning
+nonlegacy owners.
+
+Explicit legacy construction validates complete cluster coverage in the guessed
+glyph order independently of layout bidi parity. It preserves both the glyph
+payload and the layout levels. Default public construction and genuine rich
+output retain parity-coupled validation. Legacy Word owners publish plain Text.
+A contradictory legacy owner on a rich positioned field refuses replacement
+rather than publishing an invalid MultilingualGlyphRun.
+
+Private paragraph owners carry field-only paint policies beside the public layout
+models. Checked emission records every field glyph leaf's exact tree path before its
+source shaping context is erased. Subtree splices, permutations, wrappers and late
+field expansion/removal move the companion with the actual glyph storage. Missing
+ownership refuses layout. Raw and substituted page caches retain separate maps.
+Legacy span cache admission additionally requires the actual private Word producer,
+with exact policy/language identity and allocation charges. Rich, anchored and opaque
+Group cache exclusions remain in force.
+
+Stored field annotations retain an operation-local owner before cached runs split.
+Only base-result glyphs carry field roles. Brackets, emphasis marks and other
+annotation decoration remain non-field paint. The shared doc-hidden
+`line::break_into_lines_with_opaque_origins` function returns the existing layout
+lines and exact top-level Group/Figure input slots, captured through construction,
+line flush and the actual rich bidi permutation. The Word consumer binds its
+private annotation recipes through those slots. It does not match output text,
+geometry or source spans to recover ownership.
+
+Late field replacement regenerates the complete first annotation occurrence and
+removes its continuation decorations in the current traversal order. Ordinary and
+annotated fragments of the same owner share that transaction. Empty stored owners
+retain an owned zero-width Group and empty qualified base leaf, including the
+ordinary caret's exact or Word external-leading metrics. An empty final STYLEREF
+removes the entire annotation root. Repeated table headers mint a private paint
+scope for each actual repeat, including another column on the same physical page.
+Split continuations share the scope and a new physical page resets it. Recipes,
+origins, policies and repeat identities are part of retained equality and byte
+accounting. Existing rich and Group cache exclusions remain in force.
+
+Floating front drawings occupy a physical page layer after regular body and note
+text. Table rows carry explicit behind/regular/front child intervals, preserving their
+existing clips and transforms. Furniture retains its existing front priority. Late
+endnotes insert at captured page boundaries before front paint. Line-number artifacts
+move with their body band once. These composition rules do not claim native validation
+for unsupported nested anchors or replace the retained native qualification gates.
+
+**Word line numbers.** Generated section labels resolve document-default run
+properties, the uniquely named `Normal` paragraph style and the uniquely named
+`line number` character style once per layout. Primary names are trimmed and case
+sensitive. Each role follows actual-ID basedOn edges of its own type and stops
+at missing, cyclic, wrong-type or Word-ignored style IDs. Ambiguous or malformed
+roles record bounded diagnostics and preserve the source. The nearest property
+within each chain supplies that level. Non-toggle properties cascade in that
+order. Document-default true dominates bold and italic, otherwise the paragraph
+and character levels combine by XOR. Body direct formatting does not style labels.
+
+The same private face, positive nominal size, weight and explicit kerning decision
+drive label shaping, right-alignment width and painted glyphs. Missing size uses
+11 pt. Invalid size or unavailable face paints no number while the logical
+counter advances. Kerning is enabled by a present half-point threshold no larger
+than the nominal half-point size. Public neutral pagination keeps its existing
+9 pt default shaping and start interpretation.
+
+Word numbering requires explicit countBy. Omitted countBy disables labels without
+rewriting source. Explicit zero retains rendering compatibility as one. The
+source start is a skipped count, so the first logical value is start plus one,
+then countBy selects values. A wide private counter covers every parser-admitted
+u32 start without a source clamp. Values beyond Word's documented range are
+compatibility behavior rather than a native parity claim. Labels remain artifacts
+on the recorded body baseline and follow the existing page/section ownership.
+
 **Vertical Word text.** `w:tcPr/w:textDirection` and `w:sectPr/w:textDirection`
 lower onto the same transposed box and `Group` rotation the shape path uses.
 `lrTb` is the horizontal path, unchanged and with no group. `tbRl` and `tbRlV`
@@ -960,6 +1097,29 @@ fills one band, so its column tracks are dropped and
 `vertical section text is laid out in one column track` is recorded. Composing
 the two would transpose each track about its own centre while the page rotates
 about one, which is a wrong picture rather than a missing one.
+
+For a main-body section whose source direction is exactly `tbRl`, the physical
+body band retains the written margins before transposition and section vertical
+alignment. Selected ordinary header/footer flow does not replace that rotated
+band with the horizontal furniture-cleared band. The same-angle `tbRlV` source,
+other orientations and table-cell rotation retain their existing policies.
+
+Main-body `tbRl` paragraphs with positive exact line spacing carry a private
+baseline policy resolved through styles, numbering and direct properties.
+Explicit baseline alignment uses 0.8 times the exact line height. Absent, auto
+and center alignment add half the sum of actual face ascent and signed descent,
+scaled to the actual run size. A graphics-only line or unavailable face metrics
+retain the existing baseline rather than supplying an unqualified text offset.
+Raw cached and transient line advances,
+font metrics, font identity and authored baseline offsets remain unchanged.
+The separate baseline is applied when painting each fresh or reflowed line,
+including rich text, field substitutions and nested text groups. Body line
+numbers use the same baseline and price top border padding once. Underline and
+strike positions follow that same baseline. Highlight, link and fragment boxes
+retain the actual line container band. Wrapping reservations price that same raw
+line-height band before and after rebreaking, without accumulating a baseline
+adjustment. Upright notes and furniture do not inherit this body policy. These
+bounded rules do not qualify general mixed-font or other vertical contexts.
 
 Right-to-left tables reverse visual column placement without changing logical
 cell ownership. Both grammars satisfy that sentence. The DrawingML `a:tbl`
@@ -1021,12 +1181,24 @@ that preserve widow and orphan minima. Each cell advances independently at a
 safe boundary, and a continuation fragment retains the same logical row and
 cell ownership. A page break repeats preceding header rows, records another
 body-layout fragment, and extends vertical borders and fill without adding a
-horizontal border at the artificial break. `w:cantSplit` instead moves the
-whole row when it fits the next page. An unsplittable row taller than a fresh
-page paints once with visible overflow rather than retrying indefinitely.
+horizontal border at the artificial break. Whole-row barriers are `w:cantSplit`,
+header rows, merges, nested tables, clipped and exact-height rows, rotated and anchored
+content, keep-next, and page-break-before. An unsplittable row taller than a
+fresh page paints once with visible overflow rather than retrying indefinitely.
 Merged, rotated, anchored, nested-table and exact-height rows keep their
 whole-row placement, including exact-height clipping, until those cases have
 a safe fragment model.
+
+### Row splitting and vertical alignment
+
+A flowed ordinary row breaks across pages at the same complete paragraph and
+line boundaries whether or not it carries `w:vAlign`. Vertical alignment
+positions the cell content inside the space the row occupies. It does not make
+the row unsplittable and does not change the lines each page carries.
+`w:vAlign` is not a whole-row barrier. The barriers are `w:cantSplit`, header
+rows, merges, nested tables, clipped and exact-height rows, rotation, anchored
+content, keep-next, and page-break-before. The continuation fragment keeps the same logical row and
+cell ownership.
 
 A conditional table-style region's `w:trPr` resolves base first, exactly like
 its cell layers. The style's base row properties apply first, then every region
@@ -1055,9 +1227,21 @@ every `w:cnfStyle` on the row, the cell and the cell's paragraphs. Direct table
 and cell properties remain the final overlay. An explicit
 cell `nil` border suppresses the corresponding edge, including an outer edge.
 A cell `none` border behaves as an unset cell edge and inherits the corresponding
-table or table-style border. Painting and row border bands share this resolution.
+table border. Painting and row border bands share this resolution.
 The model retains `nil` and `none` as distinct source tokens because an
 unrelated table or document edit must not normalize producer XML.
+
+### Table border precedence
+
+A table style's `w:tblBorders` are table borders, not cell borders. They resolve
+into the table's base border set under the table's own direct `w:tblBorders`,
+and their outer edges apply to the table's outer edges only (ECMA-376 Part 1,
+17.4.39). A cell edge uses its direct `w:tcBorders` value first, then the table
+border set. A direct table border therefore replaces the style grid for that
+edge, so an all-`none` direct table border paints zero edges instead of
+inheriting the style's single grid. A direct `none` on the inside edges removes
+those bands while the outer edges keep their own values. Painting and row border
+bands share this resolution.
 
 A table without an explicit style uses the authored default table style.
 Its modeled base width, alignment, indent, borders, shading, look, and cell
@@ -1303,6 +1487,15 @@ Reports carry the operation's owned font contribution diagnostics and separate
 accepted Q/S trial facts from the actual current persisted trial. A report is
 read-only and never refreshes an owner implicitly.
 
+The explicit legacy Word shaping provider preserves old per-segment Unicode
+shaping chunks without adding script-only buffers. Actual bidi-level changes and
+explicit-direction resolution remain barriers. Shaping cuts remain selected even
+when wrapping is disabled, while no-wrap spans publish no soft break. Empty
+occurrences retain their source context without a break. Generic and nonlegacy
+rich/PowerPoint shaping retain their existing script, language, fallback and caps
+policies. This bounded provider correction does not complete main Word policy
+wiring, positioned field companions, R4 composition or native qualification.
+
 ## Performance
 
 PresentationML parsing and supported authoring use
@@ -1315,41 +1508,32 @@ clip correspondence and staged authoring atomicity. Unchecked constructors
 do not guarantee arbitrary malformed graphs are safe.
 
 
-`Document` keeps normal-font and deterministic `WordLayoutResult` values in
-separate `Mutex<Option<Arc<_>>>` caches. `layout`, option-taking accepted
-layout, `render_page_to_png`, `render_all_pages`, `to_pdf`, and `layout_page`
-share the normal result. The normal path also retains one synchronized
-`rdocx-layout::Engine` after mutation invalidates that completed result. The
-deterministic renderers use their own bundle. Tracked layouts remain uncached
-and use the normal engine with a distinct revision-view paragraph identity.
-Caller-only native font layouts construct an isolated engine, remain
-uncached, and cannot observe bundled or system fonts. Caller-font access
-returns an owned bundle. Normal Word additional-font layout and output use
-`layout_with_additional_fonts_and_options` in a fresh normal-font engine.
-Caller fonts override embedded and fallback faces. A family the caller does
-not supply resolves as `to_pdf` resolves it, from system fonts when the
-`system-fonts` feature is enabled and then from bundled fonts. PDF, PNG, SVG
-and selected raster pages consume that exact owned bundle. The separate
-bundled-fallback caller-font mode retains one reusable deterministic-base
-engine. Caller faces have highest priority, missing families
-resolve from bundled faces, and system fonts remain unavailable. Its owned
-result shares immutable pages and font bytes without caching the completed
-bundle. Every PDF and raster path borrows its `LayoutResult` field from the same
-bundle that owns the exact font data and Word source map. Cloning a completed
-result shares each immutable page frame and font byte buffer.
+`Document` keeps a bundled-omission cache and a system-opt-in cache. `layout`,
+`layout_with_options`, `render_page_to_png`, `render_page_to_svg`,
+`render_pages`, `render_all_pages`, `to_pdf`, `save_pdf`, and `layout_page`
+share the bundled cache when `RenderOptions.use_system_fonts` is false. False is
+derived `Default`. `layout_page` and `layout_page_with_options` keep their route
+through `layout_with_options`. The same methods share the normal cache when the
+field is true. Their diagnostic twins use that same choice for an empty caller
+font slice and return the cached `Arc`. `Arc::clone` preserves sharing. A
+nonempty caller list is caller, then embedded, then the selected tier, and it is
+wrapped with `Arc::new` only when the private helper calls an owned method. That
+`Arc` is not the omission cache. Deterministic methods ignore the field and keep
+the bundled cache. `layout_with_fonts` stays caller-only.
+`layout_with_fonts_and_bundled_fallback` and both alias methods stay caller plus
+bundled. `layout_with_additional_fonts_and_options` stays caller plus the normal
+engine and ignores the field.
 
-Without selected caller fonts, Python `Document.layout()` reads the
-bundled-font-only snapshot. Nonempty caller inputs use the normal additional
-font bundle. Empty sequences and valid empty directories retain each
-entrypoint's omission path after all supplied paths are validated. It returns immutable main-body fragments with their zero-based body
-index, one-based physical and displayed page numbers, and point-space bounds.
-`Document.layout_page()` uses the same font-selection rule. Omitted caller
-inputs, empty sequences and valid directories with no selected font retain
-the bundled deterministic cache after path validation. Nonempty selected fonts
-use a fresh normal additional-font bundle. It returns immutable page number
-and size metadata for one zero-based page index. Neither method
-exposes positioned renderer elements or permits mutation through a layout
-result.
+Without selected caller fonts, Python `Document.layout()` and
+`Document.layout_page()` read the bundled snapshot when `system_fonts` is false.
+`system_fonts` true reads the normal snapshot, and a build without
+`system-fonts` returns the documented error. Empty sequences and valid empty
+directories are omission. Nonempty caller fonts keep caller priority and use the
+public route table for that same tier. They do not call the private helper and
+they do not call the normal font methods when the tier is bundled. `page_count`,
+`to_pdf`, `to_pdf_with_diagnostics`, and every render helper, including
+`render_all_pages` and its diagnostic twin, use that same keyword and the same
+public route.
 
 PowerPoint slide raster export also stays on the facade-owned deterministic
 path. `Presentation::slide_png_deterministic` renders one zero-based slide and
@@ -1400,6 +1584,16 @@ not globally rewritten. Source XML and stored codes remain unchanged.
 Monochrome Unicode substitutes preserve the measured semantic symbol, not
 original Wingdings outlines, dimensions or advances. U2610 checkbox coverage
 is separate from the WingdingsA7 section-square mapping.
+
+### Word-only Wingdings 2 mapping
+
+Qualified numbering bullets and explicit `w:sym` runs in `Wingdings 2` map both
+the low byte `0xA1` and `U+F0A1` to the black square `U+25A0`. The mapping is
+bounded to Word's symbol methods and does not rewrite ordinary private-use
+text. An unmapped `Wingdings 2` code such as `U+F0A7`
+keeps its stored code and reports one diagnostic, `Unknown Wingdings 2 symbol
+U+F0A7: original code retained`. The Wingdings, Symbol, and PowerPoint control
+mappings above stay unchanged. Source XML and stored codes remain unchanged.
 
 Normal `FontManager` construction clones one process-lifetime snapshot of the
 bundled and system face table. Installing, removing, or replacing a system font
@@ -1541,7 +1735,13 @@ engines compare the changed theme and font bytes in their full context.
 A normal note keeps its package ID as its layout lookup key. The visible
 footnote and endnote labels are assigned independently from the first body
 reference to each note in projected document order. The same label shapes the
-body superscript and the marker beside the note. Reordering the note part does
+body superscript and an actual authored note-body marker. Qualified raw
+footnoteRef and endnoteRef events render at their source run boundary using
+resolved run styles. Imported marker absence remains absence. Literal custom
+marks remain ordinary source text and render once. New native footnote and
+endnote constructors publish explicit matching styled markers, including the
+legacy add_footnote constructor. Older imported packages are interpreted from
+their actual source, without guessing their creating API. Reordering the note part does
 not renumber either marker. A removed note leaves the remaining IDs stable
 while the displayed sequence closes the gap. The effective document and
 section policy selects decimal, Roman, or alphabetic labels, a one-based start,
@@ -1553,7 +1753,20 @@ at the section end follow that section's final body content. Document-end
 endnotes begin in the measured free band of the final body page and carry to a
 later page if needed. Footnotes reserve space on each reference page, either
 at the page bottom or beneath the body under the effective policy. Authored
-separator content replaces the synthetic rule. A carried note uses its
+separator content replaces the synthetic rule. Separator-only raw mark events
+are visible content, including their resolved paragraph metrics. A present
+empty authored record stays distinct from an absent record. Notes use full
+section width with resolved paragraph indents and tabs for both measurement
+and paint. Private current-note context is restored after success or error,
+without turning a note-body marker into a body reference.
+
+Prediction and committed note splitting consume one ordered source line-range
+plan. A short fresh note that fits a fresh effective page retains whole-note
+movement. An intrinsically long note may start beside its placed reference
+with a nonempty first fragment. Carried notes precede fresh notes, with selected
+separator and continuation-notice costs included once. A single line exceeding
+the usable note area after notice costs overflows once on a note-only page rather than losing
+source or repeating without progress. A carried note uses its
 continuation separator at the next page and its continuation notice at the
 page from which content continues. The pinned Word for Mac 16.113.2 build
 shows both document-end notes on the final body page, section-end notes after
@@ -1660,7 +1873,10 @@ equality or capacity check fails, pagination continues through the normal full
 path.
 
 The same restart record retains aligned pristine and field-substituted page
-pairs. PAGE, NUMPAGES, and PAGEREF pages bypass reshaping only when exact page
+pairs. Per-page substitution identity includes the actual instruction, stored
+display, lock, relevant owner and target section-format facts. Its owned context
+capacity is charged to the existing restart-cache byte limit. Unrelated source
+fields are not copied into every page's identity. PAGE, NUMPAGES, and PAGEREF pages bypass reshaping only when exact page
 content first recovers the retained pristine `Arc`, then page index, displayed
 page number, total-page count, sorted bookmark targets, font trace, revision
 view, and every substitution input compare equal. Field-free output shares its
@@ -1720,6 +1936,10 @@ controls aggregate the blocks projected from that direct body owner. Preserved
 unlaid content remains addressable through an empty fragment slice.
 
 The body owner is a private result-local overlay on shared layout blocks.
+Structure assignment synchronizes an owned paragraph's captured semantics after
+assigning its physical paragraph or list identity. Paint and page continuations
+consume that exact assigned identity. A present companion remains authoritative,
+including an explicit absent identity at other publication boundaries.
 `PositionedElement` and the renderer input remain unchanged. Recorded restart
 state retains the sidecar with its exact pages, accounts for its capacity under
 the existing aggregate cache ceiling, and combines cached prefix and suffix
@@ -1734,6 +1954,13 @@ The selected view determines pagination before page indices or ranges are
 validated, so tracked content can add pages. Unknown view names fail before
 output is created. HTML and Markdown conversion do not accept the tracked
 rendering selector.
+
+Checked Engine entry points prepare deferred revision Fields on a layout-only
+clone before source registration and REF or SEQ planning. Existing borrowed
+resource admission precedes recursive work, and preparation errors propagate.
+Revision-free inputs stay borrowed. Revision source registration, snapshot
+derivation and layout share the prepared owner. The caller's raw XML remains
+authoritative and unchanged.
 
 `LayoutInput::revision_view` selects the accepted or tracked projection before
 Word text shaping. One ordered projection combines ordinary runs and typed
@@ -1847,6 +2074,105 @@ and the block is broken to that section's measure and grid. Word writes a
 section this way whether the break sits on its own empty paragraph or on the
 last paragraph of content.
 
+One private story variant selects header, footer and watermark together. A
+selected blank or missing first/even story stays blank. Section-start parity
+and same-type inheritance follow ECMA-376 17.10.1, 17.10.5 and 17.10.6.
+Each physical page
+prepares its selected furniture before calculating the body band. Paragraph
+spacing, border-group gaps and flowed table rows are priced once and painted
+from the same prepared blocks and placements. Nonnegative top and bottom
+margins, including zero, clear actual selected flow. A negative side uses its
+absolute written distance and permits overlap.
+
+Written, mirrored section geometry remains the reference for page and margin
+anchors, furniture and page/text borders, except explicit page-offset axes
+inside ordinary positioned header/footer paragraph frames. Those offsets use
+the actual frame origin independently per axis, matching the qualified native
+Word frame controls. Paragraph axes retain their actual paragraph origin.
+Page alignment retains its existing section-page basis pending native alignment
+qualification. Unframed and table-cell page anchors retain section-page offsets.
+The effective body band controls
+body fit, columns, vertical alignment, line numbers and note reservations.
+Paragraph-relative anchors use their actual owner origin, including owners
+inside table cells and ordinary frames. Positioned tables, frames and drawings
+do not themselves consume flow height. Their wrap reservations can change the
+height of surrounding flow and therefore its clearance.
+
+Floating furniture tables use the existing within-page overlap policy. Each
+physical table settles once against prior tables in story order. Its whole
+settled rectangle supplies every row, wrap reservation and paint position.
+Floating ownership and table-only overlap follow ECMA-376 17.4.56 and 17.4.57.
+Drawings and ordinary frames do not enter the table-only overlap relation.
+Same-story ordinary header/footer flow ignores paragraph-frame obstacles.
+Tables and drawings retain their own wrapping policy. Selected prepared frame
+rectangles reserve actual intersecting main-body bands through the existing
+body wrap policy. Paint and body obstacles share one physical rectangle on
+written page geometry, including footer and selected first/even/default stories.
+Touching and disjoint bands do not reserve body text. Floating frame paint
+never becomes ordinary furniture flow height.
+
+Adjacent paragraphs with equal ordinary `framePr` values form one positioned
+group anchored to the first following non-frame paragraph. Frame content keeps
+its source and field identities and emits once. Ordinary header/footer frames
+retain authored vertical-anchor presence. In this qualified furniture context,
+Word16.114 observations resolve an omitted vertical anchor on the written
+margin basis, while explicit text uses its actual following story paragraph.
+The documented generic MS-OE376 text default does not predict that observed
+context. Omitted horizontal anchors use the text/column basis. Imported
+attributes and general body-frame/drop-cap semantics remain unchanged. A nonzero height with absent height rule uses Word's atLeast behavior,
+and zero height is automatic. Explicit values remain authoritative. Imported
+attributes are unchanged. Drop and margin drop-cap modes keep the existing
+unsupported fallback and do not enter ordinary positioned frame layout.
+
+Native Word parity is not qualified for seven observed ordinary furniture-frame
+cases. The margin, omitted and page vertical-anchor controls in both header and
+footer have a0.551202pt maximum measured edge difference, exceeding the
+unchanged0.5pt criterion. In the explicit-text-anchor footer control, the
+library frame lies outside the page and following ordinary footer text stays
+144pt left of Word's position. Same-story flow ignoring frame obstacles is the
+current mechanism, with that observed failure rather than a general Word
+compatibility guarantee. Authored offsets and nominal11pt/16pt source fonts
+remain authoritative. Pending S96.1 F-X288 owns the user-approved seven-case
+release carry, and Issue424 remains open. This boundary does not extend to
+body frames or drop caps, alter the original failed measurements, or waive
+other native/schema qualification. Row-split differences are separate.
+
+Pinned LibreOffice 26.2.5.2 can position the main story differently for selected
+first/even stories, floating furniture tables, omitted frame anchors and
+Center/Bottom or exact tbRl body alignment. These controls retain the qualified
+Word behavior above, including effective-band composition with section
+alignment under ECMA-376 17.6.23. Their per-oracle numeric mismatches remain
+explicit compatibility limits. A source-supported disposition preserves the
+measurement and asserts the Word side, without fitting a LibreOffice offset or
+inferring its internal cause. Other furniture, font, paint and operation
+qualification remains separate, and unexplained mismatches remain blocking.
+
+Preparation always starts from original shaped source blocks. A footer accepts
+only a stable bottom origin and complete prepared line/obstacle/placement
+state. Repeated states and the internal 32-candidate work bound return a
+section/page-qualified layout error through the fallible engine. The work bound
+is termination protection, not proof of convergence. Furniture line reflow
+separately permits at most32 original-source rebreaks per paragraph. Required
+reservations recomputed from every resulting content band must match those
+supplied to the line breaker. Transitive top-and-bottom clearance advances only
+intersecting lines, retaining earlier text above a later object. Later gaps
+remain private beside raw Word-restored line metrics. A borrowed private paint
+view applies each gap to the content origin before glyphs, highlights, links,
+rich text and logical field reconstruction. The same gap totals price borders,
+change bars and following flow once. Body pagination retains its established
+two-pass approximation and failure policy. Failed reflow does not publish
+guessed last-candidate paint. The legacy low-level signatures and
+positioned-furniture failure policy remain compatible, while ordinary flow
+clearance and spacing use the shared pricing.
+
+Fresh endnote continuation pages use the same selected furniture preparation,
+effective band and painting as body/footnote pages, with continued physical and
+displayed numbers and original source/field identities. Endnotes retain their
+existing single-column top-flow policy. Reusing the final body page consumes its
+actual remaining band. Alignment moves current-page body fragments with the
+painted body, rotating the displacement vector for vertical sections. The
+final-page fragments are published after that alignment completes.
+
 Columns reach pagination. `sect_pr_to_geometry` resolves one track list per
 section, either equal-width tracks from `w:num` and `w:space` or explicit
 tracks from the `w:col` list when `w:equalWidth` is `0`. **A section that
@@ -1926,9 +2252,64 @@ A section without a restart continues after the preceding section's displayed
 last page. Overflow endnote pages continue after the final body page for fresh
 and restarted pagination, including a restarted final section. Pagination field
 values inside notes follow their unique body reference owner rather than the
-physical page that prints the note. PAGE uses its source section number format
-and PAGEREF uses the target section number format. Chapter style and chapter
-separator remain preserved without changing layout.
+physical page that prints the note. PAGE uses its actual source section number
+format and PAGEREF uses the qualified target section number format. Physical
+page identity, displayed integer and formatted text are separate facts.
+
+Layout substitution and eligible saved-cache updates share the doc-hidden
+`format_page_field_result` policy in the existing layout engine. The companion
+`section_page_number_format` and restart projection share one private effective
+numbering provider. It positively qualifies the modeled first owner through
+the section writer's retained namespace context before admitting direct Word
+numbering duplicates. For the imported duplicate recovery qualified against
+Word, later explicit format and start attributes independently replace those
+values, while omitted attributes and empty elements retain prior values.
+The model, getters, authoring and serialized source keep first-owner authority
+and exact opaque duplicate order. Nested prior sections and bound foreign
+lookalikes, explicit no-namespace lookalikes and unprefixed attributes do not
+participate. An unqualified modeled owner cannot borrow a
+later qualified duplicate. Unknown formats remain unsupported even if a later
+token is supported, and chapter state remains unsupported. Invalid later
+start, an undeclared prefix on consumed numbering or reader failure discards
+partial recovery, retains
+stored display with diagnostics and uses the legacy modeled start for
+compatibility pagination. Explicit later starts use the existing u32 domain
+and zero behavior. Single-owner compatibility remains unchanged.
+Qualified absence selects decimal and no restart, including the implicit final
+section that pagination supplies when body sectPr is absent.
+
+The supported section formats are decimal, lowerRoman, upperRoman, lowerLetter
+and upperLetter. Explicit numeral switches or numeric pictures override a
+supported section numeral style. Character-only switches and MERGEFORMAT or
+CHARFORMAT retain that base, with existing numeric-picture then ordered general
+format stages. Roman output is bounded to 1 through 3999. Alphabetic page fields
+repeat letters, so 26 is Z, 27 is AA, 28 is BB, 52 is ZZ and 53 is AAA, with a 4096 character
+bound. These are library support limits rather than native Word maxima. Ordinary
+NUMPAGES, SECTION and SECTIONPAGES defaults remain decimal.
+
+Page-number capture closes the actual URI-bearing inherited alias, default and
+producer bindings into its existing raw owner before source scope is lost.
+Both Empty and Start forms and opaque duplicates retain payload and source
+order. Verified ordinary canonical-w bytes stay unchanged. Producer-w bindings
+stay child-local when generated section attributes use a protected alias. Read,
+formatting and start edits do not rewrite format or opaque source metadata.
+
+Both ordinary and multilingual substitution consume the same per-placement
+formatted field values, including instruction and actual note-reference owner.
+Strict page-family instruction admission also runs before deferred placeholder
+selection, so a missing PAGEREF operand retains its stored display and diagnostic
+instead of disappearing before pagination. Locked owners keep their existing
+cache policy. The direct multilingual consumer preserves empty carrier metadata
+and publishes multiple shaped spans with existing visual bidi ordering at finite
+natural width and no wrap. It does not add a Word producer or body reflow path.
+Unsupported instructions or bounded formats restore the actual stored display,
+with a diagnostic, instead of publishing a synthetic placeholder as success.
+Only an actually unplaced PAGEREF target loses TargetPage qualification.
+Unsupported formatting retains the known source family and physical placement,
+alongside its stored display and diagnostic.
+Dynamic header/footer PAGE and NUMPAGES saved caches remain retained across
+page-only, layout-backed and combined updates, while rendering resolves each
+physical placement independently.
 
 Dynamic TOC entry materialization uses the section that owns the TOC field.
 When the effective entry style has no right tab, the generated paragraph adds
@@ -2124,6 +2505,19 @@ bounded 16-byte index record per frame, and appends `idx1` after `movi`. Every
 codec write is capped before growth. Neither format invokes a subprocess or a
 system codec.
 
+## Word TOC entry ink
+
+A generated TOC entry carries the Hyperlink character style on its run, and Word
+paints that entry in the TOC paragraph style's ink rather than the Hyperlink
+character style. The layout engine recognizes a paragraph style whose identifier
+has an ASCII case-insensitive `toc` prefix whose remaining trimmed text parses
+as a numeric level from 1 to 9, or whose trimmed name equals `toc N` for
+N from 1 to 9 under ASCII case folding, and omits a Hyperlink
+character style from that entry's run resolution. Both a Word-written TOC and an
+rdocx-built TOC therefore paint `#000000` without underline. The same Hyperlink
+run in an ordinary body paragraph keeps its colour and underline. Source XML and
+stored field instructions are unchanged.
+
 ## Numbering-aware heading placement
 
 Heading level follows the shared effective paragraph cascade, including table
@@ -2185,16 +2579,24 @@ diagnostic. Explicit ambiguous rebuilds retain their existing atomic refusal.
 This is not an empty successful source discovery or a new ordinary REF/SEQ
 policy. Snapshot equality includes the private status and invalidates caches.
 
-TOC selectors reuse the existing source-qualified navigation tuple. Explicit
-custom-style selection remains independent. Heading-style selection without
-u keeps its established rule, while u requires the qualified shared heading
-eligibility, including effective inherited or direct outline9 suppression.
-When a heading range is explicit, its lower and upper bounds also filter the
-outline-derived fallback. An outline-only instruction without that range keeps
-all admitted outline levels. Explicit custom-style assignments remain independent
-of this range, including their assigned TOC levels.
-An unavailable owner is an explicit refusal, not a fabricated suppression fact.
-No additional cascade, flag, counter or per-field source scan is introduced.
+TOC selectors reuse source-qualified navigation facts from actual layout.
+Every registered paragraph under a table decision retains its physical source
+path, including nested tables and valid controls. Actual accepted row/table
+removal and continuation-cell omission record unplaced facts with no heading
+level or style. Table cache hits replay the returned placement decision against
+fresh source paths. Ordinary and nested placed headings keep the existing
+effective-paragraph provider and page placement.
+
+The doc-hidden native `paragraph_omitted_by_table(SourceNodeId)` query returns
+Some(true) for actual table omissions, Some(false) for other qualified
+navigation, and None for missing or unknown qualification. TOC discovery checks
+this result before every style, outline and explicit selector. Missing facts
+remain subject to existing freshness/refusal rules. STYLEREF and numbered
+outline consume the same cleared eligibility, without invented pages or a
+second cascade. Explicit custom-style assignments remain independent among
+admitted sources. An explicit heading range also bounds outline-derived
+fallback, and outline-only selection keeps all admitted levels. Snapshot source
+stamps and atomic rebuild requirements remain unchanged.
 
 ## Word bookmark field pagination
 
@@ -2205,6 +2607,11 @@ The transaction never measures source pages before table insertion and never
 runs a second paginator. A range uses both checked bookmark endpoints, including
 the sequence context at each endpoint for chapter-prefixed INDEX entries.
 Caption selection uses TOC `c` or `a`, independently of its `s` page prefix.
+
+Generated INDEX, caption-selected TOC and TOA page labels use the same target
+section formatter. Their physical range ordering and sequence prefixes remain
+separate from the formatted label. Section-format facts are prepared once for
+each operation rather than serializing the section for every entry.
 
 INDEX hierarchy, repeated-page suppression, cross-reference punctuation,
 run-in entries, page emphasis and chapter separators follow the pinned en-US
@@ -2364,9 +2771,10 @@ calling the deterministic bundled-font layout. The existing post-pagination
 pass remains the only page-target authority. Rebuild reads those displayed
 target values, materializes them into the owned TOC cache, reopens the final
 package, and discards the completed provisional layout. It does not estimate
-page numbers or run a second pagination algorithm. It accepts only stable
-decimal values within the produced page range and rejects a missing,
-inconsistent, or invalid target atomically. The Word layout result owns
+page numbers or run a second pagination algorithm. It qualifies the target's physical page through `bookmark_page_section` and
+checks the actual source instruction and shared formatted target label. Roman,
+letter and restarted labels are text, not physical page indices. Missing,
+stale, unsupported, inconsistent or unresolved targets refuse atomically. The Word layout result owns
 the result-local target-to-bookmark mapping. Facade substitution therefore
 uses the same accepted-revision projection and positioned table, row, cell,
 and content-control order as bookmark markers and PAGEREF layout. A revision
@@ -2386,6 +2794,62 @@ font-relative keys and row spacing determine the bounds before marks and axes
 are laid out. Horizontal legends wrap within chart width. The renderer refuses
 unbounded or insufficient layouts rather than painting labels outside the
 chart. All backends consume the resulting group without separate legend logic.
+
+## Shared picture decoding
+
+PNG decoding supports all existing 8-bit channel forms with plain or Adam7
+interlace. Each pass has its own filter rows and scatters into the full raster
+before channel separation. Plain and interlaced flat-colour inputs retain the
+same rendered page pixels.
+
+EMF probe dimensions use positive inclusive pixel bounds. Invalid bounds fall
+back to positive frame differences converted by integer multiplication by 96
+and division by 2540, without adding one to frame dimensions. The raster player
+uses integer `(1024 / longest).clamp(1, 8)` scaling. Checked source and output
+RGBA products each refuse above 64 MiB before their raster allocation.
+
+The player covers window and viewport mapping, map modes and world transforms,
+save and negative restore, stock and created solid pens and brushes, 16-bit and
+32-bit polylines, polygons and Beziers, rectangles, rounded rectangles, ellipses,
+path brackets and STRETCHDIBITS with 1, 4, 8, 24 or 32-bit DIBs. DIB sampling
+retains source crop and signs, mapped affine destination and opaque RGB. Ternary
+ROP evaluates RGB Boolean dependencies. A source-free ROP does not require a
+fictitious DIB or source clip. A pattern-dependent ROP needs a solid brush. NOP
+preserves complete RGBA and does not mark an otherwise empty image as drawn.
+Unsupported palette-object dependencies, text, clipping, BITBLT, STRETCHBLT,
+ALPHABLEND, dashed or hatched objects, EMF+ and WMF do not set the drawn flag.
+No painted supported record means unsupported format. This is a raster subset,
+not vector output or exact GDI parity. Continuous mapping, affine stroke width,
+pixel-centre crop sampling and edge coverage are approximations.
+
+Word picture diagnostics use actual inline, anchor and resolved VML emission
+owners. `WordLayoutResult::picture_draw_owners` retains image relationship and
+optional related-story relationship ids. Media hashes and unused image-map
+entries do not supply owners. Scoped lookup never falls back to a main-story
+relationship. Fresh layout transactions replace capture state, and the VML
+header/footer cache replays its charged owner snapshot. Ordinary paragraph and
+table cache predicates exclude drawing content. All fresh facade publishers,
+including the alias-aware caller-font route, annotate before caching or returning
+the owned bundle. Unsupported and undecodable sentences retain relationship and
+story identity and appear once in diagnostics before encoding. Missing VML
+parts keep their existing unresolved sentence.
+
+## Chart numeric labels
+
+Numeric label pictures support zero and optional digits, decimal rounding,
+variable-width grouping, scaling commas, percent, quoted and escaped literals,
+currency brackets with stripped locale suffix, the eight named colour brackets,
+underscore and star. Up to four sections use positive, negative, zero and ignored
+text-section selection. Exact whole-code `General` remains supported. Date/time,
+scientific, fractional, conditional, text-only, empty and more-than-four-section
+codes refuse projection. Finite refused codes draw using Rust Display General
+values and one fallback diagnostic. Non-finite failures still propagate.
+
+`unsupported_number_formats` deduplicates first occurrences in physical plot
+order: label codes, numeric categories, point overrides, then axes. Painter
+fallback covers numeric categories, value labels and percent labels. Word and
+presentation add fallback diagnostics only after the chart group paints.
+Imported format spellings are not rewritten.
 
 ## Word chart pagination
 
@@ -2589,21 +3053,26 @@ is why `embed_id` cannot survive the port, and it deduplicates a logo that
 appears on every slide.
 
 Upstream package assembly also constructs the source-neutral `ScopedMediaIds`
-maps consumed by `ResolveCtx::resolve_slide_with_media` and records package
-content types by resolved media ID. Only embedded picture relationships enter
-those maps. The target must be present, its declared content type must match its
-sniffed PNG or JPEG format. JPEG inputs must use the 8-bit, three-component
-layout supported by both the raster decoder and PDF pass-through path. Encoded
-bytes remain within 16 MiB and decoded scanline or pixel storage remains within
-64 MiB. Every dimension and byte multiplication is checked before allocation.
-The stricter raster backend must visibly decode the image at its native pixel
-bounds before it enters renderer input. Native bounds retain sparse visible
-pixels that a one-pixel probe could miss. This also covers the PDF backend,
-whose JPEG path is a less strict pass-through. A rejected relationship records
-its scope and stable failure reason separately from admitted media. The owning
-picture produces that one diagnostic and lowers as a visible bounds fallback.
-Missing, unsupported, malformed, invisible or content-type-mismatched media
-also stay unresolved. Linked media remains diagnosed and no renderer performs
+maps consumed by `ResolveCtx::resolve_slide_with_media` and records effective
+render content types by resolved media ID. For admitted PNG/JPEG bytes these
+transient types follow the sniff, including cached-chart previews. Stored package
+and MediaData content types retain their original declarations. Only embedded picture relationships enter
+those maps. The target must be present. Shared `classify_image_draw` gives sniffed
+PNG and JPEG precedence over declared MIME types, admits a drawable bounded EMF,
+and separates an undecodable raster from unsupported EMF or WMF. Known other
+formats remain outside this decoder even when declared as a metafile. Empty or
+unrecognized bytes declared as an EMF or WMF use that unsupported-format outcome.
+
+PNG and JPEG preview admission retains the 16 MiB encoded and 64 MiB decoded
+limits with checked dimensions. Adam7 preview accounting sums the actual seven
+pass row sizes. A probed JPEG outside the 8-bit three-component layout and a
+decoded PNG that changes neither black nor white preview remain the named
+unresolved residuals. A recognized malformed raster records `could not be
+decoded`. An unsupported metafile names `emf` or `wmf`. A declared MIME mismatch
+does not discard a drawable sniffed PNG or JPEG. EMF bypasses this raster-preview
+policy and uses the shared player's independent bounds. Owning relationships
+retain their scope and failure reason for a visible bounds fallback.
+Linked media remains diagnosed and no renderer performs
 network access. Direct background picture fills use
 the scope of the slide, layout, or master that
 supplied `p:bg`. Theme-referenced picture fills are rejected
@@ -2780,7 +3249,7 @@ comparisons use the same actual geometry and font inputs with comparison
 criteria fixed before measuring output. A graph copy or nonblank image alone
 is not native appearance or pixel parity evidence.
 
-Qualified picture drawing properties with hidden=true or hidden=1 do not paint. Missing and false hidden flags retain ordinary picture rendering. The reader uses the actual qualified cNvPr owner and retains its raw bytes, including foreign attributes and children. LibreOffice may materialize master visibility as hidden layout pictures during save and reopen.
+Qualified shape, picture, connector, graphic-frame and group drawing properties with hidden=true or hidden=1 do not paint. A hidden group drops its descendants. Missing and false flags retain ordinary rendering. Selected AlternateContent chart choices use their own drawing owner. The same traversal applies to slides, layouts, masters, notes and handouts. Semantic export retains hidden-shape text and chart data. The reader uses the actual qualified cNvPr owner and retains its raw bytes, including foreign attributes and children. LibreOffice may materialize master visibility as hidden layout pictures during save and reopen.
 
 ## Word table topology and physical pictures
 
@@ -2795,8 +3264,21 @@ read-only FitReport. They retain owner contexts, admitted table cells, empty
 frames, measured/stored scale, hypothetical needed total scale/reduction,
 quantized and persisted trial containment and provider diagnostics. Trials
 report points, stored bounds EMU and integer solver scale/reduction values in
-hundred-thousandths. Unsupported mandatory owners refuse rather than vanish,
-and no permitted fitting trial retains a null needed scale. Caller fonts use
+hundred-thousandths. Unsupported mandatory owners are named with their cause and do not vanish or
+abort the deck. The cause is published once on every non-empty unsupported
+frame, whether that frame has a measurement context or is contextless. The CLI
+exits 1. A table cell whose stored measurement fits the width and not the
+height overflows only when the grown table's transformed rectangle leaves the
+page. A cell whose stored measurement does not fit the width stays overflow.
+The test uses the shared row growth and `shape_transform`, including rotation
+and flip. `needed_scale` stays the stored-row hypothetical. A repeated shape id
+is measured and named once for every later physical leaf. `refresh_autofit` and
+`fit_text_at` still refuse. A notes placeholder whose idx matches no
+notes-master placeholder is measured from the single notes-master placeholder
+of its type, on the read-only fit path only. Zero or several type candidates
+after a successful collection are reported, not guessed. A master-key collision
+that collection already rejects stays a checked error. No permitted fitting
+trial retains a null needed scale. Caller fonts use
 the same strict preparation and deterministic bundled fallback as rendering.
 The report does not mutate autofit or save the presentation.
 

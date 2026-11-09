@@ -16,9 +16,11 @@ files.
 
 The archive row is regenerated from the package that carries this README.
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-opc | 117,614 compressed bytes, 477,731 member bytes, 12 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: oxml-opc | 119,252 compressed bytes, 486,417 member bytes, 12 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `oxml-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-06 |
 
 ## Use it when
 
@@ -45,4 +47,4 @@ assert_eq!(content_types.defaults["xml"], "application/xml");
 # Ok::<(), oxml_opc::OpcError>(())
 ```
 
-Add `oxml-opc = "0.14.4"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).
+Add `oxml-opc = "0.15.0"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).

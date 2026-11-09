@@ -329,8 +329,45 @@ pub fn probe(data: &[u8]) -> Option<ImageInfo> {
         ImageFormat::Gif => probe_gif(data),
         ImageFormat::Bmp => probe_bmp(data),
         ImageFormat::Webp => probe_webp(data),
-        ImageFormat::Tiff | ImageFormat::Svg | ImageFormat::Emf | ImageFormat::Wmf => None,
+        ImageFormat::Emf => probe_emf(data),
+        ImageFormat::Tiff | ImageFormat::Svg | ImageFormat::Wmf => None,
     }
+}
+
+/// Metafile bounds are inclusive device pixels. The frame is in hundredths
+/// of a millimetre and supplies dimensions only when those bounds are unusable.
+fn probe_emf(data: &[u8]) -> Option<ImageInfo> {
+    let header_bytes = usize::try_from(read_le_u32(data, 4)?).ok()?;
+    if header_bytes < 88 || header_bytes > data.len() || read_le_u32(data, 44)? != 0x10000 {
+        return None;
+    }
+    let extent = |offset: usize, inclusive: bool| -> Option<(u32, u32)> {
+        let left = i64::from(read_le_i32(data, offset)?);
+        let top = i64::from(read_le_i32(data, offset + 4)?);
+        let right = i64::from(read_le_i32(data, offset + 8)?);
+        let bottom = i64::from(read_le_i32(data, offset + 12)?);
+        let (width, height) = if inclusive {
+            (right - left + 1, bottom - top + 1)
+        } else {
+            ((right - left) * 96 / 2540, (bottom - top) * 96 / 2540)
+        };
+        let width = u32::try_from(width).ok().filter(|value| *value > 0)?;
+        let height = u32::try_from(height).ok().filter(|value| *value > 0)?;
+        Some((width, height))
+    };
+    let (width_px, height_px) = extent(8, true).or_else(|| extent(24, false))?;
+    Some(ImageInfo {
+        format: ImageFormat::Emf,
+        width_px,
+        height_px,
+        dpi_x: None,
+        dpi_y: None,
+        // A vector header declares neither channel depth nor alpha. Actual
+        // raster eligibility belongs to the bounded metafile player.
+        bit_depth: 0,
+        channels: 0,
+        has_alpha: false,
+    })
 }
 
 fn probe_png(data: &[u8]) -> Option<ImageInfo> {
@@ -1368,5 +1405,37 @@ mod tests {
                 let _ = ImageFormat::sniff(&signature[..length]);
             }
         }
+    }
+
+    #[test]
+    fn fx281_emf_probe_uses_inclusive_bounds_and_frame_fallback() {
+        let mut header = vec![0u8; 88];
+        for (offset, value) in [
+            (0, 1i32),
+            (4, 88),
+            (16, 199),
+            (20, 99),
+            (32, 5290),
+            (36, 2645),
+            (44, 0x10000),
+            (48, 88),
+            (52, 1),
+            (72, 1024),
+            (76, 768),
+            (80, 270),
+            (84, 203),
+        ] {
+            header[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        header[40..44].copy_from_slice(b" EMF");
+        let info = probe(&header).expect("readable EMF bounds must supply picture dimensions");
+        assert_eq!(info.format, ImageFormat::Emf);
+        assert_eq!((info.width_px, info.height_px), (200, 100));
+        header[16..20].copy_from_slice(&(-1i32).to_le_bytes());
+        header[20..24].copy_from_slice(&(-1i32).to_le_bytes());
+        let info = probe(&header).expect("nonpositive bounds use the frame, not device dimensions");
+        assert_eq!((info.width_px, info.height_px), (199, 99));
+        header[32..40].fill(0);
+        assert!(probe(&header).is_none());
     }
 }

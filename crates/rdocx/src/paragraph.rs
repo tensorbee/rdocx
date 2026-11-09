@@ -1172,7 +1172,12 @@ impl<'a> Paragraph<'a> {
             oxml_core::xml::reject_non_xml_characters("hyperlink tooltip", tooltip)?;
         }
         let run_start = self.inner.runs.len();
-        self.inner.runs.push(CT_R::new(text));
+        let mut run = CT_R::new(text);
+        run.properties = Some(rdocx_oxml::properties::CT_RPr {
+            style_id: Some("Hyperlink".into()),
+            ..Default::default()
+        });
+        self.inner.runs.push(run);
         self.inner.hyperlinks.push(HyperlinkSpan {
             rel_id: Some(relationship_id.to_string()),
             anchor: None,
@@ -1201,7 +1206,12 @@ impl<'a> Paragraph<'a> {
         tooltip: Option<&str>,
     ) -> Run<'_> {
         let run_start = self.inner.runs.len();
-        self.inner.runs.push(CT_R::new(text));
+        let mut run = CT_R::new(text);
+        run.properties = Some(rdocx_oxml::properties::CT_RPr {
+            style_id: Some("Hyperlink".into()),
+            ..Default::default()
+        });
+        self.inner.runs.push(run);
         self.inner.hyperlinks.push(HyperlinkSpan {
             rel_id: None,
             anchor: Some(anchor.to_owned()),

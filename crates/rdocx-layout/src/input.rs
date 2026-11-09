@@ -56,6 +56,9 @@ pub struct ImageData {
     pub content_type: String,
 }
 
+/// Concrete result-local owner list shared by capture and VML cache custody.
+pub(crate) type PictureDrawOwners = Vec<(String, Option<String>)>;
+
 /// Collision-safe media lookup shared by layout and pagination.
 #[derive(Debug, Clone)]
 pub struct MediaRegistry {
@@ -63,6 +66,7 @@ pub struct MediaRegistry {
     media: Arc<HashMap<MediaId, ImageData>>,
     missing_id: MediaId,
     scope: Option<String>,
+    picture_draw_owners: Arc<std::sync::Mutex<PictureDrawOwners>>,
 }
 
 impl MediaRegistry {
@@ -116,7 +120,37 @@ impl MediaRegistry {
             media: Arc::clone(&self.media),
             missing_id: self.missing_id,
             scope: Some(part_relationship_id.to_owned()),
+            picture_draw_owners: Arc::clone(&self.picture_draw_owners),
         }
+    }
+
+    pub(crate) fn record_picture_draw_owner(&self, relationship_id: &str) {
+        self.replay_picture_draw_owners(&[(relationship_id.to_owned(), self.scope.clone())]);
+    }
+
+    pub(crate) fn record_related_picture_draw_owner(&self, relationship_id: &str, story_id: &str) {
+        self.replay_picture_draw_owners(&[(relationship_id.to_owned(), Some(story_id.to_owned()))]);
+    }
+
+    pub(crate) fn picture_draw_owner_checkpoint(&self) -> usize {
+        self.picture_draw_owners
+            .lock()
+            .expect("picture owner lock")
+            .len()
+    }
+
+    pub(crate) fn picture_draw_owners_since(
+        &self,
+        checkpoint: usize,
+    ) -> Vec<(String, Option<String>)> {
+        self.picture_draw_owners.lock().expect("picture owner lock")[checkpoint..].to_vec()
+    }
+
+    pub(crate) fn replay_picture_draw_owners(&self, owners: &[(String, Option<String>)]) {
+        self.picture_draw_owners
+            .lock()
+            .expect("picture owner lock")
+            .extend_from_slice(owners);
     }
 
     /// Return the image bytes and content types keyed by resolved media ID.
@@ -165,6 +199,7 @@ impl MediaRegistry {
             media: Arc::new(media),
             missing_id,
             scope: None,
+            picture_draw_owners: Arc::default(),
         }
     }
 }

@@ -1,0 +1,512 @@
+# F-X271, Restore pinned viewer downloads and planning policy
+
+**Status**: completed
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+
+## Problem
+
+`scripts/install_pinned_libreoffice.py:21` retrieves the Linux oracle from a stable release URL that now returns 404. `.github/workflows/ci.yml:308` does the same for macOS. The prior CI failures are retrieval failures, not completed product tests. `scripts/test_sprint_workflow.py:9024` still expects the old future sprint placement set after the authorized roadmap shift.
+
+## Spec reference
+
+- `docs/hld/15-build-and-toolchain.md`, "Toolchain pinning", "Deterministic rendering" and "CI job matrix".
+- `docs/hld/12-testing-strategy.md`, external oracle and deterministic rendering requirements.
+- `docs/hld/14-development-backlog.md`, "F-X271, Restore pinned viewer downloads and planning policy".
+- `docs/sprints/SPRINT_PLAN.md`, "Sprint S96, Contribution and issue repair", CI blockers and combined gate.
+
+## Approach
+
+Change retrieval to the official old-release archive for the same 26.2.5.2 binaries. Keep the independently retained SHA-256 pins and exact executable identity. Linux archive name becomes `LibreOffice_26.2.5.2_Linux_x86-64_deb.tar.gz`, under `https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/deb/x86_64/`. macOS uses the corresponding `mac/aarch64/LibreOffice_26.2.5.2_MacOS_aarch64.dmg`. Authenticate actual downloaded bytes before adopting either URL. A HEAD200 is not proof.
+
+Retain the existing streaming download and Linux extraction bounds, traversal/non-file refusal, required package checks and absent installation-prefix guard. Add a macOS download size bound before mounting while preserving TLS, readonly mounting, checksum and executable identity checks. Keep installation authority platform-specific. Do not run Linux installation on this macOS host. Hosted Linux and macOS outcomes remain required.
+
+Update only the existing roadmap policy's expected future set from 97/98/99 to 99/100/101. Keep its duplicate, missing-story, dependency and cross-record consistency assertions. Add focused cases to the existing `scripts/test_sprint_workflow.py` carrier. No new source file, module, dependency, feature flag or public API is proposed.
+
+## Consumer map
+
+| Rule | Entry points and outputs | Shared provider and caller policy | Lifecycle stages compared |
+|---|---|---|---|
+| Linux oracle identity | `download_archive(Path) -> None`, `safe_extract(Path, Path) -> Path`, `verify_soffice(Path) -> None`, `install() -> None` | Existing Linux installer used by Test, MSRV, Word/presentation fidelity | Retrieve, hash, bounded extract, install, version, actual gate |
+| macOS oracle identity | Existing rpptx installed-Python CI step | Existing DMG checksum and exact soffice identity | Retrieve, bound, hash, readonly mount, installed suite |
+| Sprint placement | `test_m23_m24_roadmap_has_no_duplicate_or_dangling_story` | Same HLD/backlog/roadmap inputs, revised authorized set only | Current plan and final completion metadata |
+| Script oracle policy | Existing `build_multi_script_fixtures(output: Path)` and accepted-copy/render/score callers | Explicit kern1 on all36runs at24pt in the shared enabled intersection | Generate, actual accepted byte copy, Rust and Writer render, all-five score and separate bidi evidence |
+
+## Behavior contracts and evidence
+
+| Surface or placement | Exact behavior and boundary examples | Primary source identity and location | Local discriminator or pending evidence |
+|---|---|---|---|
+| Linux bytes | SHA-256 `2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e`, max 224 MiB | Retained source installer at Base `24af95d3`, official TDF26.2.5.2 archive | Authenticated 218075885 bytes with retained hash, runtime mismatch/oversize controls pass |
+| Linux extraction | At most 256 members, at most 256 MiB extracted, expected root and core/impress packages, regular files/directories only | Existing `safe_extract`, installer lines 73 to 123 | Traversal, link, missing package, count and size boundary controls |
+| macOS bytes | SHA-256 `c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad`, proposed 320 MiB download cap | Retained CI source at Base `24af95d3`, official TDF26.2.5.2 archive | Authenticated 297407265 bytes with retained hash, actual hosted installed outcome pending |
+| executable | Exact `LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb` | Existing independently pinned Linux/CI identities | Version mismatch refuses before use |
+| roadmap | Story placements exactly once, future audited whole sprints 99/100/101 | Authorized S96 planning diff and unchanged audited F240 to 310 set | Current-Base stale-set RED, updated set GREEN, mutation controls |
+
+## Dependency readiness
+
+No formal dependency. Tool restoration is the execution prerequisite for the final S96 oracle union. Actual external CI is final acceptance debt, not a locally passed provider gate. F-X272/F-X273 may implement their local regressions after this tooling source is reviewed, without claiming the final oracle passed.
+
+## Acceptance criteria
+
+| ID | Input or setup | Expected observation or refusal | Consumers | Local test | Final gate or pending evidence |
+|---|---|---|---|---|---|
+| A1 | Official Linux old-release archive | Actual bytes equal retained checksum and correct root/packages | Installer, Linux CI | Focused archive retrieval contract case | Real Linux install and exact version |
+| A2 | Official macOS archive | Actual bytes equal retained checksum, bounded retrieval, exact executable | rpptx Python macOS CI | Existing workflow contract plus cap assertion | Actual hosted macOS runtime gate |
+| A3 | Wrong digest/version, oversize, traversal, non-file, missing package | Refusal before installation/use, no escape writes | Installer and workflow | Existing failure controls in `test_sprint_workflow.py` | Integrated policy suite |
+| A4 | Current revised roadmap | Unique complete placements accepted, duplicate/missing/dependency mutations rejected | Sprint policy | `test_m23_m24_roadmap_has_no_duplicate_or_dangling_story` | Final-state metadata policies |
+| A5 | Actual integrated source | Previously retrieval-blocked jobs execute and succeed with exact pins | Test, MSRV, Word fidelity, rpptx Python, CI gate | None, hosted-only evidence | New source-bound run/job IDs required, preserve old failures |
+| A8 | Five generated script fixtures | Explicit shared enabled-kerning policy, all36runs retain qualified text/font/language/size/direction and accepted-copy identity | Word script oracle tooling and final F-X273 consumer | Existing fixture-inventory body plus retained exact acceptor and five-page diagnostic | Actual final-source full Word fidelity and bidi evidence, unchanged thresholds, native default-policy debt remains separate |
+
+## Test matrix
+
+| Case | Modes or state combined | Expected difference or agreement | Wrong implementation rejected |
+|---|---|---|---|
+| C1 | Linux and macOS actual downloads | Different platform hashes, same exact release/build identity | Changing URL to latest or trusting HEAD |
+| C2 | Good archive versus digest/version mismatch and each extraction bound | Only authenticated safe inputs usable | Disabling integrity or bounds to get CI green |
+| C3 | New roadmap set versus duplicate/missing/dangling stories | Valid plan accepted, mutations fail | Deleting policy assertions |
+| C4 | All36script runs with kern1 versus absent, zero or above-size mutation | Exact enabled-policy XML, unchanged text/font/language/size/direction/geometry and byte-exact accepted copies | Comparing unlike defaults or silently narrowing the qualified script inventory |
+
+## Rejected alternatives
+
+- Upgrade LibreOffice, disable TLS/checksums or skip fidelity. Each changes the oracle contract.
+- Copy donor CI or archive claims. Neither qualifies the integrated source.
+
+## Test plan
+
+**Test gate**: regression, verbatim from the backlog.
+
+Local scoped: run `python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_workspace_viewer_jobs_install_pinned_libreoffice scripts.test_sprint_workflow.SprintWorkflowTests.test_pinned_libreoffice_installer_enforces_runtime_guards scripts.test_sprint_workflow.SprintWorkflowTests.test_m23_m24_roadmap_has_no_duplicate_or_dangling_story`, plus the new archive-route assertion in that class. Run the stale-roadmap case on current Base for RED, then the repaired case for GREEN. Exercise new retrieval assertions on old source for RED without calling a network failure semantic product evidence. Existing security controls are retained controls, not invented RED claims.
+
+Final sprint: full `python3 -m unittest scripts.test_sprint_workflow`, actual authenticated supported-target installs and named hosted jobs, then `/verify --full` and the S96 union. If the new source must be hosted first, use only the validated external-CI-source-availability route. No completion ledger or dependency unblocking on a source push.
+
+## HLD impact
+
+- `docs/hld/12-testing-strategy.md`
+- `docs/hld/14-development-backlog.md`
+- `docs/hld/15-build-and-toolchain.md`
+
+## Risk routing
+
+External oracle comparison adds exact version/build/input provenance and actual supported-target installation. Completion/status policy adds final affected metadata checks. Shared tooling consumers add Linux/macOS route checks. No product parser, unit conversion, public binding or crate graph change. Final hash/pixel union still applies to S96. A8 also creates deterministic qualified run-property XML, so preserve schema placement, source text and the existing ZIP recipe while proving the exact accepted-copy boundary. No product parser is changed.
+
+## Hash harness
+
+Expected unchanged,49 hashes and 7 deterministic pixel cases. This tooling/policy story authorizes no product baseline delta.
+
+## Implementation checklist
+
+- [x] Authenticate official archive bytes against both retained platform hashes.
+- [x] Repair URLs without changing oracle identity or Linux bounds.
+- [x] Add macOS retrieval bound and preserve readonly mount checks.
+- [x] Repair only the outdated roadmap expectation, retain negative controls.
+- [x] Run unique scoped checks and independent zero-finding microscope.
+- [x] Reconcile every currently listed HLD impact before final gate, including A8 intent.
+- [x] Implement and independently review A7 public diagnostic retention without changing its deadline or stages.
+- [x] Implement and independently review A8 shared-policy script fixtures and their exact coverage declaration.
+- [x] Obtain actual final-source hosted acceptance, retaining pending status until observed.
+
+## Open questions
+
+No unresolved user product choice. Both archive byte identities are authenticated. Supported-target installation, actual hosted CI and final sprint qualification remain pending observations, not questions to waive.
+
+## Contract closure
+
+Existing callable installer signatures remain unchanged. The implemented 320 MiB macOS bound exceeds the authenticated 297407265 byte archive size. Both replacement URLs were adopted only after actual bytes matched the retained hashes. Local implementation and the named scoped checks pass. The first microscope found no implementation defects and requested this S1 readiness-text correction. Independent follow-up microscope pass 2 reports 0 defects and 0 smells. Actual supported-target installation, hosted CI and final integrated sprint qualification remain pending.
+
+## Intake identity
+
+Read-only GitHub refresh on 2026-10-28 found no body or contribution-head changes from the S96 intake. Original payloads and comments are retained under `/private/tmp/rdocx-s96-run-refresh`.
+
+- Record 427, updated `2026-10-27T20:59:51Z`, body SHA-256 `5cef6bc8e0440076c8da5c46778ee22595c208f6698f367d2fbe9635208a46f4`.
+  Contribution head `cc3473d0c05659167847a941e0c7eb2bbd7217f5`.
+- Record 428, updated `2026-10-27T21:22:09Z`, body SHA-256 `635213f1f93940b66c2856d18a2d60caaf246d94419a40db90a1ec3b4e5aa5ba`.
+  Contribution head `87f101bc8e688bd93d358b72bc69c28732e9dad6`.
+
+Design closure on 2026-10-28: consumer map, observable A-IDs, discriminating cases, public signatures, imported states, HLD impact and local/final evidence were checked against current source. Q-S96-01 is answered in F-X272. Approvals follow provider contract order. No material user decision remains. Pending native/hosted/installed observations are retained final acceptance debt, not recorded passes.
+
+## Local implementation evidence
+
+Worker Base `376a8cec`. Actual focused baseline child exit 1: retrieval-route and roadmap cases failed, runtime safety control passed. The same three named cases pass after the patch, child exit 0, 3 tests. Complete transcripts are `/private/tmp/rdocx-s96-run-refresh/fx271-local-red.log` and `fx271-local-green.log`. Runtime negative controls cover download hash/size, archive traversal/type/member/expanded-size/missing-package and exact executable identity. New macOS mutations reject unbounded retrieval, wrong checksum and writable mounting.
+
+Root authenticated both actual official archives under `/private/tmp/rdocx-s96-archive-auth`, with exact source/final URLs and receipts in `evidence.json`. Linux is 218075885 bytes and matches the retained hash. Its 46 members total 218024484 declared bytes, have the expected root, no unsafe/non-file entries and both required packages. Actual `safe_extract` succeeded with 42 Debian packages, without executing or installing them. macOS is 297407265 bytes and matches its retained hash. Grok attempts produced no usable authentication evidence and none is credited.
+
+Local `/verify --scoped F-X271` observations: the three named focused tests, `cargo fmt --all --check`, `python3 scripts/prose_check.py`, `python3 scripts/sync_agent_skills.py --check` and `git diff --check` pass. No Rust crate changed, so changed-crate lint is inapplicable. Independent microscope pass 2 is clean after the separate S1 documentation remediation. Actual hosted Linux/macOS installation and Test/MSRV/Word fidelity/rpptx Python/CI gate remain pending, as do the final full suite, hash49/pixels7, native/oracle and S96 installed/typing/packaging union. No final acceptance or dependency completion is claimed.
+
+
+## Final gate remediation amendment
+
+The actual integrated gate at a859c19f found four failures in the existing Python job contract because scripts/test_sprint_workflow.py1362 retained the superseded stable macOS URL. Replace that one literal with the already authenticated old-release route. Keep the digest, exact version, conditional matrix, failure-propagation and mutation assertions unchanged. The four actual failures are retained as RED. Run those four cases after the correction and the complete policy suite with its required process and network access at the final boundary. The original seven sandbox/process/DNS errors remain failed setup observations, not policy passes.
+
+The same source failed cargo deny check on RUSTSEC-2026-0414 through pulldown-cmark0.13.4. Amend this existing gate-repair story with the minimum security patch: pin the existing facade dependency to exactly0.13.5, update only its lock entry and update the existing HLD15pin. This introduces no dependency edge, feature, public API, source file or parser option. Default features remain disabled, html remains selected and runtime options remain TABLES plus STRIKETHROUGH. No advisory allowlist or gate bypass is permitted.
+
+Primary sources are the actual cargo-deny advisory, upstream release tag48a2767b5b8ab0a4893e80d942e510065889fc6b at https://github.com/pulldown-cmark/pulldown-cmark/releases/tag/v0.13.5 and its0.13.4comparison. The official registry archive is157218bytes, SHA256278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb, with Rust minimum1.71.1. The observed advisory concerns ENABLE_WIKILINKS, which this importer does not enable. The actual old public importer control returned successfully. Do not claim an exploitable public-importer RED or additional advisory identities from this observation. Actual supply-chain refusal is the RED.
+
+The consumer is the existing native Markdown-to-HTML importer in crates/rdocx/src/html.rs, inherited by Rust, Python, CLI and WASM. Existing import/projection/diagnostic/limit/template/round-trip controls must remain passing. The final union qualifies the new dependency through fresh affected native and installed suites, WASM and hosted MSRV, README and verified archives, supply-chain and49hashes/7pixels. Expected existing output is unchanged. Investigate every delta before adoption. Keep the security dependency increment separately labelled from the stale test-literal correction.
+
+Root designer approved this bounded remediation after actual gate evidence and independent source design review by fx271_microscope. That review approved the scope, not unwritten implementation. The normal independent implementation microscope remains required. This amendment changes no other story or sprint acceptance row, and all existing final debt remains pending.
+
+
+## Pinned presentation corpus transport recovery
+
+Root adopts this technical amendment on2026-10-30after reading the actual hosted
+read-timeout failure, bounded preparation and independent technical proposal.
+F-X271remains approved/in-progress. All50manifest URLs, digests, producers, exact
+oracle pins, streaming, cache verification, unmanifested-file refusal and final
+whole-directory verification remain unchanged. No new file/module/dependency,
+public option, endpoint fallback or missing-subject skip is authorized.
+
+A6adds one consumer: scripts/fetch_pptx_corpus.py fetch, used by Test/MSRV and
+presentation fidelity CI, must recover at most twice after a classified transient
+GET/open/read failure, for at most3attempts with1and2second delays. Keep timeout60
+per operation, without claiming a total subject deadline. Report subject, actual
+error and attempt count, including exhausted failure. HTTP429/500/502/503/504,
+actual timeout/reset/temporary connection errors, temporary DNS and raised
+IncompleteRead/RemoteDisconnected qualify. Check HTTPError before URLError.
+Unwrap only exception-valued URLError reasons with a cycle guard. Certificate and
+generic SSL failures, permanent DNS/HTTP, string reasons and unknown failures are
+terminal. Do not infer recovery from exception messages or arbitrary cause chains.
+
+Catch retryable failures only at urlopen/response.read boundaries. Local open,
+write, close, digest, replace and cleanup failures are terminal even if their
+exception class resembles a transport timeout. Close failed responses before
+retry. Discard partial bytes, never append them. Silent EOF with wrong bytes is a
+terminal digest mismatch, not an invented network retry. Publish only a complete
+checksum-matching temporary with the existing atomic replace. Preserve an old
+destination on every failure. Create the invocation-owned temporary exclusively
+and unlink only after ownership is established. A stale or colliding foreign
+.download must be refused and left untouched. No broad cleanup is added.
+
+Implement in the existing fetcher and scripts/test_sprint_workflow.py. For A6, HLD15 owns
+the retrieval intent. Extend its current retrieval intent before verify.
+Finite local tests in the existing carrier cover initial transient then success,
+partial read then complete retry,3attempt exhaustion, allowed/terminal status and
+TLS/DNS/reason controls, checksum/silent-EOF refusal, transient-looking local write
+or publication failure, cache no-network and foreign temporary custody. Mock sleep
+and responses, with no network. Capture actual old-source recovery RED before
+source edits and fixed GREEN, preserving the same semantic assertion. Retain raw
+commands/source/outcomes. Scoped policies/prose/diff and independent microscope
+are required. Full policy and actual supported-host50file retrieval/fidelity remain
+final integrated debt. No push, dispatch, native proof or completion follows this
+local transport correction.
+
+
+## Remaining public authoring CI timeout diagnostics and repair
+
+The user explicitly requires the failed CI to be fixed in this sprint before publication. Extend existing F-X271 verification confidence scope with A7. Preserve all prior installer, transport, advisory and final acceptance obligations. This amendment authorizes bounded implementation after root adoption and the canonical writer handoff. It does not authorize publication, a CI dispatch, a timeout waiver or a claim that diagnostic repair fixes the observed timeout.
+
+### Actual trigger and known boundary
+
+The immutable sprint run40812739735 attempt1 at1431cb408dc57a24353bf826933408b0ae2ab8ec fails MSRV1.93 test public_authoring_conformance_harness::sanitized_public_authoring_fixture_passes_every_conformance_stage. The integration carrier invokes python3 scripts/docx_authoring_conformance.py --public. That route executes cargo run --quiet --offline -- OUTPUT in an invocation-owned fresh public consumer project, inherits the recorded environment with the existing target/docx-authoring-conformance fallback, captures both streams and sets timeout300. The log reports running over60seconds at04:07:24 and generic timeout at04:11:24. Ordinary Test passes the same public case after roughly210seconds, but this is not a same-temperature comparison. Test CI first runs the public harness standalone before its full suite, warming the dedicated conformance target. MSRV runs only the full suite. Neither YAML job sets CARGO_TARGET_DIR. The current script has no timeout repair relative to that source. This asymmetry is a source fact, not proof of a compile delay or target deadlock.
+
+The catch at script main1334-1336 discards TimeoutExpired command, timeout and partial captured streams. Thus compile, Cargo lock wait and public consumer execution cannot be distinguished retrospectively. The offline flag prevents normal online dependency fetching but does not identify the waiting operation. This is the existing public authoring consumer, not F275's new SemVer generated project. Raw logs, source pins and the published-main comparison are retained in s96-ci-failure-triage-current-v1. The published-main installer404 and Python expectation failures are separately mapped to existing F271/F272 repairs and are not reclassified as this timeout.
+
+### Exact initial implementation contract
+
+Repair the missing diagnostics only at the known public consumer Cargo subprocess in existing scripts/docx_authoring_conformance.py. The existing nonzero-child branch also discards both streams and must retain the same public command/phase/result context while remaining a deciding failure. On TimeoutExpired, report the actual call-site phase, exact exception command/argv as data, actual timeout value and all available partial stdout/stderr. Distinguish bytes, text, empty values and None. Preserve non-UTF8 bytes through an exact escaped representation rather than a replacement-only decode. Diagnostics must allow the captured bytes to be reconstructed and must not execute or reinterpret the command or infer a wait reason from an exception message. Retain exact argv, cwd and effective inherited target/toolchain/profile facts, distinguishing an unspecified inherited value from an observed one. Bind actual CI host/compiler selection in the new hosted result rather than guessing it from a directory name. Do not dump unrelated environment variables or credentials.
+
+Add three small stderr checkpoints to the existing generated PUBLIC_CONSUMER_SOURCE at actual main entry, immediately before its first deterministic render and immediately before its second deterministic render. Preserve the two render calls and every public output requirement. These call-site markers establish observed client progress without adding a product API or process framework. If no entry marker was captured, report that no client entry was observed, not that compilation or a lock wait was proven. A captured render marker narrows the actual program phase but does not itself prove why that phase waited. Retain markers with the child diagnostics on nonzero/timeout outcomes. Do not change private generators or their output.
+
+Carry the diagnostic details out of the public TemporaryDirectory lifetime before normal cleanup removes the temporary source. A small local formatter and a catch at the actual public subprocess are sufficient. Reuse existing ConformanceError/main nonzero handling or the existing exception path. Do not add a new command mode, receipt schema, generic subprocess framework, process-tree manager, dependency, file/module, feature flag or global logging abstraction. Keep unrelated private/unclassified timeout behavior and the private-artifact non-disclosure boundary unchanged.
+
+Preserve the actual300second timeout, subprocess argv, cwd, environment/profile semantics, fresh public source boundary, capture behavior and every conformance stage initially. Timeout remains a deciding nonzero failure. No silent retry, successful timeout disposition, stage bypass, skip, target relocation, resource/concurrency change or threshold increase is authorized by the missing diagnostics. Ordinary nonzero child exit and missing evidence remain failures.
+
+### A7 consumer and discriminators
+
+A7 consumer: the existing public authoring conformance integration test in crates/rdocx/tests/integration_test.rs and its actual Test/MSRV CI callers. Local evidence uses the existing HarnessSelfTests in scripts/docx_authoring_conformance.py, with no new test entrypoint or binary.
+
+Before repair, capture a genuine synthetic old-source RED for the same diagnostic requirement. Mock the known public child raising TimeoutExpired, without Cargo, network, oracle or native execution. Cover mixed bytes/text fields, non-UTF8 bytes, empty bytes/text and None, list/tuple command representation and the actual timeout value. Assert phase/argv/timeout/partial streams survive in the deciding failure and no mock command is rerun. Verify the unchanged300second subprocess call and public invocation inputs. Add controls that a nonzero child retains its actual return code, command and both streams, and incomplete public output cannot pass. Discriminate the three unique ordered public source checkpoints while retaining both deterministic render calls. Verify that marker absence is not reported as a proven build/lock diagnosis. Keep the normal integration carrier enabled and its success requirement intact. Preserve the prior failed hosted observation and each source-bound local outcome.
+
+Implement diagnostics in the existing script and its existing HarnessSelfTests. The existing Rust integration carrier may be adjusted only if needed to retain/display the actual diagnostic while preserving its public invocation and success contract. ci.yml changes require a later observed cause that earns the specific change. Do not preemptively alter workflow timeouts, jobs, caches, target directories or stage selection. For A7, HLD15 documents failure attribution and the unchanged requirement for actual host qualification.
+
+### Actual cause and completion gate
+
+#### Observed compiler-active correction, 2026-11-06
+
+Actual normal H3 CI42306259639 Test job128196508048 exhausted the300second
+public Cargo run while its compiler remained active, with no client-entry
+checkpoint captured. H1 retained the same failure class. H2 CI42300837178
+passed the unchanged public command in264seconds. These observations identify
+compilation inside the bounded child, without attributing a dominant crate or
+claiming a product deadlock. Exact logs and source diagnosis are retained in
+`/private/tmp/rdocx-s96-prepared-integration-readiness/normal-ci-dispatch-f4e9e5bd/failure-triage-20261106T233005Z`.
+
+Root authorizes one preparatory `cargo build --quiet --offline` on the same
+fresh validated invocation-owned public consumer, in the same directory and
+environment. It uses the ordinary CI job build budget. A failed build is a
+deciding failure with its own phase and exact captured child diagnostics, and
+the run does not start. The existing public `cargo run` keeps its exact argv,
+environment, target, capture behavior and300second deadline. No retry, skipped
+stage, target relocation, workflow timeout change or source-boundary relaxation
+is authorized. Existing HarnessSelfTests must distinguish build failure from
+run failure and prove both children use the same actual producer inputs. Final
+normal hosted CI and the MSRV public integration carrier remain required.
+
+A local synthetic diagnostic GREEN proves retention only. It neither repairs nor qualifies the old300second MSRV failure. The actual source-qualified MSRV host run must retain enough child output/phase evidence to establish build, lock or program waiting and drive the concrete final repair. Root then records the bounded observed-cause correction in this same F-ID before its source change. If the new run passes, preserve its exact source/toolchain/profile/child result and verify all required public conformance evidence rather than relabelling the old failure as success.
+
+A7 closes only with a clean actual final-source MSRV public-conformance result and the required clean final CI union. Existing F271 native retrieval, F272 comparison/installed, F273 native/hash/full and new F275 compatibility/consumer gates remain separately deciding. Independent microscope, applicable scoped script policies/prose/adapters/diff checks and final integrated verification remain required. No source push, skipped old failure, old .5 wheel, build-only rehearsal or diagnostic-only GREEN substitutes for clean final-source CI before publication.
+
+
+## Renewed current-source checkpoint evidence
+
+A7local diagnostics pass12existing harness self-tests and the existing CI/privacy wiring test, with actual synthetic old-source failures retained. F271all-pass5 reports zero defects and smells. This qualifies diagnostic retention only. The original MSRV timeout remains failed, its runtime cause is unproved, and actual final-source public conformance and the complete CI union remain pending. Existing installer/retry review and input proof remain limited to their applicable unchanged scope.
+
+The existing consumed source-availability handoff establishes its historical integration fact. A renewed canonical checkpoint must authenticate fresh clean reviewed source, workflow bytes, remote/ref/SHA and ancestry. Existing F271/F275progress and S96run state record the expanded pending native/signing/CI and build-only wheels gates before any push. Old1431results do not qualify current.17/.15source. No new worker handoff or completion is inferred, and native Word, full/hash/pixel/installed/WASM/oracle acceptance remains due.
+
+
+## A8, Explicit shared-policy script oracle fixtures
+
+Root adopts this bounded technical revision under the user's explicit requirement
+to repair failed CI before publication. F-X271 remains approved and in-progress.
+The independent technical assessment and process check select this current
+oracle-tooling story. F-X273 retains its genuine historical provider-prefix done
+fact, its approved sole-HLD08 contract and every outstanding native obligation.
+No product API, Word default, font, threshold, skip, output baseline or release
+authority changes through A8. No unresolved user product choice remains.
+
+The current B7 Word fidelity result fails the original Arabic and bidirectional
+fixtures after the approved K1 policy begins honoring absent Word kerning as off.
+Retain that actual failed run41149328813 and all original inputs and measurements.
+Pinned LibreOffice26.2.5.2 DomainMapper.cxx maps w:kern to a Boolean, with zero
+false and any nonzero true, and does not implement Word's size threshold. Thus
+authored zero is not a common enabling control. Use an explicit w:kern value1
+in every generated run at the existing24point size, or48half-points. This selects
+enabled kerning under both Word's threshold and Writer's Boolean policies.
+
+This is an explicit fixture-input and coverage amendment. The five-page oracle
+gate covers shaping, language, font, bidi and geometry with enabled kerning. It
+does not qualify absent, zero, above-size or inherited Word kerning semantics.
+Keep those original K1 controls and named actual native Word observations
+independently deciding. Missing native evidence remains pending and cannot be
+replaced by the amended oracle gate. Preserve the original diagnostic absent
+fixtures and B7 failures without relabeling them successful.
+
+The callable owner remains build_multi_script_fixtures(output: Path) in existing
+scripts/docx_ssim_harness.py, returning its existing list of fixture dictionaries.
+Only add the explicit kern property in its existing four single-script and one
+mixed bidi builders. All36runs retain text, family, language, nominal and complex
+size, direction and paragraph geometry. Add a discriminator to the existing
+fixture-inventory test body, not a new file or test binary. It must reject absent,
+zero and a value beyond the font size, while preserving the existing complete
+fixture/text/font/language/bidi inventory checks. Capture actual unchanged-builder
+RED for that new requirement before implementing, then GREEN.
+
+The accepted-copy stage remains the exact current ACCEPTOR_SOURCE and
+prepare_accepted_document path. Prove the generated minimal inputs have no
+revisions and that all five actual accepted copies retain every byte, including
+all36kern properties. Do not bypass that path in the deciding gate. Preserve the
+exact pinned LibreOffice/Poppler/font inventories, rendering and acceptance stages,
+DPI, one-pixel white-canvas policy,95percent SSIM threshold,80percent page coverage
+and separate bidi qualification. No missing page, label, font or script is dropped.
+
+The TEMP-only diagnostics in fx273-b7-render-diagnostic-v1 include all five
+authored value1inputs, unchanged-source acceptor executions with byte-exact
+copies, a source-bound frozen Rust producer and actual pinned macOS oracle outputs.
+All five diagnostic scores equal the earlier Linux calibration values, with no
+threshold change. This supports the technical policy intersection, not a full
+harness, current Linux, repaired-source or native Word pass. The independent
+assessment is fx273-script-fixture-alignment-contract-readonly-v1.
+
+The consumer map and local matrix include A8, and the regression test gate remains
+unchanged. Contract closure confirms unchanged callable signatures, all36qualified
+run owners, exact accepted-copy ownership, explicit enabled-policy coverage and
+separate default-policy/native obligations. The product-facing decisions remain
+unchanged and no material question remains. Update HLD12 to state
+the explicit enabled-policy coverage, HLD14's current F-X271 scope and HLD15's
+CI qualification boundary. Keep HLD prose about current intent rather than a
+change log. Scoped fixture/static checks and a fresh independent F-X271 microscope
+are required. Final actual source-qualified hosted Word fidelity must execute all
+five amended pages and the unchanged complete harness. The final S96 union still
+requires native Word, all F-X273 riders and successful complete CI before wheels.
+No dispatch, push, completion or publication follows from this design adoption.
+
+
+## H4 reviewed source availability renewal, 2026-11-06
+
+Root prepares a successor to actual failed H3 CI42306259639. Bounded repairs
+pass24unique focused Word controls by applicable21+3runs, strict all-targets/
+all-features Clippy, formatting and two default-feature cache controls. Actual
+new Native outputs pass50SDK cases, and four actual sole-ReviewerB Word
+Accept All/Reject All saved results pass SDK and semantic checks. Six passive
+Word copies and all50originals remain unchanged, with all15prior generated
+windows retained. Root repair audit and affected archive support5 have zero
+defects and smells. F271A7 separately prepares the exact same fresh public
+consumer before its unchanged300second run, with15passing harness self-tests.
+
+Actual H3 hosted PowerPoint passed1041tests with zero skips. Its unchanged
+local release artifacts have1039applicable cases plus two debug-inapplicable
+cases per runtime, with actual hosted coverage of both counters. Earlier full
+commands remain failed, and source-qualified composite applicability is
+retained. Word's old bytecode-containing wheel authentication failures remain
+failed. Ignored bytecode is quarantined and fresh clean release packaging,
+both runtime suites and typing remain pending.
+
+The one affected Word archive was measured and independently authenticated.
+Final native/performance/source-diagnostic/full riders, current normal CI,
+verified publication dry-run, current CLI hash/pixel checks and build-only
+26payload rehearsal remain pending. Source availability permits only the
+reviewed clean sprint/s96 ref push and normal CI routing. No ledger completion,
+dependency unblocking, main merge, sprint/release tag or publication follows.
+Actual upcoming SHA, push and CI run identity will be appended after observation.
+
+
+## H5 reviewed source availability renewal, 2026-11-07
+
+The successor to b26837a9 repairs the actual16H4 integration failures. The
+current guarded native-host batch passes17cases, including the unchanged
+PDF/SVG logical-order regression and a stored-field control. Bounded independent
+review and Root final pass2 have zero findings. Full workspace Clippy and
+Rustdoc include both PyO3 binding crates and actually pass with warnings denied.
+The two affected Word archives have actual authenticated measurements and
+post-adoption packages within the existing64byte compression tolerance, with
+correct per-page Nov7dates. Other package records remain unchanged.
+
+The canonical orchestrator renews only the previously consumed source-
+availability checkpoint. Actual clean sprint ref, source SHA, workflow bytes,
+remote ancestry, push and normal CI request/run identities are recorded after
+observation in the existing S96run state and progress. Both optional CI flags
+remain false. Only the reviewed sprint ref may be pushed without force.
+
+H4CI42315170211 remains failed at Test/MSRV, despite actual public conformance,
+Python, hash, Docs and six SemVer producer/signer successes. Current source
+normal CI, fresh Word release wheel, remaining full/risk/native/performance
+acceptance, verified publish dry run and build-only26payload rehearsal remain
+due. No completion ledger, dependency unblock, main merge, tag, reporter
+comment, yank or publication is authorized by this source checkpoint.
+
+
+## H6 reviewed source availability renewal, 2026-11-07
+
+The successor to a5765aa0 repairs the actual70H5 integration failures. The
+source-stable host batch passes73regressions, including all70original cases,
+plus18Native controls and18lower semantic and normalization controls. Root
+final repair passes3and4 and the retained bounded independent reviews record their actual
+scope and source. Full workspace Clippy and Rustdoc actually pass, with warnings
+denied for Clippy. The explicit F272 amendment adds one doc-hidden lower current
+bookmark projection accessor in the prepared minor. HLD04 states its current
+versus preserved-source distinction. Actual four-package archive measurements and post-adoption checks pass. A later
+rdocx-only cache repair has a genuine measured successor and a pending
+post-adoption check before push.
+
+The canonical orchestrator renews only the previously consumed source-
+availability checkpoint. Actual clean sprint ref, source SHA, workflow bytes,
+remote ancestry, local evidence and normal CI request/run identities are
+recorded after observation in the existing S96run state and progress. Both
+optional CI flags remain false. Only the reviewed sprint ref may be pushed
+without force. Historical consumed integration a13b1292 remains a historical
+fact, not current source qualification or a fabricated new worker handoff.
+
+H5CI42322974698 remains failed at Test, MSRV and CI gate. Its successful jobs
+are not a green current-source CI run. The initial H6policy run retained7actual
+environment errors. The four affected policy methods actually pass under the required normal
+process and download access. An initial hash failure exposed three redundant
+nested namespace declarations after authored style publication. The private
+cache now retains an actual emitted-model witness separately from its genuine
+parsed source proof. All16focused style controls pass, and all49hashes match
+the unchanged baseline. Full workspace Clippy and Rustdoc pass again on that
+actual source. The exact original failed receipts remain. Fresh-document cache
+parsing is actual counted work, not a model clone labeled as a parse.
+
+Current-source normal CI, fresh installed Word artifact and full functional
+qualification, remaining complete/risk/native/performance acceptance, exact
+source-diagnostic applicability, verified publish dry run and the subsequent
+build-only26payload rehearsal remain due. The permanent named native exception
+remains unproved. No completion ledger, dependency unblock, main merge, tag,
+reporter comment, yank or publication is authorized by this source checkpoint.
+
+
+## H7 CLI fixture source availability renewal
+
+The H6 normal run42335559891fails Test and MSRV on the same17CLI integration
+cases after the Word library/integration/regression suites pass. Its later
+Test goldens and final compatibility decider are skipped, not passed.
+
+The successor changes only CLI tests and affected archive metadata. Production
+code, version carriers, public interfaces, parser/renderer/CLI behavior, all
+thresholds and the hash baseline are unchanged. Actual current macOS CLI
+integration passes116cases, with the one existing Linux-only case retained for
+hosted qualification. Source-qualified XML positives, preserved invalid
+negatives, exact diagnostics/JSON and corrected valid PNG retain their intended
+assertions. Root bounded repair pass6 reviews these exact changes.
+
+The consumed source-availability checkpoint is renewed for the reviewed clean
+canonical sprint ref and normal CI only. Record the actual SHA/tree, origin,
+ancestry, actor, request/run and outcomes after observation. H6failed CI is not
+current green evidence. Current product artifacts retain their actual4cf
+producer identities and require explicit nonproduct applicability, never a
+fabricated rebuild. Other21archive-source inputs remain unchanged, with the
+updated CLI archive measured and post-adoption checked. All final native,
+performance, hosted, verification/review and close debt remains pending. No
+completion ledger, dependency unblock, main merge, tag, registry publication,
+yank or reporter comment is authorized by this checkpoint.
+
+
+## H8 integrated repair source availability renewal
+
+The H7 run42341613212 passes the117CLI cases and its Word library, integration
+and regression suites. Its MSRV job fails15later layout cases. Historical
+producer, signer, Python and fidelity successes keep their exact H7 identity.
+The failed whole job and any unperformed final decider remain unqualified.
+
+The current repair restores stored Field display hyphenation policy, neutral
+pre-laid body wrapping compatibility, instruction events before stored Field
+cache display, and checked Engine preparation of deferred revision Fields.
+Actual producer paint and multilingual metadata replace stale synthetic
+fixture assumptions. The complete current layout library passes419cases with
+zero failures and one unchanged ignored case. All49hashes match the unchanged
+baseline, and full workspace Clippy passes with warnings denied.
+
+The exact original Issue437 counter workload also exposed unnecessary story
+refreshes in both run-font and run-collection view capture. The repaired
+current-owner capture records zero body scans in all11batches. Both exact
+new-document and reopened lifecycle regressions pass. Instrumented clocks do
+not establish the ordinary release ratios. Earlier partial repairs and failed
+count observations remain preserved. Public signatures, version carriers,
+resource limits, numeric acceptance thresholds and the baseline are unchanged.
+
+The consumed source-availability checkpoint is renewed only for reviewed clean
+canonical sprint source and complete normal CI. Bind actual source, tree,
+origin, ancestry, actor, request, run and outcomes after observation. H7
+signed subjects and its decider cannot be relabeled at the successor source.
+Current-source installed artifacts, full runtime and typing, verified changed
+package dry runs, remaining native, quiet performance and memory acceptance,
+build-only26payloads, full verification, sprint review and close remain due
+where not actually performed. The named native exception remains unproved.
+No feature completion, dependency unblock, main merge, tag, publication, yank
+or reporter comment is authorized by this checkpoint.
+
+## H9 property namespace source availability renewal
+
+The H8 normal run42346571659 has an actual MSRV failure after419layout cases
+pass. Two older assertions conflate a namespace declaration with its expanded
+name, and a later generic path refusal with the earlier checked invalid
+measurement refusal. Strengthened namespace controls also exposed genuine
+property publication and inherited foreign binding capture defects.
+
+The successor preserves Word identities at generated property roots while
+retaining foreign opaque records at their actual reader. The same tests cover
+empty, default, nonempty, positioned and direct property writers, local
+namespace shadowing, invalid measurement refusal and unchanged caller state.
+The private source-qualified lower library passes1289cases. Actual integrated-source and hash receipts remain bound to their recorded
+producer snapshots. Independent support pass2 closes S1 with zero defects
+and zero smells. The final Root microscope and affected source/metadata checks
+remain explicit prerequisites.
+The empty table-property parser repair retains a qualified self-closing
+property owner at its schema position. The PowerPoint number-format test
+separately proves checked authoring refusal and imported empty-code fallback.
+Both retain their actual prior failures and successor results.
+
+The consumed source availability checkpoint is renewed only for reviewed clean
+canonical sprint source and complete normal CI. Record the actual source,
+tree, origin, ancestry, actor, request, run and outcomes after observation.
+H8 remains failed and its successful categories retain their exact source.
+No earlier native subject, signature, decider, wheel or diagnostic artifact
+is relabeled at the successor. Existing per-feature pending arrays and states
+remain unchanged, with additional affected input debt recorded separately.
+
+Current release and diagnostic artifacts, installed functional and typing
+checks, affected package checks, remaining native, quiet performance and
+memory riders, build-only26payloads, full verification, sprint review and
+close remain due where not actually performed. The named native exception
+remains unproved. No feature completion, dependency unblock, main merge,
+tag, publication, yank or reporter comment is authorized by this checkpoint.

@@ -20,6 +20,7 @@ use rdocx::{
     CustomProperty, CustomPropertyValue, Document, FieldDateTime, FieldEvaluationContext,
     HdrFtrType, HeaderFooterKind, PictureOccurrence, RasterFormat, RasterOptions, RasterOutput,
     RevisionKind, RevisionStyle, RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
+    StoryRevision,
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
@@ -38,6 +39,7 @@ pub struct ImageOptions<'a> {
 
 pub struct RenderOptions<'a> {
     pub font_dir: Option<&'a Path>,
+    pub system_fonts: bool,
     pub page: Option<usize>,
     pub pages: Option<&'a str>,
     pub format: &'a str,
@@ -424,7 +426,12 @@ fn push_html_stories(html: &mut String, stories: &[StoryText]) {
 }
 
 /// Emit deterministic point-space extents for every direct body item.
-pub fn layout(file: &Path, json_output: bool, font_dir: Option<&Path>) -> Result<()> {
+pub fn layout(
+    file: &Path,
+    json_output: bool,
+    font_dir: Option<&Path>,
+    system_fonts: bool,
+) -> Result<()> {
     let doc = Document::open(file)?;
     let fonts = font_dir
         .map(oxml_layout::FontFile::from_dir)
@@ -434,7 +441,32 @@ pub fn layout(file: &Path, json_output: bool, font_dir: Option<&Path>) -> Result
         .iter()
         .map(|font| (font.family.as_str(), font.data.as_slice()))
         .collect::<Vec<_>>();
-    let layout = doc.layout_with_fonts_and_bundled_fallback(&refs)?;
+    let layout = if refs.is_empty() {
+        if system_fonts {
+            doc.layout_with_options(rdocx::RenderOptions {
+                use_system_fonts: true,
+                ..rdocx::RenderOptions::default()
+            })?
+        } else {
+            doc.layout_deterministic()?
+        }
+    } else if system_fonts {
+        // An explicit system request must refuse on a feature-off build before
+        // the normal engine runs, including for a nonempty caller font list.
+        doc.layout_with_options(rdocx::RenderOptions {
+            use_system_fonts: true,
+            ..rdocx::RenderOptions::default()
+        })?;
+        std::sync::Arc::new(doc.layout_with_additional_fonts_and_options(
+            &refs,
+            rdocx::RenderOptions {
+                use_system_fonts: true,
+                ..rdocx::RenderOptions::default()
+            },
+        )?)
+    } else {
+        std::sync::Arc::new(doc.layout_with_fonts_and_bundled_fallback(&refs)?)
+    };
     let body_items = doc
         .body_items()
         .enumerate()
@@ -700,6 +732,7 @@ pub fn convert_input(
     force: bool,
     dpi: u32,
     font_dir: Option<&Path>,
+    system_fonts: bool,
     revision_view: RevisionView,
     revision_style: RevisionStyle,
     image: ImageOptions<'_>,
@@ -720,6 +753,7 @@ pub fn convert_input(
             force,
             dpi,
             font_dir,
+            system_fonts,
             revision_view,
             revision_style,
             image,
@@ -730,6 +764,7 @@ pub fn convert_input(
     }
     if rendering_options
         || font_dir.is_some()
+        || system_fonts
         || revision_view != RevisionView::Accepted
         || image.pages.is_some()
         || image.transparent
@@ -774,6 +809,7 @@ pub fn convert(
     force: bool,
     dpi: u32,
     font_dir: Option<&Path>,
+    system_fonts: bool,
     revision_view: RevisionView,
     revision_style: RevisionStyle,
     image: ImageOptions<'_>,
@@ -783,6 +819,7 @@ pub fn convert(
     let render_options = rdocx::RenderOptions {
         revision_view,
         revision_style,
+        use_system_fonts: system_fonts,
     };
 
     let default_ext = match to {
@@ -828,8 +865,26 @@ pub fn convert(
     let mut stdout = io::stdout().lock();
     match to {
         "pdf" => {
-            let layout =
-                doc.layout_with_fonts_and_bundled_fallback_and_options(&font_refs, render_options)?;
+            let layout = if font_refs.is_empty() {
+                if system_fonts {
+                    doc.layout_with_options(render_options)?
+                } else {
+                    doc.layout_deterministic_with_options(render_options)?
+                }
+            } else if system_fonts {
+                // An explicit system request must refuse on a feature-off
+                // build before the normal engine runs, including for a
+                // nonempty caller font list.
+                doc.layout_with_options(render_options)?;
+                std::sync::Arc::new(
+                    doc.layout_with_additional_fonts_and_options(&font_refs, render_options)?,
+                )
+            } else {
+                std::sync::Arc::new(doc.layout_with_fonts_and_bundled_fallback_and_options(
+                    &font_refs,
+                    render_options,
+                )?)
+            };
             let bytes = oxml_pdf::render_to_pdf_checked(&layout.layout)?;
             stage_and_publish(&[(output_path.clone(), bytes)], force)?;
             for diagnostic in &layout.layout.diagnostics {
@@ -837,23 +892,47 @@ pub fn convert(
             }
         }
         "html" => {
-            let mut html = doc.to_html();
+            let (mut html, diagnostics) = doc.to_html_with_diagnostics();
             if let Some(stories) = readable_stories(file, &doc) {
                 push_html_stories(&mut html, &stories);
             }
             stage_and_publish(&[(output_path.clone(), html.into_bytes())], force)?;
+            for diagnostic in diagnostics {
+                eprintln!("{diagnostic}");
+            }
         }
         "md" | "markdown" => {
-            let mut md = doc.to_markdown();
+            let (mut md, diagnostics) = doc.to_markdown_with_diagnostics();
             if let Some(stories) = readable_stories(file, &doc) {
                 push_markdown_stories(&mut md, &stories);
             }
             stage_and_publish(&[(output_path.clone(), md.into_bytes())], force)?;
+            for diagnostic in diagnostics {
+                eprintln!("{diagnostic}");
+            }
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;
-            let layout =
-                doc.layout_with_fonts_and_bundled_fallback_and_options(&font_refs, render_options)?;
+            let layout = if font_refs.is_empty() {
+                if system_fonts {
+                    doc.layout_with_options(render_options)?
+                } else {
+                    doc.layout_deterministic_with_options(render_options)?
+                }
+            } else if system_fonts {
+                // An explicit system request must refuse on a feature-off
+                // build before the normal engine runs, including for a
+                // nonempty caller font list.
+                doc.layout_with_options(render_options)?;
+                std::sync::Arc::new(
+                    doc.layout_with_additional_fonts_and_options(&font_refs, render_options)?,
+                )
+            } else {
+                std::sync::Arc::new(doc.layout_with_fonts_and_bundled_fallback_and_options(
+                    &font_refs,
+                    render_options,
+                )?)
+            };
             let selected = selected_zero_based_pages(layout.layout.pages.len(), image.pages)?;
             match format {
                 RasterFormat::Tiff => {
@@ -1633,17 +1712,19 @@ pub fn comment_move(
 }
 
 /// Add one reply and publish the complete mutated document atomically.
+#[allow(clippy::too_many_arguments)]
 pub fn comment_reply(
     file: &Path,
     parent_id: i32,
     author: &str,
+    initials: Option<&str>,
     text: &str,
     date: Option<&str>,
     output: &Path,
     json_output: bool,
 ) -> Result<()> {
     let mut doc = Document::open(file)?;
-    let id = doc.reply_to_with_date(parent_id, author, text, date)?;
+    let id = doc.reply_to_with_initials(parent_id, author, initials, text, date)?;
     publish_document(&mut doc, output)?;
     mutation_record(
         json_output,
@@ -1698,6 +1779,7 @@ pub fn revision_list(file: &Path, json_output: bool) -> Result<()> {
                 "author": revision.author(),
                 "timestamp": revision.timestamp(),
                 "kind": revision_kind_label(revision.kind()),
+                "text": revision.text(),
                 "story": story_json(revision.story()),
             })
         })
@@ -1881,6 +1963,29 @@ fn comparison_options_json(options: &ComparisonOptions) -> Value {
     })
 }
 
+/// The items of `after` left once each key of `before` removes one item
+/// with an equal key.
+fn without_existing<T, K: Eq + std::hash::Hash>(
+    before: Vec<K>,
+    after: Vec<T>,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    let mut existing = HashMap::<K, usize>::new();
+    for key in before {
+        *existing.entry(key).or_default() += 1;
+    }
+    after
+        .into_iter()
+        .filter(|item| match existing.get_mut(&key(item)) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// Create a tracked-changes document from an original and edited input.
 pub fn compare(
     original: &Path,
@@ -1893,9 +1998,41 @@ pub fn compare(
 ) -> Result<()> {
     let mut original_doc = Document::open(original)?;
     let edited_doc = Document::open(edited)?;
+    // The counts name the revisions this comparison created. The original
+    // may already hold revisions, which the result keeps as they are.
+    let main_keys = |document: &Document| {
+        document
+            .revisions()
+            .iter()
+            .map(|revision| {
+                (
+                    revision.id(),
+                    revision.author().to_owned(),
+                    revision.timestamp().map(str::to_owned),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let story_key = |revision: &StoryRevision| {
+        (
+            revision.story().kind(),
+            revision.story().part_name().to_owned(),
+            revision.story().owner_index(),
+            revision.id(),
+            revision.author().to_owned(),
+            revision.timestamp().map(str::to_owned),
+        )
+    };
+    let existing_main = main_keys(&original_doc);
+    let existing_stories = original_doc
+        .story_revisions()?
+        .iter()
+        .map(story_key)
+        .collect::<Vec<_>>();
     let diagnostics = original_doc.compare_with_options(&edited_doc, author, timestamp, options)?;
-    let main_story_revisions = original_doc.revisions().len();
-    let revisions = original_doc.story_revisions()?;
+    let main_story_revisions =
+        without_existing(existing_main, main_keys(&original_doc), Clone::clone).len();
+    let revisions = without_existing(existing_stories, original_doc.story_revisions()?, story_key);
     let mut stories = Vec::<(&StoryId, usize)>::new();
     for revision in &revisions {
         match stories
@@ -2020,12 +2157,12 @@ fn revision_kind_label(kind: RevisionKind) -> &'static str {
     match kind {
         RevisionKind::Insertion => "insertion",
         RevisionKind::Deletion => "deletion",
-        RevisionKind::MoveFrom => "move-from",
-        RevisionKind::MoveTo => "move-to",
-        RevisionKind::RunPropertyChange => "run-property-change",
-        RevisionKind::ParagraphPropertyChange => "paragraph-property-change",
-        RevisionKind::TablePropertyChange => "table-property-change",
-        RevisionKind::SectionPropertyChange => "section-property-change",
+        RevisionKind::MoveFrom => "move_from",
+        RevisionKind::MoveTo => "move_to",
+        RevisionKind::RunPropertyChange => "run_property_change",
+        RevisionKind::ParagraphPropertyChange => "paragraph_property_change",
+        RevisionKind::TablePropertyChange => "table_property_change",
+        RevisionKind::SectionPropertyChange => "section_property_change",
     }
 }
 
@@ -2189,13 +2326,29 @@ pub fn render(
         .iter()
         .map(|font| (font.family.as_str(), font.data.as_slice()))
         .collect::<Vec<_>>();
-    let layout = doc.layout_with_fonts_and_bundled_fallback_and_options(
-        &font_refs,
-        rdocx::RenderOptions {
-            revision_view: options.revision_view,
-            revision_style: options.revision_style,
-        },
-    )?;
+    let render_options = rdocx::RenderOptions {
+        revision_view: options.revision_view,
+        revision_style: options.revision_style,
+        use_system_fonts: options.system_fonts,
+    };
+    let layout = if font_refs.is_empty() {
+        if options.system_fonts {
+            doc.layout_with_options(render_options)?
+        } else {
+            doc.layout_deterministic_with_options(render_options)?
+        }
+    } else if options.system_fonts {
+        // An explicit system request must refuse on a feature-off build before
+        // the normal engine runs, including for a nonempty caller font list.
+        doc.layout_with_options(render_options)?;
+        std::sync::Arc::new(
+            doc.layout_with_additional_fonts_and_options(&font_refs, render_options)?,
+        )
+    } else {
+        std::sync::Arc::new(
+            doc.layout_with_fonts_and_bundled_fallback_and_options(&font_refs, render_options)?,
+        )
+    };
     let selected = selected_render_pages(layout.layout.pages.len(), options.page, options.pages)?;
     let stem = file.file_stem().unwrap_or_default().to_string_lossy();
     let legacy_single_page = options.page.is_some();
@@ -3717,6 +3870,29 @@ pub fn verify_signatures(file: &Path, as_json: bool) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn issue434_all_revision_kind_labels_match_python_vocabulary() {
+        use rdocx::RevisionKind;
+        for (kind, expected) in [
+            (RevisionKind::Insertion, "insertion"),
+            (RevisionKind::Deletion, "deletion"),
+            (RevisionKind::MoveFrom, "move_from"),
+            (RevisionKind::MoveTo, "move_to"),
+            (RevisionKind::RunPropertyChange, "run_property_change"),
+            (
+                RevisionKind::ParagraphPropertyChange,
+                "paragraph_property_change",
+            ),
+            (RevisionKind::TablePropertyChange, "table_property_change"),
+            (
+                RevisionKind::SectionPropertyChange,
+                "section_property_change",
+            ),
+        ] {
+            assert_eq!(super::revision_kind_label(kind), expected);
+        }
+    }
     use super::*;
 
     /// The Myers matches of `diff` are a longest common subsequence: equal,
@@ -3811,6 +3987,7 @@ mod tests {
             false,
             96,
             None,
+            false,
             RevisionView::Accepted,
             RevisionStyle::Plain,
             ImageOptions {

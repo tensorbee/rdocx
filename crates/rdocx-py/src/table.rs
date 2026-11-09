@@ -1201,16 +1201,13 @@ impl PyTable {
             }
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let prepared = document.prepare_word_revision(
-            py,
-            &candidate,
-            "Table.add_row",
-            crate::document::WordPublication::TableGrid(
-                TableLocation::new(index, &current_related)
-                    .native(&document.inner)
-                    .map_err(|error| rdocx_to_pyerr(py, error))?,
-            ),
-        )?;
+        let publication = crate::document::WordPublication::TableGrid(
+            TableLocation::new(index, &current_related)
+                .native(&document.inner)
+                .map_err(|error| rdocx_to_pyerr(py, error))?,
+        );
+        let prepared =
+            document.prepare_word_revision(py, &candidate, "Table.add_row", publication)?;
         let mut segments = self.path.segs.clone();
         segments.push(PathSeg::Row(inserted));
         let path = document
@@ -1361,16 +1358,13 @@ impl PyTable {
             None => candidate.remove_table_row(table_index, row_index),
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let prepared = document.prepare_word_revision(
-            py,
-            &candidate,
-            "Table.remove_row",
-            crate::document::WordPublication::TableGrid(
-                TableLocation::new(table_index, &current_related)
-                    .native(&document.inner)
-                    .map_err(|error| rdocx_to_pyerr(py, error))?,
-            ),
-        )?;
+        let publication = crate::document::WordPublication::TableGrid(
+            TableLocation::new(table_index, &current_related)
+                .native(&document.inner)
+                .map_err(|error| rdocx_to_pyerr(py, error))?,
+        );
+        let prepared =
+            document.prepare_word_revision(py, &candidate, "Table.remove_row", publication)?;
         document.commit_word_revision(prepared)?;
         document.install_inner(candidate);
         Ok(())
@@ -2080,11 +2074,30 @@ impl PyCell {
     fn edit(
         &self,
         py: Python<'_>,
-        edit: impl FnOnce(&mut rdocx::Cell<'_>) -> rdocx::Result<()>,
+        edit: impl Fn(&mut rdocx::Cell<'_>) -> rdocx::Result<()>,
     ) -> PyResult<()> {
         let (table, row, cell) = self.validate(py)?;
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
+        if let Some(owner) = &self.owner
+            && let Some((slot, ordinal, row, cell)) = document.local_cell_route(owner)
+            && let Some(candidate) = document
+                .inner
+                .direct_body_table_cell_candidate(slot, row, cell, &edit)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+            && document.apply_local_cell_edit(
+                py,
+                slot,
+                ordinal,
+                row,
+                cell,
+                candidate,
+                "Cell property edit",
+                None,
+            )?
+        {
+            return Ok(());
+        }
         let mut candidate = document.inner.clone_for_staging();
         TableLocation::new(table, &current_related.clone())
             .edit(&mut candidate, |table| {
@@ -2191,10 +2204,34 @@ impl PyCell {
             .map(rdocx::Length::emu);
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
+        let story = if current_related.is_none() {
+            // Preserve the direct-table lookup's current error and work ordering.
+            crate::document::note_fx260_word(document.inner.content_count().max(1));
+            let slot = document
+                .inner
+                .content_index_of_table(table)
+                .ok_or_else(|| {
+                    rdocx_to_pyerr(
+                        py,
+                        rdocx::Error::Other("table has no checked direct physical owner".into()),
+                    )
+                })?;
+            document
+                .inner
+                .direct_body_cell_story(slot, row, cell)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+                .ok_or_else(|| {
+                    rdocx_to_pyerr(
+                        py,
+                        rdocx::Error::Other("table has no checked physical source owner".into()),
+                    )
+                })?
+        } else {
+            self.physical_story(py, &document.inner, &current_related, table, row, cell)?
+        };
         let candidate = document.inner.clone_for_staging();
-        let (candidate, location) = candidate
-            .insert_picture_to_story_with_options_owned(
+        let (candidate, location, pictures) = candidate
+            .insert_picture_to_story_with_options_and_inventory_owned(
                 &story,
                 None,
                 &data,
@@ -2204,9 +2241,7 @@ impl PyCell {
                 options.map(|o| o.inner.clone()),
             )
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let picture = candidate
-            .pictures()
-            .map_err(|error| rdocx_to_pyerr(py, error))?
+        let picture = pictures
             .into_iter()
             .find(|p| p.location == location)
             .ok_or_else(|| PyIndexError::new_err("inserted cell picture was not inventoried"))?;
@@ -2515,6 +2550,28 @@ impl PyCell {
         let (table, row, cell) = self.validate(py)?;
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
+        if let Some(owner) = &self.owner
+            && let Some(location) = document.indexed_cell_parent_location(owner)
+            && let Some((slot, ordinal, row, cell)) = document.local_cell_route(owner)
+            && let Some(candidate) = document
+                .inner
+                .direct_body_table_cell_candidate(slot, row, cell, |cell| cell.try_set_text(value))
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+            && document.apply_local_cell_edit(
+                py,
+                slot,
+                ordinal,
+                row,
+                cell,
+                candidate,
+                "Cell.text",
+                Some(crate::document::WordPublication::CellText(
+                    location, row, cell,
+                )),
+            )?
+        {
+            return Ok(());
+        }
         let mut candidate = document.inner.clone_for_staging();
         match &current_related.clone() {
             Some(_) => {
@@ -2528,15 +2585,11 @@ impl PyCell {
             None => candidate.try_set_cell_text(table, row, cell, value),
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let prepared = document.prepare_word_revision(
-            py,
-            &candidate,
-            "Cell.text",
-            TableLocation::new(table, &current_related)
-                .native(&document.inner)
-                .map(|location| crate::document::WordPublication::CellText(location, row, cell))
-                .unwrap_or(crate::document::WordPublication::Conservative),
-        )?;
+        let publication = TableLocation::new(table, &current_related)
+            .native(&document.inner)
+            .map(|location| crate::document::WordPublication::CellText(location, row, cell))
+            .unwrap_or(crate::document::WordPublication::Conservative);
+        let prepared = document.prepare_word_revision(py, &candidate, "Cell.text", publication)?;
         document.commit_word_revision(prepared)?;
         document.install_inner(candidate);
         Ok(())

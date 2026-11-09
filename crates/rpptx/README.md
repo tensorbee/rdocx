@@ -24,11 +24,26 @@ presentation, notes, handout, PDF, and animation outputs.
 - Resolve master, layout, placeholder, theme, chart, SmartArt, media, notes,
   comments, and timing state while preserving unmodelled package content.
 
+## Stored-package validation
+
+`rpptx::validate_presentation_file` validates the stored `.pptx` file through
+its original XML bytes, read-only. It checks XML 1.0 lexical and character
+faults, one complete root per XML part including `[Content_Types].xml` and
+relationship parts, the `p:presentation` direct child sequence, unknown
+direct shape-tree children, required unqualified `cNvPr` id and name
+attributes on physical shape owners, physical table row against grid column
+equality, and PowerPoint role content-type overrides resolved through their
+owning relationships, then appends the existing parsed-model issues. This is
+a bounded subset, not a full schema validator, and the input file is never
+written.
+
 ## Measured footprint and speed
+
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx | 762,699 compressed bytes, 4,061,273 member bytes, 16 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rpptx | 799,413 compressed bytes, 4,246,845 member bytes, 16 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-07 |
 
 ## Use it when
 
@@ -52,14 +67,14 @@ let bytes = deck.to_bytes()?;
 
 ```toml
 [dependencies]
-rpptx = "0.14.4"
+rpptx = "0.15.0"
 ```
 
 Enable native encryption and signing explicitly:
 
 ```toml
 [dependencies]
-rpptx = { version = "0.14.4", features = ["agile-encryption", "digital-signatures"] }
+rpptx = { version = "0.15.0", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 ## Licensed font embedding

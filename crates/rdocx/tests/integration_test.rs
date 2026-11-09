@@ -149,6 +149,7 @@ fn story_item_links_resolve_only_through_the_checked_owner() {
         r#"<w:body><w:p><w:hyperlink r:id="scopedLink"><w:r><w:t>body link</w:t></w:r></w:hyperlink></w:p><w:sdt><w:sdtContent><w:sdt><w:sdtContent><w:p><w:hyperlink w:anchor="nested-target"><w:r><w:t>nested link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt><w:p><w:hyperlink w:anchor="after-target"><w:r><w:t>after link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt>"#,
         1,
     );
+    assert!(body.contains(r#"<w:hyperlink r:id="scopedLink">"#));
     package.set_part("/word/document.xml", body.into_bytes());
     let header = std::str::from_utf8(package.get_part("/word/header-story.xml").unwrap()).unwrap();
     let header = header.replacen(
@@ -1886,7 +1887,7 @@ mod theme_and_embedded_font_tests {
     use quick_xml::events::BytesStart;
     use rdocx::{
         CT_OfficeStyleSheet, EmbeddedFont, EmbeddedFontKind, FontDefinition, FontEmbeddingLicense,
-        ThemeFontLanguage,
+        RenderOptions, ThemeFontLanguage,
     };
 
     const FONT_KEY: &str = "{00112233-4455-6677-8899-AABBCCDDEEFF}";
@@ -1984,6 +1985,85 @@ mod theme_and_embedded_font_tests {
         document.set_font(corpus_font()).unwrap();
         document.embed_font("Corpus Sans", embedded_font()).unwrap();
         document
+    }
+
+    #[test]
+    fn issue433_caller_face_beats_same_family_embedded_and_bundled_faces() {
+        let family = "Liberation Sans";
+        let sans = include_bytes!("../../oxml-layout/fonts/LiberationSans-Regular.ttf");
+        let mono = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf");
+        let mut caller = mono.to_vec();
+        for (old, new) in [
+            (b"Liberation Mono".to_vec(), family.as_bytes().to_vec()),
+            (
+                "Liberation Mono"
+                    .encode_utf16()
+                    .flat_map(u16::to_be_bytes)
+                    .collect(),
+                family.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            ),
+        ] {
+            assert_eq!(old.len(), new.len());
+            for offset in 0..=caller.len() - old.len() {
+                if caller[offset..].starts_with(&old) {
+                    caller[offset..offset + old.len()].copy_from_slice(&new);
+                }
+            }
+        }
+        let mut document = Document::new();
+        document
+            .add_paragraph("")
+            .add_run(&"iiiiiiiiiiiiiiiiiiii ".repeat(160))
+            .font(family);
+        let bundled = document.to_pdf().unwrap();
+        let caller_fonts = [(family, caller.as_slice())];
+        let caller_reference = document
+            .to_pdf_with_diagnostics(&caller_fonts, RenderOptions::default())
+            .unwrap();
+        assert_ne!(
+            bundled, caller_reference.0,
+            "mono metrics must differ from bundled Sans"
+        );
+        assert!(caller_reference.1.is_empty());
+        document
+            .embed_font(
+                family,
+                EmbeddedFont::new(
+                    EmbeddedFontKind::Regular,
+                    sans.to_vec(),
+                    FONT_KEY,
+                    license(true, "Liberation fonts SIL OFL 1.1"),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            document.to_pdf().unwrap(),
+            caller_reference.0,
+            "embedded Sans differs from caller Mono"
+        );
+        for system in [false, true] {
+            if system && !cfg!(feature = "system-fonts") {
+                continue;
+            }
+            let options = RenderOptions {
+                use_system_fonts: system,
+                ..RenderOptions::default()
+            };
+            assert_eq!(
+                document
+                    .to_pdf_with_diagnostics(&caller_fonts, options)
+                    .unwrap(),
+                caller_reference,
+                "caller must beat same-family embedded face, system={system}"
+            );
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .to_pdf_with_diagnostics(&caller_fonts, RenderOptions::default())
+                .unwrap(),
+            caller_reference
+        );
     }
 
     #[test]
@@ -2233,7 +2313,8 @@ mod theme_and_embedded_font_tests {
             .add_paragraph("")
             .add_run("Pinned theme and font resolution")
             .font("Corpus Sans")
-            .size(18.0);
+            .size(18.0)
+            .set_kern_value(Some(0.0));
 
         let theme = authored.theme().unwrap();
         let font = authored
@@ -2281,7 +2362,8 @@ mod theme_and_embedded_font_tests {
             .add_paragraph("")
             .add_run("Pinned theme and font resolution")
             .font("Carlito")
-            .size(18.0);
+            .size(18.0)
+            .set_kern_value(Some(0.0));
 
         let authored_render = authored.render_page_to_png_deterministic(0, 150.0).unwrap();
         assert_eq!(
@@ -4519,6 +4601,71 @@ fn paragraph_items_keep_runs_equations_controls_and_raw_xml_in_source_order() {
     assert_eq!(
         display.properties.justification,
         Some(rdocx::MathJustification::CenterGroup)
+    );
+}
+
+#[test]
+fn issue432_public_equation_radicals_keep_authored_degree() {
+    let cases = [
+        ("latex", r"\sqrt{x}", "", "1"),
+        ("latex", r"\sqrt[3]{x}", "3", "0"),
+        (
+            "mathml",
+            r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><msqrt><mi>x</mi></msqrt></math>"#,
+            "",
+            "1",
+        ),
+        (
+            "mathml",
+            r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mroot><mi>x</mi><mn>3</mn></mroot></math>"#,
+            "3",
+            "0",
+        ),
+    ];
+    let mut missing_degree = Vec::new();
+    for (format, source, degree, hidden) in cases {
+        for display in [false, true] {
+            let converted = match format {
+                "latex" => rdocx::equation_from_latex(source),
+                _ => rdocx::equation_from_mathml(source),
+            }
+            .unwrap();
+            let equation = if display {
+                rdocx::OfficeMath::display(vec![rdocx::CT_OMath::new(converted.value.expressions)])
+            } else {
+                rdocx::OfficeMath::inline(converted.value.expressions)
+            };
+            let mut document = Document::new();
+            let mut paragraph = document.add_paragraph("before");
+            paragraph.add_equation(equation).unwrap();
+            paragraph.add_run("after");
+            let bytes = document.to_bytes().unwrap();
+            let reopened = Document::from_bytes(&bytes).unwrap();
+            let paragraph = reopened.paragraph(0).unwrap();
+            assert_eq!(paragraph.equations().count(), 1);
+            assert!(paragraph.text().contains("before"));
+            assert!(paragraph.text().contains("after"));
+            let xml = reopened.part_xml("word/document.xml").unwrap();
+            assert_eq!(xml.matches("<m:rad>").count(), 1);
+            if let Some(degree_start) = xml.find("<m:deg>") {
+                assert!(xml.find("<m:radPr>").unwrap() < degree_start);
+                let degree_end = xml.find("</m:deg>").unwrap();
+                assert!(degree_end < xml.find("<m:e>").unwrap());
+                let degree_xml = &xml[degree_start + "<m:deg>".len()..degree_end];
+                if degree.is_empty() {
+                    assert!(degree_xml.is_empty());
+                } else {
+                    assert!(degree_xml.contains("<m:t>3</m:t>"));
+                }
+            } else {
+                missing_degree.push(format!("{format} {source}, display={display}"));
+            }
+            assert!(xml.contains(&format!("<m:degHide m:val=\"{hidden}\"/>")));
+        }
+    }
+    assert!(
+        missing_degree.is_empty(),
+        "missing authored degree: {missing_degree:?}"
     );
 }
 
@@ -9071,10 +9218,21 @@ fn independent_nested_tables_measure_to_one_final_height() {
         .fold(0.0_f64, f64::max);
     let final_height_twips = (final_height * 20.0).ceil() as i32;
     assert!(measurements[0].height_points < final_height);
-    assert!(
+    // Each nested-table measurement reports exactly one bundled substitution
+    // fact for the document-default Calibri face, with no arbitrary extras.
+    assert_eq!(
         measurements
             .iter()
-            .all(|result| result.diagnostics.is_empty())
+            .map(|result| result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        [
+            vec!["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
+            vec!["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
+        ]
     );
 
     for index in 0..2 {
@@ -13013,6 +13171,7 @@ fn save_pdf_to_file() {
         rdocx::RenderOptions {
             revision_view: rdocx::RevisionView::Tracked,
             revision_style: rdocx::RevisionStyle::Plain,
+            use_system_fonts: false,
         },
     );
     if result.is_ok() {
@@ -21789,6 +21948,11 @@ mod advanced_table_authoring_and_geometry {
                 for (cell_index, text) in row_texts.iter().enumerate() {
                     let mut cell = row.cell(cell_index).expect("autofit cell");
                     cell.set_text(text);
+                    cell.paragraph_mut(0)
+                        .unwrap()
+                        .run_mut(0)
+                        .unwrap()
+                        .set_kern_value(Some(0.0));
                     cell.set_shading("DDDDDD");
                 }
             }
@@ -21904,6 +22068,7 @@ mod f266a_mixed_script_typography {
 
         let mut latin = document.add_paragraph("");
         latin.add_run(LATIN).font("Carlito").language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut arabic = document.add_paragraph("").right_to_left(true);
         {
@@ -21912,6 +22077,7 @@ mod f266a_mixed_script_typography {
             run.set_rtl_value(Some(true));
             run.set_complex_script_value(Some(true));
             run.set_language_bidi_value(Some("ar-SA"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut hebrew = document.add_paragraph("").right_to_left(true);
@@ -21921,6 +22087,7 @@ mod f266a_mixed_script_typography {
             run.set_rtl_value(Some(true));
             run.set_complex_script_value(Some(true));
             run.set_language_bidi_value(Some("he-IL"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut korean = document.add_paragraph("");
@@ -21928,6 +22095,7 @@ mod f266a_mixed_script_typography {
             let mut run = korean.add_run(KOREAN);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans KR"));
             run.set_language_east_asia_value(Some("ko-KR"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut japanese = document.add_paragraph("");
@@ -21935,6 +22103,7 @@ mod f266a_mixed_script_typography {
             let mut run = japanese.add_run(JAPANESE);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut kanji = document.add_paragraph("");
@@ -21943,6 +22112,7 @@ mod f266a_mixed_script_typography {
             run.set_slot_font(RunFontSlot::Ascii, Some("Noto Sans SC"));
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         document
@@ -22311,6 +22481,7 @@ mod f266b_ruby_and_emphasis_typography {
         let rpr = properties.get_or_insert_with(CT_RPr::default);
         rpr.font_east_asia = Some(family.to_owned());
         rpr.language_east_asia = Some(language.to_owned());
+        rpr.kern = Some(HalfPoint(0));
     }
 
     /// One page carrying ruby-annotated Japanese, emphasis-marked Japanese
@@ -22323,6 +22494,7 @@ mod f266b_ruby_and_emphasis_typography {
             .add_run(LATIN_CONTROL)
             .font("Carlito")
             .language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut annotated = document.add_paragraph("");
         {
@@ -22333,6 +22505,7 @@ mod f266b_ruby_and_emphasis_typography {
                     .expect("the base run is a paragraph run");
                 base.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
                 base.set_language_east_asia_value(Some("ja-JP"));
+                base.set_kern_value(Some(0.0));
             }
             let ruby = annotated.ruby_mut(index).expect("the ruby was just added");
             east_asian_run(&mut ruby.ruby_text[0].properties, "Noto Sans JP", "ja-JP");
@@ -22356,6 +22529,7 @@ mod f266b_ruby_and_emphasis_typography {
             run.set_slot_font(RunFontSlot::EastAsia, Some(family));
             run.set_language_east_asia_value(Some(language));
             run.set_emphasis_mark_value(Some(mark));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut latin_marked = document.add_paragraph("");
@@ -22363,6 +22537,7 @@ mod f266b_ruby_and_emphasis_typography {
             let mut run = latin_marked.add_run(EMPHASIS_LATIN);
             run.set_font("Carlito");
             run.set_emphasis_mark_value(Some(ST_Em::UnderDot));
+            run.set_kern_value(Some(0.0));
         }
 
         document
@@ -22774,9 +22949,10 @@ mod floating_table_placement_and_wrap {
 
     fn prose(document: &mut Document, from: usize, to: usize) {
         for index in from..to {
-            document.add_paragraph(&format!(
+            let mut paragraph = document.add_paragraph(&format!(
                 "Body line {index:02} with enough words to wrap across the measure of the page and show the reservation."
             ));
+            paragraph.run_mut(0).unwrap().set_kern_value(Some(0.0));
         }
     }
 
@@ -23175,12 +23351,14 @@ mod f266c_character_grid_and_vertical_text {
             .add_run(LATIN_CONTROL)
             .font("Carlito")
             .language("en-US");
+        latin.run_mut(0).unwrap().set_kern_value(Some(0.0));
 
         let mut japanese = document.add_paragraph("");
         {
             let mut run = japanese.add_run(GRIDDED_JAPANESE);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
         }
 
         let mut combined = document.add_paragraph("");
@@ -23188,6 +23366,7 @@ mod f266c_character_grid_and_vertical_text {
             let mut run = combined.add_run(COMBINED);
             run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
             run.set_language_east_asia_value(Some("ja-JP"));
+            run.set_kern_value(Some(0.0));
             run.set_east_asian_layout_value(Some(CT_EastAsianLayout {
                 combine: Some(true),
                 combine_brackets: Some("round".to_owned()),
@@ -23213,6 +23392,7 @@ mod f266c_character_grid_and_vertical_text {
                 let mut run = paragraph.run_mut(0).expect("cell run");
                 run.set_slot_font(RunFontSlot::EastAsia, Some("Noto Sans JP"));
                 run.set_slot_font(RunFontSlot::Ascii, Some("Carlito"));
+                run.set_kern_value(Some(0.0));
             }
         }
 
@@ -24368,7 +24548,7 @@ fn rich_footnotes_match_word_after_create_edit_reorder_and_remove() {
     assert!(notes.contains("rich continuation"));
     document.remove_footnote(first).unwrap();
     let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
-    assert_eq!(reopened.footnotes(), vec![(second, "second".to_owned())]);
+    assert_eq!(reopened.footnotes(), vec![(second, " second".to_owned())]);
     let package =
         OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
     let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
@@ -24738,9 +24918,25 @@ fn footnote_markers_restart_on_each_physical_page() {
         .collect::<Vec<_>>();
     assert_eq!(pages.len(), 2, "{text}");
     assert!(pages[0].contains("First page bodyB"), "{text}");
-    assert!(pages[0].contains("B\n    First page note"), "{text}");
     assert!(pages[1].contains("Second page bodyB"), "{text}");
-    assert!(pages[1].contains("B\n    Second page note"), "{text}");
+    // This source authors no note indent or tab. Observe labels and ownership
+    // without inventing a four-space paragraph displacement in PDF extraction.
+    for (page, expected) in pages.iter().zip([
+        &["First page bodyB", "B", "First page note"][..],
+        &[
+            "Page boundary",
+            "Second page bodyB",
+            "B",
+            "Second page note",
+        ][..],
+    ]) {
+        let actual: Vec<_> = page
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(actual, expected, "{text}");
+    }
 }
 
 #[test]
@@ -36480,4 +36676,3900 @@ fn checked_body_insertions_refuse_unsavable_namespace_owners_atomically() {
         let _ = still_legacy.insert_paragraph(4, "legacy-panic");
     }));
     assert!(panicked.is_err(), "legacy insert still panics past the end");
+}
+
+#[test]
+fn issue424_note_authoring_marker_source_survives_save_reopen_and_imported_absence() {
+    let mut document = Document::new();
+    document.add_paragraph("BODY");
+    let old = document.add_footnote("OLD_API_NOTE");
+    document.paragraph_mut(0).unwrap().add_footnote_ref(old);
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_footnote(&location, "CREATE_FOOT_NOTE")
+        .unwrap();
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_endnote(&location, "CREATE_END_NOTE")
+        .unwrap();
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_footnote_with_mark(&location, "CUSTOM_NOTE", "*")
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+    let notes =
+        String::from_utf8(package.get_part("/word/footnotes.xml").unwrap().to_vec()).unwrap();
+    let endnotes =
+        String::from_utf8(package.get_part("/word/endnotes.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(notes.matches("<w:footnoteRef").count(), 2, "{notes}");
+    assert_eq!(endnotes.matches("<w:endnoteRef").count(), 1, "{endnotes}");
+    assert!(notes.contains("FootnoteReference"));
+    assert!(endnotes.contains("EndnoteReference"));
+    for xml in [&notes, &endnotes] {
+        use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+        let mut reader = NsReader::from_reader(xml.as_bytes());
+        let mut owners: Vec<(String, bool, bool)> = Vec::new();
+        loop {
+            let event = reader.read_event().unwrap();
+            if let Event::Start(element) | Event::Empty(element) = &event {
+                let word = matches!(reader.resolver().resolve_element(element.name()).0,ResolveResult::Bound(uri) if uri.as_ref()==b"http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                let local = String::from_utf8_lossy(element.local_name().as_ref()).into_owned();
+                if let Some((parent, parent_word, has_properties)) = owners.last_mut()
+                    && *parent_word
+                    && parent == "r"
+                    && word
+                {
+                    if local == "rPr" {
+                        *has_properties = true;
+                    }
+                    if matches!(local.as_str(), "footnoteRef" | "endnoteRef") {
+                        assert!(
+                            *has_properties,
+                            "authored note marker must follow matching rPr: {xml}"
+                        );
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    owners.push((local, word, false));
+                }
+            }
+            match event {
+                Event::End(_) => {
+                    owners.pop();
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let output = reopened.layout_deterministic().unwrap();
+    let mut marker_labels = Vec::new();
+    let mut text = String::new();
+    for page in &output.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element {
+                text.push_str(&run.text);
+                if run.note.is_none() && matches!(run.text.as_str(), "1" | "2" | "*") {
+                    marker_labels.push(run.text.clone());
+                }
+            }
+        });
+    }
+    assert_eq!(
+        marker_labels.iter().filter(|s| s.as_str() == "*").count(),
+        1,
+        "{marker_labels:?}"
+    );
+    for label in [
+        "OLD_API_NOTE",
+        "CREATE_FOOT_NOTE",
+        "CREATE_END_NOTE",
+        "CUSTOM_NOTE",
+    ] {
+        assert!(text.contains(label), "{text}");
+    }
+    // Older/imported packages with no actual note-body mark stay unmarked.
+    let mut imported_package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    imported_package.set_part(
+        "/word/footnotes.xml",
+        notes.replace("<w:footnoteRef/>", "").into_bytes(),
+    );
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    imported_package.write_to(&mut buffer).unwrap();
+    let imported = Document::from_bytes(buffer.get_ref()).unwrap();
+    let result = imported.layout_deterministic().unwrap();
+    let mut bodyless_numbers = 0;
+    for page in &result.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.note.is_none()
+                && matches!(run.text.as_str(), "1" | "2")
+            {
+                bodyless_numbers += 1;
+            }
+        });
+    }
+    assert_eq!(bodyless_numbers, 1, "only the actual endnote mark remains");
+}
+
+#[test]
+fn issue433_generated_toc_entries_draw_plain_and_not_underlined() {
+    let mut document = Document::new();
+    document.add_paragraph("Introduction").style("Heading1");
+    document.add_paragraph("Methods").style("Heading1");
+    document.add_paragraph("Body text.");
+    document.insert_toc(0, 1).unwrap();
+
+    let layout = document.layout_deterministic().unwrap();
+    let mut runs = Vec::new();
+    let mut hyperlink_lines = 0;
+    let mut all_lines = 0;
+    oxml_layout::walk(
+        &layout.layout.pages[0].elements,
+        &mut |element, _| match element {
+            oxml_layout::PositionedElement::Text(run) => {
+                runs.push((run.text.clone(), run.color));
+            }
+            oxml_layout::PositionedElement::Line { color, .. } => {
+                all_lines += 1;
+                if *color == oxml_layout::Color::from_hex("0563C1") {
+                    hyperlink_lines += 1;
+                }
+            }
+            _ => {}
+        },
+    );
+    let all_text = runs
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<String>();
+    assert!(all_text.contains("Table of Contents"), "{all_text}");
+    assert!(all_text.contains("Introduction"), "{all_text}");
+    assert!(all_text.contains("Methods"), "{all_text}");
+    let first_color = |needle: &str| {
+        runs.iter()
+            .find(|(text, _)| text == needle)
+            .map(|(_, color)| *color)
+    };
+    assert_eq!(
+        first_color("Introduction"),
+        Some(oxml_layout::Color::BLACK),
+        "generated TOC entry must draw plain: {runs:?}"
+    );
+    assert_eq!(
+        first_color("Methods"),
+        Some(oxml_layout::Color::BLACK),
+        "generated TOC entry must draw plain: {runs:?}"
+    );
+    assert_eq!(all_lines, 0, "generated TOC has no underline of any colour");
+    assert_eq!(
+        hyperlink_lines, 0,
+        "generated TOC entries must not carry the Hyperlink underline"
+    );
+}
+
+#[test]
+fn issue432_rebuild_toc_both_insert_orders() {
+    let mut outcomes = Vec::new();
+    for before_headings in [true, false] {
+        let mut document = Document::new();
+        if before_headings {
+            document.insert_toc(0, 2).unwrap();
+        }
+        document.add_paragraph("Introduction").style("Heading1");
+        document.add_paragraph("Methods").style("Heading2");
+        if !before_headings {
+            document.insert_toc(0, 2).unwrap();
+        }
+        let result = document.rebuild_toc();
+        match result {
+            Ok(report) => {
+                assert_eq!(report.entry_count, 2);
+                let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+                assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 2);
+                let xml = String::from_utf8(document_xml(&mut reopened)).unwrap();
+                assert!(xml.contains("Introduction") && xml.contains("Methods"));
+            }
+            Err(error) => outcomes.push(format!("before_headings={before_headings}: {error}")),
+        }
+    }
+    assert!(
+        outcomes.is_empty(),
+        "authored TOC must rebuild in both orders: {outcomes:?}"
+    );
+}
+
+#[test]
+fn issue432_replacement_skips_chart_cache_and_workbook() {
+    let mut original = Document::new();
+    original.add_paragraph("North");
+    let data = rdocx::ChartData {
+        categories: vec!["North".into(), "South".into()],
+        series: vec![("Sales".into(), vec![1.0, 2.0])],
+        ..Default::default()
+    };
+    original
+        .add_chart(
+            rdocx::ChartKind::Bar,
+            Length::inches(3.0),
+            Length::inches(2.0),
+            &data,
+        )
+        .unwrap();
+    let bytes = original.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    let companions = package
+        .zip_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|(name, _)| name.contains("/charts/") || name.contains("/embeddings/"))
+        .map(|(name, bytes)| (name, bytes.into_owned()))
+        .collect::<Vec<_>>();
+    assert!(companions.iter().any(|(name, _)| name.ends_with(".xlsx")));
+    assert!(companions.iter().any(|(name, _)| name.ends_with(".xml")));
+    let mut observed = Vec::new();
+    for regex in [false, true] {
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let count = if regex {
+            document.replace_regex("North", "NORTH").unwrap()
+        } else {
+            document.try_replace_text("North", "NORTH").unwrap()
+        };
+        let output = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&output).unwrap();
+        assert_eq!(reopened.text_report().text.matches("NORTH").count(), 1);
+        let after = OpcPackage::from_reader(std::io::Cursor::new(output)).unwrap();
+        let after = after
+            .zip_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(name, bytes)| (name, bytes.into_owned()))
+            .collect::<BTreeMap<_, _>>();
+        for (name, source) in &companions {
+            assert_eq!(
+                after.get(name),
+                Some(source),
+                "companion changed regex={regex} part={name}"
+            );
+        }
+        observed.push((regex, count));
+    }
+    assert_eq!(observed, vec![(false, 1), (true, 1)]);
+}
+
+#[test]
+fn issue432_foreign_single_paragraph_toc_refuses_atomically() {
+    let mut original = Document::new();
+    let bytes = original.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    package.set_part("/word/document.xml",br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Foreign title</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-2" \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introduction</w:t></w:r></w:p></w:body></w:document>"#.to_vec());
+    let mut fixture = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut fixture).unwrap();
+    let mut document = Document::from_bytes(&fixture.into_inner()).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .rebuild_toc()
+            .unwrap_err()
+            .to_string()
+            .contains("table of contents result must span paragraph boundaries")
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue432_literal_and_regex_keep_text_box_story_counts() {
+    let mut source = Document::new();
+    source.add_paragraph("North body");
+    source.set_header("North header");
+    source.set_footer("North footer");
+    for kind in [StoryKind::Body, StoryKind::Header, StoryKind::Footer] {
+        let story = source
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == kind)
+            .unwrap();
+        source
+            .add_text_box_to_story(&story, "North textbox", text_box_options())
+            .unwrap();
+    }
+    let bytes = source.to_bytes().unwrap();
+    for regex in [false, true] {
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let report = document.text_report();
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        let expected = report.text.matches("North").count();
+        assert_eq!(expected, 6);
+        let count = if regex {
+            document.replace_regex("North", "NORTH").unwrap()
+        } else {
+            document.try_replace_text("North", "NORTH").unwrap()
+        };
+        assert_eq!(count, expected);
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(
+            reopened.text_report().text.matches("NORTH").count(),
+            expected
+        );
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        for (name, xml) in package.zip_entries().unwrap() {
+            if name == "word/document.xml"
+                || name.starts_with("word/header")
+                || name.starts_with("word/footer")
+            {
+                let xml = String::from_utf8_lossy(&xml);
+                assert!(!xml.contains("North"), "stale paired branch in {name}");
+                assert_eq!(
+                    xml.matches("NORTH").count(),
+                    3,
+                    "both textbox branches and ordinary story: {name}"
+                );
+            }
+        }
+    }
+}
+
+// F-X272a: public Issue430 topology and destination regressions.
+fn issue430_baseline_notes() -> Document {
+    let mut document = Document::new();
+    document.add_paragraph("Seller paragraph");
+    let id = document.add_footnote("Original note");
+    document.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    document.add_paragraph("Payment paragraph");
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+#[test]
+fn issue430_comparison_tracks_added_note_and_preserves_following_paragraph() {
+    let mut original = issue430_baseline_notes();
+    let mut edited = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+    let id = edited.add_footnote("Second note");
+    edited.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    original
+        .compare(&edited, "Issue430", "2026-11-05T00:00:00Z")
+        .expect("referenced normal-note addition must compare");
+    let bytes = original.to_bytes().unwrap();
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.footnotes().len(), 2);
+    assert!(
+        accepted
+            .paragraphs()
+            .iter()
+            .any(|p| p.text().contains("Payment paragraph"))
+    );
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.footnotes().len(), 1);
+}
+
+#[test]
+fn issue430_comparison_tracks_removed_note() {
+    let mut edited = issue430_baseline_notes();
+    let mut original = Document::from_bytes(&edited.to_bytes().unwrap()).unwrap();
+    let id = original.add_footnote("Removed note");
+    original.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    original
+        .compare(&edited, "Issue430", "2026-11-05T00:00:00Z")
+        .expect("referenced normal-note removal must compare");
+    let bytes = original.to_bytes().unwrap();
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.footnotes().len(), 1);
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.footnotes().len(), 2);
+}
+
+#[test]
+fn issue430_comparison_created_note_part_reject_survives_reopen() {
+    let mut original = Document::new();
+    original.add_paragraph("Seller");
+    let mut edited = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+    let id = edited.add_footnote("Added from absent part");
+    edited.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    original
+        .compare(&edited, "Issue430", "2026-11-05T00:00:00Z")
+        .expect("absent-to-present note part must compare");
+    let bytes = original.to_bytes().unwrap();
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(rejected.to_bytes().unwrap())).unwrap();
+    assert!(!package.contains_part("/word/footnotes.xml"));
+}
+
+const ISSUE430_WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const ISSUE430_DATE: &str = "2026-11-05T00:00:00Z";
+fn issue430_fixture(body: &str, notes: Option<&str>) -> Document {
+    let mut blank = Document::new();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(blank.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/document.xml",format!(r#"<w:document xmlns:w="{ISSUE430_WORD}"><w:body>{body}<w:sectPr/></w:body></w:document>"#).into_bytes());
+    if let Some(notes) = notes {
+        package.set_part(
+            "/word/footnotes.xml",
+            format!(r#"<w:footnotes xmlns:w="{ISSUE430_WORD}">{notes}</w:footnotes>"#).into_bytes(),
+        );
+        package.content_types.add_override(
+            "/word/footnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+        );
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::FOOTNOTES, "footnotes.xml");
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+fn issue430_ref(id: i32) -> String {
+    format!(r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#)
+}
+fn issue430_p(text: &str, id: Option<i32>) -> String {
+    format!(
+        "<w:p><w:r><w:t>{text}</w:t></w:r>{}</w:p>",
+        id.map(issue430_ref).unwrap_or_default()
+    )
+}
+fn issue430_owner(id: i32, text: &str) -> String {
+    format!(
+        r#"<w:footnote w:id="{id}"><w:p><w:r><w:footnoteRef/><w:t>{text}</w:t></w:r></w:p></w:footnote>"#
+    )
+}
+fn issue430_package(document: &mut Document) -> OpcPackage {
+    OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap()
+}
+fn issue430_note_xml(document: &mut Document) -> Option<String> {
+    issue430_package(document)
+        .get_part("/word/footnotes.xml")
+        .map(|xml| String::from_utf8(xml.to_vec()).unwrap())
+}
+fn issue430_roundtrip(document: &mut Document) -> Document {
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+fn issue430_assert_settled(document: &mut Document, ids: &[i32], present: bool) {
+    assert_eq!(
+        document
+            .footnotes()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(issue430_note_xml(document).is_some(), present);
+    let package = issue430_package(document);
+    for xml in package.parts.values() {
+        assert!(!String::from_utf8_lossy(xml).contains("_rdocxCmpNoteF"));
+    }
+    assert!(document.story_revisions().unwrap().is_empty());
+    let mut reopened = issue430_roundtrip(document);
+    assert_eq!(reopened.footnotes(), document.footnotes());
+    assert_eq!(issue430_note_xml(&mut reopened).is_some(), present);
+}
+
+#[test]
+fn issue430_comparison_inserts_a_middle_paragraph_with_a_new_footnote() {
+    let first = issue430_p("seller", Some(1));
+    let payment = issue430_p("payment", None);
+    let mut original = issue430_fixture(
+        &format!("{first}{payment}"),
+        Some(&issue430_owner(1, "original")),
+    );
+    let edited = issue430_fixture(
+        &format!("{first}{}{payment}", issue430_p("middle seller", Some(2))),
+        Some(&format!(
+            "{}{}",
+            issue430_owner(1, "original"),
+            issue430_owner(2, "new")
+        )),
+    );
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    let pending = issue430_package(&mut original);
+    let body = String::from_utf8_lossy(pending.get_part("/word/document.xml").unwrap());
+    assert!(
+        body.contains(&payment),
+        "following payment remains an exact owner"
+    );
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[1], true);
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[1, 2], true);
+}
+
+#[test]
+fn issue430_comparison_removes_the_sole_normal_footnote() {
+    let body = issue430_p("seller", Some(5));
+    let edited = issue430_fixture(&issue430_p("seller", None), None);
+    let mut original = issue430_fixture(&body, Some(&issue430_owner(5, "old")));
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[5], true);
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[], false);
+    let package = issue430_package(&mut original);
+    assert!(
+        package
+            .get_part_rels("/word/document.xml")
+            .unwrap()
+            .items
+            .iter()
+            .all(|rel| rel.rel_type != rel_types::FOOTNOTES)
+    );
+    assert!(
+        !package
+            .content_types
+            .overrides
+            .contains_key("/word/footnotes.xml")
+    );
+}
+
+#[test]
+fn issue430_comparison_keeps_two_revisions_for_a_footnote_text_edit() {
+    let body = issue430_p("seller", Some(5));
+    let mut original = issue430_fixture(&body, Some(&issue430_owner(5, "old")));
+    let edited = issue430_fixture(&body, Some(&issue430_owner(5, "new")));
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    assert_eq!(original.story_revisions().unwrap().len(), 2);
+    assert!(
+        !issue430_note_xml(&mut original)
+            .unwrap()
+            .contains("_rdocxCmpNoteF")
+    );
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.footnotes(), vec![(5, "old".to_owned())]);
+    original.accept_all().unwrap();
+    assert_eq!(original.footnotes(), vec![(5, "new".to_owned())]);
+}
+
+#[test]
+fn issue430_comparison_ignores_footnote_story_without_a_dangling_reference() {
+    let mut original = issue430_fixture(
+        &issue430_p("seller", Some(5)),
+        Some(&issue430_owner(5, "old")),
+    );
+    let before = original.to_bytes().unwrap();
+    let edited = issue430_fixture(
+        &issue430_p("seller", Some(6)),
+        Some(&issue430_owner(6, "new")),
+    );
+    let options = rdocx::ComparisonOptions {
+        ignored_stories: vec![rdocx::ComparisonStoryKind::Footnote],
+        ..Default::default()
+    };
+    assert!(
+        original
+            .compare_with_options(&edited, "Issue430", ISSUE430_DATE, &options)
+            .unwrap_err()
+            .to_string()
+            .contains("ignored footnotes")
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    let edited = issue430_fixture(&issue430_p("seller", None), None);
+    original
+        .compare_with_options(&edited, "Issue430", ISSUE430_DATE, &options)
+        .unwrap();
+    original.accept_all().unwrap();
+    assert_eq!(original.footnotes(), vec![(5, "old".to_owned())]);
+}
+
+#[test]
+fn issue430_comparison_cleanup_keeps_notes_with_retained_references() {
+    let first = issue430_p("first", Some(5));
+    let second = issue430_p("second", Some(5));
+    let notes = issue430_owner(5, "shared");
+    let mut original = issue430_fixture(&format!("{first}{second}"), Some(&notes));
+    let edited = issue430_fixture(
+        &format!("{}{second}", issue430_p("first", None)),
+        Some(&notes),
+    );
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[5], true);
+    let package = issue430_package(&mut original);
+    assert_eq!(
+        String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap())
+            .matches("footnoteReference")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn issue430_comparison_identity_and_raw_type_scope_matrix() {
+    for id in [-1, 0, 7] {
+        for explicit in [false, true] {
+            let body = issue430_p("body", Some(id));
+            let type_attr = if explicit { r#" w:type="normal""# } else { "" };
+            let make = |text| {
+                format!(
+                    r#"<w:footnote w:id="{id}"{type_attr}><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:footnote>"#
+                )
+            };
+            let mut original = issue430_fixture(&body, Some(&make("old")));
+            let edited = issue430_fixture(&body, Some(&make("new")));
+            original
+                .compare(&edited, "Issue430", ISSUE430_DATE)
+                .unwrap();
+            original.accept_all().unwrap();
+            assert_eq!(original.footnotes(), vec![(id, "new".into())]);
+        }
+    }
+    for type_attr in ["", r#" q:type="normal""#, r#" x:type="separator""#] {
+        let notes = format!(
+            r#"<q:footnote xmlns:q="{ISSUE430_WORD}" xmlns:x="urn:foreign" q:id="0"{type_attr}><q:p><q:r><q:t>old</q:t></q:r></q:p></q:footnote>"#
+        );
+        let mut original = issue430_fixture(&issue430_p("body", Some(0)), Some(&notes));
+        let edited = issue430_fixture(
+            &issue430_p("body", Some(0)),
+            Some(&notes.replace("old", "new")),
+        );
+        original
+            .compare(&edited, "Issue430", ISSUE430_DATE)
+            .unwrap();
+        original.accept_all().unwrap();
+        assert_eq!(original.footnotes(), vec![(0, "new".into())]);
+    }
+}
+
+#[test]
+fn issue430_comparison_preserves_untouched_and_refuses_changed_invalid_note_type() {
+    for id in [0, 9] {
+        for kind in ["", "unknown"] {
+            let notes = format!(
+                r#"<w:footnote w:id="{id}" w:type="{kind}"><w:p><w:r><w:t>invalid</w:t></w:r></w:p></w:footnote>"#
+            );
+            let mut original = issue430_fixture(&issue430_p("body", Some(id)), Some(&notes));
+            let before = original.to_bytes().unwrap();
+            let identical = issue430_roundtrip(&mut original);
+            assert!(
+                original
+                    .compare(&identical, "Issue430", ISSUE430_DATE)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(issue430_note_xml(&mut original).unwrap().contains(&notes));
+            let edited = issue430_fixture(
+                &issue430_p("body", Some(id)),
+                Some(&notes.replace("invalid", "changed")),
+            );
+            assert!(
+                original
+                    .compare(&edited, "Issue430", ISSUE430_DATE)
+                    .is_err()
+            );
+            assert_eq!(original.to_bytes().unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_new_unused_note_pending_decision() {
+    let mut original = issue430_fixture(
+        &issue430_p("body", None),
+        Some(&issue430_owner(4, "unused original")),
+    );
+    let before = original.to_bytes().unwrap();
+    let edited = issue430_fixture(
+        &issue430_p("body", None),
+        Some(&format!(
+            "{}{}",
+            issue430_owner(4, "unused original"),
+            issue430_owner(5, "new unused")
+        )),
+    );
+    assert!(
+        original
+            .compare(&edited, "Issue430", ISSUE430_DATE)
+            .unwrap_err()
+            .to_string()
+            .contains("new unused")
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+}
+
+fn issue430_normalized_unit(
+    addition: bool,
+    token: i32,
+    ids: [i32; 3],
+    authors: [&str; 3],
+    shared: bool,
+) -> Document {
+    let kind = if addition { "ins" } else { "del" };
+    let bits = if addition { "01" } else { "10" };
+    let [body_id, mark_id, note_id] = ids;
+    let body_mark = format!(
+        r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF{token}P{bits}B"/><w:bookmarkEnd w:id="80"/>"#
+    );
+    let note_mark = format!(
+        r#"<w:bookmarkStart w:id="81" w:name="_rdocxCmpNoteF{token}P{bits}N"/><w:bookmarkEnd w:id="81"/>"#
+    );
+    let reference = format!(
+        r#"<w:{kind} w:id="{body_id}" w:author="{}" w:date="{ISSUE430_DATE}">{}</w:{kind}>"#,
+        authors[0],
+        issue430_ref(5)
+    );
+    let mut body = format!("<w:p>{body_mark}{reference}</w:p>");
+    if shared {
+        body.push_str(&format!(r#"<w:p><w:{kind} w:id="10" w:author="{}" w:date="{ISSUE430_DATE}">{}</w:{kind}></w:p>"#,authors[0],issue430_ref(5)));
+    }
+    let text = if addition { "t" } else { "delText" };
+    let notes = format!(
+        r#"<w:footnote w:id="5"><w:p><w:pPr><w:rPr><w:{kind} w:id="{mark_id}" w:author="{}" w:date="{ISSUE430_DATE}"/></w:rPr></w:pPr>{}<w:{kind} w:id="{note_id}" w:author="{}" w:date="{ISSUE430_DATE}">{}<w:r><w:footnoteRef/><w:{text}>note</w:{text}></w:r></w:{kind}></w:p></w:footnote>"#,
+        authors[1],
+        if addition { "" } else { &note_mark },
+        authors[2],
+        if addition { &note_mark } else { "" }
+    );
+    body.push_str(&issue430_p("unrelated", None));
+    issue430_fixture(&body, Some(&notes))
+}
+
+#[test]
+fn issue430_comparison_normalized_numeric_author_date_selection() {
+    for addition in [true, false] {
+        for ids in [[1, 2, 3], [7, 8, 9]] {
+            let mut pending = issue430_normalized_unit(addition, 7, ids, ["A"; 3], false);
+            assert_eq!(pending.story_revisions().unwrap().len(), 3);
+            for id in ids {
+                let mut partial = issue430_roundtrip(&mut pending);
+                let before = partial.to_bytes().unwrap();
+                let error = partial.accept_revision_id(id).unwrap_err().to_string();
+                assert!(error.contains("partial footnote custody"), "{error}");
+                assert_eq!(partial.to_bytes().unwrap(), before);
+            }
+            if !ids.contains(&7) {
+                assert_eq!(pending.accept_revision_id(7).unwrap(), 0);
+            }
+            let mut by_author = issue430_roundtrip(&mut pending);
+            assert_eq!(by_author.accept_revisions_by_author("A").unwrap(), 3);
+            let mut by_date = issue430_roundtrip(&mut pending);
+            assert_eq!(
+                by_date
+                    .accept_revisions_in_date_range("2026-11-04T00:00:00Z", "2026-11-06T00:00:00Z")
+                    .unwrap(),
+                3
+            );
+            let mut rejected = issue430_roundtrip(&mut pending);
+            assert_eq!(rejected.reject_all().unwrap(), 3);
+            issue430_assert_settled(&mut rejected, if addition { &[] } else { &[5] }, !addition);
+            pending.accept_all().unwrap();
+            issue430_assert_settled(&mut pending, if addition { &[5] } else { &[] }, addition);
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_multi_reference_custody_unit_selection() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], true);
+    assert_eq!(pending.story_revisions().unwrap().len(), 4);
+    let before = pending.to_bytes().unwrap();
+    assert!(pending.accept_revision_id(10).is_err());
+    assert_eq!(pending.to_bytes().unwrap(), before);
+    pending.accept_revisions_by_author("A").unwrap();
+    issue430_assert_settled(&mut pending, &[5], true);
+    let mut mixed = issue430_normalized_unit(true, 7, [1, 2, 3], ["A", "B", "B"], false);
+    let before = mixed.to_bytes().unwrap();
+    for author in ["A", "B"] {
+        assert!(mixed.accept_revisions_by_author(author).is_err());
+        assert_eq!(mixed.to_bytes().unwrap(), before);
+    }
+    mixed.reject_all().unwrap();
+    issue430_assert_settled(&mut mixed, &[], false);
+}
+
+#[test]
+fn issue430_comparison_special_only_part_roundtrips_both_directions() {
+    let specials = r#"<w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="0" w:type="continuationSeparator"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"#;
+    for addition in [true, false] {
+        let empty = issue430_p("body", None);
+        let referenced = issue430_p("body", Some(5));
+        let notes = format!("{specials}{}", issue430_owner(5, "note"));
+        let mut original = issue430_fixture(
+            if addition { &empty } else { &referenced },
+            Some(if addition { specials } else { &notes }),
+        );
+        let edited = issue430_fixture(
+            if addition { &referenced } else { &empty },
+            Some(if addition { &notes } else { specials }),
+        );
+        original
+            .compare(&edited, "Issue430", ISSUE430_DATE)
+            .unwrap();
+        let mut rejected = issue430_roundtrip(&mut original);
+        rejected.reject_all().unwrap();
+        issue430_assert_settled(&mut rejected, if addition { &[] } else { &[5] }, true);
+        original.accept_all().unwrap();
+        issue430_assert_settled(&mut original, if addition { &[5] } else { &[] }, true);
+        assert!(issue430_note_xml(&mut original).unwrap().contains(specials));
+    }
+}
+
+#[test]
+fn issue430_comparison_differing_id_reference_graph_preserves_exact_identities() {
+    for (left_ids, right_ids) in [
+        (vec![1], vec![2]),
+        (vec![1, 2], vec![1, 2]),
+        (vec![1, 2, 3], vec![1, 2, 3]),
+    ] {
+        let notes = |ids: &[i32]| {
+            ids.iter()
+                .map(|&id| issue430_owner(id, &format!("note{id}")))
+                .collect::<String>()
+        };
+        let mut original = issue430_fixture(&issue430_p("body", Some(1)), Some(&notes(&left_ids)));
+        let edited = issue430_fixture(&issue430_p("body", Some(2)), Some(&notes(&right_ids)));
+        original
+            .compare(&edited, "Issue430", ISSUE430_DATE)
+            .unwrap();
+        let mut rejected = issue430_roundtrip(&mut original);
+        rejected.reject_all().unwrap();
+        issue430_assert_settled(&mut rejected, &left_ids, true);
+        original.accept_all().unwrap();
+        issue430_assert_settled(&mut original, &right_ids, true);
+        let package = issue430_package(&mut original);
+        assert!(
+            String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap())
+                .contains(r#"footnoteReference w:id="2""#)
+        );
+    }
+}
+
+fn issue430_replace_parts(
+    document: &mut Document,
+    body: Option<String>,
+    notes: Option<String>,
+) -> Document {
+    let mut package = issue430_package(document);
+    if let Some(body) = body {
+        package.set_part("/word/document.xml", body.into_bytes());
+    }
+    if let Some(notes) = notes {
+        package.set_part("/word/footnotes.xml", notes.into_bytes());
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+// These generated fixtures use canonical Word names. Give every physical
+// element of one actual note unit its own test author, without changing IDs,
+// custody tokens, presence bits, references or unowned producer content.
+fn issue430_author_for_unit(document: &mut Document, owner: i32, author: &str) -> Document {
+    use quick_xml::events::{BytesStart, Event};
+    let package = issue430_package(document);
+    let mut ids = std::collections::BTreeSet::new();
+    let word_id = |start: &BytesStart<'_>| {
+        start
+            .attributes()
+            .map(Result::unwrap)
+            .find(|attribute| attribute.key.as_ref() == b"w:id")
+            .map(|attribute| {
+                std::str::from_utf8(&attribute.value)
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+    };
+    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap();
+    let mut reader = quick_xml::Reader::from_str(notes);
+    let mut current_owner = None;
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start) => {
+                if start.name().as_ref() == b"w:footnote" {
+                    current_owner = word_id(&start);
+                }
+                if current_owner == Some(owner)
+                    && matches!(start.name().as_ref(), b"w:ins" | b"w:del")
+                {
+                    ids.insert(word_id(&start).unwrap());
+                }
+            }
+            Event::End(end) if end.name().as_ref() == b"w:footnote" => current_owner = None,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert!(
+        ids.len() >= 2,
+        "actual note paragraph mark and content records"
+    );
+    let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let mut reader = quick_xml::Reader::from_str(body);
+    let mut ancestors = Vec::new();
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) => {
+                ancestors.push(if matches!(start.name().as_ref(), b"w:ins" | b"w:del") {
+                    word_id(&start)
+                } else {
+                    None
+                })
+            }
+            Event::Empty(start)
+                if start.name().as_ref() == b"w:footnoteReference"
+                    && word_id(&start) == Some(owner) =>
+            {
+                ids.insert(
+                    *ancestors
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .next()
+                        .expect("actual reference revision"),
+                );
+            }
+            Event::End(_) => {
+                ancestors.pop().unwrap();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert!(
+        ids.len() >= 3,
+        "actual body reference belongs to the same unit"
+    );
+    let mut outputs = Vec::new();
+    for xml in [body, notes] {
+        let mut reader = quick_xml::Reader::from_str(xml);
+        let mut edits = Vec::new();
+        loop {
+            let at = reader.buffer_position() as usize;
+            let event = reader.read_event().unwrap();
+            let empty = matches!(&event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start)
+                    if matches!(start.name().as_ref(), b"w:ins" | b"w:del")
+                        && word_id(&start).is_some_and(|id| ids.contains(&id)) =>
+                {
+                    let name = std::str::from_utf8(start.name().as_ref())
+                        .unwrap()
+                        .to_owned();
+                    let mut updated = BytesStart::new(name);
+                    let mut changed = 0;
+                    for attribute in start.attributes().map(Result::unwrap) {
+                        if attribute.key.as_ref() == b"w:author" {
+                            updated.push_attribute(("w:author", author));
+                            changed += 1;
+                        } else {
+                            updated
+                                .push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+                        }
+                    }
+                    assert_eq!(changed, 1);
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    writer
+                        .write_event(if empty {
+                            Event::Empty(updated)
+                        } else {
+                            Event::Start(updated)
+                        })
+                        .unwrap();
+                    edits.push((
+                        at..reader.buffer_position() as usize,
+                        String::from_utf8(writer.into_inner()).unwrap(),
+                    ));
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        let mut output = xml.to_owned();
+        for (span, value) in edits.into_iter().rev() {
+            output.replace_range(span, &value);
+        }
+        outputs.push(output);
+    }
+    let result = issue430_replace_parts(document, Some(outputs.remove(0)), Some(outputs.remove(0)));
+    assert_eq!(
+        result
+            .story_revisions()
+            .unwrap()
+            .iter()
+            .filter(|revision| revision.author() == author)
+            .count(),
+        ids.len()
+    );
+    result
+}
+
+#[test]
+fn issue430_comparison_part_presence_survives_partial_resolution() {
+    let empty = format!("{}{}", issue430_p("left", None), issue430_p("right", None));
+    let edited_body = format!(
+        "{}{}",
+        issue430_p("left", Some(5)),
+        issue430_p("right", Some(6))
+    );
+    let mut original = issue430_fixture(&empty, None);
+    let edited = issue430_fixture(
+        &edited_body,
+        Some(&format!(
+            "{}{}",
+            issue430_owner(5, "A"),
+            issue430_owner(6, "B")
+        )),
+    );
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    original = issue430_author_for_unit(&mut original, 5, "Unit5");
+    original = issue430_author_for_unit(&mut original, 6, "Unit6");
+    let listed = original.story_revisions().unwrap();
+    assert_eq!(
+        listed.len(),
+        6,
+        "three physical records per referenced definition"
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .map(|revision| revision.id())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        listed.len()
+    );
+    let mut partial = issue430_roundtrip(&mut original);
+    let before = partial.to_bytes().unwrap();
+    assert!(
+        partial
+            .reject_revision_id(listed[0].id())
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(partial.to_bytes().unwrap(), before);
+    let authors = ["Unit5", "Unit6"];
+    for order in [[authors[0], authors[1]], [authors[1], authors[0]]] {
+        let mut pending = issue430_roundtrip(&mut original);
+        assert_eq!(pending.reject_revisions_by_author(order[0]).unwrap(), 3);
+        assert!(issue430_note_xml(&mut pending).is_some());
+        assert!(
+            issue430_note_xml(&mut pending)
+                .unwrap()
+                .contains("_rdocxCmpNoteF")
+        );
+        let mut pending = issue430_roundtrip(&mut pending);
+        assert_eq!(pending.reject_revisions_by_author(order[1]).unwrap(), 3);
+        issue430_assert_settled(&mut pending, &[], false);
+    }
+}
+
+#[test]
+fn issue430_comparison_rejects_mixed_creation_lifetime_to_absent() {
+    let empty = format!("{}{}", issue430_p("left", None), issue430_p("right", None));
+    let mut first = issue430_fixture(&empty, None);
+    let first_input = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("left", Some(5)),
+            issue430_p("right", None)
+        ),
+        Some(&issue430_owner(5, "A")),
+    );
+    first.compare(&first_input, "A", ISSUE430_DATE).unwrap();
+    let mut first = issue430_roundtrip(&mut first);
+    let package = issue430_package(&mut first);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let notes =
+        String::from_utf8(package.get_part("/word/footnotes.xml").unwrap().to_vec()).unwrap();
+    let edited = issue430_replace_parts(
+        &mut first,
+        Some(body.replace(&issue430_p("right", None), &issue430_p("right", Some(6)))),
+        Some(notes.replace(
+            "</w:footnotes>",
+            &format!("{}</w:footnotes>", issue430_owner(6, "B")),
+        )),
+    );
+    first.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    let listed = first.story_revisions().unwrap();
+    for author in ["A", "B"] {
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|revision| revision.author() == author)
+                .count(),
+            3
+        );
+        let mut partial = issue430_roundtrip(&mut first);
+        let before = partial.to_bytes().unwrap();
+        let id = listed
+            .iter()
+            .find(|revision| revision.author() == author)
+            .unwrap()
+            .id();
+        assert!(
+            partial
+                .reject_revision_id(id)
+                .unwrap_err()
+                .to_string()
+                .contains("partial footnote custody")
+        );
+        assert_eq!(partial.to_bytes().unwrap(), before);
+    }
+    for order in [["A", "B"], ["B", "A"]] {
+        for accept_a in [false, true] {
+            for accept_b in [false, true] {
+                let mut pending = issue430_roundtrip(&mut first);
+                for author in order {
+                    let accept = if author == "A" { accept_a } else { accept_b };
+                    if accept {
+                        assert_eq!(pending.accept_revisions_by_author(author).unwrap(), 3);
+                    } else {
+                        assert_eq!(pending.reject_revisions_by_author(author).unwrap(), 3);
+                    }
+                    pending = issue430_roundtrip(&mut pending);
+                }
+                let retained = [(5, accept_a), (6, accept_b)]
+                    .into_iter()
+                    .filter_map(|(id, keep)| keep.then_some(id))
+                    .collect::<Vec<_>>();
+                issue430_assert_settled(&mut pending, &retained, !retained.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_preserves_prior_custody_against_unrelated_edit() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let package = issue430_package(&mut pending);
+    let old_notes = issue430_note_xml(&mut pending).unwrap();
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let edited = issue430_replace_parts(
+        &mut pending,
+        Some(body.replace("unrelated", "changed")),
+        None,
+    );
+    pending.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    assert_eq!(issue430_note_xml(&mut pending).unwrap(), old_notes);
+    let mut reopened = issue430_roundtrip(&mut pending);
+    reopened.reject_revisions_by_author("A").unwrap();
+    assert!(issue430_note_xml(&mut reopened).is_none());
+}
+
+#[test]
+fn issue430_comparison_preserves_terminal_completed_body_markers_after_unrelated_edit() {
+    for bits in ["01", "10"] {
+        let marker = format!(
+            r#"<w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF1P{bits}B"/><w:bookmarkEnd w:id="0"/>"#
+        );
+        let body = format!(
+            r#"<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="6F9BD752" w14:textId="7789695B" w:rsidR="00FF51D7" w:rsidRDefault="00000000"><w:r><w:t>seller</w:t></w:r>{marker}</w:p>{}"#,
+            issue430_p("payment", None)
+        );
+        let notes = r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"#;
+        let mut original = issue430_fixture(&body, Some(notes));
+        let mut edited = issue430_roundtrip(&mut original);
+        let location = edited.paragraph_story_location(1).unwrap().unwrap();
+        assert_eq!(
+            edited
+                .try_replace_text_at(&location, "payment", "payment changed", Some(1))
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        original
+            .compare_with_options(
+                &edited,
+                "unrelated",
+                ISSUE430_DATE,
+                &rdocx::ComparisonOptions {
+                    granularity: rdocx::ComparisonGranularity::Word,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for accept in [true, false] {
+            let mut result = issue430_roundtrip(&mut original);
+            if accept {
+                result.accept_all().unwrap();
+            } else {
+                result.reject_all().unwrap();
+            }
+            let package = issue430_package(&mut result);
+            let main =
+                std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+            assert!(main.contains(&marker), "{main}");
+            assert_eq!(result.paragraph(0).unwrap().text(), "seller");
+            assert_eq!(
+                result.paragraph(1).unwrap().text(),
+                if accept { "payment changed" } else { "payment" }
+            );
+            assert!(package.contains_part("/word/footnotes.xml"));
+        }
+    }
+}
+
+#[test]
+fn issue430_settings_cleanup_preserves_property_root_namespace_and_policy() {
+    for accept in [true, false] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let mut package = issue430_package(&mut pending);
+        let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap().replace("</w:footnotes>", r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote></w:footnotes>"#);
+        package.set_part("/word/footnotes.xml", notes.into_bytes());
+        let foreign = r#"<q:footnote xmlns:q="urn:producer" q:id="99"></q:footnote>"#;
+        let opening = format!(
+            r#"<w:footnotePr xmlns:q="{ISSUE430_WORD}" xmlns:x="urn:producer" x:flag="exact">"#
+        );
+        package.set_part("/word/settings.xml", format!(r#"<w:settings xmlns:w="{ISSUE430_WORD}">{opening}<w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/><w:footnote w:id="-1"/><q:footnote q:id="0"></q:footnote>{foreign}<x:keep/></w:footnotePr><w:endnotePr><w:numStart w:val="8"/></w:endnotePr></w:settings>"#).into_bytes());
+        if !package
+            .get_part_rels("/word/document.xml")
+            .unwrap()
+            .items
+            .iter()
+            .any(|rel| rel.rel_type == rel_types::SETTINGS)
+        {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::SETTINGS, "settings.xml");
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+        if accept {
+            pending.accept_all().unwrap();
+        } else {
+            pending.reject_all().unwrap();
+        }
+        let mut reopened = issue430_roundtrip(&mut pending);
+        let package = issue430_package(&mut reopened);
+        let settings = package.get_part("/word/settings.xml").unwrap();
+        let model = rdocx_oxml::settings::CT_Settings::from_xml(settings).unwrap();
+        let properties = model.footnote_properties().unwrap();
+        assert_eq!(properties.num_fmt.as_deref(), Some("lowerRoman"));
+        assert_eq!(properties.num_start, Some(3));
+        assert_eq!(model.endnote_properties().unwrap().num_start, Some(8));
+        let raw = std::str::from_utf8(settings).unwrap();
+        assert!(raw.contains(&opening), "{raw}");
+        assert!(raw.contains("urn:producer"));
+        assert!(raw.contains(foreign), "{raw}");
+        if accept {
+            assert_eq!(properties.special_references, vec![-1]);
+            assert!(raw.contains("q:id=\"0\""));
+        } else {
+            assert!(properties.special_references.is_empty(), "{raw}");
+            assert!(!raw.contains("<w:footnote "), "{raw}");
+            assert!(!raw.contains("q:id=\"0\""), "{raw}");
+            assert!(!package.contains_part("/word/footnotes.xml"));
+        }
+    }
+}
+
+#[test]
+fn issue430_settings_cleanup_ignores_nested_opaque_property_scopes() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let mut package = issue430_package(&mut pending);
+    let notes = std::str::from_utf8(package.get_part("/word/footnotes.xml").unwrap()).unwrap().replace("</w:footnotes>", r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote></w:footnotes>"#);
+    package.set_part("/word/footnotes.xml", notes.into_bytes());
+    let opaque = format!(
+        r#"<x:opaque xmlns:x="urn:opaque"><w:settings><w:footnotePr xmlns:q="{ISSUE430_WORD}"><q:footnote q:id="123"></q:footnote></w:footnotePr></w:settings></x:opaque>"#
+    );
+    let foreign = r#"<q:footnote q:id="99"></q:footnote>"#;
+    package.set_part("/word/settings.xml", format!(r#"<w:settings xmlns:w="{ISSUE430_WORD}">{opaque}<w:footnotePr xmlns:q="urn:producer"><w:footnote w:id="-1"/>{foreign}</w:footnotePr></w:settings>"#).into_bytes());
+    if !package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .any(|rel| rel.rel_type == rel_types::SETTINGS)
+    {
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::SETTINGS, "settings.xml");
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+    pending.reject_all().unwrap();
+    let package = issue430_package(&mut pending);
+    let raw = std::str::from_utf8(package.get_part("/word/settings.xml").unwrap()).unwrap();
+    assert!(raw.contains(&opaque), "{raw}");
+    assert!(raw.contains(foreign), "{raw}");
+    assert!(
+        raw.contains(r#"<w:footnotePr xmlns:q="urn:producer">"#),
+        "{raw}"
+    );
+    assert!(!raw.contains(r#"<w:footnote w:id="-1""#), "{raw}");
+    assert!(!package.contains_part("/word/footnotes.xml"));
+}
+
+#[test]
+fn issue430_comparison_preserves_and_retires_imported_word_resolved_markers() {
+    let body_mark =
+        r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P01B"/><w:bookmarkEnd w:id="80"/>"#;
+    let note_mark =
+        r#"<w:bookmarkStart w:id="81" w:name="_rdocxCmpNoteF7P01N"/><w:bookmarkEnd w:id="81"/>"#;
+    let body = format!(
+        "<w:p>{body_mark}{}</w:p>{}",
+        issue430_ref(5),
+        issue430_p("unrelated", None)
+    );
+    let notes = format!(
+        r#"<w:footnote w:id="5"><w:p>{note_mark}<w:r><w:t>old</w:t></w:r></w:p></w:footnote>"#
+    );
+    let mut imported = issue430_fixture(&body, Some(&notes));
+    let edited = issue430_fixture(&body.replace("unrelated", "changed"), Some(&notes));
+    imported.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    assert!(
+        issue430_note_xml(&mut imported)
+            .unwrap()
+            .contains(note_mark)
+    );
+    imported.accept_all().unwrap();
+    assert!(
+        issue430_note_xml(&mut imported)
+            .unwrap()
+            .contains(note_mark)
+    );
+    let edited = issue430_fixture(
+        &body.replace("unrelated", "changed"),
+        Some(&notes.replace("old", "new")),
+    );
+    imported.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    assert!(
+        !issue430_note_xml(&mut imported)
+            .unwrap()
+            .contains("_rdocxCmpNoteF")
+    );
+    imported.accept_all().unwrap();
+    issue430_assert_settled(&mut imported, &[5], true);
+}
+
+#[test]
+fn issue430_comparison_refuses_ambiguous_imported_custody_markers() {
+    let mut valid = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let notes = issue430_note_xml(&mut valid).unwrap();
+    for bad in [
+        notes.replace("F7P01N", "F7P11N"),
+        notes.replace("F7P01N", "F8P01N"),
+        notes.replace("w:id=\"81\"/>", "w:id=\"82\"/>"),
+    ] {
+        let mut corrupt = issue430_replace_parts(&mut valid, None, Some(bad));
+        let before = corrupt.to_bytes().unwrap();
+        assert!(corrupt.accept_all().is_err());
+        assert_eq!(corrupt.to_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn issue430_comparison_token_coincidence_with_unrelated_revision_is_not_unit() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let package = issue430_package(&mut pending);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let extra = format!(
+        r#"<w:p><w:ins w:id="7" w:author="B" w:date="{ISSUE430_DATE}"><w:r><w:t>other</w:t></w:r></w:ins></w:p>"#
+    );
+    let mut pending = issue430_replace_parts(
+        &mut pending,
+        Some(body.replace("<w:sectPr/>", &format!("{extra}<w:sectPr/>"))),
+        None,
+    );
+    assert_eq!(pending.accept_revision_id(7).unwrap(), 1);
+    assert_eq!(pending.story_revisions().unwrap().len(), 3);
+    assert!(issue430_note_xml(&mut pending).unwrap().contains("F7P01N"));
+    pending.reject_all().unwrap();
+    issue430_assert_settled(&mut pending, &[], false);
+}
+
+#[test]
+fn issue430_comparison_generates_shared_reference_unit_without_new_references() {
+    let empty = issue430_p("body", None);
+    let edited_body = format!(
+        "<w:p><w:r><w:t>body</w:t></w:r>{}{}</w:p>",
+        issue430_ref(5),
+        issue430_ref(5)
+    );
+    let mut original = issue430_fixture(&empty, None);
+    let edited = issue430_fixture(&edited_body, Some(&issue430_owner(5, "shared")));
+    original
+        .compare(&edited, "Issue430", ISSUE430_DATE)
+        .unwrap();
+    let listed = original.story_revisions().unwrap();
+    assert_eq!(listed.len(), 4);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|r| r.id())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        listed.len(),
+        "new physical revision IDs stay unique even within one logical unit"
+    );
+    for revision in &listed {
+        let mut partial = issue430_roundtrip(&mut original);
+        let before = partial.to_bytes().unwrap();
+        assert!(
+            partial
+                .reject_revision_id(revision.id())
+                .unwrap_err()
+                .to_string()
+                .contains("partial footnote custody")
+        );
+        assert_eq!(partial.to_bytes().unwrap(), before);
+    }
+    let mut rejected = issue430_roundtrip(&mut original);
+    assert_eq!(rejected.reject_all().unwrap(), listed.len());
+    issue430_assert_settled(&mut rejected, &[], false);
+    assert_eq!(original.accept_all().unwrap(), listed.len());
+    issue430_assert_settled(&mut original, &[5], true);
+    let package = issue430_package(&mut original);
+    assert_eq!(
+        String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap())
+            .matches("footnoteReference")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn issue430_comparison_invalid_reference_alignment_uses_owner_and_run_not_offsets() {
+    let invalid = r#"<w:footnote w:id="9" w:type="unknown"><w:p><w:r><w:t>invalid</w:t></w:r></w:p></w:footnote>"#;
+    let owned = issue430_p("owner", Some(9));
+    let mut original = issue430_fixture(
+        &format!("{}{owned}", issue430_p("before", None)),
+        Some(invalid),
+    );
+    let edited = issue430_fixture(
+        &format!("{}{owned}", issue430_p("longer changed before", None)),
+        Some(invalid),
+    );
+    original.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    original.accept_all().unwrap();
+    assert!(issue430_note_xml(&mut original).unwrap().contains(invalid));
+    let changed = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("longer changed before", Some(9)),
+            issue430_p("owner", None)
+        ),
+        Some(invalid),
+    );
+    let before = original.to_bytes().unwrap();
+    assert!(original.compare(&changed, "B", ISSUE430_DATE).is_err());
+    assert_eq!(original.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue430_comparison_unowned_invalid_and_opaque_content_keeps_open_part() {
+    for addition in [true, false] {
+        let mut pending = issue430_normalized_unit(addition, 7, [1, 2, 3], ["A"; 3], false);
+        let invalid = r#"<w:footnote w:id="9" w:type="unknown"><w:p><w:r><w:t>invalid</w:t></w:r></w:p></w:footnote>"#;
+        let opaque = r#"<z:record xmlns:z="urn:opaque" z:value="exact &amp; retained"/>"#;
+        let notes = issue430_note_xml(&mut pending).unwrap().replace(
+            "</w:footnotes>",
+            &format!("{invalid}{opaque}</w:footnotes>"),
+        );
+        let mut pending = issue430_replace_parts(&mut pending, None, Some(notes));
+        if addition {
+            pending.reject_all().unwrap();
+        } else {
+            pending.accept_all().unwrap();
+        }
+        let xml = issue430_note_xml(&mut pending).unwrap();
+        assert!(xml.contains(invalid));
+        assert!(xml.contains(opaque));
+        assert!(!xml.contains("_rdocxCmpNoteF"));
+        let mut reopened = issue430_roundtrip(&mut pending);
+        assert!(issue430_note_xml(&mut reopened).unwrap().contains(opaque));
+    }
+}
+
+#[test]
+fn issue430_comparison_reserves_tokens_and_bookmark_ids_without_token_chronology() {
+    let mut first = issue430_normalized_unit(true, 20, [1, 2, 3], ["A"; 3], false);
+    let package = issue430_package(&mut first);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let notes = issue430_note_xml(&mut first).unwrap();
+    let edited = issue430_replace_parts(
+        &mut first,
+        Some(body.replace(
+            &issue430_p("unrelated", None),
+            &issue430_p("unrelated", Some(6)),
+        )),
+        Some(notes.replace(
+            "</w:footnotes>",
+            &format!("{}</w:footnotes>", issue430_owner(6, "B")),
+        )),
+    );
+    first.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    let notes = issue430_note_xml(&mut first).unwrap();
+    assert!(notes.contains("F20P01N"));
+    // A controlled Word-style token rebind creates the lower-token imported
+    // history discriminator without demanding a different allocator order.
+    let end = notes.find("P11N").unwrap();
+    let start = notes[..end].rfind("_rdocxCmpNoteF").unwrap();
+    let old = &notes[start..end];
+    assert_ne!(old, "_rdocxCmpNoteF20");
+    let package = issue430_package(&mut first);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let mut first = issue430_replace_parts(
+        &mut first,
+        Some(body.replace(&format!("{old}P11B"), "_rdocxCmpNoteF0P11B")),
+        Some(notes.replace(&format!("{old}P11N"), "_rdocxCmpNoteF0P11N")),
+    );
+    for order in [["A", "B"], ["B", "A"]] {
+        let mut copy = issue430_roundtrip(&mut first);
+        copy.reject_revisions_by_author(order[0]).unwrap();
+        let mut copy = issue430_roundtrip(&mut copy);
+        copy.reject_revisions_by_author(order[1]).unwrap();
+        issue430_assert_settled(&mut copy, &[], false);
+    }
+}
+
+#[test]
+fn issue430_comparison_open_lifetime_is_byte_determined() {
+    let mut original = issue430_fixture(&issue430_p("body", None), None);
+    let edited = issue430_fixture(
+        &issue430_p("body", Some(5)),
+        Some(&issue430_owner(5, "note")),
+    );
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    let bytes = original.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    original.reject_all().unwrap();
+    reopened.reject_all().unwrap();
+    assert_eq!(original.to_bytes().unwrap(), reopened.to_bytes().unwrap());
+    issue430_assert_settled(&mut original, &[], false);
+}
+
+#[test]
+fn issue430_comparison_completed_cycle_and_accept_then_edit_have_no_stale_bits() {
+    let mut original = issue430_fixture(
+        &issue430_p("body", Some(5)),
+        Some(&issue430_owner(5, "old")),
+    );
+    let empty = issue430_fixture(&issue430_p("body", None), None);
+    original.compare(&empty, "A", ISSUE430_DATE).unwrap();
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[], false);
+    let special = r#"<w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"#;
+    let mut original = issue430_roundtrip(&mut original);
+    let edited = issue430_fixture(
+        &issue430_p("body", Some(5)),
+        Some(&format!("{special}{}", issue430_owner(5, "new"))),
+    );
+    original.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[5], true);
+    let mut original = issue430_roundtrip(&mut original);
+    let edited = issue430_fixture(
+        &issue430_p("body", Some(5)),
+        Some(&format!("{special}{}", issue430_owner(5, "later"))),
+    );
+    original.compare(&edited, "C", ISSUE430_DATE).unwrap();
+    assert_eq!(original.story_revisions().unwrap().len(), 2);
+    assert!(
+        !issue430_note_xml(&mut original)
+            .unwrap()
+            .contains("_rdocxCmpNoteF")
+    );
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[5], true);
+    let mut original = issue430_roundtrip(&mut original);
+    let edited = issue430_fixture(&issue430_p("body", None), Some(special));
+    original.compare(&edited, "D", ISSUE430_DATE).unwrap();
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[], true);
+    assert!(issue430_note_xml(&mut original).unwrap().contains(special));
+}
+
+#[test]
+fn issue430_comparison_retained_tombstone_before_an_unrelated_live_reference() {
+    let body = format!(
+        "{}{}",
+        issue430_p("body", Some(6)),
+        issue430_p("other", None)
+    );
+    let edited_body = format!(
+        "<w:p><w:r><w:t>body</w:t></w:r>{}{}</w:p>{}",
+        issue430_ref(5),
+        issue430_ref(6),
+        issue430_p("other", Some(7))
+    );
+    let mut original = issue430_fixture(&body, Some(&issue430_owner(6, "existing")));
+    let edited = issue430_fixture(
+        &edited_body,
+        Some(&format!(
+            "{}{}{}",
+            issue430_owner(6, "existing"),
+            issue430_owner(5, "A"),
+            issue430_owner(7, "C")
+        )),
+    );
+    original
+        .compare(&edited, "Reviewer", ISSUE430_DATE)
+        .unwrap();
+    original = issue430_author_for_unit(&mut original, 5, "Unit5");
+    original = issue430_author_for_unit(&mut original, 7, "Unit7");
+    let id = original
+        .story_revisions()
+        .unwrap()
+        .iter()
+        .find(|r| r.text() == "A")
+        .unwrap()
+        .id();
+    let before = original.to_bytes().unwrap();
+    assert!(
+        original
+            .reject_revision_id(id)
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    assert_eq!(original.reject_revisions_by_author("Unit5").unwrap(), 3);
+    let mut reopened = issue430_roundtrip(&mut original);
+    assert_eq!(
+        reopened
+            .footnotes()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![6, 7]
+    );
+    reopened.reject_all().unwrap();
+    issue430_assert_settled(&mut reopened, &[6], true);
+}
+
+#[test]
+fn issue430_comparison_original_custody_names_and_ids_win_for_same_owner() {
+    let mut original = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let package = issue430_package(&mut original);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let notes = issue430_note_xml(&mut original).unwrap();
+    let edited = issue430_replace_parts(
+        &mut original,
+        Some(
+            body.replace("F7P01B", "F8P01B")
+                .replace("w:id=\"80\"", "w:id=\"90\""),
+        ),
+        Some(
+            notes
+                .replace("F7P01N", "F8P01N")
+                .replace("w:id=\"81\"", "w:id=\"91\""),
+        ),
+    );
+    let before = original.to_bytes().unwrap();
+    assert!(
+        original
+            .compare(&edited, "B", ISSUE430_DATE)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue430_comparison_specials_only_baseline_and_no_note_payment_control() {
+    let specials = r#"<w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"#;
+    for notes in [None, Some(specials)] {
+        let payment = issue430_p("payment", None);
+        let mut original =
+            issue430_fixture(&format!("{}{payment}", issue430_p("old", None)), notes);
+        let edited = issue430_fixture(&format!("{}{payment}", issue430_p("new", None)), notes);
+        original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+        let package = issue430_package(&mut original);
+        assert!(
+            String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap())
+                .contains(&payment)
+        );
+        let before_notes = issue430_note_xml(&mut original);
+        original.accept_all().unwrap();
+        assert_eq!(issue430_note_xml(&mut original), before_notes);
+        assert!(original.story_revisions().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn issue430_comparison_endnote_text_edit_nonregression() {
+    let body = issue430_p("body", None);
+    let mut base = issue430_fixture(&body, None);
+    let mut package = issue430_package(&mut base);
+    let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+        .unwrap()
+        .replace(
+            "</w:p>",
+            r#"<w:r><w:endnoteReference w:id="5"/></w:r></w:p>"#,
+        );
+    package.set_part("/word/document.xml", main.into_bytes());
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add(rel_types::ENDNOTES, "endnotes.xml");
+    package.content_types.add_override(
+        "/word/endnotes.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+    );
+    let notes = format!(
+        r#"<w:endnotes xmlns:w="{ISSUE430_WORD}"><w:endnote w:id="5"><w:p><w:r><w:t>old</w:t></w:r></w:p></w:endnote></w:endnotes>"#
+    );
+    package.set_part("/word/endnotes.xml", notes.as_bytes().to_vec());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut original = Document::from_bytes(bytes.get_ref()).unwrap();
+    package.set_part(
+        "/word/endnotes.xml",
+        notes.replace("old", "new").into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let edited = Document::from_bytes(bytes.get_ref()).unwrap();
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    assert_eq!(original.story_revisions().unwrap().len(), 2);
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    assert!(
+        String::from_utf8_lossy(
+            issue430_package(&mut rejected)
+                .get_part("/word/endnotes.xml")
+                .unwrap()
+        )
+        .contains(">old</w:t>")
+    );
+    original.accept_all().unwrap();
+    assert!(
+        String::from_utf8_lossy(
+            issue430_package(&mut original)
+                .get_part("/word/endnotes.xml")
+                .unwrap()
+        )
+        .contains(">new</w:t>")
+    );
+    package.set_part(
+        "/word/endnotes.xml",
+        notes
+            .replace(
+                "</w:endnotes>",
+                r#"<w:endnote w:id="6"><w:p/></w:endnote></w:endnotes>"#,
+            )
+            .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let edited = Document::from_bytes(bytes.get_ref()).unwrap();
+    let before = original.to_bytes().unwrap();
+    assert!(original.compare(&edited, "A", ISSUE430_DATE).is_err());
+    assert_eq!(original.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue430_comparison_retained_tombstone_before_reference_only_insertion() {
+    for prior_revision in [false, true] {
+        for first_id in [5, 7] {
+            for reopen_between in [false, true] {
+                let body = format!("{}{}", issue430_p("body", None), issue430_p("other", None));
+                let edited_body = format!(
+                    "<w:p><w:r><w:t>body</w:t></w:r>{}{}</w:p>{}",
+                    issue430_ref(5),
+                    issue430_ref(6),
+                    issue430_p("other", Some(7))
+                );
+                let mut original_note = issue430_owner(6, "existing unused");
+                if prior_revision {
+                    original_note = original_note.replace("</w:p>", &format!(r#"<w:ins w:id="90" w:author="Prior" w:date="{ISSUE430_DATE}"><w:r><w:t>prior</w:t></w:r></w:ins></w:p>"#));
+                }
+                let mut original = issue430_fixture(&body, Some(&original_note));
+                let edited = issue430_fixture(
+                    &edited_body,
+                    Some(&format!(
+                        "{original_note}{}{}",
+                        issue430_owner(5, "A"),
+                        issue430_owner(7, "C")
+                    )),
+                );
+                original
+                    .compare(&edited, "Reviewer", ISSUE430_DATE)
+                    .unwrap();
+                original = issue430_author_for_unit(&mut original, 5, "Unit5");
+                original = issue430_author_for_unit(&mut original, 7, "Unit7");
+                let revisions = original.story_revisions().unwrap();
+                for revision in revisions
+                    .iter()
+                    .filter(|revision| matches!(revision.author(), "Unit5" | "Unit7"))
+                {
+                    let mut partial = issue430_roundtrip(&mut original);
+                    let before = partial.to_bytes().unwrap();
+                    assert!(
+                        partial
+                            .reject_revision_id(revision.id())
+                            .unwrap_err()
+                            .to_string()
+                            .contains("partial footnote custody")
+                    );
+                    assert_eq!(partial.to_bytes().unwrap(), before);
+                }
+                let order = if first_id == 5 {
+                    ["Unit5", "Unit7"]
+                } else {
+                    ["Unit7", "Unit5"]
+                };
+                for author in order {
+                    assert_eq!(original.reject_revisions_by_author(author).unwrap(), 3);
+                    assert!(
+                        issue430_note_xml(&mut original)
+                            .unwrap()
+                            .contains(&original_note)
+                    );
+                    if reopen_between {
+                        original = issue430_roundtrip(&mut original);
+                    }
+                }
+                assert_eq!(
+                    original
+                        .footnotes()
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .collect::<Vec<_>>(),
+                    vec![6]
+                );
+                // Reference-only insertion6 belongs to no removed-note unit.
+                assert_eq!(original.reject_revisions_by_author("Reviewer").unwrap(), 1);
+                assert!(
+                    issue430_note_xml(&mut original)
+                        .unwrap()
+                        .contains(&original_note)
+                );
+                if prior_revision {
+                    assert_eq!(original.story_revisions().unwrap().len(), 1);
+                    assert_eq!(original.accept_revision_id(90).unwrap(), 1);
+                }
+                issue430_assert_settled(&mut original, &[6], true);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_cleanup_removes_only_unshared_note_targets() {
+    let mut picture = Document::new();
+    picture.add_picture(
+        &mhtml_pixel_png(),
+        "pixel.png",
+        Length::cm(1.0),
+        Length::cm(1.0),
+    );
+    let picture_xml =
+        String::from_utf8(picture.story_range_paragraphs().unwrap().remove(0).1).unwrap();
+    let picture_package = issue430_package(&mut picture);
+    let mut relationship = picture_package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::IMAGE)
+        .unwrap()
+        .clone();
+    let target = OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+    let picture_xml = picture_xml.replace(
+        &format!("r:embed=\"{}\"", relationship.id),
+        "r:embed=\"issue430Image\"",
+    );
+    relationship.id = "issue430Image".into();
+    for shared in [false, true] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let mut package = issue430_package(&mut pending);
+        let notes = String::from_utf8(package.get_part("/word/footnotes.xml").unwrap().to_vec())
+            .unwrap()
+            .replace("</w:footnote>", &format!("{picture_xml}</w:footnote>"));
+        package.set_part("/word/footnotes.xml", notes.into_bytes());
+        if shared {
+            let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+                .unwrap()
+                .replace("<w:body>", &format!("<w:body>{picture_xml}"));
+            package.set_part("/word/document.xml", body.into_bytes());
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .items
+                .push(relationship.clone());
+        }
+        package
+            .get_or_create_part_rels("/word/footnotes.xml")
+            .items
+            .push(relationship.clone());
+        package.set_part(&target, picture_package.get_part(&target).unwrap().to_vec());
+        package.content_types.add_override(
+            &target,
+            picture_package
+                .content_types
+                .content_type_for(&target)
+                .unwrap(),
+        );
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+        pending.reject_all().unwrap();
+        let result = issue430_package(&mut pending);
+        assert!(!result.contains_part("/word/footnotes.xml"));
+        assert_eq!(result.contains_part(&target), shared);
+        assert_eq!(result.content_types.overrides.contains_key(&target), shared);
+        if shared {
+            assert_eq!(result.get_part(&target), picture_package.get_part(&target));
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_creates_exact_edited_special_inventory_at_every_normal_id() {
+    let special = r#"<w:footnote w:id="8" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"#;
+    for id in [-1, 0, 5] {
+        for specials in ["", special] {
+            let mut original = issue430_fixture(&issue430_p("body", None), None);
+            let edited = issue430_fixture(
+                &issue430_p("body", Some(id)),
+                Some(&format!("{specials}{}", issue430_owner(id, "note"))),
+            );
+            original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+            let mut accepted = issue430_roundtrip(&mut original);
+            accepted.accept_all().unwrap();
+            issue430_assert_settled(&mut accepted, &[id], true);
+            let xml = issue430_note_xml(&mut accepted).unwrap();
+            assert_eq!(xml.contains("w:type=\"separator\""), !specials.is_empty());
+            original.reject_all().unwrap();
+            issue430_assert_settled(&mut original, &[], false);
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_rejects_empty_parts_but_preserves_opaque_only_parts() {
+    for notes in ["", "<!--opaque exact-->"] {
+        let mut original = issue430_fixture(&issue430_p("body", None), Some(notes));
+        let edited = issue430_fixture(&issue430_p("changed", None), Some(notes));
+        let before = original.to_bytes().unwrap();
+        if notes.is_empty() {
+            assert!(
+                original
+                    .compare(&edited, "A", ISSUE430_DATE)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("empty footnotes part")
+            );
+            assert_eq!(original.to_bytes().unwrap(), before);
+        } else {
+            original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+            original.accept_all().unwrap();
+            assert!(issue430_note_xml(&mut original).unwrap().contains(notes));
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_new_note_alias_and_foreign_w_binding_stay_qualified() {
+    let notes = format!(
+        r#"<q:footnote xmlns:q="{ISSUE430_WORD}" xmlns:w="urn:foreign" q:id="0" w:type="separator"><q:p><q:r><q:t>note</q:t></q:r></q:p></q:footnote>"#
+    );
+    let mut original = issue430_fixture(&issue430_p("body", None), None);
+    let edited = issue430_fixture(&issue430_p("body", Some(0)), Some(&notes));
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[], false);
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[0], true);
+}
+
+#[test]
+fn issue430_comparison_preserves_imported_unused_footnotes_and_separators() {
+    let unused = r#"<w:footnote xmlns:z="urn:producer" w:id="99" z:keep="raw"><w:p><w:r><w:t>unused</w:t></w:r></w:p></w:footnote>"#;
+    let special = r#"<w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"#;
+    let opaque = r#"<z:opaque xmlns:z="urn:producer" z:value="raw &amp; retained"/>"#;
+    let left = format!("{}{unused}{special}{opaque}", issue430_owner(5, "original"));
+    let right = format!("{left}{}", issue430_owner(6, "new"));
+    let mut original = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("body", Some(5)),
+            issue430_p("tail", None)
+        ),
+        Some(&left),
+    );
+    let edited = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("body", Some(5)),
+            issue430_p("tail", Some(6))
+        ),
+        Some(&right),
+    );
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    for accept in [false, true] {
+        let mut copy = issue430_roundtrip(&mut original);
+        if accept {
+            copy.accept_all().unwrap();
+        } else {
+            copy.reject_all().unwrap();
+        }
+        let xml = issue430_note_xml(&mut copy).unwrap();
+        for raw in [unused, special, opaque] {
+            assert!(xml.contains(raw), "lost exact imported record {raw}");
+        }
+        let mut reopened = issue430_roundtrip(&mut copy);
+        assert_eq!(issue430_note_xml(&mut reopened).unwrap(), xml);
+    }
+}
+
+#[test]
+fn issue430_comparison_partial_resolution_keeps_unowned_invalid_content() {
+    let mut first = issue430_fixture(
+        &format!("{}{}", issue430_p("left", None), issue430_p("right", None)),
+        None,
+    );
+    let edited = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("left", Some(5)),
+            issue430_p("right", Some(6))
+        ),
+        Some(&format!(
+            "{}{}",
+            issue430_owner(5, "A"),
+            issue430_owner(6, "B")
+        )),
+    );
+    first.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    first = issue430_author_for_unit(&mut first, 5, "Unit5");
+    first = issue430_author_for_unit(&mut first, 6, "Unit6");
+    let listed = first.story_revisions().unwrap();
+    assert_eq!(listed.len(), 6);
+    let before = first.to_bytes().unwrap();
+    assert!(
+        first
+            .reject_revision_id(listed[0].id())
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(first.to_bytes().unwrap(), before);
+    let authors = ["Unit5", "Unit6"];
+    let invalid = r#"<w:footnote w:id="0" w:type=""><w:p/></w:footnote>"#;
+    let notes = issue430_note_xml(&mut first)
+        .unwrap()
+        .replace("</w:footnotes>", &format!("{invalid}</w:footnotes>"));
+    let mut first = issue430_replace_parts(&mut first, None, Some(notes));
+    for order in [[authors[0], authors[1]], [authors[1], authors[0]]] {
+        let mut pending = issue430_roundtrip(&mut first);
+        assert_eq!(pending.reject_revisions_by_author(order[0]).unwrap(), 3);
+        assert!(issue430_note_xml(&mut pending).unwrap().contains(invalid));
+        let mut pending = issue430_roundtrip(&mut pending);
+        assert_eq!(pending.reject_revisions_by_author(order[1]).unwrap(), 3);
+        issue430_assert_settled(&mut pending, &[], true);
+        assert!(issue430_note_xml(&mut pending).unwrap().contains(invalid));
+    }
+}
+
+#[test]
+fn issue430_comparison_note_paragraph_can_be_empty() {
+    let mut original = issue430_fixture(&issue430_p("body", None), None);
+    let edited = issue430_fixture(
+        &issue430_p("body", Some(5)),
+        Some(r#"<w:footnote w:id="5"><w:p/></w:footnote>"#),
+    );
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    let pending = issue430_note_xml(&mut original).unwrap();
+    assert!(pending.contains("P01N"));
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[], false);
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[5], true);
+}
+
+#[test]
+fn issue430_comparison_cleanup_proves_transitive_sharing_and_retiring_cycles() {
+    for shared in [false, true] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let mut package = issue430_package(&mut pending);
+        package.set_part("/customXml/a.xml", b"<a/>".to_vec());
+        package.set_part("/customXml/b.xml", b"<b/>".to_vec());
+        for name in ["/customXml/a.xml", "/customXml/b.xml"] {
+            package.content_types.add_override(name, "application/xml");
+        }
+        package
+            .get_or_create_part_rels("/word/footnotes.xml")
+            .add("urn:issue430:owned", "../customXml/a.xml");
+        package
+            .get_or_create_part_rels("/customXml/a.xml")
+            .add("urn:issue430:edge", "b.xml");
+        package
+            .get_or_create_part_rels("/customXml/b.xml")
+            .add("urn:issue430:edge", "a.xml");
+        if shared {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add_with_id(
+                    "retainedGraph",
+                    "urn:issue430:external-owner",
+                    "../customXml/b.xml",
+                );
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+        pending.reject_all().unwrap();
+        let result = issue430_package(&mut pending);
+        assert!(!result.contains_part("/word/footnotes.xml"));
+        for name in ["/customXml/a.xml", "/customXml/b.xml"] {
+            assert_eq!(result.contains_part(name), shared);
+            assert_eq!(result.get_part_rels(name).is_some(), shared);
+            if shared {
+                assert_eq!(result.get_part(name), package.get_part(name));
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_missing_owned_target_refuses_resolution_atomically() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let mut package = issue430_package(&mut pending);
+    package
+        .get_or_create_part_rels("/word/footnotes.xml")
+        .add("urn:issue430:owned", "../customXml/missing.xml");
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut pending = Document::from_bytes(bytes.get_ref()).unwrap();
+    let before = pending.to_bytes().unwrap();
+    assert!(
+        pending
+            .reject_all()
+            .unwrap_err()
+            .to_string()
+            .contains("note-owned target is missing")
+    );
+    assert_eq!(pending.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue430_comparison_common_note_field_witness_uses_actual_id_across_ordinal_shift() {
+    let special = r#"<w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>"#;
+    let field = |instruction| {
+        format!(
+            r#"<w:footnote w:id="42"><w:p><w:fldSimple w:instr="{instruction}"><w:r><w:t>result</w:t></w:r></w:fldSimple></w:p></w:footnote>"#
+        )
+    };
+    for shift in [false, true] {
+        let body = format!(
+            "{}{}",
+            issue430_p("owner", Some(42)),
+            issue430_p("other", None)
+        );
+        let mut original = issue430_fixture(&body, Some(&format!("{special}{}", field("DATE"))));
+        let edited_body = if shift {
+            format!(
+                "{}{}",
+                issue430_p("owner", Some(42)),
+                issue430_p("other", Some(7))
+            )
+        } else {
+            body.clone()
+        };
+        let added = if shift {
+            issue430_owner(7, "new")
+        } else {
+            String::new()
+        };
+        let edited = issue430_fixture(
+            &edited_body,
+            Some(&format!("{special}{added}{}", field("TIME"))),
+        );
+        original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+        let mut rejected = issue430_roundtrip(&mut original);
+        rejected.reject_all().unwrap();
+        let xml = issue430_note_xml(&mut rejected).unwrap();
+        assert!(xml.contains("DATE"));
+        assert!(!xml.contains("TIME"));
+        assert_eq!(
+            rejected
+                .footnotes()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+        original.accept_all().unwrap();
+        let xml = issue430_note_xml(&mut original).unwrap();
+        assert!(xml.contains("TIME"));
+        assert!(!xml.contains("DATE"));
+        assert_eq!(
+            original
+                .footnotes()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            if shift { vec![7, 42] } else { vec![42] }
+        );
+    }
+}
+
+#[test]
+fn issue430_comparison_ignored_textbox_policy_keeps_note_postcondition_context() {
+    let options = rdocx::ComparisonOptions {
+        ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+        ..Default::default()
+    };
+    let body = issue430_p("body", Some(5));
+    let mut original = issue430_fixture(&body, Some(&issue430_owner(5, "old")));
+    let edited = issue430_fixture(&body, Some(&issue430_owner(5, "new")));
+    original
+        .compare_with_options(&edited, "A", ISSUE430_DATE, &options)
+        .unwrap();
+    original.accept_all().unwrap();
+    assert_eq!(original.footnotes(), vec![(5, "new".into())]);
+    let host = r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="shape"><v:textbox><w:txbxContent><w:p><w:r><w:t>BOX</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#;
+    let notes = issue430_owner(5, "old")
+        .replace("</w:p></w:footnote>", &format!("{host}</w:p></w:footnote>"));
+    let mut original = issue430_fixture(&body, Some(&notes));
+    let edited = issue430_fixture(
+        &body,
+        Some(&notes.replace("old", "new").replace("BOX", "CHANGED BOX")),
+    );
+    original
+        .compare_with_options(&edited, "A", ISSUE430_DATE, &options)
+        .unwrap();
+    original.accept_all().unwrap();
+    let xml = issue430_note_xml(&mut original).unwrap();
+    assert!(xml.contains(">new</w:t>"));
+    assert!(xml.contains(">BOX</w:t>"));
+    assert!(!xml.contains("CHANGED BOX"));
+}
+
+#[test]
+fn issue430_comparison_normalized_partial_date_selection_refuses_atomically() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let notes = issue430_note_xml(&mut pending)
+        .unwrap()
+        .replace(ISSUE430_DATE, "2026-11-06T00:00:00Z");
+    let mut pending = issue430_replace_parts(&mut pending, None, Some(notes));
+    let before = pending.to_bytes().unwrap();
+    assert!(
+        pending
+            .accept_revisions_in_date_range("2026-11-04T00:00:00Z", "2026-11-05T12:00:00Z")
+            .unwrap_err()
+            .to_string()
+            .contains("partial footnote custody")
+    );
+    assert_eq!(pending.to_bytes().unwrap(), before);
+    pending.accept_all().unwrap();
+    issue430_assert_settled(&mut pending, &[5], true);
+}
+
+fn issue430_opaque_header(document: &mut Document, opaque: &str) -> (Document, String) {
+    document.set_header("real header");
+    let mut package = issue430_package(document);
+    let target = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::HEADER)
+        .unwrap()
+        .target
+        .clone();
+    let part = OpcPackage::resolve_rel_target("/word/document.xml", &target);
+    let raw = format!(
+        r#"<w:hdr xmlns:w="{ISSUE430_WORD}" xmlns:x="urn:opaque" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x"><w:p><w:r><w:t>real header</w:t></w:r></w:p><x:opaque>{opaque}</x:opaque></w:hdr>"#
+    );
+    package.set_part(&part, raw.as_bytes().to_vec());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    (Document::from_bytes(bytes.get_ref()).unwrap(), part)
+}
+
+#[test]
+fn issue430_custody_opaque_note_lookalike_does_not_block_resolution() {
+    let body = format!(
+        r#"<w:p><w:ins w:id="100" w:author="Other" w:date="{ISSUE430_DATE}"><w:r><w:t>change</w:t></w:r></w:ins></w:p>{}"#,
+        issue430_p("body", Some(5))
+    );
+    let mut base = issue430_fixture(&body, Some(&issue430_owner(5, "ordinary")));
+    let opaque = r#"<w:footnote w:id="5"><w:p><w:bookmarkStart w:id="81" w:name="_rdocxCmpNoteF7P01N"/><w:bookmarkEnd w:id="81"/></w:p></w:footnote>"#;
+    let (mut document, part) = issue430_opaque_header(&mut base, opaque);
+    let before = issue430_package(&mut document)
+        .get_part(&part)
+        .unwrap()
+        .to_vec();
+    document
+        .accept_revision_id(100)
+        .expect("opaque N lookalike is not custody");
+    assert_eq!(
+        issue430_package(&mut document).get_part(&part).unwrap(),
+        before
+    );
+    assert_eq!(document.footnotes(), vec![(5, "ordinary".to_owned())]);
+}
+
+#[test]
+fn issue430_custody_opaque_duplicate_preserves_real_unit() {
+    let mut base = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let opaque = r#"<w:footnote w:id="5"><w:p><w:bookmarkStart w:id="181" w:name="_rdocxCmpNoteF7P01N"/><w:bookmarkEnd w:id="181"/></w:p></w:footnote>"#;
+    let (mut document, part) = issue430_opaque_header(&mut base, opaque);
+    let before = issue430_package(&mut document)
+        .get_part(&part)
+        .unwrap()
+        .to_vec();
+    document
+        .accept_all()
+        .expect("only admitted N belongs to real unit");
+    assert_eq!(
+        issue430_package(&mut document).get_part(&part).unwrap(),
+        before
+    );
+    assert_eq!(document.footnotes(), vec![(5, "note".to_owned())]);
+}
+
+#[test]
+fn issue430_custody_marker_uses_first_admitted_note_paragraph() {
+    let mut original = issue430_fixture(&issue430_p("body", None), None);
+    let opaque =
+        r#"<x:opaque xmlns:x="urn:opaque"><w:p><w:r><w:t>opaque</w:t></w:r></w:p></x:opaque>"#;
+    let note = format!(
+        r#"<w:footnote w:id="5">{opaque}<w:p><w:r><w:footnoteRef/><w:t>actual</w:t></w:r></w:p></w:footnote>"#
+    );
+    let edited = issue430_fixture(&issue430_p("body", Some(5)), Some(&note));
+    original
+        .compare(&edited, "A", ISSUE430_DATE)
+        .expect("opaque p is not insertion target");
+    assert!(issue430_note_xml(&mut original).unwrap().contains(opaque));
+    original.accept_all().unwrap();
+    assert!(issue430_note_xml(&mut original).unwrap().contains(opaque));
+}
+
+#[test]
+fn issue430_custody_signed_normal_pending_revision_listing() {
+    for id in [0, -1] {
+        let mut original = issue430_fixture(&issue430_p("body", None), None);
+        let edited = issue430_fixture(
+            &issue430_p("body", Some(id)),
+            Some(&issue430_owner(id, "actual")),
+        );
+        original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+        assert_eq!(
+            original
+                .story_revisions()
+                .expect("signed normal owns revisions")
+                .len(),
+            3
+        );
+    }
+}
+
+#[test]
+fn issue430_custody_leading_gap_preserves_modeled_namespace_publication() {
+    for gap in ["\n  ", "<!--retained gap-->", "<?note unchanged?>"] {
+        let mut original = issue430_fixture(&issue430_p("body", None), None);
+        let owner = |text: &str| {
+            format!(
+                r#"<w:footnote w:id="5">{gap}<w:p><w:r><w:footnoteRef/><w:t>{text}</w:t></w:r></w:p></w:footnote>"#
+            )
+        };
+        let edited = issue430_fixture(&issue430_p("body", Some(5)), Some(&owner("first")));
+        original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+        original.accept_all().unwrap();
+        let mut original = issue430_roundtrip(&mut original);
+        let later = issue430_fixture(&issue430_p("body", Some(5)), Some(&owner("later")));
+        original
+            .compare(&later, "B", ISSUE430_DATE)
+            .expect("leading gap does not change later publication");
+        original.accept_all().unwrap();
+        assert!(issue430_note_xml(&mut original).unwrap().contains(gap));
+    }
+}
+
+#[test]
+fn issue430_custody_opaque_body_pair_cannot_replace_actual_body_owner() {
+    let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+    let package = issue430_package(&mut pending);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let marker =
+        r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P01B"/><w:bookmarkEnd w:id="80"/>"#;
+    assert!(body.contains(marker));
+    pending = issue430_replace_parts(&mut pending, Some(body.replace(marker, "")), None);
+    let opaque = format!(
+        r#"<w:p>{marker}<w:ins w:id="103" w:author="A" w:date="{ISSUE430_DATE}">{}</w:ins></w:p>"#,
+        issue430_ref(5)
+    );
+    let (mut pending, _) = issue430_opaque_header(&mut pending, &opaque);
+    let before = pending.to_bytes().unwrap();
+    assert!(
+        pending
+            .accept_all()
+            .unwrap_err()
+            .to_string()
+            .contains("missing its body counterpart")
+    );
+    assert_eq!(pending.to_bytes().unwrap(), before);
+}
+
+fn issue430_opaque_revision_host() -> &'static str {
+    r#"<x:opaque xmlns:x="urn:opaque-revision"><w:txbxContent><w:p><w:ins w:id="777" w:author="Opaque" w:date="2026-11-05T00:00:00Z"><w:r><w:t>opaque-revision</w:t></w:r></w:ins></w:p></w:txbxContent></x:opaque>"#
+}
+
+#[test]
+fn issue430_custody_opaque_textbox_revision_is_not_published() {
+    let mut original = issue430_fixture(&issue430_p("body", None), None);
+    let opaque = issue430_opaque_revision_host();
+    let note = format!(
+        r#"<w:footnote w:id="5"><w:p><w:r><w:footnoteRef/><w:t>actual</w:t></w:r></w:p>{opaque}</w:footnote>"#
+    );
+    let edited = issue430_fixture(&issue430_p("body", Some(5)), Some(&note));
+    original
+        .compare(&edited, "A", ISSUE430_DATE)
+        .expect("opaque textbox revision is not a producer input");
+    assert!(issue430_note_xml(&mut original).unwrap().contains(opaque));
+    assert_eq!(original.story_revisions().unwrap().len(), 3);
+    assert_eq!(original.accept_revisions_by_author("A").unwrap(), 3);
+    assert!(issue430_note_xml(&mut original).unwrap().contains(opaque));
+}
+
+#[test]
+fn issue430_custody_opaque_textbox_revision_is_not_selected_or_counted() {
+    for accept in [false, true] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let notes = issue430_note_xml(&mut pending).unwrap().replace(
+            "</w:footnote>",
+            &format!("{}</w:footnote>", issue430_opaque_revision_host()),
+        );
+        let mut pending = issue430_replace_parts(&mut pending, None, Some(notes));
+        assert_eq!(pending.story_revisions().unwrap().len(), 3);
+        let before = pending.to_bytes().unwrap();
+        assert_eq!(pending.accept_revision_id(777).unwrap(), 0);
+        assert_eq!(pending.to_bytes().unwrap(), before);
+        let count = if accept {
+            pending.accept_revisions_by_author("A").unwrap()
+        } else {
+            pending.reject_all().unwrap()
+        };
+        assert_eq!(count, 3);
+        if accept {
+            assert!(
+                issue430_note_xml(&mut pending)
+                    .unwrap()
+                    .contains(issue430_opaque_revision_host())
+            );
+        } else {
+            assert!(issue430_note_xml(&mut pending).is_none());
+        }
+    }
+}
+
+#[test]
+fn issue430_custody_admitted_structural_and_textbox_revisions_keep_selectors_and_counts() {
+    let inserted = |id: i32, text: &str| {
+        format!(
+            r#"<w:ins w:id="{id}" w:author="A" w:date="{ISSUE430_DATE}"><w:r><w:t>{text}</w:t></w:r></w:ins>"#
+        )
+    };
+    let table = |id: i32| {
+        format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="{id}" w:author="A" w:date="{ISSUE430_DATE}"/></w:trPr><w:tc><w:tcPr/><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        )
+    };
+    let control = format!(
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:p>{}</w:p></w:sdtContent></w:sdt>",
+        inserted(9, "control")
+    );
+    let boxed = format!(
+        r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="real-shape"><v:textbox><w:txbxContent><w:p>{}</w:p>{}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+        inserted(10, "textbox"),
+        table(11)
+    );
+    for accept in [false, true] {
+        let mut pending = issue430_normalized_unit(true, 7, [1, 2, 3], ["A"; 3], false);
+        let notes = issue430_note_xml(&mut pending).unwrap().replace(
+            "</w:footnote>",
+            &format!("{}{control}{boxed}</w:footnote>", table(8)),
+        );
+        let mut pending = issue430_replace_parts(&mut pending, None, Some(notes));
+        let listed = pending.story_revisions().unwrap();
+        assert_eq!(listed.len(), 7);
+        for id in [8, 9, 10, 11] {
+            assert!(listed.iter().any(|revision| revision.id() == id));
+        }
+        let before = pending.to_bytes().unwrap();
+        assert!(
+            pending
+                .accept_revision_id(8)
+                .unwrap_err()
+                .to_string()
+                .contains("partial footnote custody")
+        );
+        assert_eq!(pending.to_bytes().unwrap(), before);
+        let count = if accept {
+            pending.accept_all().unwrap()
+        } else {
+            pending.reject_revisions_by_author("A").unwrap()
+        };
+        assert_eq!(count, 7);
+        assert!(pending.story_revisions().unwrap().is_empty());
+        if accept {
+            assert!(issue430_note_xml(&mut pending).unwrap().contains("textbox"));
+        } else {
+            assert!(issue430_note_xml(&mut pending).is_none());
+        }
+    }
+}
+
+#[test]
+fn issue430_custody_orphan_body_without_part_does_not_own_adjacent_content() {
+    let marker =
+        r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P00B"/><w:bookmarkEnd w:id="80"/>"#;
+    let opaque = r#"<x:opaque xmlns:x="urn:opaque"><w:txbxContent><w:p><w:r><w:footnoteReference w:id="6"/></w:r></w:p></w:txbxContent></x:opaque>"#;
+    let body = format!(
+        r#"<w:p>{marker}<w:r><w:t>ordinary</w:t></w:r>{opaque}</w:p><w:p><w:ins w:id="100" w:author="Other" w:date="{ISSUE430_DATE}"><w:r><w:t>change</w:t></w:r></w:ins></w:p>"#
+    );
+    let mut document = issue430_fixture(&body, None);
+    assert_eq!(document.accept_revision_id(100).unwrap(), 1);
+    let package = issue430_package(&mut document);
+    let body = String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap());
+    assert!(body.contains(marker));
+    assert!(body.contains(opaque));
+    assert!(!package.contains_part("/word/footnotes.xml"));
+}
+
+#[test]
+fn issue430_custody_orphan_body_does_not_excuse_an_actual_dangling_reference() {
+    for marker in [
+        "",
+        r#"<w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P00B"/><w:bookmarkEnd w:id="80"/>"#,
+    ] {
+        let body = format!(
+            r#"<w:p>{marker}<w:r><w:t>ordinary</w:t></w:r></w:p>{}<w:p><w:ins w:id="100" w:author="Other" w:date="{ISSUE430_DATE}"><w:r><w:t>change</w:t></w:r></w:ins></w:p>"#,
+            issue430_p("dangling", Some(6))
+        );
+        let mut document = issue430_fixture(&body, None);
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .accept_revision_id(100)
+                .unwrap_err()
+                .to_string()
+                .contains("has no owner")
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn issue430_custody_note_rejection_preserves_opaque_deleted_text_literals() {
+    let opaque = r#"<x:opaque xmlns:x="urn:opaque-literal" x:kind="keep"><w:delText xml:space="preserve">literal &amp; deleted</w:delText><w:delInstrText>literal instruction</w:delInstrText></x:opaque>"#;
+    let plain = format!("<w:p><w:r><w:footnoteRef/><w:t>real</w:t>{opaque}</w:r></w:p>");
+    let field = format!(
+        r#"<w:p><w:r><w:footnoteRef/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText>{opaque}</w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+    );
+    for (content, opaque) in [plain, field].into_iter().flat_map(|content| {
+        let aliased = content
+            .replace("<w:", "<n:")
+            .replace("</w:", "</n:")
+            .replacen(
+                "<n:p>",
+                &format!(r#"<n:p xmlns:n="{ISSUE430_WORD}" xmlns:w="urn:foreign-w">"#),
+                1,
+            );
+        let aliased_opaque = opaque.replace("<w:", "<n:").replace("</w:", "</n:");
+        [(content, opaque.to_owned()), (aliased, aliased_opaque)]
+    }) {
+        let note = format!(r#"<w:footnote w:id="5">{content}</w:footnote>"#);
+        let mut original = issue430_fixture(&issue430_p("body", Some(5)), Some(&note));
+        let original_notes = original.footnotes();
+        let edited = issue430_fixture(&issue430_p("body", None), None);
+        original
+            .compare(&edited, "A", ISSUE430_DATE)
+            .expect("opaque literals survive tracked removal rejection");
+        let pending = issue430_note_xml(&mut original).unwrap();
+        assert!(pending.contains(&opaque));
+        let expected_count = original.story_revisions().unwrap().len();
+        assert!(expected_count >= 3);
+        let mut accepted = issue430_roundtrip(&mut original);
+        assert_eq!(accepted.accept_all().unwrap(), expected_count);
+        issue430_assert_settled(&mut accepted, &[], false);
+        let mut rejected = issue430_roundtrip(&mut original);
+        assert_eq!(rejected.reject_all().unwrap(), expected_count);
+        assert_eq!(rejected.footnotes(), original_notes);
+        assert!(issue430_note_xml(&mut rejected).unwrap().contains(&opaque));
+        issue430_assert_settled(&mut rejected, &[5], true);
+    }
+}
+
+#[test]
+fn issue432_note_mark_order_separators_and_space() {
+    let mut doc = Document::new();
+    doc.add_paragraph("body");
+    assert_eq!(doc.add_footnote("Source note"), 2);
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_endnote(&location, "End note").unwrap();
+    for (part, word) in [
+        ("word/footnotes.xml", "footnote"),
+        ("word/endnotes.xml", "endnote"),
+    ] {
+        let xml = doc.part_xml(part).unwrap();
+        assert!(
+            xml.contains("w:type=\"separator\""),
+            "missing separator: {xml}"
+        );
+        assert!(
+            xml.contains("w:type=\"continuationSeparator\""),
+            "missing continuation: {xml}"
+        );
+        assert!(xml.contains(&format!("<w:{word}Ref/>")), "{xml}");
+        assert!(
+            xml.contains("<w:t xml:space=\"preserve\"> </w:t>"),
+            "missing space run: {xml}"
+        );
+    }
+    assert_eq!(
+        doc.footnotes().iter().find(|(id, _)| *id == 2).unwrap().1,
+        " Source note"
+    );
+}
+
+#[test]
+fn issue432_low_level_hyperlinks_carry_hyperlink_style() {
+    let mut doc = Document::new();
+    let rid = doc.add_hyperlink_relationship("https://example.test");
+    doc.add_paragraph("").add_hyperlink("link", &rid).bold(true);
+    let body = doc.part_xml("word/document.xml").unwrap();
+    assert!(body.contains("<w:rStyle w:val=\"Hyperlink\""), "{body}");
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("w:styleId=\"Hyperlink\""), "{styles}");
+    assert!(
+        doc.style("Hyperlink").is_none(),
+        "output must not force assign-back"
+    );
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_footnote(&location, "note").unwrap();
+    assert!(
+        doc.style("Hyperlink").is_some(),
+        "real reopen commits definition"
+    );
+}
+
+#[test]
+fn issue432_numbering_id_survives_note_and_picture_publication() {
+    let mut doc = Document::new();
+    doc.add_paragraph("body");
+    let unused = doc
+        .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Decimal)])
+        .unwrap();
+    let bullet = doc
+        .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+        .unwrap();
+    let first = doc.add_numbering_instance(bullet, &[]).unwrap();
+    doc.add_numbering_instance(unused, &[]).unwrap();
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_footnote(&location, "note").unwrap();
+    assert_eq!(
+        doc.numbering_instance(first).unwrap().definition_id,
+        bullet,
+        "same-document reopen must preserve live definition id"
+    );
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    let body = doc
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Body)
+        .unwrap();
+    doc.add_picture_with_options(
+        &body,
+        &mhtml_pixel_png(),
+        "pixel.png",
+        rdocx::PictureOptions {
+            width: Length::pt(12.0),
+            height: Length::pt(12.0),
+            crop: None,
+            anchor: None,
+            name: None,
+            description: None,
+            title: None,
+            decorative: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(doc.numbering_instance(first).unwrap().definition_id, bullet);
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    doc.add_numbering_instance(bullet, &[]).unwrap();
+    let bytes = doc.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.numbering_definition(0).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+}
+
+#[test]
+fn issue432_note_defaults_preserve_whitespace_imports_and_collisions() {
+    for endnote in [false, true] {
+        for mark in [None, Some("* ")] {
+            for text in ["", " text", "text"] {
+                let mut doc = Document::new();
+                doc.add_paragraph("body");
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                let id = match (endnote, mark) {
+                    (false, None) => doc.create_footnote(&location, text),
+                    (true, None) => doc.create_endnote(&location, text),
+                    (false, Some(mark)) => doc.create_footnote_with_mark(&location, text, mark),
+                    (true, Some(mark)) => doc.create_endnote_with_mark(&location, text, mark),
+                }
+                .unwrap();
+                assert_eq!(id, 2);
+                let part = if endnote {
+                    "word/endnotes.xml"
+                } else {
+                    "word/footnotes.xml"
+                };
+                let xml = doc.part_xml(part).unwrap();
+                let notes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+                let note = notes.footnotes.iter().find(|note| note.id == id).unwrap();
+                assert_eq!(
+                    note.paragraphs[0].text(),
+                    format!("{} {text}", mark.unwrap_or(""))
+                );
+                assert_eq!(note.paragraphs[0].runs.len(), 3);
+                for special in notes.footnotes.iter().filter(|note| note.id <= 0) {
+                    assert!(special.paragraphs[0].runs[0].content.is_empty());
+                    assert!(special.paragraphs[0].runs[0].properties.is_none());
+                }
+                assert_eq!(xml.matches("w:type=\"separator\"").count(), 1);
+                assert_eq!(xml.matches("w:type=\"continuationSeparator\"").count(), 1);
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                if endnote {
+                    doc.create_endnote(&location, "second").unwrap();
+                } else {
+                    doc.create_footnote(&location, "second").unwrap();
+                }
+                let again = doc.part_xml(part).unwrap();
+                assert_eq!(again.matches("w:type=\"separator\"").count(), 1);
+                assert_eq!(again.matches("w:type=\"continuationSeparator\"").count(), 1);
+                assert!(
+                    !doc.part_xml("word/settings.xml")
+                        .unwrap()
+                        .contains("notePr")
+                );
+                let before = doc.to_bytes().unwrap();
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                assert!(
+                    doc.create_footnote_with_mark(&location, "refused", "")
+                        .is_err()
+                );
+                assert_eq!(doc.to_bytes().unwrap(), before);
+            }
+        }
+    }
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for endnote in [false, true] {
+        for collisions in [false, true] {
+            let mut seed = Document::new();
+            seed.add_paragraph("body");
+            let location = seed.paragraph_story_location(0).unwrap().unwrap();
+            if endnote {
+                seed.create_endnote(&location, "seed").unwrap();
+            } else {
+                seed.create_footnote(&location, "seed").unwrap();
+            }
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let (part, root, item) = if endnote {
+                ("/word/endnotes.xml", "endnotes", "endnote")
+            } else {
+                ("/word/footnotes.xml", "footnotes", "footnote")
+            };
+            let imported = if collisions {
+                format!(
+                    r#"<n:{item} n:id="-1" n:type="normal" x:keep="raw"><n:p><n:r><n:t>OLD</n:t></n:r></n:p></n:{item}><n:{item} n:id="0"><n:p/></n:{item}>"#
+                )
+            } else {
+                // The legacy typed fallback calls this a Separator. Its actual
+                // qualified type is unknown, so it cannot suppress the new one.
+                format!(
+                    r#"<n:{item} n:id="-7" n:type="unknown" x:keep="raw"><n:p><n:r><n:t>OLD</n:t></n:r></n:p></n:{item}>"#
+                )
+            };
+            let source = format!(
+                r#"<n:{root} xmlns:n="{word}" xmlns:x="urn:producer">{imported}</n:{root}>"#
+            );
+            package.set_part(part, source.into_bytes());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut doc = Document::from_bytes(bytes.get_ref()).unwrap();
+            let location = doc.paragraph_story_location(0).unwrap().unwrap();
+            if endnote {
+                doc.create_endnote(&location, "new").unwrap();
+            } else {
+                assert_eq!(doc.add_footnote("new"), if collisions { 1 } else { -6 });
+            }
+            let output = doc.part_xml(part).unwrap();
+            assert!(
+                output.contains(&imported),
+                "imported bytes changed: {output}"
+            );
+            if !endnote {
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                doc.create_footnote(&location, "checked publication")
+                    .unwrap();
+                assert!(
+                    doc.part_xml(part).unwrap().contains(&imported),
+                    "create_footnote_at must also preserve exact imported bytes"
+                );
+            }
+
+            assert_eq!(
+                output.contains("w:type=\"separator\""),
+                !collisions,
+                "{output}"
+            );
+            assert_eq!(
+                output.contains("w:type=\"continuationSeparator\""),
+                !collisions,
+                "{output}"
+            );
+        }
+    }
+    // Keep the legacy max-based allocator's separator-only result of1.
+    let mut doc = Document::new();
+    doc.add_footnote("seed");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(doc.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/footnotes.xml", format!(r#"<w:footnotes xmlns:w="{word}"><w:footnote w:type="separator" w:id="-1"><w:p/></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p/></w:footnote></w:footnotes>"#).into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut imported = Document::from_bytes(bytes.get_ref()).unwrap();
+    assert_eq!(imported.add_footnote("next"), 1);
+}
+
+#[test]
+fn issue432_hyperlink_publication_uses_typed_sources_and_style_ids() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for (source, expected) in [
+        (
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>typed</w:t></w:r></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>control</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:del w:id="1" w:author="a"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:delText>deleted</w:delText></w:r></w:del></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:hyperlink w:anchor="target"><w:r><w:t>bare</w:t></w:r></w:hyperlink></w:p>"#,
+            false,
+        ),
+        (
+            r#"<w:p><x:opaque xmlns:x="urn:opaque"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>opaque</w:t></w:r></x:opaque></w:p>"#,
+            false,
+        ),
+        (r#"<w:p><w:r><w:t>plain</w:t></w:r></w:p>"#, false),
+    ] {
+        let doc = fx268_document_with_xml(&format!(
+            r#"<w:document xmlns:w="{word}"><w:body>{source}</w:body></w:document>"#
+        ));
+        assert!(doc.style("Hyperlink").is_none());
+        assert_eq!(
+            doc.part_xml("word/styles.xml")
+                .unwrap()
+                .contains("w:styleId=\"Hyperlink\""),
+            expected,
+            "{source}"
+        );
+    }
+    let mut doc = Document::new();
+    doc.add_style(
+        StyleBuilder::character("MyLink", "Hyperlink").run_properties(CT_RPr {
+            bold: Some(true),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let rid = doc.add_hyperlink_relationship("https://example.test");
+    let mut paragraph = doc.add_paragraph("");
+    paragraph
+        .add_hyperlink_with_tooltip("external", &rid, Some("tip"))
+        .unwrap()
+        .italic(true)
+        .color("123456");
+    paragraph
+        .add_internal_hyperlink("internal", "target", None)
+        .bold(true);
+    let body = doc.part_xml("word/document.xml").unwrap();
+    assert_eq!(body.matches("<w:rStyle w:val=\"Hyperlink\"").count(), 2);
+    assert!(body.contains("123456"));
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("w:styleId=\"MyLink\""));
+    assert!(styles.contains("w:styleId=\"Hyperlink\""));
+    doc.add_style(
+        StyleBuilder::paragraph("Hyperlink", "producer").run_properties(CT_RPr {
+            color: Some("ABCDEF".into()),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("ABCDEF"));
+    assert!(!styles.contains("0563C1"));
+}
+
+#[test]
+fn issue432_numbering_published_ids_agree_across_output_modes_and_orders() {
+    let mut outputs = Vec::new();
+    for reversed in [false, true] {
+        let mut doc = Document::new();
+        let first = doc
+            .add_numbering_definition(&[ListLevel::new(if reversed {
+                ListNumberFormat::Decimal
+            } else {
+                ListNumberFormat::Bullet
+            })])
+            .unwrap();
+        let second = doc
+            .add_numbering_definition(&[ListLevel::new(if reversed {
+                ListNumberFormat::Bullet
+            } else {
+                ListNumberFormat::Decimal
+            })])
+            .unwrap();
+        let (bullet, decimal) = if reversed {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        let (bullet_num, decimal_num) = if reversed {
+            let decimal_num = doc.add_numbering_instance(decimal, &[]).unwrap();
+            (
+                doc.add_numbering_instance(bullet, &[]).unwrap(),
+                decimal_num,
+            )
+        } else {
+            let bullet_num = doc.add_numbering_instance(bullet, &[]).unwrap();
+            (
+                bullet_num,
+                doc.add_numbering_instance(decimal, &[]).unwrap(),
+            )
+        };
+        doc.add_paragraph("bullet").numbering(bullet_num, 0);
+        doc.add_paragraph("decimal").numbering(decimal_num, 0);
+        let bytes = doc.to_bytes().unwrap();
+        let class = doc.to_bytes_as(WordPackageClass::Document).unwrap();
+        assert_eq!(bytes, class);
+        let flat = doc.to_flat_opc_bytes().unwrap();
+        let from_flat = Document::from_flat_opc_bytes(&flat).unwrap();
+        let root = |xml: String| {
+            xml.split_once("?>")
+                .map_or(xml.as_str(), |(_, root)| root)
+                .trim_start()
+                .to_owned()
+        };
+        assert_eq!(
+            root(doc.part_xml("word/numbering.xml").unwrap()),
+            root(from_flat.part_xml("word/numbering.xml").unwrap())
+        );
+        #[cfg(all(feature = "agile-encryption", not(target_arch = "wasm32")))]
+        {
+            let encrypted = doc.to_encrypted_bytes("password").unwrap();
+            let reopened = Document::from_encrypted_bytes(&encrypted, "password").unwrap();
+            assert_eq!(
+                root(doc.part_xml("word/numbering.xml").unwrap()),
+                root(reopened.part_xml("word/numbering.xml").unwrap())
+            );
+        }
+        assert_eq!(
+            doc.numbering_instance(bullet_num).unwrap().definition_id,
+            bullet
+        );
+        outputs.push(bytes);
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "first-use equivalent constructions publish identical bytes"
+    );
+}
+
+#[test]
+fn issue432_hyperlink_definition_publication_covers_named_stories() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let styled = r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>source</w:t></w:r>"#;
+    for kind in [
+        StoryKind::Header,
+        StoryKind::Footer,
+        StoryKind::Footnote,
+        StoryKind::Endnote,
+        StoryKind::Comment,
+    ] {
+        let mut seed = Document::new();
+        seed.add_paragraph("body");
+        let location = seed.paragraph_story_location(0).unwrap().unwrap();
+        match kind {
+            StoryKind::Header => seed.set_header("seed"),
+            StoryKind::Footer => seed.set_footer("seed"),
+            StoryKind::Footnote => {
+                seed.create_footnote(&location, "seed").unwrap();
+            }
+            StoryKind::Endnote => {
+                seed.create_endnote(&location, "seed").unwrap();
+            }
+            StoryKind::Comment => {
+                seed.add_comment(
+                    RunRange {
+                        start: RunPosition {
+                            body_index: 0,
+                            run_index: 0,
+                        },
+                        end: RunPosition {
+                            body_index: 0,
+                            run_index: 1,
+                        },
+                    },
+                    "Author",
+                    None,
+                    "seed",
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let part = seed
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == kind)
+            .unwrap()
+            .part_name()
+            .to_owned();
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+        let xml = match kind {
+            StoryKind::Header => format!(r#"<w:hdr xmlns:w="{word}"><w:p>{styled}</w:p></w:hdr>"#),
+            StoryKind::Footer => format!(r#"<w:ftr xmlns:w="{word}"><w:p>{styled}</w:p></w:ftr>"#),
+            StoryKind::Footnote => format!(
+                r#"<w:footnotes xmlns:w="{word}"><w:footnote w:id="2"><w:p>{styled}</w:p></w:footnote></w:footnotes>"#
+            ),
+            StoryKind::Endnote => format!(
+                r#"<w:endnotes xmlns:w="{word}"><w:endnote w:id="2"><w:p>{styled}</w:p></w:endnote></w:endnotes>"#
+            ),
+            StoryKind::Comment => format!(
+                r#"<w:comments xmlns:w="{word}"><w:comment w:id="0" w:author="Author"><w:p>{styled}</w:p></w:comment></w:comments>"#
+            ),
+            _ => unreachable!(),
+        };
+        package.set_part(&part, xml.as_bytes().to_vec());
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let doc = Document::from_bytes(bytes.get_ref()).unwrap();
+        assert!(doc.style("Hyperlink").is_none());
+        assert_eq!(
+            doc.part_xml("word/styles.xml")
+                .unwrap()
+                .contains("w:styleId=\"Hyperlink\""),
+            kind != StoryKind::Comment,
+            "{kind:?}"
+        );
+        assert_eq!(
+            doc.part_xml(&part).unwrap(),
+            xml,
+            "style scan must not rewrite source story"
+        );
+    }
+}
+
+#[test]
+fn issue432_pending_signed_normal_id_occupies_special_slot() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut failures = Vec::new();
+    for existing_id in [-2, -1] {
+        for explicit in [false, true] {
+            let mut seed = Document::new();
+            seed.add_footnote("seed");
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let kind = if explicit { " w:type=\"normal\"" } else { "" };
+            let imported = format!(
+                r#"<w:footnote w:id="{existing_id}"{kind} producer="exact"><w:p><w:r><w:t>OLD</w:t></w:r></w:p></w:footnote>"#
+            );
+            package.set_part(
+                "/word/footnotes.xml",
+                format!(r#"<w:footnotes xmlns:w="{word}">{imported}</w:footnotes>"#).into_bytes(),
+            );
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut doc = Document::from_bytes(bytes.get_ref()).unwrap();
+            let id = doc.add_footnote("new normal");
+            assert_eq!(
+                id,
+                existing_id + 1,
+                "legacy allocator must remain unchanged"
+            );
+            let output = doc.part_xml("word/footnotes.xml").unwrap();
+            assert!(
+                output.contains(&imported),
+                "exact imported raw owner must survive"
+            );
+            let notes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(output.as_bytes()).unwrap();
+            let ids = notes
+                .footnotes
+                .iter()
+                .map(|note| note.id)
+                .collect::<std::collections::HashSet<_>>();
+            if ids.len() != notes.footnotes.len() {
+                failures.push(format!(
+                    "existing={existing_id}, explicit={explicit}: duplicate ids {:?}",
+                    notes
+                        .footnotes
+                        .iter()
+                        .map(|note| (note.id, note.note_type))
+                        .collect::<Vec<_>>()
+                ));
+            }
+            assert!(notes.footnotes.iter().any(|note| note.id == id
+                && note.note_type == rdocx_oxml::footnotes::NoteType::Normal
+                && note.paragraphs[0].text() == " new normal"));
+            if notes.footnotes.iter().any(|note| {
+                note.id == id && note.note_type != rdocx_oxml::footnotes::NoteType::Normal
+            }) {
+                failures.push(format!("existing={existing_id}, explicit={explicit}: pending normal slot also acquired a special"));
+            }
+            let reopened = Document::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+            assert!(
+                reopened
+                    .footnotes()
+                    .contains(&(id, " new normal".to_owned()))
+            );
+            assert!(
+                reopened
+                    .part_xml("word/footnotes.xml")
+                    .unwrap()
+                    .contains(&imported)
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn issue435_replace_zip_part(bytes: &[u8], name: &str, replacement: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let entry_name = entry.name().unwrap().into_owned();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        writer
+            .start_file(&entry_name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(if entry_name == name {
+                replacement
+            } else {
+                &data
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+fn issue435_body_bytes(body: &str) -> Vec<u8> {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let source = seed.to_bytes().unwrap();
+    let xml = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}</w:body></w:document>"#
+    );
+    issue435_replace_zip_part(&source, "word/document.xml", xml.as_bytes())
+}
+
+#[test]
+fn issue435_validate_reports_wordprocessingml_schema_faults() {
+    let valid = "<w:p><w:r><w:t>valid</w:t></w:r></w:p>";
+    assert!(
+        rdocx::validate_document_bytes(&issue435_body_bytes(valid))
+            .unwrap()
+            .is_valid()
+    );
+    let cases = [
+        ("<w:p><w:r/><w:pPr/></w:p>", "w:pPr"),
+        ("<w:p><w:r><w:t>text</w:t><w:rPr/></w:r></w:p>", "w:rPr"),
+        ("<w:p><w:bogus/></w:p>", "bogus"),
+        ("<w:p><w:pPr><w:jc w:val='middle'/></w:pPr></w:p>", "ST_Jc"),
+        (
+            "<w:p><w:r><w:rPr><w:color w:val='#FF0000'/></w:rPr></w:r></w:p>",
+            "ST_HexColor",
+        ),
+        ("<w:p><w:r>direct text</w:r></w:p>", "text directly"),
+        ("<w:sectPr/><w:p/>", "follows w:sectPr"),
+        (
+            "<w:p><w:ins w:author='A'><w:r><w:t>new</w:t></w:r></w:ins></w:p>",
+            "w:id",
+        ),
+        (
+            "<w:p><w:del w:id='2'><w:r><w:delText>old</w:delText></w:r></w:del></w:p>",
+            "w:author",
+        ),
+        (
+            "<w:p><w:r><w:drawing><wp:extent cx='-914400' cy='1'/></w:drawing></w:r></w:p>",
+            "ST_PositiveCoordinate",
+        ),
+        (
+            "<w:p><m:oMath><m:rad><m:radPr><m:degHide m:val='1'/></m:radPr><m:e/></m:rad></m:oMath></w:p>",
+            "m:deg",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (body, expected) in cases {
+        match rdocx::validate_document_bytes(&issue435_body_bytes(body)) {
+            Ok(report)
+                if !report.is_valid()
+                    && report.findings.iter().any(|finding| {
+                        finding.message.contains("word/document.xml")
+                            && finding.message.contains(expected)
+                    }) => {}
+            result => missed.push(format!("expected {expected} for {body}, got {result:?}")),
+        }
+    }
+    let radical = "<w:p><m:oMath><m:rad><m:deg/><m:e/></m:rad></m:oMath></w:p>";
+    assert!(
+        rdocx::validate_document_bytes(&issue435_body_bytes(radical))
+            .unwrap()
+            .is_valid()
+    );
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_validate_reports_related_and_auxiliary_xml_faults() {
+    let valid = issue435_body_bytes("<w:p><w:r><w:t>valid</w:t></w:r></w:p>");
+    let malformed = issue435_replace_zip_part(
+        &valid,
+        "docProps/app.xml",
+        b"<Properties><x>A & B</x></Properties>",
+    );
+    let report = rdocx::validate_document_bytes(&malformed).unwrap();
+    assert!(
+        !report.is_valid()
+            && report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("docProps/app.xml")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn issue435_validate_reports_dangling_references_and_deleted_text() {
+    let mut missed = Vec::new();
+    for (body, expected) in [
+        (
+            "<w:p><w:r><w:drawing><a:blip r:embed='rId999'/></w:drawing></w:r></w:p>",
+            "rId999",
+        ),
+        (
+            "<w:p><w:r><w:drawing><a:blip xmlns:rel='http://schemas.openxmlformats.org/officeDocument/2006/relationships' rel:embed='rId998'/></w:drawing></w:r></w:p>",
+            "rId998",
+        ),
+        (
+            "<w:p/><w:sectPr><w:headerReference w:type='default' r:id='rId997'/></w:sectPr>",
+            "rId997",
+        ),
+        (
+            "<w:p><w:r><w:footnoteReference w:id='99'/></w:r></w:p>",
+            "99",
+        ),
+        (
+            "<w:p><w:del w:id='1' w:author='A'><w:r><w:t>deleted</w:t></w:r></w:del></w:p>",
+            "w:delText",
+        ),
+    ] {
+        match rdocx::validate_document_bytes(&issue435_body_bytes(body)) {
+            Ok(report)
+                if !report.is_valid()
+                    && report.findings.iter().any(|finding| {
+                        finding.message.contains("word/document.xml")
+                            && finding.message.contains(expected)
+                    }) => {}
+            result => missed.push(format!("expected {expected}, got {result:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_forbidden_xml_is_a_validation_finding_and_an_open_error() {
+    let bytes = issue435_body_bytes("<w:p><w:r><w:t>literal\u{1}</w:t></w:r></w:p>");
+    let result = rdocx::validate_document_bytes(&bytes);
+    assert!(
+        matches!(&result, Ok(report) if !report.is_valid() && report.findings.iter().any(|finding| finding.message.contains("word/document.xml") && finding.message.contains("U+0001"))),
+        "{result:?}"
+    );
+    assert!(
+        Document::from_bytes(&bytes).is_err(),
+        "open must refuse literal U+0001"
+    );
+}
+
+#[test]
+fn issue435_bookmarks_sharing_an_id_open_and_render() {
+    let body = "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>first</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>second</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p>";
+    let bytes = issue435_body_bytes(body);
+    let document =
+        Document::from_bytes(&bytes).expect("ordinary imported repeated bookmarks must open");
+    assert_eq!(document.text(), "firstsecond\n");
+    assert!(!document.to_pdf_deterministic().unwrap().is_empty());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.is_valid(),
+        "ordinary repeated bookmarks are not errors: {report:?}"
+    );
+    assert!(report.findings.iter().any(|finding| finding.severity
+        == rdocx::ValidationSeverity::Warning
+        && finding.message.contains("bookmark id 2")));
+}
+
+#[test]
+fn issue435_authored_note_comparison_header_and_picture_base_is_valid() {
+    let mut document = Document::new();
+    document.add_paragraph("original");
+    let id = document.add_footnote("source note");
+    document.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    document.set_header("header");
+    document.add_picture(
+        &mhtml_pixel_png(),
+        "pixel.png",
+        Length::pt(12.0),
+        Length::pt(12.0),
+    );
+    let mut edited = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    edited.replace_text("original", "updated");
+    document
+        .compare(&edited, "Reviewer", ISSUE430_DATE)
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.is_valid(),
+        "actual note/comparison/header/picture base: {report:?}"
+    );
+    assert!(document.validate().unwrap().is_valid());
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert!(reopened.text().contains("updated"));
+}
+
+#[test]
+fn issue435_subset_respects_qualified_scopes_and_opaque_payloads() {
+    for body in [
+        "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><q:r><q:t>alias</q:t></q:r></q:p>",
+        "<p xmlns='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><r><t>default</t></r></p>",
+        "<w:p><w:pPr><w:jc val='middle'/></w:pPr><x:opaque xmlns:x='urn:opaque'><w:p><w:bogus/></w:p><m:rad/></x:opaque></w:p>",
+        "<w:p><x:opaque xmlns:x='urn:opaque'><w:p xmlns:w='urn:foreign'><w:bogus/></w:p></x:opaque><w:r><w:t>kept</w:t></w:r></w:p>",
+    ] {
+        let bytes = issue435_body_bytes(body);
+        let report = rdocx::validate_document_bytes(&bytes).unwrap();
+        assert!(
+            report.is_valid(),
+            "opaque or valid qualified control: {body}, {report:?}"
+        );
+    }
+    for (body, expected) in [
+        (
+            "<w:p><w:pPr><q:jc xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' q:val='middle'/></w:pPr></w:p>",
+            "ST_Jc",
+        ),
+        (
+            "<p xmlns='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><r><t>first</t></r></p><w:p><w:bogus></w:bogus></w:p>",
+            "bogus",
+        ),
+        (
+            "<w:p><x:opaque xmlns:x='urn:opaque' xmlns:rel='http://schemas.openxmlformats.org/officeDocument/2006/relationships' rel:id='lost'/></w:p>",
+            "lost",
+        ),
+    ] {
+        let report = rdocx::validate_document_bytes(&issue435_body_bytes(body)).unwrap();
+        assert!(
+            !report.is_valid()
+                && report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.message.contains(expected)),
+            "{body}: {report:?}"
+        );
+    }
+}
+
+#[test]
+fn issue435_subset_finding_cap_keeps_existing_package_errors() {
+    let bytes = issue435_body_bytes(&format!("<w:p>{}</w:p>", "<w:bogus/>".repeat(25)));
+    let mut reader = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut rels = String::new();
+    std::io::Read::read_to_string(
+        &mut reader.by_name("word/_rels/document.xml.rels").unwrap(),
+        &mut rels,
+    )
+    .unwrap();
+    let rels = rels.replace(
+        "</Relationships>",
+        "<Relationship Id='missing' Type='urn:custom' Target='missing.xml'/></Relationships>",
+    );
+    let bytes = issue435_replace_zip_part(&bytes, "word/_rels/document.xml.rels", rels.as_bytes());
+    let first = rdocx::validate_document_bytes(&bytes).unwrap();
+    let second = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert_eq!(first, second, "new findings are deterministic");
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.message.contains("not allowed in w:p"))
+            .count(),
+        10
+    );
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.message.contains("15 additional subset"))
+            .count(),
+        1
+    );
+    assert!(
+        first.findings.iter().any(|finding| finding
+            .message
+            .contains("relationship missing points at missing part")),
+        "unrelated package error must not be hidden: {first:?}"
+    );
+}
+
+#[test]
+fn issue435_auxiliary_xml_lexical_checks_preserve_supported_encodings() {
+    let base = issue435_body_bytes("<w:p><w:r><w:t>body</w:t></w:r></w:p>");
+    for xml in [
+        "<root/><root/>",
+        "<root/>outside",
+        "<root/><?xml version='1.0'?>",
+        "<root/><![CDATA[]]>",
+        "<root bad:name='value'/>",
+        "<root a='1' a='2'/>",
+    ] {
+        let bytes = issue435_replace_zip_part(&base, "docProps/app.xml", xml.as_bytes());
+        let report = rdocx::validate_document_bytes(&bytes).unwrap();
+        assert!(
+            !report.is_valid()
+                && report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.message.contains("docProps/app.xml")
+                        && finding.message.contains("well-formed XML")),
+            "{xml}: {report:?}"
+        );
+    }
+    let text = "<root xmlns='urn:opaque'>_x0001_ é</root>";
+    for little in [true, false] {
+        for bom in [true, false] {
+            let mut xml = if bom {
+                if little {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                }
+            } else {
+                Vec::new()
+            };
+            for unit in text.encode_utf16() {
+                xml.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            let bytes = issue435_replace_zip_part(&base, "docProps/app.xml", &xml);
+            assert!(rdocx::validate_document_bytes(&bytes).unwrap().is_valid());
+            let mut opened = Document::from_bytes(&bytes).unwrap();
+            let saved = opened.to_bytes().unwrap();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+            assert_eq!(package.get_part("/docProps/app.xml"), Some(xml.as_slice()));
+        }
+    }
+}
+
+#[test]
+fn issue435_normal_note_references_use_related_parts_and_signed_ids() {
+    let mut seed = Document::new();
+    let note = seed.add_footnote("note");
+    seed.add_paragraph("body").add_footnote_ref(note);
+    let source = seed.to_bytes().unwrap();
+    for local in ["footnote", "endnote"] {
+        for id in [-7, 0, 4] {
+            for note_type in ["", " w:type='normal'"] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+                let relationship_type = if local == "footnote" {
+                    rel_types::FOOTNOTES
+                } else {
+                    rel_types::ENDNOTES
+                };
+                let part = format!("/word/{local}s.xml");
+                let content_type = if local == "footnote" {
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+                } else {
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"
+                };
+                if local == "endnote" {
+                    package.content_types.add_override(&part, content_type);
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add(relationship_type, "endnotes.xml");
+                }
+                package.set_part("/word/document.xml", format!("<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:{local}Reference w:id='{id}'/></w:r></w:p></w:body></w:document>").into_bytes());
+                let root = format!(
+                    "<w:{local}s xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:{local} w:id='{id}'{note_type}><w:p><w:r><w:t>note</w:t></w:r></w:p></w:{local}></w:{local}s>"
+                );
+                package.set_part(&part, root.as_bytes().to_vec());
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.is_valid(),
+                    "normal {local} {id} {note_type}: {report:?}"
+                );
+                let wrong_scope = root
+                    .replace(&format!("<w:{local}s "), "<x:opaque xmlns:x='urn:opaque' ")
+                    .replace(&format!("</w:{local}s>"), "</x:opaque>");
+                package.set_part(&part, wrong_scope.into_bytes());
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.findings.iter().any(|finding| finding
+                        .message
+                        .contains(&format!("missing {local} id {id}"))),
+                    "foreign root cannot own {local}: {report:?}"
+                );
+                package.set_part(
+                    &part,
+                    root.replace(
+                        &format!("w:id='{id}'{note_type}"),
+                        &format!("w:id='{id}' w:type='separator'"),
+                    )
+                    .into_bytes(),
+                );
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.findings.iter().any(|finding| finding
+                        .message
+                        .contains(&format!("missing {local} id {id}"))),
+                    "special note is not normal: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue435_body_and_header_bookmark_repeats_open_render_and_keep_allocation() {
+    let mut seed = Document::new();
+    seed.add_paragraph("body");
+    seed.set_header("header");
+    let source = seed.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+    let document =
+        String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let body = document.replace(
+        "<w:p>",
+        "<w:p><w:bookmarkStart w:id='2' w:name='body'/><w:bookmarkEnd w:id='2'/>",
+    );
+    assert!(body.contains("w:name='body'"));
+    package.set_part("/word/document.xml", body.into_bytes());
+    let header = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::HEADER)
+        .unwrap();
+    let header = OpcPackage::resolve_rel_target("/word/document.xml", &header.target);
+    let xml = "<w:hdr xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:p><w:bookmarkStart w:id='2' w:name='header'/><w:r><w:t>header</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p></w:hdr>".to_owned();
+    package.set_part(&header, xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut opened = Document::from_bytes(bytes.get_ref()).unwrap();
+    assert!(opened.text().contains("body"));
+    assert!(!opened.to_pdf_deterministic().unwrap().is_empty());
+    assert!(
+        rdocx::validate_document_bytes(bytes.get_ref())
+            .unwrap()
+            .is_valid()
+    );
+    let range = rdocx::RunRange {
+        start: rdocx::RunPosition {
+            body_index: 0,
+            run_index: 0,
+        },
+        end: rdocx::RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+    };
+    assert_ne!(opened.add_bookmark("authored", range).unwrap(), 2);
+    let saved = opened.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&saved).unwrap();
+    assert!(reopened.text().contains("body"));
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    assert!(String::from_utf8_lossy(package.get_part(&header).unwrap()).contains("header"));
+}
+
+#[test]
+fn issue435_review_d1_real_picture_extent_is_checked_through_known_containers() {
+    let mut seed = Document::new();
+    seed.add_picture(
+        &mhtml_pixel_png(),
+        "pixel.png",
+        Length::pt(12.0),
+        Length::pt(12.0),
+    );
+    let original = seed.to_bytes().unwrap();
+    assert!(
+        rdocx::validate_document_bytes(&original)
+            .unwrap()
+            .is_valid()
+    );
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("<pic:pic") && xml.contains("<pic:spPr>"));
+    let offset = xml.find("<a:ext ").unwrap();
+    let damaged = format!(
+        "{}{}",
+        &xml[..offset],
+        xml[offset..].replacen("cx=\"", "cx=\"-", 1)
+    );
+    assert_eq!(
+        xml.split("<wp:extent").nth(1).unwrap().split("/>").next(),
+        damaged
+            .split("<wp:extent")
+            .nth(1)
+            .unwrap()
+            .split("/>")
+            .next()
+    );
+    let bytes = issue435_replace_zip_part(&original, "word/document.xml", damaged.as_bytes());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.findings.iter().any(
+            |finding| finding.severity == rdocx::ValidationSeverity::Error
+                && finding.message.contains("word/document.xml")
+                && finding.message.contains("ST_PositiveCoordinate")
+        ),
+        "{report:?}"
+    );
+    let opaque = issue435_body_bytes(
+        "<w:p><x:payload xmlns:x='urn:opaque'><a:xfrm><a:ext cx='-1' cy='1'/></a:xfrm></x:payload></w:p>",
+    );
+    assert!(rdocx::validate_document_bytes(&opaque).unwrap().is_valid());
+}
+
+#[test]
+fn issue435_review_d2_related_opaque_utf16_keeps_the_auxiliary_frontier() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    let original = seed.to_bytes().unwrap();
+    let mut missed = Vec::new();
+    for little in [true, false] {
+        for bom in [true, false] {
+            let mut xml = if bom {
+                if little {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                }
+            } else {
+                Vec::new()
+            };
+            for unit in "<opaque xmlns='urn:opaque'>é _x0001_</opaque>".encode_utf16() {
+                xml.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            for related in [false, true] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+                package
+                    .content_types
+                    .add_override("/customXml/opaque.xml", "application/xml");
+                package.set_part("/customXml/opaque.xml", xml.clone());
+                if related {
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add("urn:opaque", "../customXml/opaque.xml");
+                }
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let mut opened = Document::from_bytes(bytes.get_ref())
+                    .expect("opaque related UTF16 is actually admitted by open");
+                let saved = opened.to_bytes().unwrap();
+                let reopened = Document::from_bytes(&saved).unwrap();
+                assert!(reopened.text().contains("source"));
+                let saved_package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+                assert_eq!(
+                    saved_package.get_part("/customXml/opaque.xml"),
+                    Some(xml.as_slice())
+                );
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                if !report.is_valid() {
+                    missed.push(format!(
+                        "little={little},bom={bom},related={related}: {report:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_review_d3_shared_target_story_roles_union_before_deduplication() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    seed.set_header("header");
+    let original = seed.to_bytes().unwrap();
+    let mut missed = Vec::new();
+    for custom_first in [true, false] {
+        for alias in ["header1.xml", "HEADER1.XML", "./header1.xml"] {
+            for faulty in [false, true] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+                let rels = package.get_or_create_part_rels("/word/document.xml");
+                let header = rels
+                    .items
+                    .iter()
+                    .find(|rel| rel.rel_type == rel_types::HEADER)
+                    .unwrap()
+                    .target
+                    .clone();
+                assert_eq!(header, "header1.xml");
+                rels.add("urn:custom-header-reference", alias);
+                if custom_first {
+                    rels.items.rotate_right(1);
+                }
+                if faulty {
+                    let xml =
+                        String::from_utf8(package.get_part("/word/header1.xml").unwrap().to_vec())
+                            .unwrap()
+                            .replacen("</w:p>", "<w:bogus/></w:p>", 1);
+                    assert!(xml.contains("<w:bogus/>"));
+                    package.set_part("/word/header1.xml", xml.into_bytes());
+                }
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                Document::from_bytes(bytes.get_ref())
+                    .expect("valid and unknown-child header remain open-admitted");
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                let correct = if faulty {
+                    report.findings.iter().any(|finding| {
+                        finding.severity == rdocx::ValidationSeverity::Error
+                            && finding.message.to_ascii_lowercase().contains("header1.xml")
+                            && finding.message.contains("w:bogus")
+                    })
+                } else {
+                    report.is_valid()
+                };
+                if !correct {
+                    missed.push(format!(
+                        "first={custom_first},alias={alias},faulty={faulty}: {report:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_review_d4_clone_refuses_ambiguous_imported_repeat_before_publication() {
+    let bytes = issue435_body_bytes(
+        "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>source</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>repeat</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p><w:p><w:r><w:t>destination</w:t></w:r></w:p>",
+    );
+    let mut document = Document::from_bytes(&bytes).unwrap();
+    let body = body_story(&document);
+    let held_source = document.story_items(&body).unwrap()[0].location().clone();
+    let held_destination = document.story_items(&body).unwrap()[1].location().clone();
+    let held_source_xml = document.paragraph_element_xml(&held_source).unwrap();
+    let held_destination_xml = document.paragraph_element_xml(&held_destination).unwrap();
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .clone_content(&held_source, &rdocx::ContentLocation::end(body.clone()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("content fragment bookmark ownership is incomplete or ambiguous"),
+        "{error}"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        document.paragraph_element_xml(&held_source).unwrap(),
+        held_source_xml
+    );
+    assert_eq!(
+        document.paragraph_element_xml(&held_destination).unwrap(),
+        held_destination_xml
+    );
+    let fresh = document.story_items(&body).unwrap();
+    assert_eq!(fresh[0].location(), &held_source);
+    assert_eq!(fresh[1].location(), &held_destination);
+    let mut reopened = Document::from_bytes(&before).unwrap();
+    assert_eq!(reopened.to_bytes().unwrap(), before);
+    assert_eq!(reopened.text(), document.text());
+    // An unrelated real clone remains valid with the imported repeats intact.
+    document
+        .clone_content(&held_destination, &rdocx::ContentLocation::end(body))
+        .unwrap();
+    let saved = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&saved).unwrap();
+    assert_eq!(reopened.text().matches("destination").count(), 2);
+    assert!(rdocx::validate_document_bytes(&saved).unwrap().is_valid());
+}
+
+#[test]
+fn issue435_review_d1_authored_shape_extent_is_checked() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    seed.add_text_box_to_story(&body_story(&seed), "text box", text_box_options())
+        .unwrap();
+    let original = seed.to_bytes().unwrap();
+    assert!(
+        rdocx::validate_document_bytes(&original)
+            .unwrap()
+            .is_valid()
+    );
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("<wps:wsp>") && xml.contains("<wps:spPr>"));
+    let offset = xml.find("<a:ext ").unwrap();
+    let damaged = format!(
+        "{}{}",
+        &xml[..offset],
+        xml[offset..].replacen("cx=\"", "cx=\"-", 1)
+    );
+    let bytes = issue435_replace_zip_part(&original, "word/document.xml", damaged.as_bytes());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.findings.iter().any(
+            |finding| finding.severity == rdocx::ValidationSeverity::Error
+                && finding.message.contains("word/document.xml")
+                && finding.message.contains("ST_PositiveCoordinate")
+        ),
+        "{report:?}"
+    );
 }

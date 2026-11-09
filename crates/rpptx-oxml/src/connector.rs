@@ -80,6 +80,15 @@ struct NonVisualConnectorProperties {
 }
 
 impl CT_ConnectionShape {
+    pub(crate) fn hidden(&self) -> bool {
+        let bindings = accessibility_parent_bindings(
+            &self.raw.raw_attributes,
+            &self.raw.non_visual.raw_attributes,
+        );
+        self.accessibility_xml()
+            .is_ok_and(|xml| crate::namespace::non_visual_drawing_hidden(&xml, &bindings))
+    }
+
     /// Creates a free-standing connector with canonical non-visual shells.
     pub fn new_free_standing(
         id: u32,

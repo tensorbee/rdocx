@@ -26,7 +26,8 @@ pub struct ScopedMediaIds {
     pub slide: HashMap<String, MediaId>,
     pub layout: HashMap<String, MediaId>,
     pub master: HashMap<String, MediaId>,
-    /// Package content type for each content-addressed media item.
+    /// Render-effective content type for each content-addressed media item.
+    /// Native rendering uses the admitted PNG/JPEG byte format without changing package metadata.
     pub media_content_types: HashMap<MediaId, String>,
 }
 
@@ -43,7 +44,7 @@ impl ScopedMediaIds {
         .copied()
     }
 
-    /// Return the package content type for a relationship-resolved media item.
+    /// Return the render-effective content type for a relationship-resolved media item.
     pub fn content_type(&self, source: FlattenedSource, relationship_id: &str) -> Option<&str> {
         let media_id = self.get(source, relationship_id)?;
         self.media_content_types.get(&media_id).map(String::as_str)

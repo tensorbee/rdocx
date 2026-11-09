@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 284 | 274 | 0 | 6 |
-| **Total** | **615** | **556** | **0** | **55** |
+| X, Cross-cutting | 315 | 298 | 0 | 13 |
+| **Total** | **646** | **580** | **0** | **62** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -369,27 +369,27 @@ regenerated, never hand-edited.
 <!-- AUTOGEN:backlog-M19 START -->
 | F-ID | Title | Sprint | Size | Status |
 |------|-------|--------|------|--------|
-| F-184 | Advanced spreadsheet go or no-go             | S101 | S | pending |
-| F-185 | Workbook and worksheet model                 | S101 | L | pending |
-| F-186 | Shared strings, styles and number formats    | S102 | L | pending |
-| F-187 | Reader                                       | S104 | L | pending |
-| F-188 | Writer                                       | S104 | L | pending |
-| F-189 | Formula parser                               | S102 | L | pending |
-| F-190 | Calculation engine                           | S105 | L | pending |
-| F-191 | Charts in spreadsheets                       | S105 | M | pending |
-| F-192 | Conditional formatting and data validation   | S105 | M | pending |
-| F-193 | Pivot cache and table model                  | S106 | L | pending |
-| F-194 | Sheet rendering                              | S110 | L | pending |
-| F-195 | rxlsx distribution                           | S110 | L | pending |
-| F-204 | Spreadsheet corpus and compatibility matrix | S101 | M | pending |
-| F-205 | Excel tables and structured references      | S102 | L | pending |
-| F-206 | Advanced worksheet objects                  | S103 | L | pending |
-| F-207 | Pivot recalculation engine                  | S106 | L | pending |
-| F-208 | Slicers, pivot charts, and Data Model boundary | S106 | L | pending |
-| F-209 | Power Query package and M language          | S107 | L | pending |
-| F-210 | Power Query execution and connectors        | S108 | L | pending |
-| F-211 | Office Scripts artifacts and ExcelScript surface | S109 | L | pending |
-| F-212 | Sandboxed Office Scripts runtime            | S109 | L | pending |
+| F-184 | Advanced spreadsheet go or no-go             | S103 | S | pending |
+| F-185 | Workbook and worksheet model                 | S103 | L | pending |
+| F-186 | Shared strings, styles and number formats    | S104 | L | pending |
+| F-187 | Reader                                       | S106 | L | pending |
+| F-188 | Writer                                       | S106 | L | pending |
+| F-189 | Formula parser                               | S104 | L | pending |
+| F-190 | Calculation engine                           | S107 | L | pending |
+| F-191 | Charts in spreadsheets                       | S107 | M | pending |
+| F-192 | Conditional formatting and data validation   | S107 | M | pending |
+| F-193 | Pivot cache and table model                  | S108 | L | pending |
+| F-194 | Sheet rendering                              | S112 | L | pending |
+| F-195 | rxlsx distribution                           | S112 | L | pending |
+| F-204 | Spreadsheet corpus and compatibility matrix | S103 | M | pending |
+| F-205 | Excel tables and structured references      | S104 | L | pending |
+| F-206 | Advanced worksheet objects                  | S105 | L | pending |
+| F-207 | Pivot recalculation engine                  | S108 | L | pending |
+| F-208 | Slicers, pivot charts, and Data Model boundary | S108 | L | pending |
+| F-209 | Power Query package and M language          | S109 | L | pending |
+| F-210 | Power Query execution and connectors        | S110 | L | pending |
+| F-211 | Office Scripts artifacts and ExcelScript surface | S111 | L | pending |
+| F-212 | Sandboxed Office Scripts runtime            | S111 | L | pending |
 <!-- AUTOGEN:backlog-M19 END -->
 
 ### M20, Fidelity at scale
@@ -404,12 +404,12 @@ regenerated, never hand-edited.
 | F-200 | Vertical and bidirectional text              | S58  | M | done |
 | F-201 | Large document performance                   | S57  | L | done |
 | F-202 | Incremental layout                           | S58  | L | done |
-| F-313 | External Word benchmark reproduction loop    | S100  | S | pending |
-| F-314 | Benchmark conversion failures and startup latency | S100 | M | pending |
-| F-315 | Word tracked-change markup print view        | S100  | L | pending |
-| F-316 | Word comment and revision balloon pane       | S100  | L | pending |
-| F-317 | Benchmark pagination and layout fidelity wave | S100 | L | pending |
-| F-318 | Benchmark release, adapter update and README badge | S100 | M | pending |
+| F-313 | External Word benchmark reproduction loop    | S102 | S | pending |
+| F-314 | Benchmark conversion failures and startup latency | S102 | M | pending |
+| F-315 | Word tracked-change markup print view        | S102 | L | pending |
+| F-316 | Word comment and revision balloon pane       | S102 | L | pending |
+| F-317 | Benchmark pagination and layout fidelity wave | S102 | L | pending |
+| F-318 | Benchmark release, adapter update and README badge | S102 | M | pending |
 <!-- AUTOGEN:backlog-M20 END -->
 
 ### M21, Presentation depth
@@ -521,28 +521,28 @@ regenerated, never hand-edited.
 | F-288 | Legacy form field creation | S95.4 | M | done |
 | F-289 | Modern Word form authoring | S95.4 | L | done |
 | F-290 | Mail-merge package and data-source authoring | S95.4 | M | done |
-| F-291 | Tracked insertion and deletion authoring | S97 | L | pending |
-| F-292 | Property revisions and move ranges | S97 | L | pending |
-| F-293 | Complete comments and modern comment metadata | S97 | L | pending |
-| F-294 | Permission ranges and protection integration | S97 | M | pending |
-| F-295 | Comparison output as complete revisions | S97 | L | pending |
-| F-296 | Collaboration identity and deterministic time policy | S97 | M | pending |
-| F-297 | Complete Word drawing anchor and effect authoring | S98 | L | pending |
-| F-298 | Shapes, text boxes, groups, and connectors in Word | S98 | L | pending |
-| F-299 | AlternateContent, VML, and SVG compatibility authoring | S98 | L | pending |
-| F-300 | Charts at arbitrary Word insertion points | S98 | M | pending |
-| F-301 | SmartArt and diagram authoring in Word | S98 | L | pending |
-| F-302 | Embedded objects, icons, and alternative-format parts | S98 | M | pending |
-| F-303 | Drawing and embedded-content layout completion | S98 | L | pending |
-| F-304 | Typed package extensibility facade | S99 | L | pending |
-| F-305 | Attached templates, web extensions, and task panes | S99 | L | pending |
-| F-306 | Executable compatibility attachment and signature rules | S99 | M | pending |
-| F-307 | Complete accessibility authoring and audit | S99 | L | pending |
-| F-308 | Fully modeled and losslessness diagnostics | S99 | L | pending |
-| F-309 | Strict, transitional, and repair-free conformance | S99 | L | pending |
-| F-310 | Determinism, resource limits, bindings, and stability gate | S99 | L | pending |
-| F-311 | Positioned paragraph frame placement | S99 | M | pending |
-| F-312 | Run visual effect render projection | S99 | L | pending |
+| F-291 | Tracked insertion and deletion authoring | S99 | L | pending |
+| F-292 | Property revisions and move ranges | S99 | L | pending |
+| F-293 | Complete comments and modern comment metadata | S99 | L | pending |
+| F-294 | Permission ranges and protection integration | S99 | M | pending |
+| F-295 | Comparison output as complete revisions | S99 | L | pending |
+| F-296 | Collaboration identity and deterministic time policy | S99 | M | pending |
+| F-297 | Complete Word drawing anchor and effect authoring | S100 | L | pending |
+| F-298 | Shapes, text boxes, groups, and connectors in Word | S100 | L | pending |
+| F-299 | AlternateContent, VML, and SVG compatibility authoring | S100 | L | pending |
+| F-300 | Charts at arbitrary Word insertion points | S100 | M | pending |
+| F-301 | SmartArt and diagram authoring in Word | S100 | L | pending |
+| F-302 | Embedded objects, icons, and alternative-format parts | S100 | M | pending |
+| F-303 | Drawing and embedded-content layout completion | S100 | L | pending |
+| F-304 | Typed package extensibility facade | S101 | L | pending |
+| F-305 | Attached templates, web extensions, and task panes | S101 | L | pending |
+| F-306 | Executable compatibility attachment and signature rules | S101 | M | pending |
+| F-307 | Complete accessibility authoring and audit | S101 | L | pending |
+| F-308 | Fully modeled and losslessness diagnostics | S101 | L | pending |
+| F-309 | Strict, transitional, and repair-free conformance | S101 | L | pending |
+| F-310 | Determinism, resource limits, bindings, and stability gate | S101 | L | pending |
+| F-311 | Positioned paragraph frame placement | S101 | M | pending |
+| F-312 | Run visual effect render projection | S101 | L | pending |
 <!-- AUTOGEN:backlog-M24 END -->
 
 ### X, Cross-cutting
@@ -754,7 +754,7 @@ HLD14 contract before adopting contributor changes.
 | F-X187 | Scoped paragraph and cell text replacement | S90 | M | done |
 | F-X188 | Preserve comment ownership when replacing or removing whole stories | S90 | L | done |
 | F-X190 | Preserve cached text in multi-run complex field story snapshots | S90 | M | done |
-| F-X192 | Complete the remaining Word bibliography catalogue | S96 | L | pending |
+| F-X192 | Complete the remaining Word bibliography catalogue | S98 | L | pending |
 | F-X191 | Ignore namespace declarations in numbering reader completeness | S90 | S | done |
 | F-X189 | Prepare Word 0.16.0 and PowerPoint 0.14.0 families | S90 | L | done |
 | F-X193 | Preserve semantic mark highlights through nested HTML runs | S91 | S | done |
@@ -787,7 +787,7 @@ HLD14 contract before adopting contributor changes.
 | F-X216 | Import complete slides and merge decks with source formatting | S91 | L | done |
 | F-X217 | Import HTML and Markdown through public Word surfaces | S91 | L | done |
 | F-X218 | Export presentations as semantic HTML and Markdown | S91 | L | done |
-| F-X219 | Qualify full-range text watermark interoperability | S96 | M | pending |
+| F-X219 | Qualify full-range text watermark interoperability | S98 | M | pending |
 | F-X220 | Embed fonts through both native and public package families | S91 | L | done |
 | F-X221 | Prepare Word 0.16.1 and PowerPoint 0.14.1 patch releases | S91 | L | done |
 | F-X222 | Restore linear Word story range inventory and empty owners | S91 | M | done |
@@ -810,9 +810,9 @@ HLD14 contract before adopting contributor changes.
 | F-X239 | python-pptx notes names and refusal of silent zero values | S94 | M | done |
 | F-X240 | Python and CLI signing and signature verification | S94 | M | done |
 | F-X241 | Python and CLI form reading and filling | S94 | M | done |
-| F-X242 | Form control geometry and AcroForm field model | S96 | L | pending |
-| F-X243 | Field appearance streams, full-font resources and conformance | S96 | L | pending |
-| F-X244 | Signature field, bindings and CLI option | S96 | M | pending |
+| F-X242 | Form control geometry and AcroForm field model | S97 | L | pending |
+| F-X243 | Field appearance streams, full-font resources and conformance | S97 | L | pending |
+| F-X244 | Signature field, bindings and CLI option | S97 | M | pending |
 | F-X245 | Preserve chart data changes in Word comparison | S93 | L | done |
 | F-X246 | Honor chart legend position and overlay during rendering | S93 | L | done |
 | F-X247 | Preserve the common LaTeX inputs reported in Issue365 | S94 | L | done |
@@ -837,6 +837,141 @@ HLD14 contract before adopting contributor changes.
 | F-X266 | Bound Word body reads and structural edit cost | S95.4 | L | done |
 | F-X267 | Bound PowerPoint mutation cost across public publishers | S95.4 | L | done |
 | F-X268 | Bound Word owner inventory and unchanged package staging | S95.4 | L | done |
-| F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | S96 | M | pending |
+| F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | S98 | M | pending |
 | F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
+| F-X271 | Restore pinned viewer downloads and planning policy | S96 | M | done |
+| F-X272 | Preserve existing revisions during document comparison | S96 | L | done |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | done |
+| F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
+| F-X274 | Honor section and field page-number formats | S96 | M | done |
+| F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | done |
+| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | done |
+| F-X277 | Complete Issue432 through child stories, completion umbrella | S96 | L | done |
+| F-X277a | Emit authored radical degrees and preserve imported absence | S96 | S | done |
+| F-X277b | Complete Word-like notes, links and numbering | S96 | L | done |
+| F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | S96 | M | done |
+| F-X278 | Complete Word rendering fidelity and font policy | S96 | L | done |
+| F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | done |
+| F-X279a | Expose owned revision text and one kind vocabulary | S96 | M | done |
+| F-X279b | Complete comments, comparison and insert_document | S96 | L | done |
+| F-X279c | Author comment markup and styles without changing reply ranges | S96 | M | done |
+| F-X279d | Author crossing comment replies with initials | S96 | M | done |
+| F-X280 | Complete Issue435 through child stories, completion umbrella | S96 | L | done |
+| F-X280a | Refuse negative authored shape sizes before publication | S96 | S | done |
+| F-X280b | Complete validation and damaged-input refusal | S96 | L | done |
+| F-X280c | Validate stored PresentationML packages through the public file route | S96 | M | done |
+| F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | done |
+| F-X282 | Bound edit cost across styles, body and cells | S96 | M | done |
+| F-X283 | Bound whole-cell setters and Python open-replace-save cost | S96 | L | done |
+| F-X284 | Review performance and memory and rank optimization work | S96.1 | M | pending |
+| F-X285 | Complete carried numerical performance targets | S96.1 | L | pending |
+| F-X286 | Qualify and reduce memory footprint and retained history | S96.1 | L | pending |
+| F-X287 | Repair note comparison after Word-save normalization | S96.1 | L | pending |
+| F-X288 | Repair seven native ordinary furniture-frame differences | S96.1 | L | pending |
+| F-X289 | Requalify historical native kerning and right-edge coverage | S96.1 | L | pending |
+| F-X290 | Repair measured legacy Word kerning and line-number edge differences | S96.1 | L | pending |
+
 <!-- AUTOGEN:backlog-MX END -->
+
+Issue430 remains part of the existing F-X272 completion contract. Its complete
+footnote topology, ignored-story consistency, lifecycle and paragraph alignment
+work is delegated to F-X272a under the approved reviewed contract. Parent C1 and
+the child use distinct worktrees and require serial semantic reconciliation.
+No parent provider or final acceptance follows from this delivery split.
+
+Q-A430-28 has an explicit user-approved one-release exception. Only the native
+positive for two physical footnote references sharing one normal definition is
+unobserved under user-approved acceptance exception, never passed. The
+[approved decision and V3/V4/V5 evidence](/private/tmp/rdocx-cross-review/Q-A430-28-native-evidence-decision.json)
+are reconciled in the existing F272 plan. A430-6/7 and Q-A430-22 physical
+inventory/cleanup/custody/atomicity, library lifecycle and reopen, applicable
+bindings/CLI, SDK including expected-invalid controls and native actual
+comparison-output checks on Word-admitted inputs remain mandatory.
+Stable follow-up R-A430-28: re-evaluate this unproved native same-owner positive
+on a later Word release and retain the prior negative evidence. This is not a
+permanent waiver or a new F-ID. No feature status/count, provider readiness,
+Issue430implementation authority or publication approval changes.
+
+The new S96 intake adds F-X276 through F-X282, pending and unclaimed, mapping
+Issues 431 to 437 and PRs 438, 441, 440, 444, 439, 442 and 443 respectively.
+Issue434 is one story F-X279 with an F-X272 provider dependency, not a second
+F-X272 scope. Issue430 remains under F-X272 and Issue429 remains under F-X275.
+Issues 264, 281 and 377 stay open, and Issue381 stays with S97. Provider edges
+are F-X277 to F-X272, F-X279 to F-X272, and F-X280 to F-X277 and F-X272. Other
+new stories have no invented product edge. Q-S96-07 is answered: bundled default, explicit system-fallback opt-in, and caller fonts highest. The choice blocker is removed. A278-7 remains unmet. The later Issue445 intake adds F-X283, pending and unclaimed, mapping Issue445 and PR443 at head `7b3dcd0e4a3f89c4ecc7b88718c68a9a58159ad8`. It is a genuinely additional story, not an F282 repair reset, and keeps the existing 44 A-ID rows and F282's original three A-IDs and exhausted design peers. F-X283 has no provider edge. Shared facade, binding and HLD files make it a resource serial after F-X282. The earlier 12-story 43-to-63 and combined 57-to-83 figures remain historical, and F-X283 effort is unestimated pending design.
+
+
+F-X277 is split without reducing Issue432 scope. F-X277a independently owns A277-1 and has no provider edge. F-X277b owns A277-2 through A277-8 and retains F-X272. The parent closes only after both children and its F-X272 edge satisfy actual gates. F-X280 retains its F-X277 and F-X272 dependencies. These child rows are delivery decomposition of existing scope, not two new issue contracts or extra aggregate effort. Original design peers remain exhausted. No status or provider completion follows from registration.
+
+F-X272a is done only as the approved genuine LOCAL provider implementation
+checkpoint at integrated1c69b7e0. Its approved plan retains all final acceptance
+riders and Q28 UNPROVED. F-X277b owns exactly A277-2/3/6 and uses that completed
+child dependency for separate-worktree implementation. This operative rule
+supersedes the older broad B range and its implementation-wide F-X272 edge.
+F-X277 still closes only after F-X272 and all three children qualify. F-X279b
+and both completion umbrellas retain their full parent barriers. F-X277b is
+done only at its approved genuine LOCAL checkpoint after integration07f79679
+and clean Root implementation final2. Its plan and final riders stay pending.
+F-X280b consumes the actual completed F-X272a plus F-X277b child chain, with
+both integrations ancestors of its clean Base and all final C1/open/OPC
+composition retained. No delivery ledger or final native/schema/full result
+follows from either prefix status.
+
+
+F-X279c is a prepared draft split of complete A279-2/C2. Root adoption and
+approval are pending. It consumes existing integrated comment/style APIs with
+minimal lower comments serializer/admission hunks. It does not consume C1,
+comparison or insert_document providers. F279b's actual F272 barrier and all
+remaining outcomes stay. The umbrella additionally waits for C on adoption.
+Original exhausted design peers and implementation cap remain unchanged.
+
+Root adopts the exact F-X279c split and approves its design after the independent
+Codex final review. C owns complete original A279-2/C2. All older draft or
+proposed C ownership text above is historical. B keeps A1/3/5/6, P1/P2 and its
+actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
+lower comments writer/admission hunks reconcile with frozen C1 parser/scope
+hunks. The reviewed product Base987027d4 enters no product change here. Normal
+clean claim is next. All review caps and final/native gates remain unchanged.
+
+
+F-X279d is a draft complete A279-1 authoring/initials split, pending independent
+Root adoption/approval. Existing baseline authoring helpers, not unfinished C1
+or C2 services, are the proposed dependency boundary. Preserve C2 neighbor code.
+B retains P1/P2/C6 composition and actual F272 implementation readiness. Parent
+requires D only after adoption, alongside F272/A/B/C and all final/native riders.
+No claim, approval, provider completion or review-cap reset is recorded here.
+
+F-X279d is integrated as reviewed at f89a8c9f after clean independent pass2,
+Root final review and source reconciliation. Delivery stays in-progress pending
+fresh Word and final union acceptance. B retains comparison composition and F272.
+
+
+## S96 release carry to S96.1, Q-S96-16
+
+User-approved on2026-11-08. S96 releases reviewed implemented behavior with explicit known limitations. F-X284starts the successor with an authenticated performance/memory review. F-X285owns numerical F-X268flat/linear/407and F-X282A282-1toA282-3andF-X283A283-1toA283-4qualification that remains unmet or unperformed, preserving each original criterion rather than inventing replacements. Non-numerical correctness and structural/ownership obligations remain S96gates. F-X286owns unfinished F-X268A7/Q18/Q22memory/RSS/equivalence/calibration/history qualification and review-ranked memory improvements. No failed/pending check becomes passed. Historical F-X268stays done, successor stories stay pending, and no current completion count is changed by this planning entry. Issues437/445remain open while their carried criteria are unmet. S97and later sprint numbering are preserved.
+
+## Approved Word-save limitation carry to S96.1
+
+The user approved releasing with both observed Word-save limitations and a fix story in S96.1. Pending F-X287 owns repair and native qualification of note-plus-body-text saves and mixed-author note histories. Issue430 remains open. This carry does not turn a failed or unperformed native check into a pass, reset F-X272/F-X272a provider status or peer caps, or waive any other native, schema, binding, CLI, Source/resource, package or release gate. Q-A430-28 remains a separate exact unproved exception.
+
+The note-plus-body-text middle save opens, lists revisions and no-op serializes with member bytes preserved, but Accept All, Reject All and unrelated body comparison refuse with `body custody pair is inside a revision`. The mixed pending and A-already-accepted saves refuse B rejection with `cannot remove the final paragraph mark`. Each failed action is atomic relative to its immediate pre-action state. Earlier successful actions remain committed. In the fully pending mixed input, resolving A first can return successfully and retire all custody markers while B revisions remain pending. That successful marker loss does not satisfy the open-lifetime preservation requirement. The B-already-accepted intermediate has the separately recorded successful A destinations, which do not qualify the other mixed inputs.
+
+F-X287 requires the normal design, claim, implementation, review and qualification lifecycle. No design plan is created by this registration, and no status, delivery count or historical provider completion is reset. The original45A/14G matrices remain its affected repair obligations, not completed or removed rows. The actual RC3 evidence remains at `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/native-middle-rc3-runtime-probe-1/RESULT.json` and `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh/native-mixed-rc3-runtime-probe-1/CORRECTED_RESULT.json`. Their original failures, `RESULT.json`, transport receipts, intermediate packages and `FAILED_ACTION_ATOMICITY.json` remain preserved. The mixed graph correction changes only the definition inventory reader, not product outcomes or bytes.
+
+## Approved seven-case ordinary-frame release carry
+
+F-X288 owns only the user-approved seven-case ordinary header/footer frame carry: six0.551202pt edge errors against the unchanged0.5pt criterion and the explicit-text footer off-page frame/144pt following-flow difference. Preserve failed observations, nominal source fonts and authored offsets. Issue424 stays open. F-X288 is pending design, unclaimed and not completed. General body frames, drop caps and the separate row-split disposition are outside its scope. All other native, runtime, safety and release gates remain required.
+
+The exact seven F273 A3 cases and immutable evidence paths are retained in the operative F-X273/F-X275 plan sections. This explicit release exception does not relabel failed0.5pt comparisons as passes or infer a matching source-supported oracle disposition. No new plan, claim, provider-status change, completion count or peer-cap reset follows from this registration.
+
+## Approved historical native right-edge qualification carry
+
+F-X289 is pending design and unclaimed in S96.1. It owns only the user-approved historical native kerning/right-edge qualification limit: fresh checks do not prove equivalence to all50older measurement instances. These are not50named files. Original tests, failed/absent measurements, the0.5pt metric and fresh reported-case checks remain intact. Recover/authenticate the original logical instance map or explicitly review a replacement finite qualification contract before closing that debt. No other current failure, source policy, public reproduction, A8 operation union or native/runtime/release gate is waived. Other approved carries and all existing statuses/caps remain separate.
+
+The operative F273/F275 sections retain the exact approval and original obligation. F-X289 registration creates no plan file, claim, implementation, qualification pass or delivery credit.
+
+## Approved four-case current Word rendering carry
+
+F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved three measured legacy Word compatibility kerning/superscript cases and one measured line-number edge. The legacy cases are k1-threshold-1, k1-threshold-3 and k1-threshold-4 under the original mode12/default-compatibility profile, with maxima3.715936pt,3.715936pt and4.946208pt. The fourth case is label3bottom in native-line-style-enabled-explicit-defaults at0.511225pt against0.5pt. Preserve every failed outcome and the unchanged0.5pt metric. The single mode15direct-enabled control passes, but does not qualify all threshold/superscript variants. Historical50instance recovery remains separately owned by F-X289. No other current failure, source policy, native/runtime/release gate, provider status, completion count or review cap changes.
+
+Exact case/evidence boundaries are retained in the existing F273/F275 plans. This registration creates no new plan file, claim, completed status or delivery credit.

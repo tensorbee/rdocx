@@ -1,5 +1,100 @@
 # Changelog
 
+## v0.17.0
+
+### Highlights
+
+Word0.17.0 improves section page numbering, header and footer clearance, TOC navigation through merged tables, and comparison of documents containing existing revisions. The seven Rust packages, CLI and Python distribution share this version. It also covers notes comparison, markup, rendering, comments, imports, package validation and bounded Python edit routes.
+
+### Added
+
+Existing comparison operations can retain unchanged revision-bearing owners while recording another reviewer's changes elsewhere. Existing field-update and rendering operations support decimal, lower and upper roman, and lower and upper letter section page numbers without a new public page-format authoring API.
+
+### Fixed
+
+- apply section page-number formats and restart or continuation values across PAGE, PAGEREF, selected footer placements and explicit field updates. Preserve physical page identity separately from displayed numbers and formatted text. Addresses [#423](https://github.com/tensorbee/rdocx/issues/423).
+- clear body flow against the selected header and footer content, including paragraph spacing, tables and supported ordinary frames. Preserve written page geometry for margin-relative placement. Keep long-note fragments with their reference when space permits, retain authored note markers and special records, and advance note-only pages even when a continuation notice consumes their usable area. Addresses [#424](https://github.com/tensorbee/rdocx/issues/424) through a hardened equivalent of [PR428](https://github.com/tensorbee/rdocx/pull/428).
+- preserve existing revision XML on unchanged supported owners, allocate new compared-story revision IDs without collisions, and report only newly created revisions in CLI comparison counts. Unsupported edits refuse atomically with an owner location. Addresses the bounded preservation alternative in [#425](https://github.com/tensorbee/rdocx/issues/425) through a hardened equivalent of [PR427](https://github.com/tensorbee/rdocx/pull/427).
+- retain physical source navigation through vertically merged cells and accepted-view deleted rows. TOC rebuild skips proven omitted content across the supported selectors while keeping placed headings and stale-source checks. Addresses [#426](https://github.com/tensorbee/rdocx/issues/426) through the adapted navigation work in [PR428](https://github.com/tensorbee/rdocx/pull/428).
+- update pulldown-cmark to0.13.6 for RUSTSEC-2026-0414 and RUSTSEC-2026-0433. The public Markdown importer continues to leave wikilinks disabled. This dependency update does not establish exposure through that disabled parser option.
+
+- compare added and removed normal footnotes with bounded selective accept/reject ownership, preserving original unused notes and refusing unsupported changed note types atomically. Addresses [#430](https://github.com/tensorbee/rdocx/issues/430). The approved native exception below remains explicit.
+- write authored equation radicals in schema order, preserve imported radical omissions, author explicit note reference markers and special-note records, retain hyperlinks and numbering identities, drop only lone empty merged-cell paragraphs, inherit new-cell paragraph-mark formatting without copying numbering, rebuild library-authored TOCs in either insertion order, and exclude chart caches and workbooks from visible-text replacement. Addresses [#432](https://github.com/tensorbee/rdocx/issues/432) through adapted [PR441](https://github.com/tensorbee/rdocx/pull/441).
+- refine TOC hyperlink appearance, first-line indentation, the supported table-border pair, eligible vertically aligned row splitting, automatic text colour and Wingdings 2 bullets. Bundled fonts are the default for PDF, layout and page counts, with caller fonts taking priority and system fallback explicit. Addresses the bounded rendering cases in [#433](https://github.com/tensorbee/rdocx/issues/433) through adapted [PR440](https://github.com/tensorbee/rdocx/pull/440).
+- author comments with styles, initials and crossing replies, expose owned revision text and kind, compare equivalent split runs without new revisions, and preserve supported source font-family and font-size defaults through document defaults, source Normal and supported style inheritance, and preserve separate list instances when inserting documents. Crossing-reply comparison and selective resolution retain their approved graph and protected-owner limits. Addresses [#434](https://github.com/tensorbee/rdocx/issues/434) through adapted [PR444](https://github.com/tensorbee/rdocx/pull/444).
+- validate a bounded stored Word schema and relationship subset, qualify normal-note references, reject duplicate decoded ZIP entry names and forbidden XML characters through existing error channels, and preserve repeated imported ordinary bookmark IDs without allowing new ambiguous ownership. Reject negative authored shape dimensions. Addresses the Word and shared-package cases in [#435](https://github.com/tensorbee/rdocx/issues/435) through adapted [PR439](https://github.com/tensorbee/rdocx/pull/439).
+- draw the supported EMF raster subset and interlaced PNGs, distinguish decode failures from missing relationships, tolerate retained extra chart axis IDs, use the supported chart number formats with explicit fallback diagnostics, and include readable chart titles, categories, series and values in text exports. Addresses the Word and shared rendering/export cases in [#436](https://github.com/tensorbee/rdocx/issues/436) through adapted [PR442](https://github.com/tensorbee/rdocx/pull/442).
+- bound styles access and checked body/cell edit work while preserving refusal, saved bytes and held-handle behavior. Addresses [#437](https://github.com/tensorbee/rdocx/issues/437) through adapted [PR443](https://github.com/tensorbee/rdocx/pull/443), including the whole-cell setter and Python open/replace/save follow-up in [#445](https://github.com/tensorbee/rdocx/issues/445).
+
+### Compatibility
+
+Tracking a simple field's instruction change uses schema-valid complex field
+markers. After accepting or rejecting that tracked change, `Field.is_complex`
+can therefore be true even when the input used a simple field. This approved representation consequence applies specifically to tracked
+instruction changes.
+
+Word0.17.0 requires shared OOXML0.15.0 and moves its publicly reachable shared Rust types to a new minor line. The OPC `parts` map stores `Arc<Vec<u8>>`, and `remove_part` returns `Option<Arc<Vec<u8>>>`, including through the `rdocx_opc` re-export. Direct map insertion and owned removal callers must use the Arc contract. Pass a `Vec<u8>` directly to generic `set_part`, rather than an ambiguous `Vec.into()` expression. The OPC Arc migration does not change Python signatures. Other additive Python surfaces are described above. Retaining old revisions is bounded owner preservation, rather than unrestricted native Word Compare behavior. Edits, moves or deletion touching a revision-bearing paragraph, whole table or block control, or changed revised section properties remain refused. For those cases, retain the original redline separately, resolve the relevant author or revision IDs on independent copies with the checked APIs, then compare those baselines. Resolving those copies discards the resolved tracked markup.
+
+The new minor lines make the public contract distinction explicit after the breaking change reported in [#429](https://github.com/tensorbee/rdocx/issues/429). Published OPC0.14.3 and0.14.4 expose conflicting Vec and Arc contracts. Deliberately selecting OPC0.14.3 restores source type-check compatibility for the exact published jubarte-redlines0.13.0 and0.14.0 clients that were examined. This is a bounded workaround, not a universal0.14patch, runtime guarantee or completed registry rollback. Existing0.14.4 locks need deliberate recovery, and dependencies requiring at least0.14.4 cannot fall back to0.14.3. No yank or publication is implied.
+
+Roman formatting remains bounded to1through3999 and alphabetic formatting to4096characters. Unsupported imported number formats and chapter-dependent numbering remain preserved and diagnostic. Native Word observations outside these bounds do not extend support. Imported notes without a source reference marker remain unmarked. Newly authored add_footnote content includes an explicit styled marker, matching the existing note creation operations. Ordinary frames exclude drop caps, and exact tbRl body corrections do not promise general vertical-text parity. General native Word layout equivalence is not claimed.
+
+The same-owner physical-reference native footnote case remains unproved under the narrow approved Q-A430-28 exception. It is not a passed Word observation. All other applicable native, schema, binding, CLI and package gates remain required. Footnotes with absent type are normal regardless of ID. Changed empty or unknown types refuse atomically while untouched imported records remain preserved. Comparison ownership while revisions remain unresolved uses hidden standard Word bookmarks and does not promise unrestricted native Word Compare parity.
+
+After Word saves a comparison that adds a note alongside new body text, later resolution or comparison can refuse. Some mixed-author Word-saved histories also refuse rejection or retire custody markers during partial resolution while another author remains pending. Failed calls preserve their immediate input state, while earlier successful changes remain. [Issue430](https://github.com/tensorbee/rdocx/issues/430) stays open, with a fix planned for S96.1.
+
+Some positioned header/footer frames differ from Word by about 0.55 pt. In a tested text-anchored footer, the frame falls outside the page and following footer text wraps differently. [Issue424](https://github.com/tensorbee/rdocx/issues/424) stays open, with a fix planned for S96.1. These measured limitations do not establish general Word layout parity.
+
+Historical native kerning and right-edge coverage is not fully requalified. Fresh checks do not prove equivalence to all 50 older measurements. Further qualification is planned for S96.1.
+
+Some legacy Word compatibility documents show kerning or superscript differences of up to 4.95 pt. One tested line-number edge differs by 0.511225 pt against the 0.5 pt qualification limit. Repair work is planned for S96.1.
+
+The rendering refinements cover the approved fixtures and retain documented residuals for imported numbering, unsupported formatting, automatic-colour calibration, font coverage and general native layout. Stored validation is a bounded subset, not complete OOXML schema validation. Literal `_x0001_`, valid opaque XML and binary payloads remain preserved. Source preservation is not sanitization.
+
+### Performance and memory limitations
+
+Performance qualification is incomplete. The latest complete benchmark snapshot before the final namespace allocation changes passed76of79flat checks, all5linear checks and both Issue407protocols. Reply, document picture insertion and cell picture insertion missed their flat limits. This is retained evidence, not a guarantee for the final artifact or a claim of79/79acceptance.
+
+Full memory/RSS, retention-history and ordinary/private calibration qualification remains unfinished. No6MiB or68MiB memory claim is made. S96.1 Optimization Sprint starts with a performance and memory review, then addresses the remaining targets and memory work. Issues437and445remain open for carried numerical criteria. Correctness and release packaging checks remain required.
+
+### Contributors
+
+- [@set2374](https://github.com/set2374) reported section PAGE formatting in [#423](https://github.com/tensorbee/rdocx/issues/423) and supplied the numbering-level first-line indent reproduction in [#433](https://github.com/tensorbee/rdocx/issues/433#issuecomment-6715174819).
+- [@hadim](https://github.com/hadim) reported the Word behavior and cost cases in [#424](https://github.com/tensorbee/rdocx/issues/424), [#425](https://github.com/tensorbee/rdocx/issues/425), [#426](https://github.com/tensorbee/rdocx/issues/426), [#432](https://github.com/tensorbee/rdocx/issues/432), [#433](https://github.com/tensorbee/rdocx/issues/433), [#434](https://github.com/tensorbee/rdocx/issues/434), [#435](https://github.com/tensorbee/rdocx/issues/435), [#436](https://github.com/tensorbee/rdocx/issues/436), [#437](https://github.com/tensorbee/rdocx/issues/437) and [#445](https://github.com/tensorbee/rdocx/issues/445). Their [PR427](https://github.com/tensorbee/rdocx/pull/427), [PR428](https://github.com/tensorbee/rdocx/pull/428), [PR439](https://github.com/tensorbee/rdocx/pull/439), [PR440](https://github.com/tensorbee/rdocx/pull/440), [PR441](https://github.com/tensorbee/rdocx/pull/441), [PR442](https://github.com/tensorbee/rdocx/pull/442), [PR443](https://github.com/tensorbee/rdocx/pull/443) and [PR444](https://github.com/tensorbee/rdocx/pull/444) supplied reference work adapted to the accepted owner, preservation, atomicity and validation contracts. PR443 is one contribution record covering the distinct edit-cost and follow-up setter/open paths, not two merged contributions.
+- [@arthrod](https://github.com/arthrod) reported the incompatible OPC release in [#429](https://github.com/tensorbee/rdocx/issues/429), prompting explicit minor boundaries and bounded old-line recovery guidance.
+- [@lawrenceakka](https://github.com/lawrenceakka) reported added and removed footnote comparison in [#430](https://github.com/tensorbee/rdocx/issues/430).
+
+## rpptx-v0.15.0
+
+### Highlights
+
+PowerPoint0.15.0 aligns the fifteen shared OOXML and PowerPoint Rust packages, CLI and Python distribution. This release covers fit diagnostics, Markdown escaping, slide lookup, stored validation, pictures, charts and layout. Earlier S95.4 shared-buffer work is not a new PowerPoint performance feature.
+
+### Added
+
+- expose Python slide collection index lookup with current, stale and removed handle behavior, and retain independent fit-frame diagnostics rather than refusing an entire deck for the supported read-only cases. Addresses [#431](https://github.com/tensorbee/rdocx/issues/431) through adapted [PR438](https://github.com/tensorbee/rdocx/pull/438).
+- include readable chart titles, categories, series and values in semantic exports, with diagnostic-channel omissions for unreadable charts. Shared font support additions are included where consumed, without promising a new PowerPoint Wingdings rendering policy. The shared doc-hidden symbol-resolution helpers originate in [#433](https://github.com/tensorbee/rdocx/issues/433) and adapted [PR440](https://github.com/tensorbee/rdocx/pull/440).
+- add shared OPC `get_part_shared`, returning a borrowed `Option<&Arc<Vec<u8>>>` without changing `get_part`. This is the shared accessor outcome from [#437](https://github.com/tensorbee/rdocx/issues/437) and adapted [PR443](https://github.com/tensorbee/rdocx/pull/443), not a measured PowerPoint performance gain.
+
+### Fixed
+
+- qualify duplicate-shape fit diagnostics by actual leaf, retain supported notes-shape matching, grow supported table rows and spans, distinguish width/off-slide overflow, emit plain deduplicated CLI fit lines and preserve Markdown escaping and repeated spaces. Addresses [#431](https://github.com/tensorbee/rdocx/issues/431) through adapted [PR438](https://github.com/tensorbee/rdocx/pull/438).
+- validate the bounded stored PowerPoint schema, reference and finite-value subset through existing Rust file and CLI channels. Shared package opening rejects exact duplicate decoded ZIP names and forbidden XML characters. Negative authored dimensions refuse while valid zero dimensions remain supported. Addresses the PowerPoint and shared cases in [#435](https://github.com/tensorbee/rdocx/issues/435) through adapted [PR439](https://github.com/tensorbee/rdocx/pull/439).
+- render the supported EMF raster subset and interlaced PNGs, distinguish image decode errors, retain extra chart axis IDs, format the supported chart codes with explicit fallbacks, export readable charts, omit hidden presentation shapes from visual output while retaining semantic text, write per-span PDF ActualText from each span's own logical text, and align Two Content layout inheritance. Addresses [#436](https://github.com/tensorbee/rdocx/issues/436) through adapted [PR442](https://github.com/tensorbee/rdocx/pull/442).
+
+### Compatibility
+
+Shared OOXML0.15.0 exposes `OpcPackage.parts: HashMap<String, Arc<Vec<u8>>>` and `remove_part: Option<Arc<Vec<u8>>>`. Pass a `Vec<u8>` directly to generic `set_part` rather than an ambiguous `Vec.into()` expression. Python package signatures retain their existing contracts except the stated additive slide lookup surface. The new minor line makes the contract distinction explicit after [#429](https://github.com/tensorbee/rdocx/issues/429).
+
+Published OPC0.14.3 and0.14.4 have conflicting Vec and Arc contracts. The exact examined jubarte clients can deliberately select OPC0.14.3 for source type-check recovery. Existing0.14.4 locks and exact or minimum0.14.4 dependencies retain their recovery limits. No universal old-line patch, runtime guarantee, yank or registry rollback is claimed.
+
+Validation is a bounded subset and preserves valid opaque payloads. Metafile rendering remains a raster subset rather than complete EMF or WMF support. Chart fallback and layout limits remain explicit. Word rendering changes do not establish new PowerPoint symbol behavior or Word Python performance gains for this family. The separate unpublished rpptx-wasm carrier stays0.12.1, and npm publication is outside this release.
+
+### Contributors
+
+- [@hadim](https://github.com/hadim) reported the PowerPoint and shared cases in [#431](https://github.com/tensorbee/rdocx/issues/431), [#433](https://github.com/tensorbee/rdocx/issues/433), [#437](https://github.com/tensorbee/rdocx/issues/437), [#435](https://github.com/tensorbee/rdocx/issues/435) and [#436](https://github.com/tensorbee/rdocx/issues/436), and supplied [PR440](https://github.com/tensorbee/rdocx/pull/440), [PR443](https://github.com/tensorbee/rdocx/pull/443) and [PR438](https://github.com/tensorbee/rdocx/pull/438), [PR439](https://github.com/tensorbee/rdocx/pull/439) and [PR442](https://github.com/tensorbee/rdocx/pull/442). Those contributions were adapted to the accepted family-specific contracts rather than claimed as unchanged merges.
+- [@arthrod](https://github.com/arthrod) reported the shared OPC compatibility failure in [#429](https://github.com/tensorbee/rdocx/issues/429), prompting the explicit minor boundary and bounded recovery guidance.
+
 ## v0.16.4
 
 ### Highlights

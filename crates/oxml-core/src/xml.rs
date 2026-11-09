@@ -1,12 +1,12 @@
 //! Shared OOXML namespace and attribute helpers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use quick_xml::XmlVersion;
 use quick_xml::errors::{Error as QuickXmlError, IllFormedError, SyntaxError};
 use quick_xml::events::{BytesDecl, BytesRef, BytesStart, Event};
-use quick_xml::name::{Namespace, ResolveResult};
-use quick_xml::reader::NsReader;
+use quick_xml::name::{Namespace, NamespaceResolver, PrefixDeclaration, QName, ResolveResult};
+use quick_xml::reader::Reader;
 
 use crate::error::Result;
 
@@ -58,20 +58,98 @@ pub fn validate_strict_xml_1_0(xml: &[u8]) -> std::result::Result<(), XmlLexical
         return Err(XmlLexicalError::ForbiddenLiteralCharacter);
     }
 
-    let mut reader = NsReader::from_reader(xml);
+    let mut reader = Reader::from_reader(xml);
+    let mut namespaces = LexicalNamespaces::default();
     reader.config_mut().trim_text(false);
     reader.config_mut().check_comments = true;
     let mut buffer = Vec::new();
     loop {
-        let (_, event) = reader
-            .read_resolved_event_into(&mut buffer)
+        let event = reader
+            .read_event_into(&mut buffer)
             .map_err(classify_reader_error)?;
-        let event = event.into_owned();
-        validate_lexical_event(&reader, &event)?;
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            namespaces.enter(element)?;
+        }
+        validate_lexical_event(&namespaces, &event)?;
+        if matches!(event, Event::Empty(_) | Event::End(_)) {
+            namespaces.leave();
+        }
         if matches!(event, Event::Eof) {
             return Ok(());
         }
         buffer.clear();
+    }
+}
+
+/// Logical depth uses heap frame marks. The vendor resolver validates only
+/// each element's declarations at depth one, retaining its raw-URI semantics,
+/// reserved bindings and existing per-element declaration limit.
+#[derive(Default)]
+struct LexicalNamespaces {
+    declarations: NamespaceResolver,
+    bindings: HashMap<Vec<u8>, Vec<u8>>,
+    undo: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    frames: Vec<usize>,
+}
+
+impl LexicalNamespaces {
+    fn enter(&mut self, element: &BytesStart<'_>) -> std::result::Result<(), XmlLexicalError> {
+        self.declarations
+            .push(element)
+            .map_err(|error| XmlLexicalError::InvalidNamespace(error.to_string()))?;
+        self.frames.push(self.undo.len());
+        // The vendor bindings iterator omits empty undeclarations. Preserve
+        // every raw declaration in order, including empty values and shadows.
+        for attribute in element.attributes().with_checks(false) {
+            let Ok(attribute) = attribute else { break };
+            let Some(prefix) = attribute.key.as_namespace_binding() else {
+                continue;
+            };
+            let prefix = match prefix {
+                PrefixDeclaration::Default => Vec::new(),
+                PrefixDeclaration::Named(prefix) => prefix.to_vec(),
+            };
+            let previous = self
+                .bindings
+                .insert(prefix.clone(), attribute.value.into_owned());
+            self.undo.push((prefix, previous));
+        }
+        self.declarations.pop();
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        let Some(mark) = self.frames.pop() else {
+            return;
+        };
+        while self.undo.len() > mark {
+            let (prefix, previous) = self.undo.pop().expect("scope undo entry");
+            if let Some(previous) = previous {
+                self.bindings.insert(prefix, previous);
+            } else {
+                self.bindings.remove(&prefix);
+            }
+        }
+    }
+
+    fn resolve(&self, name: QName<'_>, attribute: bool) -> ResolveResult<'_> {
+        let prefix = name.prefix();
+        if prefix.is_none() && attribute {
+            return ResolveResult::Unbound;
+        }
+        let prefix = prefix.as_ref().map_or(&b""[..], |prefix| prefix.as_ref());
+        match prefix {
+            b"xml" => ResolveResult::Bound(Namespace(b"http://www.w3.org/XML/1998/namespace")),
+            b"xmlns" => ResolveResult::Bound(Namespace(b"http://www.w3.org/2000/xmlns/")),
+            _ => match self.bindings.get(prefix) {
+                Some(namespace) if !namespace.is_empty() => {
+                    ResolveResult::Bound(Namespace(namespace))
+                }
+                Some(_) => ResolveResult::Unbound,
+                None if prefix.is_empty() => ResolveResult::Unbound,
+                None => ResolveResult::Unknown(prefix.to_vec()),
+            },
+        }
     }
 }
 
@@ -99,16 +177,16 @@ fn classify_reader_error(error: QuickXmlError) -> XmlLexicalError {
 }
 
 fn validate_lexical_event(
-    reader: &NsReader<&[u8]>,
+    namespaces: &LexicalNamespaces,
     event: &Event<'_>,
 ) -> std::result::Result<(), XmlLexicalError> {
     match event {
         Event::Decl(declaration) => validate_xml_declaration(declaration),
-        Event::Start(element) | Event::Empty(element) => validate_element(reader, element),
+        Event::Start(element) | Event::Empty(element) => validate_element(namespaces, element),
         Event::End(element) => {
             let name = element.name();
             let prefix = validate_xml_qname(name.as_ref())?;
-            validate_bound_prefix(&reader.resolver().resolve_element(name).0, prefix).map(|_| ())
+            validate_bound_prefix(&namespaces.resolve(name, false), prefix).map(|_| ())
         }
         Event::GeneralRef(reference) => validate_reference(reference).map(|_| ()),
         Event::PI(instruction) => validate_processing_instruction(instruction.target()),
@@ -170,7 +248,7 @@ fn encoding_name_is_valid(value: &str) -> bool {
 }
 
 fn validate_element(
-    reader: &NsReader<&[u8]>,
+    namespaces: &LexicalNamespaces,
     element: &BytesStart<'_>,
 ) -> std::result::Result<(), XmlLexicalError> {
     let element_name = element.name();
@@ -180,7 +258,7 @@ fn validate_element(
             "element uses the reserved xmlns prefix".to_owned(),
         ));
     }
-    validate_bound_prefix(&reader.resolver().resolve_element(element_name).0, prefix)?;
+    validate_bound_prefix(&namespaces.resolve(element_name, false), prefix)?;
 
     let mut expanded_names = HashSet::new();
     for attribute in element.attributes() {
@@ -207,9 +285,9 @@ fn validate_element(
             validate_namespace_declaration(Some(local_name(name)), value.as_bytes())?;
             continue;
         }
-        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+        let namespace = namespaces.resolve(attribute.key, true);
         let resolved = validate_bound_prefix(&namespace, prefix)?;
-        if !expanded_names.insert((resolved, local.as_ref().to_vec())) {
+        if !expanded_names.insert((resolved, attribute.key.local_name().as_ref().to_vec())) {
             return Err(XmlLexicalError::DuplicateExpandedAttribute);
         }
     }
@@ -485,5 +563,31 @@ mod tests {
                 "{xml:?}: {actual:?}"
             );
         }
+    }
+
+    #[test]
+    fn strict_xml_deep_scopes_preserve_aliases_undeclarations_and_declaration_limit() {
+        let xml = format!(
+            "<r xmlns:p=\"urn:outer\">{}<p:leaf/>{}</r>",
+            "<p:x xmlns:p=\"urn:inner\">".repeat(100_000),
+            "</p:x>".repeat(100_000)
+        );
+        validate_strict_xml_1_0(xml.as_bytes()).unwrap();
+        validate_strict_xml_1_0(br#"<r xmlns="urn:default" xmlns:p="urn:outer"><p:x xmlns:p="urn:inner"/><p:x/><x xmlns=""><plain/></x><x/></r>"#).unwrap();
+        let duplicate_after_empty_shadow = br#"<r xmlns:a="urn:same" xmlns:b="urn:same"><a:x xmlns:b="urn:different" a:id="1" b:id="2"/><a:x a:id="1" b:id="2"/></r>"#;
+        assert_eq!(
+            validate_strict_xml_1_0(duplicate_after_empty_shadow),
+            Err(XmlLexicalError::DuplicateExpandedAttribute)
+        );
+        let declarations = (0..256)
+            .map(|i| format!(" xmlns:n{i}=\"urn:{i}\""))
+            .collect::<String>();
+        validate_strict_xml_1_0(format!("<r{declarations}/>").as_bytes()).unwrap();
+        assert!(matches!(
+            validate_strict_xml_1_0(
+                format!("<r{declarations} xmlns:extra=\"urn:extra\"/>").as_bytes()
+            ),
+            Err(XmlLexicalError::InvalidNamespace(_))
+        ));
     }
 }

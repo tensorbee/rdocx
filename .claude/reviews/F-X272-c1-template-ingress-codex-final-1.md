@@ -1,0 +1,15 @@
+# F-X272, native template ingress, Root final 1
+
+Reviewed the bounded native borrowed-scope, filter transport and shared operation ingress increments against their frozen source packets. Root inspected actual lookup callers, retained input lifetimes, visitor reuse, candidate commit and native failure policies. Independent Codex source support produced three clean bounded reports under root-template-borrowed-scopes and root-template-operation-ingress. This is not a reset of original implementation peer caps or whole C1 acceptance.
+
+Verdict: 0 defects, 0 smells, 0 nitpicks within this increment.
+
+At native template source f114f772066f2d83251bd0fa7eb49869fb68178493efd3b7bd26cd8f128ae9da, ingress uses the existing loaded-model admission before recursive walking or staging. It freezes actual original OPC buffers and current body/table/control/note/glossary paragraph references. The existing six visitor signatures gain borrowed-owner lifetimes without changing traversal. One operation accompanies main evaluation, chart text and raw text boxes. Both path grammars retain native kind/missing/deferred lookup policy while propagating actual operation failures. Loop scopes receive actual indexed input members. The context is dropped before replacing the original document.
+
+Scope and expression evaluation borrow actual JSON values. A generated string moves into prepared output instead of being copied again. Owned trim reuses its buffer. Standard string case conversion preserves contextual Greek lowercase and Turkish dotted-I expansion. These are concrete copy reductions, without a claim of measured speed or memory savings. Input lookup registration alone grants no scalar allowance.
+
+Actual source-pinned evidence includes5template unit nodes,35existing template-related native nodes and3selected rendering regressions. The real render/save/reopen case covers nested borrowed loops, an empty loop, joins and Unicode. Existing owner, chart, raw-textbox, copied-note, false-control, formatter and atomicity cases pass. The recursive-model test preserves the existing refusal and package/model publication state. It does not instrument a clone counter. Native all-target/all-feature Clippy exits0. Earlier borrowed-source observations remain historical and do not replace these newer actual receipts.
+
+Frozen sources, retained successful binaries, exact child outcomes and independent reports are under /private/tmp/rdocx-s96-root-c1-implementation/root-template-operation-ingress and root-template-borrowed-scopes. Root has since started a separate lower FieldSourceEdit preallocation repair, so this report does not claim final union qualification after that source change.
+
+Actual scalar copy reservations, Word-source/model literal provenance, parser/filter allocations, later execution/formatter copies, remaining source recipes and constructor policies remain open. Issue430 and all integrated native/schema/installed/hash/CI/performance/release gates remain mandatory. No provider completion or sprint closure is recorded.

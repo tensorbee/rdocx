@@ -1,5 +1,24 @@
 # 10, Bindings spec
 
+Comment anchor and reply factories retain fresh source, namespace, marker, ordering and flow preparation. Their fixed standalone paragraph value reads may use positive exact-input, immutable-root and valid-selector certificates, with actual first reads and unchanged first errors. Direct paragraphs retain one key, while eligible simple model tables retain one key per direct paragraph selector under one active Weak root. Factory-local ordinal hints never identify a physical owner or source ancestry, including incidental equal-value matches. The finite value language and cold invariance grammar stay unchanged. Held and fresh handles, atomic refusal and saved/reopened values remain independent acceptance requirements.
+
+Cold binding inventory may borrow immutable model values only after Native complete opening and staged alignment proofs. Paired model origin and original writer-vector identity can discharge those repeated comparisons. Mutable model/vector access invalidates their proof. Only a currently finite-qualified plain item may use identity to omit comparison, while unavailable identity and unsupported/private items retain actual full comparison work. Held/fresh ownership, publication atomicity and Source admission remain independent.
+
+## Cell edit and shared part surfaces
+
+`OpcPackage::get_part_shared(&self, part_name: &str) -> Option<&Arc<Vec<u8>>>`
+uses the same case-equivalent lookup as `get_part` and exposes the existing
+shared allocation without copying bytes. The doc-hidden
+`Document::edit_cell_paragraph<T>` takes physical table, row, cell and paragraph
+indices and a `FnOnce(&mut Paragraph) -> Result<T>`. Its real consumers return
+unit for setters and a run-index/path pair for run insertion. It executes the
+callback at most once, including checked fallback. Invalid locations execute
+it zero times. Python cell paragraph mutations call this bridge. Run binding
+uses prepared paragraph route facts rather than materializing a second native
+paragraph projection. Existing Python signatures and handle authority remain
+unchanged.
+
+
 
 ## Additive native timeline projection
 
@@ -166,8 +185,11 @@ The established layout entrypoints retain their call shapes.
 The shared native `ChartData` input includes optional category-axis and
 value-axis titles plus a typed `Vec<RgbColor>` palette. `oxml-chart`, `rdocx`,
 and `rpptx` re-export the same `RgbColor`. `ChartData::default()` supplies empty
-optional styling fields for callers using update syntax. The added fields are
-an intentional pre-1.0 struct-literal break. Python roots expose concrete
+optional styling fields for callers using update syntax. Checked chart authoring
+and data replacement reject an explicitly empty number-format code before
+publication. Imported stored empty codes remain retained and use the documented
+General draw fallback while their numeric projection refuses. The added fields
+are an intentional pre-1.0 struct-literal break. Python roots expose concrete
 `CategoryChartData`, `XyChartData` and seven-kind `XL_CHART_TYPE` values. Word
 `add_chart(chart_type, chart_data, width, height, after=None)` returns a prepared
 owned Paragraph and accepts only a checked same-document direct body owner.
@@ -729,8 +751,13 @@ direct-body constructors and call shape remain unchanged.
 `Document.revisions` lists the revisions of every story that the accept and
 reject methods resolve, each with a snake_case `kind` and the `Story` that
 holds it, so its length equals the count they return. A `Revision` built
-directly keeps its four-field constructor and has no story unless one is
-passed. `try_replace_text` and `replace_all_regex` return their
+directly keeps its four required keyword fields and has no story unless one is
+passed. Its optional `text: str` defaults to the empty string. Snapshots own
+immutable text, and equality includes text. `None` is not a text value.
+PyO3 abi3 constructor text signatures are available from Python3.10. On
+Python3.9, constructor defaults remain callable and specified by the installed
+stub, while class signature introspection is unavailable.
+`try_replace_text` and `replace_all_regex` return their
 replacement counts. `update_fields` takes the native evaluation context as
 keyword arguments, reads the wall-clock fields of `now` as given, and returns
 the number of updated fields. Comments are
@@ -899,6 +926,14 @@ staged `duplicate_slide`, advances the revision once, and returns the new slide
 captured at that revision. As in the facade, a slide that owns a modern
 comments part is refused, even when removing its last comment left that part
 empty, and the refusal leaves the package and the revision unchanged.
+`SlideCollection.index(slide)` returns the live zero-based position and raises
+`ValueError` with `slide is not in this collection` for another presentation, a
+structural twin, a reopened deck, a non-slide, a removed or stale handle, and a
+foreign slide against an empty collection. Two wrappers and a fresh lookup
+after `move` agree. Other accessors keep their existing errors. A removed handle
+used through an accessor such as `slide_id` is causally `StaleElementError`, and
+a numeric collection index outside the collection remains `IndexError`. The
+defensive absent-owner branch is not presented as a reachable public case.
 
 `Shape` geometry, `name`, and `rotation` are writable without a revision bump.
 Assigning one coordinate or the rotation of a placeholder first copies the
@@ -997,7 +1032,14 @@ and rounding. `align` is an `ST_RectAlignment` token string, and lengths are
 EMU.
 
 `ShapeCollection.add_shape` accepts a DrawingML preset name or an `MSO_SHAPE`
-member. `add_connector` follows the python-pptx signature, `add_group_shape`
+member. `add_textbox` and `add_shape` refuse a negative width or height at
+the call, before any shape, relationship or part is created, raising
+`RpptxError` with a message ending `shape width and height must not be
+negative, got {width} by {height} EMU` carrying the raw signed values. A zero
+width or height is accepted, and negative `left` and `top` are positions
+rather than dimensions and stay supported. Tables keep requiring positive
+extents, and connectors stay endpoint-based. `add_connector` follows the
+python-pptx signature, `add_group_shape`
 appends an empty group, and `add_picture` accepts a path, bytes, or a binary
 file-like object, which is rewound first when it can seek. `remove` deletes one
 shape of a slide with the relationships and parts only it used and advances the
@@ -1017,7 +1059,8 @@ allocation of the returned Python shape. Existing physical owners retain their
 authority, including the group, its collection and its existing members. The
 returned member is captured against the prepared successor before publication.
 The same group collection can make the next addition without being re-fetched.
-An error leaves native state and owner generations unchanged.
+Textbox and preset additions through a group's `shapes` refuse a negative
+width or height the same way at the call. An error leaves native state and owner generations unchanged.
 A group added inside a group has the zero `a:xfrm` python-pptx writes, so its
 `left`, `top`, `width`, and `height` read zero until its first member arrives,
 while a group added to a slide's own shapes reads `None`. `add_group_shape` has
@@ -1223,8 +1266,21 @@ for a nonzero `expect`, without creating a body or retiring an owner.
 `Presentation.validate()` runs the native `validate` with the GIL released and
 returns a tuple of frozen `ValidationIssue` snapshots in native order. Each
 carries a `kind` that names the native variant in snake_case, such as
-`duplicate_shape_id`, and a `message` equal to the line `rpptx validate`
-prints for that issue. A clean presentation returns an empty tuple.
+`duplicate_shape_id`, and a `message` equal to the `Display` sentence that
+`rpptx validate` prints for that issue. A clean presentation returns an empty
+tuple. This binding stays parsed-model only: there is no Python
+stored-package API, and the parsed route keeps building and rescanning the
+model rather than reading original package bytes.
+
+The native side adds `rpptx::validate_presentation_file`, a read-only stored
+route over the original XML bytes, and the `rpptx validate` command routes to
+it. It reports the bounded stored subset described in
+`04-opc-and-packaging.md` and then appends the existing parsed-model issues,
+so an issue a consumer reaches through either route prints the same Display
+sentence. The issue variants, their snake_case kinds and the Display
+sentences are unchanged, and no new Python surface is added for the stored
+route. The command help and README name the exact checked subset and state
+that it is not a full schema validator.
 
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native
@@ -1299,6 +1355,31 @@ transform edits. `Font.highlight_color` names that same checked colour view.
 direct modes. These getter reads create no owner nodes or scope generations.
 
 ## Native Word facade stability
+
+New runs from all three Paragraph hyperlink constructors reference character
+style id `Hyperlink` and preserve later direct formatting. Shared staged
+preparation adds a missing definition with colour `0563C1` and single underline
+when a physical typed source run references that id. Body tables and controls,
+retained revisions, headers, footers, footnotes and endnotes participate.
+Opaque XML and comments do not supply references. Existing style ids and bare
+imported links retain their semantics. Output publication retains the existing
+field-normalization assign-back condition. A real committed staged mutation
+can install the prepared definition in the live document.
+
+Returned numbering ids remain live handles throughout the same Document,
+including signing, normalizing save and same-document note or picture reopen.
+A temporary emission permutation writes deterministic first-use package ids,
+then restores the live model, body numbering properties and identifier sets on
+both success and failure. Separate private abstract and instance maps translate
+both actual reopen paths back to live ids while retaining imported-id custody.
+Private native template staging and repeated-fragment packages keep consistent
+live IDs without a temporary permutation or another Field materialization.
+Their Sources describe the actual staged bytes. Scalar and repeated rendering
+retain the selected live counter and its start override. The final rendering
+publication uses the ordinary canonical emission and reopen translation.
+An unchanged save after signing preserves the signature. A process reopen
+starts a new Document whose handles use the published ids. `part_xml` exposes
+published package ids, while numbering queries use the live model.
 
 Native Rust exposes `Document::paragraph_visibility(&self) -> Result<Vec<bool>>`.
 Each flag matches one `Document::paragraphs()` item in encounter order. The
@@ -1922,7 +2003,11 @@ argument, so document-wide and display-paragraph properties stay with their
 owners rather than being silently projected. Format attributes and expression
 properties that cannot survive the conversion are diagnosed. The surface is
 native Rust, with Python's existing `Paragraph.add_equation(source, format=...)`
-route reusing it. The finite Issue365 matrix admits named Greek variants,
+route reusing it. Native and Python authoring write an empty `m:deg` after
+`m:radPr` for square roots, in both inline and display equations. Indexed
+roots retain their degree. Imported missing degrees remain absent, and the
+existing missing-`radPr` normalization remains unchanged. These markup rules
+add no signature or format option. The finite Issue365 matrix admits named Greek variants,
 relations, operators, arrows and degree, upright sin/log/ln/exp/operatorname,
 plain mathrm and literal text. Function runs use normal=true, plain mathematics
 uses style=Plain and normal text uses both. Literal text retains boundary and
@@ -2109,8 +2194,8 @@ method as `Document.try_replace_text`. The WASM binding keeps its infallible
 
 Literal replacement reaches the body, tables, content controls at every level,
 headers, footers, footnotes, endnotes, the text boxes of the body, headers, and
-footers, and the labels of the charts in the body. Regex replacement reaches
-the same stories except chart labels. Every normal note of the
+footers. Regex replacement reaches the same stories. Neither changes chart
+label caches or embedded workbooks. Every normal note of the
 relationship-resolved footnotes and endnotes parts is searched, its tables and
 block controls included. The separator, continuation separator, and
 continuation notice entries are not, and neither is an untyped entry at id 0 or
@@ -2126,8 +2211,9 @@ and `replace_all_regex`, the WASM replacement method, and
 `rdocx replace --expect` share these counts.
 
 Literal replacement reaches the body, tables, content controls at every level,
-headers, footers, footnotes, endnotes, text boxes, and chart labels. Regex
-replacement reaches the same stories except chart labels. Every normal note of
+headers, footers, footnotes, endnotes and the supported body/header/footer text
+boxes. Regex replacement reaches the same stories. Chart caches and embedded
+workbooks remain unchanged. Every normal note of
 the relationship-resolved footnotes and endnotes parts is searched, its tables
 and block controls included. The separator, continuation
 separator, and continuation notice entries are not, and neither is an untyped
@@ -2160,6 +2246,23 @@ Asymmetric, ambiguous or unsupported mapping refuses the whole package.
 Expected-count mismatch and zero-match behavior precede alternate-copy
 admission. Invalid replacement text and stale locations fail without
 publication. Foreign namespace lookalikes cannot establish alternate ownership.
+
+Native checked replacement uses the doc-hidden fallible paragraph and
+header/footer entrypoints `try_replace_in_paragraph`,
+`try_replace_regex_in_paragraph`, `try_replace_in_header_footer` and
+`try_replace_regex_in_header_footer`. Each takes the corresponding legacy
+arguments and returns `Result<usize>`. The legacy `usize` entrypoints retain
+their compatibility refusal policy. Result-returning document operations
+forward nested edit, writer and reparse errors before publishing their staged
+candidate. This includes ordinary regex operations and expected-count
+operations. Physical selected-source reuse does not renew an admission
+allowance or grant an aggregate reservation to a parsed or expanded source.
+Raw-block replacement in header/footer, text-box and note traversal performs
+original source admission before constructing its typed block. A source resource
+refusal propagates through the fallible native entrypoint and leaves earlier
+candidate edits unpublished. Ordinary unsupported-input preservation keeps its
+existing raw fallback. Read-time retention of a raw block does not authorize a
+later checked edit to construct an over-budget modeled owner.
 
 `Document::try_replace_all_expected` takes ordered `(placeholder, replacement,
 expected)` pairs and returns the count of each pair. Each pair runs over the
@@ -2336,6 +2439,13 @@ in the literal text, and a match whose range would also show text that the
 literal text leaves out, such as a field result, is not exact. Python exposes
 it with keyword `author`, `text`, `occurrence`, `initials` and `date`
 arguments.
+Comment authoring in Rust and Python uses CommentText paragraphs and a
+CommentReference annotation run in the first paragraph. Missing style definitions
+are appended without inventing absent base styles. Incompatible existing style
+types and fixed writer namespace destinations refuse atomically. Python held
+views and document revisions remain unchanged on refusal, while a successful
+add or reply publishes once. Untouched imported comment parts remain unchanged.
+
 Native `move_comment(id, StoryRunRange)` and `move_comment_to_text(id, anchor,
 occurrence)` move an existing root thread without changing its numeric id or
 metadata. Python exposes `move_comment(id, range)` and
@@ -2345,6 +2455,16 @@ bytes and revisions. `rdocx comment move <file> <id> --text <anchor>
 --occurrence <n>` uses the existing required output, JSON and atomic save
 conventions. Unknown ids, replies, stale destinations and unsupported source
 ownership produce checked errors.
+Native `reply_to_with_initials(parent_id, author, initials, text, date)` adds
+optional initials without changing existing reply signatures. Python
+`reply_to(parent_id, *, author, text, date=None, initials=None)` and CLI
+`comment reply --initials` expose the same omission, empty and nonempty values.
+A reply writes its own crossing range immediately after the selected parent
+start and through its reference run. Known parents without a projectable
+range/reference refuse. Failures preserve held views and revision, while
+successful publication advances once and stales held views. Imported point,
+orphan and rangeless replies retain their saved shape.
+
 The Python `add_comment` and `reply_to` methods expose the same value as the
 optional `date` keyword, and `rdocx comment add` and `rdocx comment reply` as
 the optional `--date` flag. Omission writes no date and remains deterministic.
@@ -2492,7 +2612,14 @@ member of `oxml-layout`'s `TextSegment`, `GlyphRun`, and
 `MultilingualGlyphRun` is a pre-1.0 source break for native struct literals.
 
 Native immutable layout snapshots expose page_sections, field_placements and
-bookmark_page_section while preserving bookmark_page compatibility. WordStory
+bookmark_page_section while preserving bookmark_page compatibility. Layout,
+eligible saved caches and generated page labels share the same effective
+imported numbering facts. Qualified direct duplicate numbering overlays only
+explicit format and start attributes, without changing first-owner model
+getters, authoring or retained source. Unknown or chapter state is not rescued
+by a later supported value. Invalid later start or unqualified source retains
+stored display and diagnostics with the existing modeled-start compatibility
+fallback. Dynamic physical footer caches remain retained. WordStory
 has a physical text-box variant with actual OPC part and logical owner path.
 Hidden ordered cached-field segment, section inventory and physical text-box owner
 accessors support checked staging. The hidden Field.cached_display_owner_is_locked
@@ -2721,6 +2848,13 @@ the list has one entry per resolved revision. A compared comment package
 change uses one private package revision, reported under the main story,
 because its added or removed comment may have no surviving comment owner.
 The list length equals the count from `accept_all` and `reject_all`.
+`StoryRevision::text()` returns owned stored visible text through a borrowed
+string view. Content revisions select their payload and property revisions
+select the current owner. Section and private package revisions have empty
+text. Reading does not evaluate fields or modify XML. Python snapshots and CLI
+JSON use this native text. CLI revision kinds use the same eight snake_case
+labels as Python. Human revision output retains its seven tab-separated columns
+without adding text. Story labels retain their existing spelling.
 `rdocx-cli revision list` and Python `Document.revisions` expose this all-story
 listing. WASM load and save paths preserve the revision XML without a revision
 inspection method.
@@ -2848,6 +2982,11 @@ changes return an error before mutation. Resolution covers the main document,
 headers, footers, comments, normal footnotes, endnotes, and nested text boxes.
 `Document::revisions` remains main-story-only, while
 `Document::story_revisions` lists exactly the revisions these methods resolve.
+Qualified source revision traversal includes an actual simple-field result under
+an admitted hyperlink owner. This does not promote that otherwise opaque lower
+hyperlink child into a typed Field or borrowed main-document revision handle.
+Source snapshots, CLI and Python listing/counting use the shared source scanner.
+The existing lower borrowed projection retains its modeled-only domain.
 These eight methods are additive on `rdocx::Document`.
 `rdocx-cli revision accept|reject` exposes the all-story resolution boundary
 with mutually exclusive id, exact-author, or paired date selectors. An omitted
@@ -2862,12 +3001,17 @@ original for each. A message starts with a stable prefix,
 `formatting differs` for unsupported formatting and
 `content-control <name> differs` for a content control's metadata, where
 `<name>` is `tag`, `alias`, `lock`, `placeholder`, or `docPartGallery`.
-Comparison rejects existing modeled revisions and unsupported structural shell
-differences, a content control's type or data binding included, and it commits
-only after accepting and rejecting staged copies reproduce their respective
-package-wide modeled baselines. Those baselines read each paragraph as one
-sequence in document order: compared units, preserved raw children such as
-bookmarks, comment range markers, inline content controls, and hyperlink edges.
+Comparison rejects unsupported structural shell differences, a content
+control's type or data binding included. Inputs may hold existing modeled
+revisions. An owner that holds one in either input is kept byte for byte when
+both inputs hold it unchanged, and any other change to it is rejected with a
+message that names its story path and owner index. Comparison commits only
+after staged copies that accept and reject the revisions it wrote reproduce
+their respective package-wide modeled baselines, and only when the staged
+result still holds every existing revision of the original byte for byte.
+Those baselines read each paragraph as one sequence in document order:
+compared units, preserved raw children such as bookmarks, comment range
+markers, inline content controls, and hyperlink edges.
 A granular revision that splits a run therefore still reproduces a bookmark or
 comment range beside the edit, while a result that moves any of them relative
 to the text or to each other is refused. Ignored whitespace, fields, and comment
@@ -2881,6 +3025,50 @@ formatting, textual whitespace, fields, comments, and any public
 `ComparisonStoryKind`. The non-exhaustive story enum names the main, header,
 footer, comment, text-box, footnote, and endnote categories. The comparison
 surface covers relationship-resolved stories, fields, and nested text boxes.
+Normal-footnote topology is supported through the same native, Python and CLI
+comparison entry points. Physical reference sites retain their actual note ids.
+Omitted and explicit-normal types are normal at any signed id. Empty or unknown
+types preserve their legacy read result and exact source while changes to their
+owner or reference refuse. New unused definitions refuse, and original unused
+or still referenced definitions remain.
+
+Added and removed definitions carry hidden zero-width standard bookmark pairs.
+The name's token is persistent ownership identity, independent of current
+revision ids. The original and edited part-presence bits belong to the emitting
+transaction. `story_revisions` and CLI revision listing expose every revision
+element separately. Id selectors compare actual current ids, and author and
+date selectors compare each element's metadata. A partial custody-unit selection
+refuses atomically, including when a token happens to equal an unrelated id.
+No selector treats the token as a request to select the unit.
+
+For positively admitted custody states, accept restores edited note identities,
+reference inventory, special records and part presence. Reject restores the original destination. Creating a part
+carries the actual edited special inventory, including none. An open creation
+unwinds to absence after its final owned note is rejected unless retained
+unowned content requires the part. Resolved units keep tombstones while another
+unit is pending, and settlement physically retires library markers. An unmatched
+body pair has no surviving note-owner identity and cannot group or select an
+adjacent reference, even inside a revision wrapper. Its ordinary revisions keep
+their ordinary selectors. Exact note-present owner, reference, token, bits and
+pair checks remain mandatory, and a note pair without its body pair refuses.
+Missing note-pair corruption cannot always be distinguished from identical valid
+removed-note histories. Opaque revision-shaped payload does not add listing or
+resolution counts. Genuine admitted textbox and structural revisions still do.
+Reopen
+reads the same persisted units and part-presence votes without chronology or
+process-local history. Imported Word-completed markers stay exact when untouched
+through an unrelated scoped paragraph replacement and comparison, including a
+terminal body pair with no surviving note counterpart. Complete removal of a
+comparison-owned footnotes part also retires its settings references while
+preserving other note policy. Completed markers retire before an affected
+comparison edits their owner or part or adds
+custody. Ignored footnote stories retain original parts and refuse body changes
+that would leave a missing note target. Endnote text comparison remains
+supported, while new endnote topology remains refused. These operations use
+existing held-handle invalidation and leave all live state unchanged on refusal.
+
+Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair inside a revision and drop its note counterpart. Such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
+
 Word and character revisions group changed stretches as deletions followed by
 insertions. Whitespace between changes folds, while a non-whitespace anchor
 folds only when its joined word count is strictly shorter than both changed
@@ -2889,7 +3077,78 @@ letters. Structural, opaque and formatting boundaries, fields, drawings and
 ignored units remain barriers. Default and explicit run granularity retain their
 existing output. Inside supported inline controls, retained raw children keep
 their physical text ownership on both sides through accept, reject and reopen.
-No new comparison option or public signature is introduced.
+No comparison option or existing public signature changes. The additive doc-hidden
+lower native `properties::protected_source_residual(xml, inherited_bindings)`
+bridge supplies opaque source identity to the facade. Ordinary comparison proof
+inputs omit the established qualified paragraph, run and row producer identities,
+including physical field runs. This does not remove attributes from output XML or
+weaken held-revision preservation. Unknown attributes, foreign lookalikes and scopes
+on surviving residual facts remain significant. Imported unsupported field programs
+retain their exact source while existing result setters and renderers keep stored
+display. Current nested edits and new-field constructors remain strictly checked,
+with existing XML, ownership and resource guards. Changed checked raw owner XML
+also receives strict field-program validation after its exact same-owner no-op.
+This covers paragraph, run, table and cell replacements through their shared
+native attachment owner, without tightening retained lower fragment readers.
+An unchanged malformed field in a changed whole fragment does not become retained
+source merely by parsing. Exact no-ops and retained typed result edits preserve
+their existing source and lifetime contracts. Checked paragraph publication keeps
+the original validated qualified input through its existing staged owner
+transaction. Parsed guards do not authorize regenerating a root that loses
+retained field bindings. A changed run validates only that fresh run, while a
+changed whole paragraph validates every modeled field in its incoming owner.
+The native-only
+`CT_P::field_source_run_fragments_at(&self, run_idx: usize)` bridge returns
+`Result<Option<(usize, Vec<Option<Vec<u8>>>)>>` for one intact eligible shared
+field span. Positive coverage equals the ordered vector length. Outside entries
+retain actual materialized run bytes, while field entries are absent. An absent,
+changed or unproved span returns no mapping. Both bridges are implementation
+carriers with no new model field, authoring operation or Python/WASM method.
+The run fragments are operation-local source, not a persistent exchange format.
+Private comparison frames retain actual run templates and parent namespace
+bindings beside scoped snapshots. Existing insertion publishers keep edited
+content authority separate from left-side formatting and shell authority.
+Namespace closure follows relocation, while source children retained in an
+equivalent destination keep their exact bytes and authored declarations.
+Original physical raw-slot ordinals and boundaries travel through private
+word/character attribution and merging. Whole and fragmented publishers select
+source occurrences explicitly by input role and owner, including an empty
+selection. Ordered multiplicity and generated role coverage are validated before
+publication. Root declaration movement is a consistency check after source
+identity is established. It is never a byte-search identity mechanism. Changed
+typed atoms retain generated authority and unchanged typed restoration requires
+an actual source association and a checked transformation. Private typed selections
+also retain Unicode-scalar subranges for proved pure-text fragments. The actual
+immediate output parent, including a planned revision wrapper, controls namespace
+relocation in ordinary, granular, nested and controlled run publication. Fresh
+wrapper scope comes from the same allocator policy as generated Word markup.
+Paired text-box preflight refuses significant metadata edits without a tracking
+publisher, while the independent guard keeps actual root, content and field facts
+at option-normalized coverage. Empty and whitespace-only facts remain boundaries. Positive run-root facts retain
+coverage semantics across physical run partitions. Other authored leaf, field and
+structural facts retain ordered occurrence multiplicity. Actual emitted pure-text
+leaf intervals travel through the existing selective resolver with source ordinal
+and scalar provenance, then complete compatible source occurrences are restored
+before paired-host publication. This internal transport supplies no expected-model
+facts to either reconstruction guard. Simple field metadata views separate their
+actual root and associated result-run owners. Shared outside-field source leaves
+retain attributes during materialization. Direct instruction deletion leaves opaque
+textbox and foreign descendants under their existing source authority.
+Unknown field and result metadata stays significant with `ignore_fields=True`.
+A shared field span with significant run-root metadata and unproved per-slot
+correspondence retains exact unchanged source and refuses changed inner source.
+Existing logical field comparisons precede the ordinary formatting-ignore return.
+Owned root provenance removes only proved extraction additions before temporary
+resolution, including comparisons that allocate temporary IDs. Owning readers distinguish modeled
+values from omitted source metadata before protected-owner raw passthrough.
+Unknown Word and producer attributes, unsupported known-key values, full opaque
+events and effective bindings remain checked. Known numeric/toggle normalization
+and default-only node omission retain compatibility without hiding opaque edits.
+Raw-carrier closure may move namespace declarations onto an opaque root when its
+expanded name, non-declaration attributes, encoded values and effective scope
+agree. Its shape and exact remaining payload stay source-authoritative, as do
+sibling order/multiplicity and descendant-local shadows. Successful comparison
+still emits the original protected bytes.
 The native facade stages the main story from package-authoritative XML and
 preserves exact unchanged drawing wrappers even when sibling text in the same
 paragraph, table, cell, or control changes. Accepting and rejecting the result
@@ -2915,10 +3174,19 @@ cuts at bookmark and comment range boundaries so inserted text stays on its
 edited side of a marker.
 Whole inserted, deleted and moved hyperlink paragraphs keep the hyperlink shell
 outside revisions and track its content inside. Resolved hyperlink targets and
-display text survive save and reopen. Empty whole-paragraph hyperlinks and simple
-fields outside a complex field carried whole remain explicit atomic refusals.
-Nested captured Word hyperlinks are also refused atomically, keeping wrapper
-call depth bounded to one paragraph and one direct hyperlink owner.
+display text survive save and reopen. Empty whole-paragraph hyperlinks and
+standalone simple shells on the framed paragraph/field/hyperlink path remain
+explicit atomic refusals without a complete complex field carried whole. Fields
+inside atomic controls or opaque drawings remain within that payload's lifetime,
+and independent textbox fields do not borrow body carriage. Publisher and
+admission share the same qualified frame path. Nested captured Word hyperlinks
+remain refused even across a field or control. The iterative owner walk retains
+the admitted XML/model depth and source-copy budgets.
+Typed complex-field discovery also requires the begin and end runs' actual
+physical parent to match before probing an isolated excerpt. Sibling revision
+wrappers remain distinct even with equal metadata. A cross-wrapper field stays
+preserved and untyped until supported context is restored by resolution. This
+changes no public method or signature and does not suppress source parse errors.
 Edits before retained tables carry the changed paragraph's own mark, and a
 removed mark before a retained table requires no content to remain. Opaque
 children and meaningful raw gaps prevent that removal. Empty paragraphs can gain
@@ -2938,7 +3206,32 @@ typed inputs recover matching package drawing payloads before serialization.
 Complex fields map every physical source run to one modeled comparison owner,
 and sibling fields from one physical run share that owner. Text read out of a
 field's physical run is compared as its own runs, and the comparison source
-writes that span as one physical run per modeled run.
+writes that span as one physical run per modeled run. Inherited and local namespace
+bindings accompany source owners through nested paragraph, field, table and
+control analysis. Aliased Word names retain the same physical ownership, while
+foreign lookalikes stay opaque. Existing revision owners remain byte-identical,
+and newly generated Word fragments cannot capture a producer's foreign `w`
+binding. Main and related-story accept/reject operations share the same
+source/destination namespace relocation policy for all, author, id, id-set and
+date selection. Retained shells, properties and opaque children keep their
+expanded element and attribute names through merge, wrapper promotion and
+property replacement, with child-local declarations taking precedence.
+Comparison retains both raw property sides privately before adding markers,
+patches only supported Word property slots and keeps unsupported formatting
+left-biased. Source root metadata, opaque child order and own-section precedence
+survive comparison, selective resolution, save and reopen for paired and Empty
+metadata-bearing properties. The private projection checks source identity
+rather than confusing those container forms with a changed raw boundary.
+Complete prior run properties replace current formatting on rejection, while
+revision selection and marker order remain independent. Legal run splitting
+copies formatting to each resulting owner without duplicating a child inside
+one property owner. No public model or binding signature changes.
+Relocated source context also preserves namespace prefixes used only by values
+such as compatibility attributes, rather than inferring opaque value schemas. Revision value
+equality ignores only the enumeration order of complete parser-context entries.
+Stored context order and every other raw, projected, nested and policy field
+remain authoritative, so a comment beside an unchanged revised paragraph does
+not become an edit of that paragraph.
 It emits same-story moves and supported run, paragraph, table, and section
 property revisions. Diagnostic locations retain the actual story identity and
 stable owner path. `rdocx-cli compare` takes an explicit author, RFC 3339
@@ -2959,6 +3252,20 @@ document changes, and a duplicated story keeps the native rejection.
 `ignore_comments` also leaves comment anchors to the original, while ignoring
 the `comment` story excludes only the comments part. Python and WASM preserve
 comparison output when they save their owned document.
+Equal adjacent plain text with equal run properties gives zero revisions despite
+run splits at every granularity. Structural tokens remain barriers. Word
+substitution emits the changed word without revising a split unchanged neighbor.
+A graph-only added crossing reply creates one comment-package revision, with no
+body text revision. Selective acceptance retains its range, reference, initials
+and parent link. Rejection restores the original graph. Existing crossing replies
+remain in place during selective text resolution, subject to unchanged protected
+owner and revised-comment refusal contracts.
+Protected-owner coalescing requires actual equal content and formatting under
+every ignore policy, together with the existing source-residual check. Ordinary
+ignore policies and paired Field publication keep their existing semantics.
+A newly added reply receives the same complete containing-owner check before
+comparison publishes the authored replay.
+
 
 Native Word rendering exposes `rdocx::RevisionView`, `rdocx::RevisionStyle`
 and the concrete `rdocx::RenderOptions`, whose default selects accepted view
@@ -3009,9 +3316,11 @@ Python copies bytes and path inputs before releasing the GIL. Metadata,
 strict file loading and native layout or rendering run detached. Missing and
 non-directory paths raise their existing I/O exceptions with the path. Other
 strict loader refusals retain the public layout/domain error and exact failing
-path. Invalid inputs do not produce output or mutate source. Normal Word
-caller rendering keeps normal fallback, while deterministic entrypoints keep
-bundled fallback. Existing caller-only native layout methods remain isolated.
+path. Invalid inputs do not produce output or mutate source. Caller fonts on the
+bundled omission tier resolve missing families from the bundled inventory. A
+nonempty caller request under the explicit system opt-in keeps the normal
+engine. Deterministic entrypoints keep bundled fallback. Existing caller-only
+native layout methods remain isolated.
 
 Configured `render_pages` constructs one owned layout. Omitted page selection
 uses that bundle's actual page count. Explicit selections retain order and
@@ -3066,32 +3375,37 @@ must include those fields. Checked PDF output refuses failed selected-font
 preparation before allocating partial output, and native Result consumers
 propagate the existing error. Valid output and legacy vector signatures remain.
 
-Native renderers obtain the complete positioned output through
-`Document::layout` and `Document::layout_with_options`. Accepted calls return a
-shared `Arc<WordLayoutResult>` from the normal-font cache, including pages,
-font bytes, revision view, and the result-local Word source map. After a
-mutation, the retained normal engine may reuse bounded context-independent
-paragraph and shaping work while rebuilding the completed result. Tracked calls
-stay uncached and use a distinct revision-view paragraph identity.
-`Document::layout_with_fonts` and
-`Document::layout_with_fonts_and_options` return owned uncached bundles whose
-font mapping contains the exact caller-provided bytes selected for shaping.
-They construct a caller-only engine and cannot observe the normal process font
-snapshot. `Document::layout_with_fonts_and_bundled_fallback` and its
-option-taking counterpart return the same owned result shape while retaining a
-private reusable deterministic-base engine. Caller faces override bundled
-faces, missing families resolve from the bundled inventory, and system fonts
-remain unavailable. Differing caller labels act as aliases automatically on
-the existing strict and bundled-fallback paths.
-`Document::layout_with_fonts_aliases_and_bundled_fallback` and
-`Document::layout_with_fonts_aliases_and_bundled_fallback_and_options` add
-explicit byte-free aliases to the owned bundled-fallback result paths.
-`Document::transfer_reusable_bundled_fallback_layout_from_with_aliases` moves
-private work only when the exact caller-font bytes, bounded aliases, and other
-retained inputs match. Rejection preserves both engines. Deterministic calls
-remain isolated on the bundled-font-only path. The built-in PDF, raster, and
-page accessors consume their existing paths. These additions are pre-1.0 native
-Rust APIs and do not add Python, WASM, or CLI methods.
+Native renderers obtain omission output through `Document::layout` and
+`Document::layout_with_options`. `layout_page` and `layout_page_with_options`
+keep their route through `layout_with_options` and clone one page out of the
+returned `Arc`. Accepted omission calls return a shared `Arc<WordLayoutResult>`
+from the bundled cache, including pages, font bytes, revision view, and the
+result-local Word source map. `Arc::clone` preserves that sharing. Accepted calls
+with `use_system_fonts` true return the shared normal-font cache instead. Tracked
+calls stay uncached and use the engine selected by that field. Nonempty
+caller-font results that the private helper wraps use `Arc::new` and are not that
+shared cache. `Document::layout_with_fonts` and
+`Document::layout_with_fonts_and_options` stay caller-only and uncached. The
+bundled-fallback methods, including both alias methods, stay caller plus
+bundled. `layout_with_additional_fonts_and_options` stays caller plus the normal
+engine and ignores `use_system_fonts`. Deterministic calls remain on the bundled
+path and ignore the field. These are pre-1.0 native Rust APIs. Python receives
+`system_fonts`, default false, on the implicit publishers and calls the public
+route table for a nonempty font list. WASM does not receive the field. `toPdf`
+follows `Document::to_pdf` into the deterministic cache.
+
+### Font policy keywords
+
+`RenderOptions::use_system_fonts` is the native Rust selector and defaults to
+false through the derived `Default`. Python exposes the keyword-only
+`system_fonts: bool = False` on `to_pdf`, `to_pdf_with_diagnostics`,
+`page_count`, `layout`, `layout_page`, and every render helper and diagnostic
+twin. The CLI exposes `--system-fonts` on `convert`, `render`, and `layout`.
+`inspect` stays on the deterministic bundled path and accepts no font-policy
+flag. Omission, an empty sequence, an empty directory, and a directory with no
+font file select bundled fonts. Caller fonts keep highest priority over embedded
+and the selected tier. An explicit system request refuses on a build without the
+`system-fonts` feature with the documented error before the normal engine runs.
 
 Native Word callers measure a checked paragraph or table with
 `Document::measure_content(&ContentLocation, Length, RenderOptions)`. Width must
@@ -3620,14 +3934,22 @@ Python package signatures are unchanged. Debug `_inventory_work` and
 `_commit_work` exist only on debug builds and are not stable exports.
 
 Current source prepares the exact seven-package Word Rust family, `rdocx`
-Python distribution, `rdocx-wasm` and inherited support carriers at0.16.3.
+Python distribution, `rdocx-wasm` and inherited support carriers at0.17.0.
 The exact fifteen-package shared OOXML and PowerPoint family plus `rpptx-py`
-and its Python distribution are prepared at0.14.3. The separate unpublished
+and its Python distribution are prepared at0.15.0. The separate unpublished
 `rpptx-wasm` npm carrier remains0.12.1. Word's current dependency pins require
-shared0.14.3, so the shared family precedes Word publication. Preparation is
+shared0.15.0, so the shared family precedes Word publication. Preparation is
 local metadata and artifact verification, without registry publication or tag
-authority. The previous unified v0.16.2 and rpptx-v0.14.2 releases remain
-immutable at reviewed main57f4d7438483e109cb8e45097f3498fe1c223b23.
+authority. The previous unified v0.16.4 and rpptx-v0.14.4 releases remain
+immutable at reviewed main24af95d3d94c25e95f61a75e7e21f18fa95b6363.
+
+The existing release workflow consumes authenticated native compatibility and
+completed final-source CI before publication. Rust registry membership derives
+from `RELEASE_CRATES`, with twenty libraries and two binary-only CLIs. Binding
+and WASM carriers retain their independent existing checks. Default/all Rust
+API views do not replace installed Python calls, typing, CLI identities or
+behavioral compatibility. First-minor empty-line applicability is explicit.
+
 
 **maturin, mixed Rust and Python layout**, so type stubs and enum shims have a
 home. `python-source = "python"`, `module-name = "rdocx._rdocx"`,
@@ -3776,13 +4098,14 @@ original package. Images, headers, footers, numbering, settings, themes, font
 tables, notes, properties, content types, relationships, and opaque parts stay
 in the package rather than being reconstructed by the binding.
 
-The constructor, `fromBytes`, `addParagraph`, `addHeading`,
-`addBoldParagraph`, `addTable`, `getText`, `paragraphCount`, `toDocxBytes`,
-`toPdf`, `toHtml`, `toHtmlFragment`, `toMarkdown`, and `replacePlaceholder`
-names remain stable. `toPdf` delegates to the normal `Document::to_pdf` facade
-and returns its bytes directly. `Document::open`, `save`, and a second
-deterministic PDF alias stay absent because browser callers supply and receive
-bytes and the WASM profile already excludes host font discovery.
+The constructor and the listed method names remain stable. `toPdf` calls
+`Document::to_pdf` at `rdocx-wasm/src/lib.rs:85` and returns those bytes
+directly. Under this alternative that call is the bundled deterministic cache.
+It does not load host fonts. `rdocx-wasm` disables `rdocx` defaults at
+`Cargo.toml:27`, while bundled font data stays unconditional. The wasm32 graph
+therefore excludes host font discovery. No wasm font-policy option is added. A
+future request for host fonts must fail with the native system-font error. No
+binding route change.
 
 The `system-fonts` feature is default-on in `rdocx-layout` and `rdocx`, which
 preserves native behavior. `rdocx-wasm` disables `rdocx` defaults, while the
@@ -3884,6 +4207,19 @@ fraction or leap second. Omission keeps now=None and unresolved date caches.
 Existing header/footer dynamic caches and unsupported-switch diagnostics stay
 visible. The input path supplies field filename context.
 
+Existing page-only, layout-backed and combined update signatures and binding
+defaults stay unchanged. Native cache updates, render substitution and generated
+page labels share the layout engine's concrete page-format policy and actual
+owner or target section. Character-only switches preserve supported section
+numeral style. Unknown section or chapter states, malformed instructions and
+bounded-format failures retain source display with diagnostics. A reused physical
+footer keeps its saved PAGE/NUMPAGES cache while each rendered placement gets its
+own formatted value. Held handles follow existing staged-publication lifetime
+rules, and saved/reopened reads retain that source/cache distinction. No page
+format setter, enum, Python or WASM method is added. The two additive doc-hidden
+native formatter/source helpers are implementation-facing providers.
+
+
 Word images extract uses physical picture occurrences and actual internal
 media identity, extracting each unique source part once in first-occurrence
 order. Flat generated image-000001 names derive extensions from bounded content
@@ -3942,8 +4278,13 @@ identity/name, contexts, empty/status facts, current measured/stored values,
 needed total scale/reduction, quantized/persisted trials and diagnostics.
 Trial dimensions/heights are points, stored bounds EMU and integer scales or
 reductions hundred-thousandths. No fitting permitted trial reports null needed
-scale and unfit-at-floor. Unsupported mandatory owners refuse. Fit does not
-save, exiting0 without overflow,1 for overflow and2 for checked error.
+scale and unfit-at-floor. Exit 0 when every frame is assessed and none overflow.
+Exit 1 when any frame overflows or has status `unsupported`. Exit 2 for a
+checked error. A non-empty unsupported frame carries its cause once. Empty
+frames keep status `empty`, overflow false and no unsupported cause, including
+an unresolved notes placeholder. JSON `reason` is `cannot-assess` when status is
+`unsupported`. The page-growth
+exception is the same width-qualified rule as HLD 08. Fit does not save.
 
 `inspect` reports the file, slide and layout counts, slide size, core metadata,
 and each slide's identity, hidden state, and shape count. Its JSON form uses the
@@ -4073,7 +4414,8 @@ collected. Otherwise validation retains those errors, adds one indeterminate
 paragraph-visibility Warning with the actual detail, and omits the empty-count
 advisory. It does not substitute plain text or all-false flags. Title, author
 and heading advisories retain their existing behavior. `layout --json` uses
-bundled deterministic fonts and reports every direct body item. Its point-space
+bundled deterministic fonts unless `--system-fonts` selects the system tier, and
+reports every direct body item. Its point-space
 fragments carry one-based physical and displayed page numbers, and preserved
 unlaid items retain an empty fragment list. `diff` compares accepted-view
 paragraph text story by story: the body paragraphs, the body's table cells
@@ -4091,7 +4433,8 @@ compared, `--json` emits a schema-1 record with each unreadable side in
 error or incomplete comparison. `replace --expect N` checks the
 run-aware replacement count before staged publication. A mismatch creates no
 output and leaves an existing destination untouched. Both the selected page
-and all-page `render` paths use bundled deterministic fonts. The compiled
+and all-page `render` paths use bundled deterministic fonts unless
+`--system-fonts` selects the system tier. The compiled
 surface also includes nested comment thread commands with optional RFC 3339
 comment dates, all-story revision inspection, all-story filtered revision
 resolution, comparison with explicit granularity, ignore options and per-story
@@ -4213,7 +4556,13 @@ ordered report payload.
 
 Rust provides `try_add_paragraph`, `try_insert_paragraph`, `try_add_table` and `try_insert_table` as additive checked methods. Python keeps its existing add and insert paragraph and table APIs, paragraph insertion before an owner, heading creation and page-break creation. Those paths share the checked native policy before their existing publishers. Insertion bounds precede paragraph XML characters, which precede namespace refusal. Existing error families remain. No Python `try_` method or stub export is added. The internal paragraph preflight is shared so XML errors keep that order without replacing the source-preserving splice path.
 
-Word publication consumes current native serialization pieces and retained-source read proofs without adding a stable Python export. Source normalization does not make a parsed child eligible for writer reuse. The page-border publisher validates through the existing save-equivalent path before its conservative owner publication. Trusted byte-opened packages can avoid ZIP output there, while untrusted packages retain the ZIP fallback. Debug `_staging_work` has six slots: parsed bytes, scanned bytes, canonicalized bytes, ZIP bytes written, serialized children and children read. The last two units count children rather than bytes.
+Word publication consumes current native serialization pieces and retained-source read proofs without adding a stable Python export. Cold plain-paragraph batches return accepted text and run paths under the existing complete opening, writer, namespace and finite payload proof. They optionally lend current immutable staged model Arcs after complete per-slot alignment. A valid full writer proof without such a record retains the successful facts and ordinary model copies. The query schedules complete opening/staged comparisons and finite facts per physical slot, while retaining exhaustive root/section metadata and exact lengths. A late opening mismatch discards prefix facts before resource fallback, and a late staged mismatch makes every model loan absent. Cached pieces share only model values. They retain no source record, XML, frame or historical opening. The exact finite graph proves zero weighted/table resource depth, while every unsupported post-opening miss keeps the old full model guard and fallback. A borrowed last-successful run-property value can reuse that same finite eligibility proof only after complete equality within the call. No property proof or facts are retained while dormant. Body piece read facts may reuse a context whose unique retained root declarations and effective body bindings differ only in order. The Native BodyItemContext::read_facts_compatible predicate keeps the main part, model namespaces, root attributes including MC values, body declarations and edit-eligibility flag exact. All five collections must have unique names on the new order-only branch. Exact context equality keeps its existing behavior. Changed names, values, default bindings, duplicate names or other context changes use the full inventory. Native source/writer/opening equality and local cell/splice guards stay exact. Current related-part discovery, duplicate physical-part checks, Field exclusions and hyperlink qualification still run before publication. Source normalization does not make a parsed child eligible for writer reuse. The page-border publisher validates through the existing save-equivalent path before its conservative owner publication. Trusted byte-opened packages can avoid ZIP output there, while untrusted packages retain the ZIP fallback. Debug `_staging_work` has six slots: parsed bytes, scanned bytes, canonicalized bytes, ZIP bytes written, serialized children and children read. The last two units count children rather than bytes.
+
+The qualified cold opening query preallocates paragraph text from checked stored Text lengths and copies the same values in physical run/content order. Returned accepted-run paths and optional model loans stay unchanged. Unavailable sizes or variants retain the original text materializer. No Python signature, cache authority or dormant payload is added.
+
+Private comment projections consume owned first-read paragraphs or immutable certified model loans. Their source marker reads and accepted text/run axes remain unchanged. The loan owner is not exposed through bindings or retained in public results, and releases before reply publication. Table-root lifetime, inline tuple size and actual Arc operations remain memory/equivalence costs.
+
+
 
 Document.charts is a read-only tuple of owned Chart snapshots. chart_type is an
 optional integer, categories a tuple of strings and series a tuple of existing
@@ -4247,7 +4596,16 @@ and known semantic mappings retain precedence.
 Document exposes HTML and Markdown, CLI-equivalent text and owned TextReport, typed ODT, RTF and EPUB payloads with complete ordered diagnostic tuples, and explicit body word and character counts. Validation accepts an owned document snapshot, bytes or a path. Package decode and path errors propagate, while admitted advisory findings preserve native severity, order and validity.
 
 Document.validate and module validate_file share the native physical-owner
-validation used by the Word CLI. Identified paragraphs inside block content
+validation used by the Word CLI. The byte, path and live-document routes also
+share the bounded Word subset and actual open predicate described in
+`04-opc-and-packaging.md`. Findings preserve native severity, order and
+validity, including the ten-per-part subset cap and omitted-count summary.
+Shared OPC forbidden-character read errors become validation error findings
+naming the part and code point, while both Python open constructors raise
+their existing `PackageError`. Exact duplicate ZIP part names also refuse
+both open constructors. Imported ordinary repeated bookmark ids remain
+admitted, with advisory warnings and existing ownership checks preserved.
+ Identified paragraphs inside block content
 controls retain inherited producer namespace bindings, including qualified
 paraId and textId, through open, save and reopen. This does not relax genuine
 owner mismatch or malformed-source refusal. Imported content-control type markers keep
@@ -4394,9 +4752,24 @@ The native canonicalization behind both picture insertion bindings may reconcile
 
 Table exposes signed removable indent, autofit, actual table style ID or display-name resolution, six look flags and checked empty-row, logical-column and complete-cell-split operations. Undefined, ambiguous and wrong-type styles refuse without publication. Existing nested Cell.add_table uses the checked physical owner provider. Structural edits invalidate held rows and cells, while a no-op split preserves their revision.
 
+Cell merging drops only a lone content-empty paragraph, disregarding its
+properties and root attributes for that decision. Nontext or opaque content,
+nested tables and multiple paragraphs remain in row-major order. An all-empty
+merge retains the origin paragraph including its formatting. Row and column
+additions inherit the source cell's last paragraph properties. An existing
+paragraph-mark run format takes priority over the last run's direct format.
+New paragraphs exclude numbering, section and paragraph revision ownership,
+while other unknown properties retain their bytes. Added cells have one empty
+paragraph. Split-cell additions keep their existing default paragraph format.
+
+Authored TOC insertion with no selected headings places its field end in a
+following empty paragraph, so adding headings afterward remains rebuildable.
+The title retains the field begin, instruction and separator. Imported TOC
+boundary refusals retain their existing policy and error text.
+
 PictureOptions exposes checked metadata, crop and the supported inline and floating placement vocabulary. Document.add_picture, Run.add_picture and Cell.add_picture import path or bytes and return frozen factory-created Picture snapshots. Document.pictures returns physical source order across admitted stories. Snapshots carry document origin, revision, physical owner and unchanged source identity. Document.set_picture_size accepts one snapshot and resizes that occurrence only. The former relationship-wide Python operation is explicitly named set_picture_sizes_for_relationship. Native relationship-wide sizing and replace_image retain their separate compatibility contracts. Foreign, stale, malformed and unsupported inputs refuse before publication.
 
-Python Document.insert_document(other, at=..., policy=...) publishes through native import_fragment. Native Document.insert_document(index, other) is the existing body, style and numbering route and does not take that policy. It does not import source media relationships. Its unchanged control uses a source and a destination that already share the intended media graph. Inserted picture bytes stay with their drawings for both orders, the default policy and related-part reuse turned off, through save and reopen. Unused relationship bytes are not a preservation promise.
+Python Document.insert_document(other, at=..., policy=...) publishes through native import_fragment and preserves its companion and complete relationship closure. Native Document.insert_document(index, other) uses the same importer with a body-only policy for body, style and numbering, without source media or companions. Both preserve source-effective ASCII and high-ANSI fonts and half-point size on ordinary body and table-cell paragraphs, including typed row and cell content controls and modeled hyperlink runs. Source defaults precede bounded nonconditional table, paragraph and character styles, with direct components strongest. Inline run controls, revised raw payload and conditional table formatting are outside this font-materialization contract. Prepared body bytes remain authoritative through import and save/reopen. Destination paragraphs keep their existing default style. Omitted Python policy and the native default allocate distinct numbering instances, while explicit reuse_equivalent and direct import_fragment keep reuse. Native FragmentConflictPolicy::for_insert_document selects this behavior without changing Default. Boolean at values raise TypeError. Empty-source insertion is a no-op. Success publishes once and stales prior handles, while refusal retains bytes and handles. Native insertion keeps its infallible signature and panics on a staged preflight failure before publication. Its media control uses a source and destination that already share the intended media graph. Python inserted picture bytes stay with their drawings for both orders, default policy and related-part reuse turned off, through save and reopen.
 
 Paragraph.add_internal_hyperlink and first-character # URLs use the same checked bookmark provider. Ordinary URL fragments remain external links. Tooltips retain native hyperlink formatting. Document.add_heading_hyperlink stages a suitable existing or unique valid supported heading bookmark and its source link together. Supported related-story source paragraphs use their actual owner. Bookmark grammar, owner origin and revision are validated before mutation. No external relationship is allocated for internal links.
 
@@ -4510,6 +4883,31 @@ It needs no family alias, new API or rewrite of the run's document semantics.
 API inputs, exact license authorization, immutable snapshots and own-renderer
 face selection retain their contracts.
 
+## Word chart text export
+
+Rust `Document::to_html_with_diagnostics`,
+`to_html_fragment_with_diagnostics` and `to_markdown_with_diagnostics` return
+`(String, Vec<String>)`. The existing string methods return the string half.
+Python keeps its string results. The CLI HTML and Markdown convert arms publish
+the string and print diagnostics to stderr.
+
+The ordinary Rust-only `rdocx_html::ChartTable` owns optional title, category
+strings and named numeric series. `rows` returns an empty-corner header and rows
+to the longest category or series length. Missing and non-finite values are
+blank. Finite Rust Display keeps 1150 as 1150. The three `with_charts` emitters
+borrow a relationship map without adding a field to `HtmlInput`. Existing
+emitters and EPUB use an empty map. Main-body paragraph drawing order places
+chart tables after their paragraph. Table-cell, furniture and text-box charts
+remain outside this finite traversal.
+
+The Word facade projects cached data and title from the same current chart-part
+bytes. A nonempty title is a paragraph before the escaped `chart-data` table,
+with HTML class `chart-title` or a plain Markdown line. A failed read omits the
+whole table with one relationship diagnostic. Non-finite cells diagnose once
+and leave other cells intact. No diagnostic is inserted into returned text,
+and read-only export does not rewrite package bytes or retire handles. These
+three tuples do not change the separate ODT, RTF, EPUB or text-report contracts.
+
 ## Presentation semantic text export
 
 Python `Presentation.to_html` and `to_markdown` return strings with keyword
@@ -4519,6 +4917,24 @@ Detached image mode refuses with directions to an export result or save method.
 with `text: str`, `assets: tuple[tuple[str, bytes], ...]` and
 `diagnostics: tuple[str, ...]`. Detached results own their data and remain
 independent of subsequent presentation edits.
+
+Chart projection resolves the current slide's internal chart relationship and
+content type, then reads cached data and the complete-byte title from that same
+part. It does not require a workbook or a direct shape-id chart owner. Direct
+graphic frames and selected AlternateContent chart choices use one semantic
+chart method. Rich title text takes precedence over cached string text, even
+when the rich join is empty. Hidden charts remain semantic content. Tables keep
+series names, categories and finite Display values such as 1150. Sparse or
+non-finite cells are blank and diagnose once. Read failure omits the entire table
+and records its relationship id, without adding the generic non-chart omission.
+Non-chart graphic frames keep their existing omission diagnostic. HTML cells
+and titles are escaped, and Markdown cells escape pipes and syntax.
+
+The same projection feeds both ordinary methods, both option methods, both save
+wrappers and CLI semantic conversion. Word and presentation Python string
+methods expose titles and table values without acquiring a tuple or ChartTable
+class. CLI diagnostics stay on stderr. Export does not rewrite chart title,
+cache, format or raw extra-axis bytes. WASM gains no semantic export surface.
 
 `save_html` and `save_markdown` accept a path and the same keyword options,
 with `inline_images=False`, and return a tuple of diagnostics after staged
@@ -4535,6 +4951,18 @@ rendering. Semantic flags refuse on PDF and image formats. The existing
 `--force` policy applies to the whole document/asset set and never permits
 replacing the input. Diagnostics are separate from exported text. WASM gains
 no semantic export entry point.
+
+Markdown keeps one space between two non-whitespace characters as a space.
+U+0020 is not always escaped. A leading, trailing, or repeated space, and a
+space beside whitespace, is written `&#32;`. Tab and CR stay `&#9;` and `&#13;`.
+The always-escaped characters are U+005C, U+0060, U+002A, U+005F, U+005B,
+U+005D, U+003C, U+003E, U+0023, U+007C, U+007E, and U+0026. U+002D and U+002B
+are escaped only where they would start a list marker. U+003D is escaped only
+where the line would be a setext underline. U+002E and U+0029 are escaped only
+when they end an ordered-list number on that same line. The decision uses the
+assembled paragraph, including image alt text and a notes line after the
+generated `> ` prefix. An inserted hard break resets the line column and the
+digit count.
 
 ## Word checked XML owner authority
 
@@ -4573,7 +5001,55 @@ unsupported MC attribute retains its own raw value and resolved meaning,
 without freezing supported text and metadata edits on its owner. This does
 not establish a recursive schema validator or broaden ordinary import.
 
-Current paragraph, table and cell capture uses derived exact-route indexes.
+Open retains exact eager fallible owner validation but returns with dormant
+checked authority. It validates the physical story snapshots and every selected
+paragraph without building optional owner read facts or projection caches.
+Eligible plain paragraph pieces reuse the native checked direct-fragment
+producer, including its resource validation, namespace writer and paragraph
+parse. A cold empty-piece build can instead query all body paragraphs under
+one exact current-opening model, namespace and successful writer proof.
+This finite reader-invariance path admits only PPr-free, capture-free ASCII
+alphanumeric/space Text runs and the explicitly reconstructed formatting
+subset. It returns temporary text and physical run-path facts, without
+Source credit or retained dormant state. Every miss uses the existing
+per-piece producer, and warm piece reuse does not run the whole-opening proof.
+Unproved pieces retain the full owner-facts fallback.
+Dormant state has absent snapshot/removal scopes, empty
+owners/indexes and no pieces or pending pieces. Paragraph/table collections,
+section handles, pictures, stories, furniture variants, hyperlinks, revisions,
+comments and story items activate under an exclusive document borrow. Existing
+checked descendants use immutable authority. Numeric structural publication
+activates before index preparation. Unbound hyperlink removal activates after
+native record validation and before its physical-owner lookup.
+
+First activation always validates current native state afresh and prepares all
+storage before scope initialization. Initialization retains the current serial,
+origin and unique-current-epoch guard. A held epoch or outstanding preparation
+refuses activation without publishing authority. Positive dormant literal
+replacement validates its candidate, prepares the Python result, then commits
+one revision and native candidate without installing owner facts. Zero counts,
+count mismatch and refusal leave state unchanged. Direct URL/image publication
+and serialization retain their existing native errors and binding serial
+without keeping dormant facts. External stream failure does not reverse native
+normalization already performed by serialization.
+
+Whole-cell text and the five cell property setters use selected-table candidates
+when their physical owner is a qualified direct-body cell. Cell paragraph text
+resolves through paragraph_route and joins direct paragraph ordinals rather than
+raw story-item positions. First serialized tcPr relocates held paragraph and run
+routes for both absent and empty properties. Properties retain scopes. Text
+keeps the cell owner, advances its content and retires the existing CellText
+descendant scopes, including retained later paragraphs. Paragraph text retains
+its own existing policy: selected owner/properties and other cell paragraph
+scopes survive while selected content and descendants receive successors. Every fallible candidate,
+index, scope and piece preparation precedes revision commit. Exactly one aligned
+active piece is replaced after commit. Unsupported or disappearing-owner cases
+use the established checked fallback. Cached facts must contain only the root
+physical table for local publication. Nested neighboring cells use checked
+publication so equal row/cell ordinals cannot exchange held authority. Signed width truncation and wrap, border
+validation and atomic nonnegative margin validation remain field-specific.
+
+Current paragraph, table and cell capture uses derived exact-route indexes. Direct body paragraph slot lookup borrows its existing complete ContentLocation key, including fingerprint and end marker. Control-contained lookup retains its constructed key. This changes no retained owner, map insertion or publication policy.
 Body and cell-paragraph aliases are prepared from the native batch location
 projections when the owner inventory is prepared, including before candidate
 publication. The additive doc-hidden native methods paragraph_story_locations and
@@ -4657,3 +5133,261 @@ a valid new signed package. Input and existing destinations remain unchanged.
 ## Native ZIP error compatibility
 
 OpcError::Zip exposes zip::result::ZipError from the version9 dependency, replacing its zip8 type identity. Native Word and PowerPoint error families continue to carry that OPC error. This is an accepted pre-1.0 source-compatibility boundary for downstream construction, matching and From conversions. No new wrapper error or method is introduced. Python retains the existing package/error mappings.
+
+Paired textbox projection selects actual ordered source run and content-leaf pairs
+before scalar fragmentation, including Run with ignored whitespace. Inner scalar
+alignment and grouping keep those source and raw/control boundaries. Paired pieces
+use original formatting, while genuinely unpaired inserted owners keep edited
+formatting. Physical emitted provenance, logical occurrence, policy shell and
+explicit ignored Drop coverage remain distinct. Restoration consumes actual resolved
+payload and complete policy action coverage, never expected text. A checked paired
+host owns its inner field replacement. Same-instruction fields retain the original
+shell and actual edited result authority. Instruction or form changes select the
+actual complete edited field without converting a simple side. A private context
+identifies that checked source pair and interval. Scalar leaf capture alone grants
+no field publication authority.
+
+Ordinary same-instruction, same-form comparison tracks changes inside the actual
+field result owners. A simple field keeps its original root, lexical instruction,
+flags and schema-ordered fldData. An instruction or simple/complex form change
+publishes two complete standard complex spans. Clean simple source is mapped only
+when every carrier fact is consumed. Unknown carrier attributes refuse conversion.
+An unchanged or result-only field retains its existing source policy. Global Field
+equality remains form-insensitive, so local source-form dispatch precedes equality.
+Both resolved directions retain complex representation after a conversion. Each
+local witness identifies actual input story, owner, logical slot, complete physical
+span and the two allocated publication IDs. Independent acceptance and rejection
+guards inspect actual resolved owners, semantic values and source facts. Only that
+checked occurrence receives a representation exception. Other owners and facts
+retain strict comparison.
+
+Field source facts omit properties only below proved current Word paragraph and
+run owners. Foreign or unknown wrappers, fldData, prior revisions and drawing
+subtrees retain their opaque descendant bytes, including property lookalikes.
+An opaque-only edit remains observable when formatting is ignored. Physical part
+origins follow proved table, row, cell and control child boundaries through checked
+namespace closure offsets. A missing physical extent never grants a conversion
+exception. Exact unchanged owner bytes and their required namespace bindings can
+bypass detachment. Extra unused bindings do not rewrite packed field runs.
+
+The lower Field owns one ordered result paragraph behind copy-on-write storage.
+Mutable descendant access detaches that current owner before the reference escapes.
+Checked normalization prepares current result, revision text, nested cache and source
+aliases atomically. Qualified hyperlink-owned simple results retain this same ordered
+authority, including their actual accepted target and child graph. Stored legacy projections describe the last normalized owner.
+Read consumers prepare a current owner once per operation and retain actual source
+and result-slot correspondence. The native doc-hidden
+`Field::cached_result_physical_runs` borrows already parsed contiguous cache facts
+for comparison and independent graph checks. A pending scalar override retires
+original legacy facts. This physical view does not require text equality with a
+legacy scalar display. Paired opaque tab/break source and unwrapped deletion-text
+retain their established display policy through the separate consistency-filtered
+cache/segment readers. Semantic cache borrowing additionally requires significant
+typed payload, a note/comment reference, a child Field or actual run properties.
+Plain text and SoftHyphen-only caches without properties remain absent from that
+semantic view. A physical-only simple cache without a child cannot suppress a
+direct scalar clear through a coincidentally equal typed display. No Python or WASM method is added. Revision view controls tracked versus accepted
+content, while computed display precedence remains with the field consumer.
+Qualified inline controls reuse the canonical projector over already parsed facts
+for complete isolated complex spans and retain the complete physical extent in the
+existing source record. Current simple and complex virtual fields publish at their
+actual control boundary. Shared, partial, crossing and unproved shapes keep their
+previous physical representation. Resource admission checks complete composite
+source/current payload facts before construction, copying and normalization. Shared
+Field addresses retain path-sensitive admission facts to bound repeated traversal.
+
+A paired occurrence retains independent original and edited scalar domains. Action
+coverage is validated separately for each input, including original-only Preserve
+and edited-only Drop. Every emitted leaf retains physical provenance independently
+of the logical pair. Membership is selected from either actual input owner and
+slot, without inventing counterpart scalar coordinates. Assembly consumes actual
+resolved payload only. Field evidence distinguishes ordinary outer source replacement
+from admitted inner field comparison and its original source shell.
+
+Within a proved paired metadata text occurrence, Run and Word projection publishes
+an actual source-backed ignored separator when omitting it would join surviving
+content tokens during assembly. The action is Insert with its edited interval and
+original paired formatting. Existing original whitespace width, leading/trailing
+ignored units and Character policy remain unchanged. Raw events between emitted
+text edges remain barriers. An actual suffix after the right text edge stays with
+that source owner. Restoration keeps the actual terminal run and its independent
+raw suffix in place, edits only proved member children and retires earlier runs
+only after complete child coverage proves they contain no independent event.
+
+Checked raw paragraph, table and cell replacement keeps valid imported field
+namespace identity and cache content through current snapshots and save/reopen.
+Fresh whole-owner field programs use the strict instruction constructor, while
+exact unchanged owner snapshots retain their no-op behavior. Replacing only a
+run validates that run without reauthoring a retained malformed field sibling.
+Cached display is observed through the existing paragraph accepted-text and
+qualified field snapshot contracts. Cell.text retains its existing plain-run
+projection. Supported public field evaluation installs source-associated main
+cache edits before rebuilding the model, preserving retained opaque namespace
+owners through save. The detached checked-field source-pair route remains the
+public mechanism for arbitrary cache authoring through paragraph replacement.
+
+The native doc-hidden CT_Document.body_item_xml_with_ancestor_declarations
+method coordinates exact current-source field-cache publication across actual
+table, cell and control namespace ancestors. It adds no Python or WASM method.
+Checked cache updates retain exact physical path and writer-byte correspondence
+under local and global namespace declarations, including duplicate paragraphs.
+
+The lower Rust doc-hidden `ScopedWordOperation` can freeze named borrowed OPC
+inputs and borrowed current paragraphs through `with_inputs`. Construction does
+not scan or fund catalog entries. `source_part` selects a known name and validates
+its range before capture. `source_model_paragraph` rejects a foreign model before
+cloning and carries the selected frozen model facts through its normalization and
+source writer. Its returned bytes are generated correspondence, not original OPC
+proof. `ScopedWordSource` has private bytes, correspondence and an operation anchor.
+It exposes `as_bytes` but no public constructor, Clone, numeric identity or map.
+`source_paragraph`, `source_document` and consuming `finish_source` reject a
+foreign operation anchor. `source_document` returns CT_Document through the
+existing whole-document factory and retains only private positive ownership
+facts. Its private root-event ordinary facts add no whole-source ordinary or
+fieldless certificate and no Python/WASM method.
+These are native Rust coordination APIs. They add no Python or WASM method.
+
+
+The hidden Rust Word grammar factory freezes Text, Field and complete retained
+XML membership in addition to its existing inputs. Borrowed current/frozen
+writer pairs have invocation lifetime and validate membership and duplicate
+current keys before output growth. Body-item, document and note source methods
+share their substantive existing writers. Carrier composition and namespace
+closure retain the operation anchor and copied/generated correspondence.
+The separate template_replaceable_texts method selects actual Word operands
+through the parser and substantive placeholder walk, reserving aggregation
+copies before growth. source_paragraph remains a Word-parse-only entry.
+These methods expose no provenance map or model field and add no Python or
+WASM binding. Additional nested producer and Native consumer connections remain
+required by the complete grammar carrier contract.
+
+Existing glossary, doc-part and revision models expose doc-hidden retained_xml
+borrowed accessors. The control retained_run_xml accessor uses its stored
+absolute content index and returns None when there is no capture. It does not
+override the writer's original-run or pending-edit guard. These add no binding
+or public provenance type. The doc-hidden Field::stored_ordered_result also
+borrows its stored paragraph without allocation, normalization or cache
+eligibility selection. Native input freezing can inspect that physical input
+before cloning. The actual writer still decides whether it is used.
+
+The scoped prepare_template_field method preserves the Native preflight
+decision. Its bypass branch clones with inert provenance and performs no new
+Field admission. Normal preparation uses inherited operation work in the
+existing child-before-owner order. A private Weak operation anchor and
+occurrence identity can move with the returned Field. Facts stay in the
+operation and equality ignores the receipt. Only the actual selected writer
+and guarded producer correspondence can publish Word operand intervals.
+Generated summaries, untracked cache changes and foreign or expired receipts
+do not themselves supply input.
+
+The internal Native bridge also exposes scoped raw textbox literal discovery
+and replacement through the existing opaque Word operation and source types.
+Its borrowed replacement tuples include actual selected JSON dependencies for
+affected Fields. The core doc-hidden capture companion returns bytes and an
+optional numeric copy transcript from the same capture loop. These interfaces
+add no Python authoring API, public model fields or independent allowance.
+Native keeps its existing grammar, validation and publication policy.
+
+The hidden Rust repeat_source method creates one generated publication occurrence
+from an anchored ScopedWordSource. It reserves known Field-copy demand without
+renewing Original, frozen-model or Word input. It preserves bytes and private
+correspondence, retaining unknown coverage explicitly. It does not parse or
+certify the entire source, and its final Native consumers remain required.
+
+The hidden Rust with_template_word_inputs constructor takes seven parameters:
+original parts, current paragraphs, current bodies, current Text owners, current
+Fields, current raw sources and JSON data. Borrowed bodies reach physical
+control members omitted by paragraph-only read projections. Overlapping seeds
+are deduplicated by live owner identity. Catalog membership grants no work or
+correspondence to a later clone, and does not override stored-cache eligibility.
+
+The hidden source_document call may record private ordinary intervals for its
+actual qualified document/body root events only after full factory success.
+This changes no public signature or binding. It does not certify the body
+contents, infer ordinary coverage from an empty Field list or grant input work.
+
+The hidden Rust source_imported_field_xml and rewrite_imported_source methods
+use the existing opaque operation and source types. Scalar production preserves
+raw versus escaped policy and binds its exact prepaid Field buffer to one
+parent occurrence. Rewrite accepts moved scalar payloads, validates all bounds
+and anchors before growth, and pays for remaining Field copies. Empty insertion
+requires a nonempty proved enclosing event and a strictly interior coordinate.
+No Python API, public receipt type or input allowance is added. Native interior
+owner qualification and complete import forwarding remain required.
+
+Initial Native template preparation can forward captured physical paragraph
+Fields, including nested-control runs, through prepare_template_field. It
+preserves preflight and raw-preservation policy and checks the shared refusal
+state before copying. The doc-hidden install_template_prepared_fields operation
+takes a mutable paragraph, accepted run path, owned Field-slot vector and an
+optional borrowed frozen paragraph. It validates exact slots and operation
+prepared facts, owns the run clone and uses the existing shared-work installer.
+Its Revision refresh carries the successful private reader companion through
+actual cloned slots and mapped reparse. Initial lookup retains prepared-state
+and exact replaced-slot exclusions. This private bounded wiring changes no
+public constructor or Python method and
+does not complete template lineage or later package-writer forwarding.
+
+Private property observations extend no Rust, Python or WASM authoring signature.
+The existing opaque source_document/source_paragraph readers and actual mapped
+wrapper read can retain qualified selected style-event facts. None-mode property
+parsing allocates no added transcript. Whole-factory failures, overwritten
+properties and discarded projection rows do not publish those facts. Positive
+Field coverage supersedes ordinary intervals. This does not complete Native
+import ownership, writer forwarding or the remaining scoped consumer closure.
+
+
+The hidden Rust source-composition and namespace-closure methods use the
+established Field publication-copy ledger for actual known copied output.
+They grant no Original, model-current, Word or ordinary input by materializing
+a buffer. Actual retained-part, clone, prepared-root and frozen-current-record
+consumers select their existing roles explicitly. The Native main source now
+reaches the prepared grammar paragraph and row readers, including actual
+namespace-changing replay. Structural import/current-source refresh and
+returned-model companions remain separate obligations. This wiring adds no
+Python, WASM or public Rust type or method.
+
+The additive doc-hidden ScopedWordOperation::declare_source_w14_on_root method
+consumes one ScopedWordSource and returns Result<ScopedWordSource>. It is the
+36th carrier operation in the approved inventory. Its actual consumers are
+source_model_document, source_model_notes and actual Native main assembly. No binding method or
+public type is added. Its owned call, visibility and exact signature belong
+in the external client and final strict SemVer inventory. Local source tests
+are not a substitute for that final compiled caller check.
+
+The doc-hidden scoped Rust operation exposes46carrier operations and7borrowed
+accessors. The comments methods are source_model_comments, source_comments and
+source_model_comments_from_read. Initial model emission accepts the existing
+current/frozen Text, Field and raw-record pair slices. The reader accepts the
+existing opaque Source and returns CT_Comments. Returned-model emission accepts
+that comments model and its actual same-operation successful-read Source. These
+methods share the real comments headers, paragraph-ID writer and opaque child
+order. They expose no budget, Work object or provenance type, and add no Python,
+WASM or CLI operation. Foreign or unread returned-model Sources refuse. The
+external Rust compile client includes all46operations and the retained borrowed
+accessor lifetimes at the final reviewed source.
+
+
+Document.add_picture and Cell.add_picture consume the complete checked inventory returned by their owned Native support bridge. They retain exact inserted-location selection, snapshot construction, validation order and conservative atomic publication. Cell physical source selection remains checked through its existing route.
+
+
+Document.replace_text_at uses the checked current selector bridge for a bound recognized one-index paragraph, table or content control. Causal stale and foreign checks run first. Constructed and numeric items, unknown or unsupported kinds and nested paths keep the original resolver and error ordering. Current source discovery never trusts a stored inventory fingerprint.
+
+
+The Native Cell literal replacement route shares its actual initial main output between direct-body selection and physical-cell qualification only under the existing exact current writer proof. Related discovery, optional legacy fallback and postflush source admission remain unchanged. No retained binding fingerprint supplies this qualification, and ordinary writer equality grants no scoped input credit.
+
+
+Reply anchoring reuses one successfully qualified source/item for completely equal endpoints. Different endpoints remain independently qualified. After anchoring, complete fresh story discovery and selected-owner qualification share the same actual source buffers. Full unrelated-source errors precede selection. Both transaction staging boundaries and all source/resource checks remain, without an owned public reply bridge or fresh input credit.
+
+
+Cell.add_picture resolves an ordinary direct-body table cell through the shared current-source Native qualifier. Its doc-hidden support method is also used by Native Cell replacement. Current typed table identity, writer proof, physical source owner and complete related discovery remain authoritative. Related and nested binding routes retain their full resolver. Held formatting changes never reuse a stored cell fingerprint.
+
+
+The existing debug-only transaction provenance map includes phase-zero outputs as ordinary-prefixed producer names. Its six-slot work counters and scoped/picture labels retain their existing meanings. This additive diagnostic observes actual initial binding source work without hiding ordinary work or changing shipping behavior.
+
+
+The shared unpublished binding support allocator exposes concrete Global, Local and Replacement preparation modes. Existing global/local entrypoints preserve their contracts. Only Word Conservative splice and general publication select Replacement. It retains document successor index zero and every declared birth, reserves all original owner-successor generation positions, and retires the same validated states at commit. It returns no unused owner successors. First invalidation causes, serials, stale and overflow checks remain unchanged. PowerPoint keeps its required successors.
+
+The private debug transaction provenance map reports actual ScopeGeneration creations as allphase.scope_generation_allocations and their actual non-document-entry owner-successor subset as allphase.scope_owner_successor_allocations. Each row records calls and exact value payload bytes, excluding Arc headers and allocator overhead. The subset excludes retired index zero, regardless of scope kind. Existing six-slot staging and eight-slot splice units are unchanged. Shipping builds carry neither diagnostic.
+
+Debug transaction output rows allphase.modeled_namespace_scope_copies count actual deep vector copies and the UTF8 name/URI payload bytes copied, excluding allocator/container overhead. They follow the existing staging reference pause and introduce no pause. Row allphase.word_piece_model_clones counts actual model clone sites and BodyContent value payload bytes, excluding nested heap traffic. Both are diagnostics only. Modeled owner scanning shares immutable namespace vectors without skipping attributes, declarations or any parser/source/resource check. No stable Python export or stub changes.

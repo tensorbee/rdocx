@@ -1,5 +1,6 @@
 //! Table elements: `CT_Tbl`, `CT_Row`, `CT_Tc` and related types.
 
+use crate::text::XmlWriteRole;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
@@ -13,7 +14,7 @@ use crate::numbering::{
 };
 use crate::properties::{
     CT_Shd, get_word_val_attr, is_word_attribute, is_word_element, parse_integer_measurement,
-    parse_word_toggle, write_toggle,
+    parse_word_toggle,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::revision::{CT_Revision, RevisionKind};
@@ -22,9 +23,69 @@ use crate::shared::ST_Border;
 use crate::shared::ST_Jc;
 use crate::text::{
     CT_P, ROOT_ATTRIBUTES_POSITION, capture_root_attribute_record, is_root_attribute_record,
-    push_root_attribute_record,
 };
 use crate::units::Twips;
+
+/// Concrete scalar kernels used by ordinary constructors and source facts.
+#[derive(Clone, Copy)]
+pub(crate) enum TableScalar {
+    Measurement,
+    Unsigned,
+    PositiveSpan,
+    Merge,
+}
+impl TableScalar {
+    pub(crate) fn for_names(element: &[u8], attribute: &[u8]) -> Option<Self> {
+        match (element, attribute) {
+            (
+                b"tblW" | b"tblInd" | b"tblCellSpacing" | b"tcW" | b"wBefore" | b"wAfter"
+                | b"gridCol",
+                b"w",
+            )
+            | (
+                b"tblpPr",
+                b"leftFromText" | b"rightFromText" | b"topFromText" | b"bottomFromText" | b"tblpX"
+                | b"tblpY",
+            )
+            | (b"trHeight", b"val") => Some(Self::Measurement),
+            (
+                b"tblStyleRowBandSize" | b"tblStyleColBandSize" | b"gridBefore" | b"gridAfter",
+                b"val",
+            ) => Some(Self::Unsigned),
+            (b"gridSpan", b"val") => Some(Self::PositiveSpan),
+            (b"vMerge", b"val") => Some(Self::Merge),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn unsigned(self, value: &str) -> Result<u32> {
+        let value = value.parse()?;
+        if matches!(self, Self::PositiveSpan) && value == 0 {
+            return Err(OxmlError::InvalidValue(
+                "w:gridSpan must be positive".to_owned(),
+            ));
+        }
+        Ok(value)
+    }
+    pub(crate) fn merge(value: Option<&str>) -> Result<VMerge> {
+        match value {
+            Some("restart") => Ok(VMerge::Restart),
+            Some("continue") | None => Ok(VMerge::Continue),
+            Some(value) => Err(OxmlError::InvalidValue(format!(
+                "invalid w:vMerge value {value}"
+            ))),
+        }
+    }
+    pub(crate) fn decode(self, element: &[u8], attribute: &[u8], value: &str) -> Result<()> {
+        match self {
+            Self::Measurement => {
+                parse_integer_measurement::<i32>(element, attribute, value).map(|_| ())
+            }
+            Self::Unsigned | Self::PositiveSpan => self.unsigned(value).map(|_| ()),
+            Self::Merge => Self::merge(Some(value)).map(|_| ()),
+        }
+    }
+}
 
 pub(crate) const MAX_RECOGNIZED_TABLE_NESTING: usize = 32;
 /// Known sequence boundaries for the concrete table, row and cell owners.
@@ -164,11 +225,16 @@ fn write_extras_at<W: std::io::Write>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Preserve the actual boundary and inherited emission contexts.
 fn write_boundary<W: std::io::Write>(
     writer: &mut Writer<W>,
     extra_xml: &[(usize, Vec<u8>)],
     controls: &[(usize, usize, CT_Sdt)],
     pos: usize,
+    role: XmlWriteRole,
+    source_context: Option<&[(&str, &str)]>,
+    work: &mut crate::text::WordOperationWork,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let extras = extra_xml
         .iter()
@@ -180,7 +246,7 @@ fn write_boundary<W: std::io::Write>(
             .iter()
             .filter(|(at, before, _)| *at == pos && *before == raw_before)
         {
-            control.to_xml(writer)?;
+            control.write_xml_role_in(writer, role, source_context, work, emission)?;
         }
         if let Some(raw) = extras.get(raw_before) {
             writer.get_mut().write_all(raw)?;
@@ -285,29 +351,58 @@ impl CT_TblBorders {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        writer.write_event(Event::Start(BytesStart::new(tag)))?;
-        if let Some(ref e) = self.top {
-            e.to_xml(writer, "w:top")?;
-        }
-        if let Some(ref e) = self.left {
-            e.to_xml(writer, "w:left")?;
-        }
-        if let Some(ref e) = self.bottom {
-            e.to_xml(writer, "w:bottom")?;
-        }
-        if let Some(ref e) = self.right {
-            e.to_xml(writer, "w:right")?;
-        }
-        if let Some(ref e) = self.inside_h {
-            e.to_xml(writer, "w:insideH")?;
-        }
-        if let Some(ref e) = self.inside_v {
-            e.to_xml(writer, "w:insideV")?;
+        self.write_xml_core(writer, tag, XmlWriteRole::Publication, None, None)
+    }
+
+    fn write_xml_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let source = role == XmlWriteRole::Source;
+        let mut root = crate::text::FieldXmlStart::new(tag, emission)?;
+        let prefix = if source {
+            Some(root.qualify(&[], role, source_context)?)
+        } else {
+            None
+        };
+        root.write(writer, false)?;
+        for (local, qualified, edge) in [
+            ("top", "w:top", &self.top),
+            ("left", "w:left", &self.left),
+            ("bottom", "w:bottom", &self.bottom),
+            ("right", "w:right", &self.right),
+            ("insideH", "w:insideH", &self.inside_h),
+            ("insideV", "w:insideV", &self.inside_v),
+        ] {
+            if let Some(edge) = edge {
+                edge.write_xml_in(
+                    writer,
+                    if source { local } else { qualified },
+                    role,
+                    source_context,
+                    emission,
+                )?;
+            }
         }
         for raw in &self.extra_xml {
             writer.get_mut().write_all(raw)?;
         }
-        writer.write_event(Event::End(BytesEnd::new(tag)))?;
+        if let Some(prefix) = prefix {
+            let local = tag.split_once(':').map_or(tag, |(_, local)| local);
+            if let Some(emission) = emission {
+                emission.write_word_end(writer, &prefix, local)?;
+            } else {
+                writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:{local}"))))?;
+            }
+        } else if let Some(emission) = emission {
+            emission.write_end_name(writer, tag)?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(tag)))?;
+        }
         Ok(())
     }
 
@@ -395,35 +490,49 @@ impl CT_TblCellMar {
     }
 
     fn to_xml_with_tag<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        writer.write_event(Event::Start(BytesStart::new(tag)))?;
+        self.write_xml_in(writer, tag, None)
+    }
+
+    fn write_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        crate::text::FieldXmlStart::new(tag, emission)?.write(writer, false)?;
 
         fn write_edge<W: std::io::Write>(
             writer: &mut Writer<W>,
             tag: &str,
             val: Twips,
+            emission: Option<&crate::text::FieldXmlEmission>,
         ) -> Result<()> {
             let mut buf = itoa::Buffer::new();
-            let mut e = BytesStart::new(tag);
-            e.push_attribute(("w:w", buf.format(val.0)));
-            e.push_attribute(("w:type", "dxa"));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::new(tag, emission)?;
+            e.push("w:w", buf.format(val.0))?;
+            e.push("w:type", "dxa")?;
+            e.write(writer, true)?;
             Ok(())
         }
 
         if let Some(t) = self.top {
-            write_edge(writer, "w:top", t)?;
+            write_edge(writer, "w:top", t, emission)?;
         }
         if let Some(l) = self.left {
-            write_edge(writer, "w:left", l)?;
+            write_edge(writer, "w:left", l, emission)?;
         }
         if let Some(b) = self.bottom {
-            write_edge(writer, "w:bottom", b)?;
+            write_edge(writer, "w:bottom", b, emission)?;
         }
         if let Some(r) = self.right {
-            write_edge(writer, "w:right", r)?;
+            write_edge(writer, "w:right", r, emission)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new(tag)))?;
+        if let Some(emission) = emission {
+            emission.write_end_name(writer, tag)?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(tag)))?;
+        }
         Ok(())
     }
 }
@@ -462,7 +571,7 @@ impl CT_TblWidth {
     }
 
     pub fn from_xml_attrs(e: &BytesStart) -> Result<Self> {
-        let word_prefixes = word_prefixes_at(e, &["w".to_owned()])?;
+        let word_prefixes = word_prefixes_at(e, &["w".to_owned()])?.into_owned();
         Self::from_xml_attrs_with_prefixes(e, &word_prefixes)
     }
 
@@ -485,11 +594,27 @@ impl CT_TblWidth {
     }
 
     pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
+        self.write_xml_core(writer, tag, XmlWriteRole::Publication, None, None)
+    }
+
+    fn write_xml_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        tag: &str,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut e = crate::text::FieldXmlStart::new(tag, emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            e.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
         let mut buf = itoa::Buffer::new();
-        let mut e = BytesStart::new(tag);
-        e.push_attribute(("w:w", buf.format(self.w)));
-        e.push_attribute(("w:type", self.width_type.as_str()));
-        writer.write_event(Event::Empty(e))?;
+        e.push_word(&prefix, "w", buf.format(self.w))?;
+        e.push_word(&prefix, "type", self.width_type.as_str())?;
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -673,37 +798,63 @@ impl CT_TblPPr {
     }
 
     pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut start = crate::text::FieldXmlStart::new("w:tblpPr", emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+
         let mut buf = itoa::Buffer::new();
-        let mut e = BytesStart::new("w:tblpPr");
+        let mut e = start;
         for (name, value) in [
-            ("w:leftFromText", self.left_from_text),
-            ("w:rightFromText", self.right_from_text),
-            ("w:topFromText", self.top_from_text),
-            ("w:bottomFromText", self.bottom_from_text),
+            ("leftFromText", self.left_from_text),
+            ("rightFromText", self.right_from_text),
+            ("topFromText", self.top_from_text),
+            ("bottomFromText", self.bottom_from_text),
         ] {
             if let Some(value) = value {
-                e.push_attribute((name, buf.format(value.0)));
+                e.push_word(&prefix, name, buf.format(value.0))?;
             }
         }
         if let Some(anchor) = self.horz_anchor {
-            e.push_attribute(("w:horzAnchor", anchor.to_str()));
+            e.push_word(&prefix, "horzAnchor", anchor.to_str())?;
         }
         if let Some(anchor) = self.vert_anchor {
-            e.push_attribute(("w:vertAnchor", anchor.to_str()));
+            e.push_word(&prefix, "vertAnchor", anchor.to_str())?;
         }
         if let Some(spec) = self.tbl_p_x_spec {
-            e.push_attribute(("w:tblpXSpec", spec.to_str()));
+            e.push_word(&prefix, "tblpXSpec", spec.to_str())?;
         }
         if let Some(value) = self.tbl_p_x {
-            e.push_attribute(("w:tblpX", buf.format(value.0)));
+            e.push_word(&prefix, "tblpX", buf.format(value.0))?;
         }
         if let Some(spec) = self.tbl_p_y_spec {
-            e.push_attribute(("w:tblpYSpec", spec.to_str()));
+            e.push_word(&prefix, "tblpYSpec", spec.to_str())?;
         }
         if let Some(value) = self.tbl_p_y {
-            e.push_attribute(("w:tblpY", buf.format(value.0)));
+            e.push_word(&prefix, "tblpY", buf.format(value.0))?;
         }
-        writer.write_event(Event::Empty(e))?;
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -851,9 +1002,17 @@ impl CT_TblLook {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        let mut e = BytesStart::new("w:tblLook");
+        self.write_xml_in(writer, None)
+    }
+
+    fn write_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut e = crate::text::FieldXmlStart::new("w:tblLook", emission)?;
         if let Some(ref val) = self.val {
-            e.push_attribute(("w:val", val.as_str()));
+            e.push("w:val", val.as_str())?;
         }
         for (name, value) in [
             ("w:firstRow", self.first_row),
@@ -864,10 +1023,10 @@ impl CT_TblLook {
             ("w:noVBand", self.no_v_band),
         ] {
             if let Some(value) = value {
-                e.push_attribute((name, ooxml_bool_str(value)));
+                e.push(name, ooxml_bool_str(value))?;
             }
         }
-        writer.write_event(Event::Empty(e))?;
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -922,11 +1081,11 @@ impl CT_TblPr {
                         pr.description = unescaped_word_val_attr(e, &prefixes)?;
                     } else if is_word_element(name.as_ref(), b"tblStyleRowBandSize", &prefixes) {
                         if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            pr.row_band_size = Some(val.parse()?);
+                            pr.row_band_size = Some(TableScalar::Unsigned.unsigned(&val)?);
                         }
                     } else if is_word_element(name.as_ref(), b"tblStyleColBandSize", &prefixes) {
                         if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            pr.column_band_size = Some(val.parse()?);
+                            pr.column_band_size = Some(TableScalar::Unsigned.unsigned(&val)?);
                         }
                     } else if is_word_element(name.as_ref(), b"tblW", &prefixes) {
                         pr.width = Some(CT_TblWidth::from_xml_attrs_with_prefixes(e, &prefixes)?);
@@ -1046,111 +1205,147 @@ impl CT_TblPr {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_event(Event::Start(BytesStart::new("w:tblPr")))?;
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut root = crate::text::FieldXmlStart::new("w:tblPr", emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            root.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+        root.write(writer, false)?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
         if let Some(ref style_id) = self.style_id {
-            let mut e = BytesStart::new("w:tblStyle");
-            e.push_attribute(("w:val", style_id.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblStyle", emission)?;
+            e.push_word(&prefix, "val", style_id.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 1)?;
         if let Some(position) = &self.float_position {
-            position.write_xml(writer)?;
+            position.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 2)?;
         if let Some(overlap) = self.overlap {
-            let mut e = BytesStart::new("w:tblOverlap");
-            e.push_attribute(("w:val", overlap.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblOverlap", emission)?;
+            e.push_word(&prefix, "val", overlap.to_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 3)?;
         if let Some(bidi) = self.bidi_visual {
-            write_toggle(writer, "w:bidiVisual", bidi)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "bidiVisual",
+                bidi,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         write_extras_at(writer, &self.extra_xml, 4)?;
         if let Some(size) = self.row_band_size {
             let mut buffer = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:tblStyleRowBandSize");
-            e.push_attribute(("w:val", buffer.format(size)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblStyleRowBandSize", emission)?;
+            e.push_word(&prefix, "val", buffer.format(size))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 5)?;
         if let Some(size) = self.column_band_size {
             let mut buffer = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:tblStyleColBandSize");
-            e.push_attribute(("w:val", buffer.format(size)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblStyleColBandSize", emission)?;
+            e.push_word(&prefix, "val", buffer.format(size))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 6)?;
         if let Some(ref width) = self.width {
-            width.write_xml(writer, "w:tblW")?;
+            width.write_xml_core(writer, "w:tblW", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 7)?;
         if let Some(jc) = self.jc {
-            let mut e = BytesStart::new("w:jc");
-            e.push_attribute(("w:val", jc.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "jc", emission)?;
+            e.push_word(&prefix, "val", jc.to_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 8)?;
         if let Some(ref spacing) = self.cell_spacing {
-            spacing.write_xml(writer, "w:tblCellSpacing")?;
+            spacing.write_xml_core(writer, "w:tblCellSpacing", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 9)?;
         if let Some(ref indent) = self.indent {
-            indent.write_xml(writer, "w:tblInd")?;
+            indent.write_xml_core(writer, "w:tblInd", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 10)?;
         if let Some(ref borders) = self.borders
             && !borders.is_empty()
         {
-            borders.to_xml(writer, "w:tblBorders")?;
+            borders.write_xml_core(writer, "w:tblBorders", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 11)?;
         if let Some(ref shd) = self.shading {
-            shd.write_xml(writer, "w:shd")?;
+            if role == XmlWriteRole::Source {
+                shd.write_xml_in(writer, "shd", role, source_context, emission)?;
+            } else {
+                shd.write_xml_in(writer, "w:shd", role, source_context, emission)?;
+            }
         }
 
         write_extras_at(writer, &self.extra_xml, 12)?;
         if let Some(ref layout) = self.layout {
-            let mut e = BytesStart::new("w:tblLayout");
-            e.push_attribute(("w:type", layout.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblLayout", emission)?;
+            e.push_word(&prefix, "type", layout.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 13)?;
         if let Some(ref cell_margin) = self.cell_margin {
-            cell_margin.to_xml(writer)?;
+            cell_margin.write_xml_in(writer, "w:tblCellMar", emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 14)?;
         if let Some(ref look) = self.look {
-            look.to_xml(writer)?;
+            look.write_xml_in(writer, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 15)?;
         if let Some(ref caption) = self.caption {
-            let mut e = BytesStart::new("w:tblCaption");
-            e.push_attribute(("w:val", caption.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblCaption", emission)?;
+            e.push_word(&prefix, "val", caption.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 16)?;
         if let Some(ref description) = self.description {
-            let mut e = BytesStart::new("w:tblDescription");
-            e.push_attribute(("w:val", description.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "tblDescription", emission)?;
+            e.push_word(&prefix, "val", description.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 17)?;
@@ -1159,10 +1354,14 @@ impl CT_TblPr {
             writer.get_mut().write_all(raw)?;
         }
         if let Some(change) = &self.change {
-            change.write_xml(writer)?;
+            change.write_xml_with_role_override(writer, None, role, source_context, emission)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:tblPr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tblPr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tblPr"))))?;
+        }
         Ok(())
     }
 }
@@ -1303,13 +1502,39 @@ impl CT_TblGrid {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut start = crate::text::FieldXmlStart::new("w:tblGrid", emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+
         let mut buf = itoa::Buffer::new();
-        writer.write_event(Event::Start(BytesStart::new("w:tblGrid")))?;
+        start.write(writer, false)?;
 
         for col in &self.columns {
-            let mut e = BytesStart::new("w:gridCol");
-            e.push_attribute(("w:w", buf.format(col.width.0)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "gridCol", emission)?;
+            e.push_word(&prefix, "w", buf.format(col.width.0))?;
+            e.write(writer, true)?;
         }
 
         for raw in &self.extra_xml {
@@ -1319,7 +1544,11 @@ impl CT_TblGrid {
             writer.get_mut().write_all(raw)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:tblGrid")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tblGrid")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tblGrid"))))?;
+        }
         Ok(())
     }
 }
@@ -1431,11 +1660,11 @@ impl CT_TrPr {
                         }
                     } else if is_word_element(name.as_ref(), b"gridBefore", &prefixes) {
                         pr.grid_before = get_word_val_attr(e, &prefixes)?
-                            .map(|value| value.parse())
+                            .map(|value| TableScalar::Unsigned.unsigned(&value))
                             .transpose()?;
                     } else if is_word_element(name.as_ref(), b"gridAfter", &prefixes) {
                         pr.grid_after = get_word_val_attr(e, &prefixes)?
-                            .map(|value| value.parse())
+                            .map(|value| TableScalar::Unsigned.unsigned(&value))
                             .transpose()?;
                     } else if is_word_element(name.as_ref(), b"wBefore", &prefixes) {
                         pr.width_before =
@@ -1526,83 +1755,131 @@ impl CT_TrPr {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let _source_scope =
+            (role == XmlWriteRole::Source).then(|| crate::text::root_binding_scope(0));
         if self.is_empty() {
             return Ok(());
         }
 
-        writer.write_event(Event::Start(BytesStart::new("w:trPr")))?;
+        let mut root = crate::text::FieldXmlStart::new("w:trPr", emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            root.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+        root.write(writer, false)?;
 
         // cnfStyle comes first in the schema sequence for both trPr and tcPr.
         write_extras_at(writer, &self.extra_xml, 0)?;
         if let Some(ref cnf) = self.cnf_style {
-            let mut e = BytesStart::new("w:cnfStyle");
-            e.push_attribute(("w:val", cnf.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "cnfStyle", emission)?;
+            e.push_word(&prefix, "val", cnf.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 1)?;
         write_extras_at(writer, &self.extra_xml, 2)?;
         if let Some(grid_before) = self.grid_before {
             let mut buffer = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:gridBefore");
-            e.push_attribute(("w:val", buffer.format(grid_before)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "gridBefore", emission)?;
+            e.push_word(&prefix, "val", buffer.format(grid_before))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 3)?;
         if let Some(grid_after) = self.grid_after {
             let mut buffer = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:gridAfter");
-            e.push_attribute(("w:val", buffer.format(grid_after)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "gridAfter", emission)?;
+            e.push_word(&prefix, "val", buffer.format(grid_after))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 4)?;
         if let Some(ref width) = self.width_before {
-            width.write_xml(writer, "w:wBefore")?;
+            width.write_xml_core(writer, "w:wBefore", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 5)?;
         if let Some(ref width) = self.width_after {
-            width.write_xml(writer, "w:wAfter")?;
+            width.write_xml_core(writer, "w:wAfter", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 6)?;
         if let Some(cant_split) = self.cant_split {
-            write_toggle(writer, "w:cantSplit", cant_split)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "cantSplit",
+                cant_split,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         write_extras_at(writer, &self.extra_xml, 7)?;
         if let Some(height) = self.height {
             let mut buf = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:trHeight");
-            e.push_attribute(("w:val", buf.format(height.0)));
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "trHeight", emission)?;
+            e.push_word(&prefix, "val", buf.format(height.0))?;
             if let Some(ref rule) = self.height_rule {
-                e.push_attribute(("w:hRule", rule.as_str()));
+                e.push_word(&prefix, "hRule", rule.as_str())?;
             }
-            writer.write_event(Event::Empty(e))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 8)?;
         if let Some(header) = self.header {
-            write_toggle(writer, "w:tblHeader", header)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "tblHeader",
+                header,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         write_extras_at(writer, &self.extra_xml, 9)?;
         if let Some(ref spacing) = self.cell_spacing {
-            spacing.write_xml(writer, "w:tblCellSpacing")?;
+            spacing.write_xml_core(writer, "w:tblCellSpacing", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 10)?;
         if let Some(jc) = self.jc {
-            let mut e = BytesStart::new("w:jc");
-            e.push_attribute(("w:val", jc.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "jc", emission)?;
+            e.push_word(&prefix, "val", jc.to_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 11)?;
         if let Some(hidden) = self.hidden {
-            write_toggle(writer, "w:hidden", hidden)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "hidden",
+                hidden,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         write_extras_at(writer, &self.extra_xml, 12)?;
@@ -1612,7 +1889,7 @@ impl CT_TrPr {
             .iter()
             .filter(|revision| revision.kind() == RevisionKind::Insertion)
         {
-            revision.write_xml(writer)?;
+            revision.write_xml_with_role_override(writer, None, role, source_context, emission)?;
         }
         write_extras_at(writer, &self.extra_xml, 13)?;
         self.write_revision_xml_at(writer, 13)?;
@@ -1621,7 +1898,7 @@ impl CT_TrPr {
             .iter()
             .filter(|revision| revision.kind() == RevisionKind::Deletion)
         {
-            revision.write_xml(writer)?;
+            revision.write_xml_with_role_override(writer, None, role, source_context, emission)?;
         }
         if self.revision_xml_positions.len() != self.revision_xml.len() {
             for raw in &self.revision_xml {
@@ -1634,12 +1911,16 @@ impl CT_TrPr {
                 RevisionKind::Insertion | RevisionKind::Deletion
             )
         }) {
-            revision.write_xml(writer)?;
+            revision.write_xml_with_role_override(writer, None, role, source_context, emission)?;
         }
         write_extras_at(writer, &self.extra_xml, 14)?;
         write_extras_at(writer, &self.extra_xml, 15)?;
 
-        writer.write_event(Event::End(BytesEnd::new("w:trPr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "trPr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:trPr"))))?;
+        }
         Ok(())
     }
 
@@ -1867,26 +2148,15 @@ impl CT_TcPr {
             pr.width = Some(CT_TblWidth::from_xml_attrs_with_prefixes(e, word_prefixes)?);
         } else if is_word_element(name.as_ref(), b"gridSpan", word_prefixes) {
             if let Some(val) = get_word_val_attr(e, word_prefixes)? {
-                let span: u32 = val.parse()?;
-                if span == 0 {
-                    return Err(OxmlError::InvalidValue(
-                        "w:gridSpan must be positive".to_owned(),
-                    ));
-                }
+                let span = TableScalar::PositiveSpan.unsigned(&val)?;
                 pr.grid_span = Some(span);
             }
         } else if is_word_element(name.as_ref(), b"hMerge", word_prefixes) {
             pr.h_merge = Some(get_word_val_attr(e, word_prefixes)?.unwrap_or_default());
         } else if is_word_element(name.as_ref(), b"vMerge", word_prefixes) {
-            pr.v_merge = Some(match get_word_val_attr(e, word_prefixes)?.as_deref() {
-                Some("restart") => VMerge::Restart,
-                Some("continue") | None => VMerge::Continue,
-                Some(value) => {
-                    return Err(OxmlError::InvalidValue(format!(
-                        "invalid w:vMerge value {value}"
-                    )));
-                }
-            });
+            pr.v_merge = Some(TableScalar::merge(
+                get_word_val_attr(e, word_prefixes)?.as_deref(),
+            )?);
         } else if is_word_element(name.as_ref(), b"vAlign", word_prefixes) {
             if let Some(val) = get_word_val_attr(e, word_prefixes)? {
                 pr.v_align = Some(ST_VerticalJc::from_str(&val));
@@ -1919,22 +2189,48 @@ impl CT_TcPr {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        self.write_xml_role_in(writer, role, source_context, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.is_empty() {
             return Ok(());
         }
 
-        writer.write_event(Event::Start(BytesStart::new("w:tcPr")))?;
+        let mut start = crate::text::FieldXmlStart::new("w:tcPr", emission)?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            "w".to_owned()
+        };
+
+        start.write(writer, false)?;
 
         write_extras_at(writer, &self.extra_xml, 0)?;
         if let Some(ref cnf) = self.cnf_style {
-            let mut e = BytesStart::new("w:cnfStyle");
-            e.push_attribute(("w:val", cnf.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "cnfStyle", emission)?;
+            e.push_word(&prefix, "val", cnf.as_str())?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 1)?;
         if let Some(ref width) = self.width {
-            width.write_xml(writer, "w:tcW")?;
+            width.write_xml_core(writer, "w:tcW", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 2)?;
@@ -1942,65 +2238,76 @@ impl CT_TcPr {
             && grid_span > 1
         {
             let mut buf = itoa::Buffer::new();
-            let mut e = BytesStart::new("w:gridSpan");
-            e.push_attribute(("w:val", buf.format(grid_span)));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "gridSpan", emission)?;
+            e.push_word(&prefix, "val", buf.format(grid_span))?;
+            e.write(writer, true)?;
         }
 
         // Unmodelled w:hMerge is preserved at boundary 3.
         write_extras_at(writer, &self.extra_xml, 3)?;
         if let Some(h_merge) = &self.h_merge {
-            let mut e = BytesStart::new("w:hMerge");
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "hMerge", emission)?;
             if !h_merge.is_empty() {
-                e.push_attribute(("w:val", h_merge.as_str()));
+                e.push_word(&prefix, "val", h_merge.as_str())?;
             }
-            writer.write_event(Event::Empty(e))?;
+            e.write(writer, true)?;
         }
         write_extras_at(writer, &self.extra_xml, 4)?;
         if let Some(ref vm) = self.v_merge {
-            let mut e = BytesStart::new("w:vMerge");
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "vMerge", emission)?;
             match vm {
-                VMerge::Restart => e.push_attribute(("w:val", "restart")),
+                VMerge::Restart => e.push_word(&prefix, "val", "restart")?,
                 VMerge::Continue => {} // empty element
             }
-            writer.write_event(Event::Empty(e))?;
+            e.write(writer, true)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 5)?;
         if let Some(ref borders) = self.borders
             && !borders.is_empty()
         {
-            borders.to_xml(writer, "w:tcBorders")?;
+            borders.write_xml_core(writer, "w:tcBorders", role, source_context, emission)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 6)?;
         if let Some(ref shd) = self.shading {
-            shd.write_xml(writer, "w:shd")?;
+            if role == XmlWriteRole::Source {
+                shd.write_xml_in(writer, "shd", role, source_context, emission)?;
+            } else {
+                shd.write_xml_in(writer, "w:shd", role, source_context, emission)?;
+            }
         }
 
         write_extras_at(writer, &self.extra_xml, 7)?;
         if let Some(no_wrap) = self.no_wrap {
-            write_toggle(writer, "w:noWrap", no_wrap)?;
+            crate::run_properties::write_word_toggle(
+                writer,
+                "noWrap",
+                no_wrap,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         write_extras_at(writer, &self.extra_xml, 8)?;
         if let Some(ref cell_margin) = self.cell_margin {
-            cell_margin.to_xml_with_tag(writer, "w:tcMar")?;
+            cell_margin.write_xml_in(writer, "w:tcMar", emission)?;
         }
         write_extras_at(writer, &self.extra_xml, 9)?;
         if let Some(ref td) = self.text_direction {
-            let mut e = BytesStart::new("w:textDirection");
-            e.push_attribute(("w:val", td.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "textDirection", emission)?;
+            e.push_word(&prefix, "val", td.as_str())?;
+            e.write(writer, true)?;
         }
 
         // Unmodelled w:tcFitText is preserved at boundary 10.
         write_extras_at(writer, &self.extra_xml, 10)?;
         write_extras_at(writer, &self.extra_xml, 11)?;
         if let Some(ref va) = self.v_align {
-            let mut e = BytesStart::new("w:vAlign");
-            e.push_attribute(("w:val", va.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            let mut e = crate::text::FieldXmlStart::word(&prefix, "vAlign", emission)?;
+            e.push_word(&prefix, "val", va.to_str())?;
+            e.write(writer, true)?;
         }
 
         // The remaining standard Word children occupy boundaries 12 to 17.
@@ -2008,7 +2315,11 @@ impl CT_TcPr {
             write_extras_at(writer, &self.extra_xml, boundary)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:tcPr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tcPr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tcPr"))))?;
+        }
         Ok(())
     }
 
@@ -2099,7 +2410,8 @@ impl CT_Tc {
     /// Parse one namespace-complete checked tc owner before staging.
     #[doc(hidden)]
     pub fn from_xml_fragment_checked(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &[], None)?;
+        let admitted = crate::document::admit_word_source(xml, &[], None, None)?;
+        let mut controls = admitted.controls();
         crate::text::validate_word_owner_fragment(xml, b"tc", true)?;
         let mut reader = Reader::from_reader(xml);
         loop {
@@ -2113,6 +2425,7 @@ impl CT_Tc {
                         &bindings,
                         0,
                         Some(&root),
+                        Some(&mut controls),
                     )?;
                     model.retain_root_attributes(&root, &prefixes)?;
                     return Ok(model);
@@ -2177,26 +2490,20 @@ impl CT_Tc {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
-        crate::document::admit_word_reader(
+        let admitted = crate::document::admit_word_reader(
             reader,
             &["w".to_owned()],
             b"tc",
             Some(crate::namespace::W_NS),
         )?;
-        Self::from_xml_with_prefixes_and_owner_bindings(reader, &["w".to_string()], &[])
-    }
-
-    pub(crate) fn from_xml_with_prefixes_and_owner_bindings(
-        reader: &mut Reader<&[u8]>,
-        word_prefixes: &[String],
-        owner_bindings: &[(String, String)],
-    ) -> Result<Self> {
+        let mut controls = admitted.controls();
         Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
             reader,
-            word_prefixes,
-            owner_bindings,
+            &["w".to_string()],
+            &[],
             0,
             None,
+            Some(&mut controls),
         )
     }
 
@@ -2206,7 +2513,38 @@ impl CT_Tc {
         owner_bindings: &[(String, String)],
         table_depth: usize,
         root: Option<&BytesStart<'_>>,
+        control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            table_depth,
+            root,
+            control_facts,
+            None,
+        )
+    }
+
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+        root: Option<&BytesStart<'_>>,
+        mut control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
+        destination_maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    ) -> Result<Self> {
+        let mut pending_maps =
+            destination_maps
+                .as_ref()
+                .map(|maps| crate::text::WordBlockSourceMaps {
+                    collect_word_texts: maps.collect_word_texts,
+                    collect_properties: maps.collect_properties,
+                    ..Default::default()
+                });
+        let mut source_maps = pending_maps.as_mut();
+
         let raw_owner_bindings =
             crate::text::bindings_outside_retained_root(owner_bindings, root, word_prefixes)?;
         let mut properties = None;
@@ -2215,6 +2553,7 @@ impl CT_Tc {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = reader.buffer_position();
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
@@ -2229,27 +2568,121 @@ impl CT_Tc {
                             &property_bindings,
                         )?);
                     } else if is_word_element(name.as_ref(), b"p", &prefixes) {
-                        content.push(CellContent::Paragraph(
-                            CT_P::from_xml_with_prefixes_and_root(reader, &prefixes, Some(e))?,
-                        ));
+                        let mut maps = source_maps.as_ref().map(|_| Vec::new());
+                        let collect_word = source_maps
+                            .as_ref()
+                            .is_some_and(|maps| maps.collect_word_texts);
+                        let mut word_texts = Vec::new();
+                        let collect_properties = source_maps
+                            .as_ref()
+                            .is_some_and(|maps| maps.collect_properties);
+                        let mut ordinary = Vec::new();
+                        let mut nested = crate::text::WordBlockSourceMaps::default();
+                        let paragraph = CT_P::from_xml_with_read_output(
+                            reader,
+                            &prefixes,
+                            Some(e),
+                            control_facts.as_deref_mut(),
+                            crate::text::WordParagraphReadOutput {
+                                extra_maps: maps.as_mut(),
+                                text_facts: collect_word.then_some(&mut word_texts),
+                                ordinary: collect_properties.then_some(&mut ordinary),
+                                nested_maps: collect_word.then_some(&mut nested),
+                                ..Default::default()
+                            },
+                        )?;
+                        let word_texts = collect_word.then(|| {
+                            control_facts
+                                .as_deref()
+                                .and_then(|cursor| cursor.paragraph_word_facts(reader, word_texts))
+                                .map(|mut facts| {
+                                    facts.nested = std::mem::take(&mut nested);
+                                    facts
+                                })
+                        });
+                        if let (Some(output), Some(maps)) = (source_maps.as_deref_mut(), maps) {
+                            let mut child = nested;
+                            child.paragraph(maps);
+                            child.ordinary = ordinary;
+                            if let Some(facts) = word_texts {
+                                child.word_texts.push((Vec::new(), facts));
+                            }
+                            output.append(
+                                crate::text::WordBlockComponent::CellContent(content.len()),
+                                child,
+                            );
+                        }
+                        content.push(CellContent::Paragraph(paragraph));
                     } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let table_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
-                        let mut table = CT_Tbl::from_xml_with_prefixes_and_owner_bindings_at_depth(
-                            reader,
-                            &prefixes,
-                            &table_bindings,
-                            table_depth.saturating_add(1),
-                            Some(e),
-                        )?;
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        let mut table =
+                            CT_Tbl::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+                                reader,
+                                &prefixes,
+                                &table_bindings,
+                                table_depth.saturating_add(1),
+                                Some(e),
+                                control_facts.as_deref_mut(),
+                                child_maps.as_mut(),
+                            )?;
                         table.retain_root_attributes(e, &prefixes)?;
+                        if let (Some(output), Some(child)) =
+                            (source_maps.as_deref_mut(), child_maps)
+                        {
+                            output.append(
+                                crate::text::WordBlockComponent::CellContent(content.len()),
+                                child,
+                            );
+                        }
                         content.push(CellContent::Table(table));
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
-                        let raw = crate::text::raw_with_external_bindings(
-                            &capture_element(reader, e)?,
+                        let captured = capture_element(reader, e)?;
+                        let captured_map = control_facts.as_deref().and_then(|facts| {
+                            facts.captured_map(
+                                reader,
+                                event_start..reader.buffer_position(),
+                                &captured,
+                            )
+                        });
+                        let (raw, captured_map) = crate::text::raw_with_external_bindings_and_map(
+                            &captured,
                             &raw_owner_bindings,
+                            None,
+                            captured_map,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_cell_raw(&raw, &prefixes) {
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        if let Some(sdt) = CT_Sdt::from_raw_with_mapped_context_and_maps(
+                            &raw,
+                            &prefixes,
+                            SdtOwner::Cell,
+                            control_facts.as_deref_mut(),
+                            captured_map,
+                            child_maps.as_mut(),
+                        ) {
+                            if let (Some(output), Some(child)) =
+                                (source_maps.as_deref_mut(), child_maps)
+                            {
+                                output.append(
+                                    crate::text::WordBlockComponent::CellContent(content.len()),
+                                    child,
+                                );
+                            }
                             content.push(CellContent::ContentControl(sdt));
                         } else {
                             extra_xml.push((content.len(), raw));
@@ -2272,7 +2705,19 @@ impl CT_Tc {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     if is_word_element(name.as_ref(), b"p", &prefixes) {
-                        content.push(CellContent::Paragraph(CT_P::from_empty_root(e, &prefixes)?));
+                        let paragraph = CT_P::from_empty_root(e, &prefixes)?;
+                        if let Some(output) = source_maps.as_deref_mut() {
+                            let mut child = crate::text::WordBlockSourceMaps::default();
+                            child.paragraph(vec![None; paragraph.extra_xml.len()]);
+                            if output.collect_word_texts {
+                                child.word_texts.push((Vec::new(), None));
+                            }
+                            output.append(
+                                crate::text::WordBlockComponent::CellContent(content.len()),
+                                child,
+                            );
+                        }
+                        content.push(CellContent::Paragraph(paragraph));
                     } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
                         content.push(CellContent::Table(CT_Tbl::new()));
                     } else if !is_word_element(name.as_ref(), b"tcPr", &prefixes) {
@@ -2295,6 +2740,13 @@ impl CT_Tc {
             buf.clear();
         }
 
+        if let (Some(destination), Some(pending)) = (destination_maps, pending_maps) {
+            destination.paragraphs.extend(pending.paragraphs);
+            destination.word_texts.extend(pending.word_texts);
+            destination.word_runs.extend(pending.word_runs);
+            destination.word_raws.extend(pending.word_raws);
+            destination.ordinary.extend(pending.ordinary);
+        }
         Ok(CT_Tc {
             properties,
             content,
@@ -2303,30 +2755,89 @@ impl CT_Tc {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn writer_field_roots(&self) -> Vec<&crate::text::Field> {
+        let mut fields = Vec::new();
+        for child in &self.content {
+            fields.extend(match child {
+                CellContent::Paragraph(paragraph) => paragraph.writer_field_roots(),
+                CellContent::Table(table) => table.writer_field_roots(),
+                CellContent::ContentControl(control) => control.writer_field_roots(),
+            });
+        }
+        fields
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let mut work = crate::text::WordOperationWork::model_fields(self.writer_field_roots())?;
+        self.write_xml_role_in(writer, role, source_context, &mut work, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        work: &mut crate::text::WordOperationWork,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let _source_scope =
+            (role == XmlWriteRole::Source).then(|| crate::text::root_binding_scope(0));
         crate::document::admit_word_model(crate::document::WordOwner::Cell(self))?;
-        let mut start = BytesStart::new("w:tc");
+        let mut start = crate::text::FieldXmlStart::new("w:tc", emission)?;
         for (position, raw) in &self.extra_xml {
             if *position == ROOT_ATTRIBUTES_POSITION && is_root_attribute_record(raw) {
-                push_root_attribute_record(&mut start, raw, None)?;
+                start.root_record(raw, None, role)?;
             }
         }
-        writer.write_event(Event::Start(start))?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            start.restore_word_binding()?;
+            "w".to_owned()
+        };
+        let local = crate::text::raw_namespace_declarations(start.element())?;
+        let mut context = source_context.unwrap_or(&[]).to_vec();
+        for (name, uri) in &local {
+            context.retain(|(known, _)| *known != name);
+            context.push((name, uri));
+        }
+        let source_context = (role == XmlWriteRole::Source).then_some(context.as_slice());
+        let _owner_scope = crate::text::emitted_binding_scope(start.element(), false, false)?;
+        start.write(writer, false)?;
 
         if let Some(ref props) = self.properties {
-            props.to_xml(writer)?;
+            props.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         for (idx, item) in self.content.iter().enumerate() {
             write_extras_at(writer, &self.extra_xml, idx)?;
             match item {
-                CellContent::Paragraph(p) => p.to_xml(writer)?,
-                CellContent::Table(tbl) => tbl.to_xml(writer)?,
-                CellContent::ContentControl(sdt) => sdt.to_xml(writer)?,
+                CellContent::Paragraph(p) => {
+                    p.write_xml_core_in(writer, None, role, source_context, work, emission)?
+                }
+                CellContent::Table(tbl) => {
+                    tbl.write_xml_role_in(writer, role, source_context, work, emission)?
+                }
+                CellContent::ContentControl(sdt) => {
+                    sdt.write_xml_role_in(writer, role, source_context, work, emission)?
+                }
             }
         }
         write_extras_at(writer, &self.extra_xml, self.content.len())?;
 
-        writer.write_event(Event::End(BytesEnd::new("w:tc")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tc")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tc"))))?;
+        }
         Ok(())
     }
 
@@ -2436,37 +2947,61 @@ impl CT_Row {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
-        crate::document::admit_word_reader(
+        let admitted = crate::document::admit_word_reader(
             reader,
             &["w".to_owned()],
             b"tr",
             Some(crate::namespace::W_NS),
         )?;
-        Self::from_xml_with_prefixes_and_owner_bindings(reader, &["w".to_string()], &[], None)
-    }
-
-    pub(crate) fn from_xml_with_prefixes_and_owner_bindings(
-        reader: &mut Reader<&[u8]>,
-        word_prefixes: &[String],
-        owner_bindings: &[(String, String)],
-        root: Option<&BytesStart<'_>>,
-    ) -> Result<Self> {
+        let mut controls = admitted.controls();
         Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
             reader,
-            word_prefixes,
-            owner_bindings,
+            &["w".to_string()],
+            &[],
             0,
-            root,
+            None,
+            Some(&mut controls),
         )
     }
 
-    fn from_xml_with_prefixes_and_owner_bindings_at_depth(
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings_at_depth(
         reader: &mut Reader<&[u8]>,
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
         table_depth: usize,
         root: Option<&BytesStart<'_>>,
+        control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            table_depth,
+            root,
+            control_facts,
+            None,
+        )
+    }
+
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+        root: Option<&BytesStart<'_>>,
+        mut control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
+        destination_maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    ) -> Result<Self> {
+        let mut pending_maps =
+            destination_maps
+                .as_ref()
+                .map(|maps| crate::text::WordBlockSourceMaps {
+                    collect_word_texts: maps.collect_word_texts,
+                    collect_properties: maps.collect_properties,
+                    ..Default::default()
+                });
+        let mut source_maps = pending_maps.as_mut();
+
         let mut table_property_exception = None;
         let mut properties = None;
         let mut cells = Vec::new();
@@ -2475,6 +3010,7 @@ impl CT_Row {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = reader.buffer_position();
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
@@ -2498,21 +3034,75 @@ impl CT_Row {
                     } else if is_word_element(name.as_ref(), b"tc", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let cell_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
-                        let mut cell = CT_Tc::from_xml_with_prefixes_and_owner_bindings_at_depth(
-                            reader,
-                            &prefixes,
-                            &cell_bindings,
-                            table_depth,
-                            Some(e),
-                        )?;
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        let mut cell =
+                            CT_Tc::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+                                reader,
+                                &prefixes,
+                                &cell_bindings,
+                                table_depth,
+                                Some(e),
+                                control_facts.as_deref_mut(),
+                                child_maps.as_mut(),
+                            )?;
                         cell.retain_root_attributes(e, &prefixes)?;
+                        if let (Some(output), Some(child)) =
+                            (source_maps.as_deref_mut(), child_maps)
+                        {
+                            output.append(
+                                crate::text::WordBlockComponent::RowCell(cells.len()),
+                                child,
+                            );
+                        }
                         cells.push(cell);
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
-                        let raw = crate::text::raw_with_external_bindings(
-                            &capture_element(reader, e)?,
+                        let captured = capture_element(reader, e)?;
+                        let captured_map = control_facts.as_deref().and_then(|facts| {
+                            facts.captured_map(
+                                reader,
+                                event_start..reader.buffer_position(),
+                                &captured,
+                            )
+                        });
+                        let (raw, captured_map) = crate::text::raw_with_external_bindings_and_map(
+                            &captured,
                             owner_bindings,
+                            None,
+                            captured_map,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_row_raw(&raw, &prefixes) {
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        if let Some(sdt) = CT_Sdt::from_raw_with_mapped_context_and_maps(
+                            &raw,
+                            &prefixes,
+                            SdtOwner::Row,
+                            control_facts.as_deref_mut(),
+                            captured_map,
+                            child_maps.as_mut(),
+                        ) {
+                            if let (Some(output), Some(child)) =
+                                (source_maps.as_deref_mut(), child_maps)
+                            {
+                                output.append(
+                                    crate::text::WordBlockComponent::RowControl(
+                                        content_controls.len(),
+                                    ),
+                                    child,
+                                );
+                            }
                             let raw_before = extra_xml
                                 .iter()
                                 .filter(|(at, _)| *at == cells.len())
@@ -2546,6 +3136,26 @@ impl CT_Row {
                     } else if is_word_element(name.as_ref(), b"tc", &prefixes) {
                         let mut cell = CT_Tc::new();
                         cell.retain_root_attributes(e, &prefixes)?;
+                        if let Some(output) = source_maps.as_deref_mut() {
+                            // CT_Tc::new creates this one empty paragraph. It
+                            // has no physical paragraph or raw extra origins.
+                            output.paragraphs.push((
+                                vec![
+                                    crate::text::WordBlockComponent::RowCell(cells.len()),
+                                    crate::text::WordBlockComponent::CellContent(0),
+                                ],
+                                Vec::new(),
+                            ));
+                            if output.collect_word_texts {
+                                output.word_texts.push((
+                                    vec![
+                                        crate::text::WordBlockComponent::RowCell(cells.len()),
+                                        crate::text::WordBlockComponent::CellContent(0),
+                                    ],
+                                    None,
+                                ));
+                            }
+                        }
                         cells.push(cell);
                     } else if !is_word_element(name.as_ref(), b"trPr", &prefixes) {
                         extra_xml.push((
@@ -2575,6 +3185,13 @@ impl CT_Row {
             extra_xml.push((ROOT_ATTRIBUTES_POSITION, record));
         }
 
+        if let (Some(destination), Some(pending)) = (destination_maps, pending_maps) {
+            destination.paragraphs.extend(pending.paragraphs);
+            destination.word_texts.extend(pending.word_texts);
+            destination.word_runs.extend(pending.word_runs);
+            destination.word_raws.extend(pending.word_raws);
+            destination.ordinary.extend(pending.ordinary);
+        }
         Ok(CT_Row {
             table_property_exception,
             properties,
@@ -2585,35 +3202,100 @@ impl CT_Row {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn writer_field_roots(&self) -> Vec<&crate::text::Field> {
+        let mut fields = Vec::new();
+        for cell in &self.cells {
+            fields.extend(cell.writer_field_roots());
+        }
+        for (_, _, control) in &self.content_controls {
+            fields.extend(control.writer_field_roots());
+        }
+        fields
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let mut work = crate::text::WordOperationWork::model_fields(self.writer_field_roots())?;
+        self.write_xml_role_in(writer, role, source_context, &mut work, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        work: &mut crate::text::WordOperationWork,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let _source_scope =
+            (role == XmlWriteRole::Source).then(|| crate::text::root_binding_scope(0));
         crate::document::admit_word_model(crate::document::WordOwner::Row(self))?;
-        let mut start = BytesStart::new("w:tr");
+        let mut start = crate::text::FieldXmlStart::new("w:tr", emission)?;
         for (position, raw) in &self.extra_xml {
             if Self::raw_is_root_attributes(*position, raw) {
-                push_root_attribute_record(&mut start, raw, None)?;
+                start.root_record(raw, None, role)?;
             }
         }
-        writer.write_event(Event::Start(start))?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            start.restore_word_binding()?;
+            "w".to_owned()
+        };
+        let local = crate::text::raw_namespace_declarations(start.element())?;
+        let mut context = source_context.unwrap_or(&[]).to_vec();
+        for (name, uri) in &local {
+            context.retain(|(known, _)| *known != name);
+            context.push((name, uri));
+        }
+        let source_context = (role == XmlWriteRole::Source).then_some(context.as_slice());
+        let _owner_scope = crate::text::emitted_binding_scope(start.element(), false, false)?;
+        start.write(writer, false)?;
 
         if let Some(raw) = &self.table_property_exception {
             writer.get_mut().write_all(raw)?;
         }
 
         if let Some(ref props) = self.properties {
-            props.to_xml(writer)?;
+            props.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         for (idx, cell) in self.cells.iter().enumerate() {
-            write_boundary(writer, &self.extra_xml, &self.content_controls, idx)?;
-            cell.to_xml(writer)?;
+            write_boundary(
+                writer,
+                &self.extra_xml,
+                &self.content_controls,
+                idx,
+                role,
+                source_context,
+                work,
+                emission,
+            )?;
+            cell.write_xml_role_in(writer, role, source_context, work, emission)?;
         }
         write_boundary(
             writer,
             &self.extra_xml,
             &self.content_controls,
             self.cells.len(),
+            role,
+            source_context,
+            work,
+            emission,
         )?;
 
-        writer.write_event(Event::End(BytesEnd::new("w:tr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tr"))))?;
+        }
         Ok(())
     }
 
@@ -2697,7 +3379,18 @@ impl CT_Tbl {
     /// Parse one namespace-complete checked tbl owner before staging.
     #[doc(hidden)]
     pub fn from_xml_fragment_checked(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &[], None)?;
+        let admitted = crate::document::admit_word_source(xml, &[], None, None)?;
+        let mut controls = admitted.controls();
+        Self::from_xml_fragment_checked_in(xml, &mut controls, None)
+    }
+
+    pub(crate) fn from_xml_fragment_checked_in(
+        xml: &[u8],
+        controls: &mut crate::document::ControlSourceCursor<'_>,
+        mut maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    ) -> Result<Self> {
+        #[cfg(test)]
+        CHECKED_TABLE_READS.with(|count| count.set(count.get() + 1));
         crate::text::validate_word_owner_fragment(xml, b"tbl", true)?;
         let mut reader = Reader::from_reader(xml);
         loop {
@@ -2705,13 +3398,16 @@ impl CT_Tbl {
                 Event::Start(root) => {
                     let prefixes = word_prefixes_at(&root, &[])?;
                     let bindings = local_namespace_overrides(&root, &[])?;
-                    let mut model = Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
-                        &mut reader,
-                        &prefixes,
-                        &bindings,
-                        0,
-                        Some(&root),
-                    )?;
+                    let mut model =
+                        Self::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+                            &mut reader,
+                            &prefixes,
+                            &bindings,
+                            0,
+                            Some(&root),
+                            Some(controls),
+                            maps.as_deref_mut(),
+                        )?;
                     model.retain_root_attributes(&root, &prefixes)?;
                     return Ok(model);
                 }
@@ -2774,13 +3470,21 @@ impl CT_Tbl {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
-        crate::document::admit_word_reader(
+        let admitted = crate::document::admit_word_reader(
             reader,
             &["w".to_owned()],
             b"tbl",
             Some(crate::namespace::W_NS),
         )?;
-        Self::from_xml_with_prefixes_and_owner_bindings(reader, &["w".to_string()], &[])
+        let mut controls = admitted.controls();
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
+            reader,
+            &["w".to_string()],
+            &[],
+            0,
+            None,
+            Some(&mut controls),
+        )
     }
 
     #[cfg(test)]
@@ -2791,6 +3495,7 @@ impl CT_Tbl {
         Self::from_xml_with_prefixes_and_owner_bindings(reader, word_prefixes, &[])
     }
 
+    #[cfg(test)]
     pub(crate) fn from_xml_with_prefixes_and_owner_bindings(
         reader: &mut Reader<&[u8]>,
         word_prefixes: &[String],
@@ -2802,6 +3507,7 @@ impl CT_Tbl {
             owner_bindings,
             0,
             None,
+            None,
         )
     }
 
@@ -2811,7 +3517,38 @@ impl CT_Tbl {
         owner_bindings: &[(String, String)],
         table_depth: usize,
         root: Option<&BytesStart<'_>>,
+        control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            table_depth,
+            root,
+            control_facts,
+            None,
+        )
+    }
+
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+        root: Option<&BytesStart<'_>>,
+        mut control_facts: Option<&mut crate::document::ControlSourceCursor<'_>>,
+        destination_maps: Option<&mut crate::text::WordBlockSourceMaps>,
+    ) -> Result<Self> {
+        let mut pending_maps =
+            destination_maps
+                .as_ref()
+                .map(|maps| crate::text::WordBlockSourceMaps {
+                    collect_word_texts: maps.collect_word_texts,
+                    collect_properties: maps.collect_properties,
+                    ..Default::default()
+                });
+        let mut source_maps = pending_maps.as_mut();
+
         let raw_owner_bindings =
             crate::text::bindings_outside_retained_root(owner_bindings, root, word_prefixes)?;
         if table_depth >= MAX_RECOGNIZED_TABLE_NESTING {
@@ -2827,6 +3564,7 @@ impl CT_Tbl {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = reader.buffer_position();
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
@@ -2845,19 +3583,74 @@ impl CT_Tbl {
                     } else if is_word_element(name.as_ref(), b"tr", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let row_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
-                        rows.push(CT_Row::from_xml_with_prefixes_and_owner_bindings_at_depth(
-                            reader,
-                            &prefixes,
-                            &row_bindings,
-                            table_depth,
-                            Some(e),
-                        )?);
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        let row =
+                            CT_Row::from_xml_with_prefixes_and_owner_bindings_at_depth_and_maps(
+                                reader,
+                                &prefixes,
+                                &row_bindings,
+                                table_depth,
+                                Some(e),
+                                control_facts.as_deref_mut(),
+                                child_maps.as_mut(),
+                            )?;
+                        if let (Some(output), Some(child)) =
+                            (source_maps.as_deref_mut(), child_maps)
+                        {
+                            output.append(
+                                crate::text::WordBlockComponent::TableRow(rows.len()),
+                                child,
+                            );
+                        }
+                        rows.push(row);
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
-                        let raw = crate::text::raw_with_external_bindings(
-                            &capture_element(reader, e)?,
+                        let captured = capture_element(reader, e)?;
+                        let captured_map = control_facts.as_deref().and_then(|facts| {
+                            facts.captured_map(
+                                reader,
+                                event_start..reader.buffer_position(),
+                                &captured,
+                            )
+                        });
+                        let (raw, captured_map) = crate::text::raw_with_external_bindings_and_map(
+                            &captured,
                             &raw_owner_bindings,
+                            None,
+                            captured_map,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_table_raw(&raw, &prefixes) {
+                        let mut child_maps =
+                            source_maps
+                                .as_ref()
+                                .map(|maps| crate::text::WordBlockSourceMaps {
+                                    collect_word_texts: maps.collect_word_texts,
+                                    collect_properties: maps.collect_properties,
+                                    ..Default::default()
+                                });
+                        if let Some(sdt) = CT_Sdt::from_raw_with_mapped_context_and_maps(
+                            &raw,
+                            &prefixes,
+                            SdtOwner::Table,
+                            control_facts.as_deref_mut(),
+                            captured_map,
+                            child_maps.as_mut(),
+                        ) {
+                            if let (Some(output), Some(child)) =
+                                (source_maps.as_deref_mut(), child_maps)
+                            {
+                                output.append(
+                                    crate::text::WordBlockComponent::TableControl(
+                                        content_controls.len(),
+                                    ),
+                                    child,
+                                );
+                            }
                             let raw_before =
                                 extra_xml.iter().filter(|(at, _)| *at == rows.len()).count();
                             content_controls.push((rows.len(), raw_before, sdt));
@@ -2891,7 +3684,9 @@ impl CT_Tbl {
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     // tblPr and tblGrid have fixed positions ahead of the rows,
                     // so a self-closing one must not be re-emitted from here.
-                    if is_word_element(name.as_ref(), b"tblGrid", &prefixes) {
+                    if is_word_element(name.as_ref(), b"tblPr", &prefixes) {
+                        properties = Some(CT_TblPr::default());
+                    } else if is_word_element(name.as_ref(), b"tblGrid", &prefixes) {
                         grid = Some(CT_TblGrid::default());
                     } else if is_word_element(name.as_ref(), b"tr", &prefixes) {
                         rows.push(CT_Row::from_empty_root(e, &prefixes)?);
@@ -2925,6 +3720,13 @@ impl CT_Tbl {
             buf.clear();
         }
 
+        if let (Some(destination), Some(pending)) = (destination_maps, pending_maps) {
+            destination.paragraphs.extend(pending.paragraphs);
+            destination.word_texts.extend(pending.word_texts);
+            destination.word_runs.extend(pending.word_runs);
+            destination.word_raws.extend(pending.word_raws);
+            destination.ordinary.extend(pending.ordinary);
+        }
         Ok(CT_Tbl {
             properties,
             grid,
@@ -2935,35 +3737,100 @@ impl CT_Tbl {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role(writer, XmlWriteRole::Publication, None)
+    }
+
+    pub(crate) fn writer_field_roots(&self) -> Vec<&crate::text::Field> {
+        let mut fields = Vec::new();
+        for row in &self.rows {
+            fields.extend(row.writer_field_roots());
+        }
+        for (_, _, control) in &self.content_controls {
+            fields.extend(control.writer_field_roots());
+        }
+        fields
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let mut work = crate::text::WordOperationWork::model_fields(self.writer_field_roots())?;
+        self.write_xml_role_in(writer, role, source_context, &mut work, None)
+    }
+
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        work: &mut crate::text::WordOperationWork,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let _source_scope =
+            (role == XmlWriteRole::Source).then(|| crate::text::root_binding_scope(0));
         crate::document::admit_word_model(crate::document::WordOwner::Table(self))?;
-        let mut start = BytesStart::new("w:tbl");
+        let mut start = crate::text::FieldXmlStart::new("w:tbl", emission)?;
         for (position, raw) in &self.extra_xml {
             if *position == ROOT_ATTRIBUTES_POSITION && is_root_attribute_record(raw) {
-                push_root_attribute_record(&mut start, raw, None)?;
+                start.root_record(raw, None, role)?;
             }
         }
-        writer.write_event(Event::Start(start))?;
+        let prefix = if role == XmlWriteRole::Source {
+            start.qualify(&[], role, source_context)?
+        } else {
+            start.restore_word_binding()?;
+            "w".to_owned()
+        };
+        let local = crate::text::raw_namespace_declarations(start.element())?;
+        let mut context = source_context.unwrap_or(&[]).to_vec();
+        for (name, uri) in &local {
+            context.retain(|(known, _)| *known != name);
+            context.push((name, uri));
+        }
+        let source_context = (role == XmlWriteRole::Source).then_some(context.as_slice());
+        let _owner_scope = crate::text::emitted_binding_scope(start.element(), false, false)?;
+        start.write(writer, false)?;
 
         if let Some(ref props) = self.properties {
-            props.to_xml(writer)?;
+            props.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         if let Some(ref grid) = self.grid {
-            grid.to_xml(writer)?;
+            grid.write_xml_role_in(writer, role, source_context, emission)?;
         }
 
         for (idx, row) in self.rows.iter().enumerate() {
-            write_boundary(writer, &self.extra_xml, &self.content_controls, idx)?;
-            row.to_xml(writer)?;
+            write_boundary(
+                writer,
+                &self.extra_xml,
+                &self.content_controls,
+                idx,
+                role,
+                source_context,
+                work,
+                emission,
+            )?;
+            row.write_xml_role_in(writer, role, source_context, work, emission)?;
         }
         write_boundary(
             writer,
             &self.extra_xml,
             &self.content_controls,
             self.rows.len(),
+            role,
+            source_context,
+            work,
+            emission,
         )?;
 
-        writer.write_event(Event::End(BytesEnd::new("w:tbl")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tbl")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tbl"))))?;
+        }
         Ok(())
     }
 
@@ -3027,6 +3894,121 @@ impl Default for CT_Tbl {
     }
 }
 
+/// Modeled source attributes follow the concrete table/grid/row/cell readers.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    Some(match (parent, local) {
+        (
+            b"tblPr" | b"tblPrEx",
+            b"tblStyle"
+            | b"tblOverlap"
+            | b"bidiVisual"
+            | b"jc"
+            | b"tblCaption"
+            | b"tblDescription"
+            | b"tblStyleRowBandSize"
+            | b"tblStyleColBandSize",
+        ) => &[b"val"],
+        (b"tblPr" | b"tblPrEx", b"tblpPr") => &[
+            b"leftFromText",
+            b"rightFromText",
+            b"topFromText",
+            b"bottomFromText",
+            b"vertAnchor",
+            b"horzAnchor",
+            b"tblpX",
+            b"tblpXSpec",
+            b"tblpY",
+            b"tblpYSpec",
+        ],
+        (b"tblPr" | b"tblPrEx", b"tblW" | b"tblInd" | b"tblCellSpacing")
+        | (b"trPr", b"wBefore" | b"wAfter" | b"tblCellSpacing")
+        | (b"tcPr", b"tcW") => &[b"w", b"type"],
+        (b"tblPr" | b"tblPrEx", b"tblLayout") => &[b"type"],
+        (b"tblPr" | b"tblPrEx", b"tblLook") => &[
+            b"val",
+            b"firstRow",
+            b"lastRow",
+            b"firstColumn",
+            b"lastColumn",
+            b"noHBand",
+            b"noVBand",
+        ],
+        (b"tblPr" | b"tblPrEx", b"shd") | (b"tcPr", b"shd") => {
+            crate::properties::source_shading_attributes()
+        }
+        (b"tblPr" | b"tblPrEx", b"tblBorders" | b"tblCellMar" | b"tblPrChange")
+        | (b"tcPr", b"tcBorders" | b"tcMar") => &[],
+        (b"tblGrid", b"gridCol") => &[b"w"],
+        (b"trPr", b"trHeight") => &[b"val", b"hRule"],
+        (
+            b"trPr",
+            b"tblHeader" | b"jc" | b"gridBefore" | b"gridAfter" | b"hidden" | b"cnfStyle"
+            | b"cantSplit",
+        ) => &[b"val"],
+        (
+            b"tcPr",
+            b"gridSpan" | b"hMerge" | b"vMerge" | b"vAlign" | b"cnfStyle" | b"noWrap"
+            | b"textDirection",
+        ) => &[b"val"],
+        (b"tblCellMar" | b"tcMar", b"top" | b"left" | b"start" | b"bottom" | b"right" | b"end") => {
+            &[b"w", b"type"]
+        }
+        (
+            b"tblBorders" | b"tcBorders",
+            b"top" | b"left" | b"start" | b"bottom" | b"right" | b"end" | b"insideH" | b"insideV",
+        ) => crate::properties::source_border_attributes(),
+        _ => return None,
+    })
+}
+
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent == b"tcPr" && local == b"vAlign" && key == b"val" {
+        return ST_VerticalJc::from_str(value).to_str() == value;
+    }
+    if parent == b"tcPr" && local == b"vMerge" && key == b"val" {
+        return matches!(value, "restart" | "continue");
+    }
+    if key == b"val" && local == b"jc" && matches!(parent, b"tblPr" | b"tblPrEx" | b"trPr") {
+        return ST_Jc::from_str(value).is_ok();
+    }
+    if key == b"val" && local == b"tblOverlap" {
+        return ST_TblOverlap::parse(value).is_some();
+    }
+    if key == b"val"
+        && matches!(
+            (parent, local),
+            (b"tblPr" | b"tblPrEx", b"bidiVisual")
+                | (b"trPr", b"tblHeader" | b"hidden" | b"cantSplit")
+                | (b"tcPr", b"noWrap")
+        )
+    {
+        return parse_ooxml_bool(value).is_some();
+    }
+    if local == b"tblLook" && key != b"val" {
+        return parse_ooxml_bool(value).is_some();
+    }
+    if local == b"tblpPr" {
+        if matches!(key, b"horzAnchor" | b"vertAnchor") {
+            return ST_TblAnchor::parse(value).is_some();
+        }
+        if key == b"tblpXSpec" {
+            return AnchorAlignH::parse(value).is_some();
+        }
+        if key == b"tblpYSpec" {
+            return ST_YAlign::parse(value).is_some();
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3057,7 +4039,7 @@ mod tests {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref element)) if element.local_name().as_ref() == b"tbl" => {
-                    let prefixes = word_prefixes_at(element, &["w".to_owned()])?;
+                    let prefixes = word_prefixes_at(element, &["w".to_owned()])?.into_owned();
                     let owner_bindings = local_namespace_overrides(element, &["w".to_owned()])?;
                     return CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
                         &mut reader,
@@ -5101,14 +6083,53 @@ mod tests {
     /// from the row positions, so capturing them would reorder the children.
     #[test]
     fn self_closing_table_properties_are_not_reordered() {
-        let tbl = parse_table(
-            r#"<w:tblPr/><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
-        );
+        let contents =
+            r#"<w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#;
+        let tbl = parse_table(&format!("<w:tblPr/>{contents}"));
+        assert_eq!(tbl.properties, Some(CT_TblPr::default()));
         assert!(tbl.extra_xml.is_empty(), "tblPr must not be captured");
         let xml = table_to_xml(&tbl);
         assert!(
-            !xml.contains("</w:tr><w:tblPr/>"),
-            "tblPr must never follow the rows: {xml}"
+            xml.find("<w:tblPr>").unwrap() < xml.find("<w:tblGrid>").unwrap(),
+            "tblPr must precede the grid: {xml}"
         );
+        let paired = parse_table(&format!("<w:tblPr></w:tblPr>{contents}"));
+        assert_eq!(tbl, paired, "empty spellings have the same properties");
+        let reopened = parse_scoped_table(&xml).unwrap();
+        assert_eq!(reopened, tbl);
+        assert_eq!(table_to_xml(&reopened), xml);
+
+        let uri = crate::namespace::W_NS;
+        for property in [
+            format!(r#"<q:tblPr xmlns:q="{uri}"/>"#),
+            format!(r#"<w:tblPr xmlns:w="{uri}"/>"#),
+        ] {
+            let aliased = parse_scoped_table(&format!(
+                r#"<w:tbl xmlns:w="{uri}">{property}{contents}</w:tbl>"#
+            ))
+            .unwrap();
+            assert_eq!(aliased, tbl);
+            assert_eq!(table_to_xml(&aliased), xml);
+        }
+        let foreign = parse_scoped_table(&format!(
+            r#"<w:tbl xmlns:w="{uri}"><w:tblPr xmlns:w="urn:producer" w:keep="yes"/>{contents}</w:tbl>"#
+        ))
+        .unwrap();
+        assert!(foreign.properties.is_none());
+        assert_eq!(foreign.extra_xml.len(), 1);
+        let foreign_xml = table_to_xml(&foreign);
+        assert!(foreign_xml.contains(r#"xmlns:w="urn:producer" w:keep="yes""#));
+        let reopened = parse_scoped_table(&foreign_xml).unwrap();
+        assert!(reopened.properties.is_none());
+        assert_eq!(table_to_xml(&reopened), foreign_xml);
+
+        let absent = parse_table(contents);
+        assert!(absent.properties.is_none());
+        assert!(!table_to_xml(&absent).contains("<w:tblPr"));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CHECKED_TABLE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

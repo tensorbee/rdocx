@@ -2322,3 +2322,455 @@ def test_issue389_local_edits_do_not_scale_with_unrelated_package():
         assert document.remove_content(1) is True
         assert document.paragraphs[0].text == "q0"
         assert document.paragraphs[count - 2].text == f"p{count - 1}"
+
+
+def _fx283_piece_work():
+    # Debug-only structural diagnostics. Release runs retain the semantic cases.
+    from rdocx import _rdocx
+
+    reads = getattr(_rdocx, "_word_piece_work", None)
+    comparisons = getattr(_rdocx, "_word_piece_alignments", None)
+    if reads is None:
+        return None
+    return reads() + (comparisons() if comparisons is not None else 0)
+
+
+def _fx283_body_document(body):
+    from rdocx import Document
+
+    seed = Document().to_bytes()
+    old = _document_xml(seed).encode()
+    new = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<w:body>{body}<w:sectPr/></w:body></w:document>'
+    ).encode()
+    return Document.from_bytes(_replace_document_xml(seed, old, new))
+
+
+@pytest.mark.parametrize("properties", ["", "<w:tcPr/>", '<w:tcPr><w:tcW w:w="900" w:type="dxa"/></w:tcPr>'])
+def test_fx283_first_properties_relocate_held_routes_and_text_retires_descendants(properties):
+    from rdocx import Document, StaleElementError, WD_CELL_VERTICAL_ALIGNMENT
+    _word_piece_work = _fx283_piece_work
+
+    document = _fx283_body_document(
+        '<w:tbl><w:tr><w:tc>' + properties +
+        '<w:p><w:r><w:t>first</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>later</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>neighbor</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+    )
+    cell, neighbor = document.tables[0].cell(0, 0), document.tables[0].cell(0, 1)
+    first, later = cell.paragraphs[0], cell.paragraphs[1]
+    run = first.runs[0]
+    _word_piece_work()
+    cell.shading = "123456"
+    work = _word_piece_work()
+    assert work is None or work <= 3
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    assert (first.text, later.text, run.text) == ("first", "later", "first")
+    _word_piece_work()
+    cell.text = "after"
+    work = _word_piece_work()
+    assert work is None or work <= 3
+    assert cell.text == "after\nlater" and neighbor.text == "neighbor"
+    for held in (first, later, run):
+        with pytest.raises(StaleElementError):
+            _ = held.text
+    paragraph = cell.paragraphs[1]
+    _word_piece_work()
+    paragraph.text = "changed later"
+    work = _word_piece_work()
+    assert work is None or work <= 3
+    reopened = Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0)
+    assert reopened.text == cell.text == "after\nchanged later"
+
+
+@pytest.mark.parametrize("count", [0, 40, 120])
+def test_fx283_reused_cell_setters_do_not_visit_unrelated_body_pieces(count):
+    from rdocx import Document, WD_CELL_VERTICAL_ALIGNMENT
+    _word_piece_work = _fx283_piece_work
+
+    document = Document()
+    for _ in range(count):
+        document.add_paragraph("unrelated")
+    table = document.add_table(rows=2, cols=2)
+    cells = [table.cell(row, cell) for row in range(2) for cell in range(2)]
+    for name, value in [("text", "value"), ("vertical_alignment", WD_CELL_VERTICAL_ALIGNMENT.CENTER), ("shading", "123456")]:
+        for cell in cells:
+            _word_piece_work()
+            setattr(cell, name, value)
+            work = _word_piece_work()
+            assert work is None or work <= 3
+    assert [cell.text for cell in cells] == ["value"] * 4
+
+
+@pytest.mark.parametrize("emu", [634, 635, 636, -634, -635, 2147483648 * 635, -2147483649 * 635])
+def test_fx283_cell_width_keeps_signed_twip_truncation_and_wrap(emu):
+    from rdocx import Document
+
+    document = Document()
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.width = emu
+    twips = abs(emu) // 635 * (-1 if emu < 0 else 1)
+    expected = ((twips + 2**31) % 2**32 - 2**31) * 635
+    assert cell.width == expected
+    assert Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0).width == expected
+
+
+def test_fx283_dormant_replacement_keeps_errors_counts_and_later_activation():
+    from rdocx import Document, RdocxError, ReplacementCountError, StaleElementError
+
+    source = _fx283_body_document('<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>water</w:t></w:r></w:p>').to_bytes()
+    document = Document.from_bytes(source)
+    assert document.try_replace_text("missing", "none") == 0
+    with pytest.raises(ReplacementCountError):
+        document.try_replace_text("water", "wine", expect=2)
+    with pytest.raises(RdocxError, match="replacement text.*U\\+0001"):
+        document.try_replace_text("missing", "\x01")
+    assert document.to_bytes() == source
+    assert document.replace_all([("missing", "none", 0), ("water", "wine", 1), ("wine", "water", 1)]) == (0, 1, 1)
+    assert document.try_replace_text("water", "wine") == 1
+    saved = document.to_bytes()
+    held = document.paragraphs[0]
+    assert held.text == Document.from_bytes(saved).paragraphs[0].text == "wine"
+    assert held.runs[0].font.bold is True
+    assert document.try_replace_text("wine", "water", expect=1) == 1
+    with pytest.raises(StaleElementError):
+        _ = held.text
+
+
+def test_fx283_missing_external_link_still_refuses_open():
+    from rdocx import RdocxError
+
+    with pytest.raises(RdocxError):
+        _fx283_body_document('<w:p><w:hyperlink r:id="missing"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>')
+    control = _fx283_body_document('<w:p><w:hyperlink w:anchor="inside"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>')
+    assert control.paragraphs[0].text == "link"
+
+
+def test_fx283_first_authority_access_rebuilds_current_facts_after_dormant_replace():
+    from rdocx import Document
+    _word_piece_work = _fx283_piece_work
+
+    document = _fx283_body_document('<w:p><w:r><w:t>water</w:t></w:r></w:p>')
+    assert document.try_replace_text("water", "wine") == 1
+    saved = document.to_bytes()
+    _word_piece_work()
+    paragraph = document.paragraphs[0]
+    work = _word_piece_work()
+    assert work is None or work > 0, "first checked factory must validate current native facts afresh"
+    assert paragraph.text == Document.from_bytes(saved).paragraphs[0].text == "wine"
+
+
+@pytest.mark.parametrize("publisher", ["replace_image", "replace_image_for_story", "resize"])
+def test_fx283_direct_images_and_failed_stream_save_rebuild_at_first_handle(publisher):
+    import base64
+    from rdocx import Document, RdocxError, Story
+    _word_piece_work = _fx283_piece_work
+
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAIAAeIhvDMAAAAASUVORK5CYII=")
+    seed = Document()
+    seed.add_picture(png, "before.png", width=1270, height=1905)
+    rel = seed.pictures()[0].relationship_id
+    field = b'<w:p xmlns:k="urn:opaque-scope"><w:fldSimple w:instr="MERGEFIELD name"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p>'
+    source = _replace_document_xml(seed.to_bytes(), b"<w:body>", b"<w:body>" + field)
+    document = Document.from_bytes(source)
+    with pytest.raises(RdocxError):
+        document.replace_image("missing", png)
+    if publisher == "replace_image":
+        document.replace_image(rel, png)
+    elif publisher == "replace_image_for_story":
+        document.replace_image_for_story(Story(kind="body", part_name="/word/document.xml", owner_index=0), rel, png)
+    else:
+        assert document.set_picture_sizes_for_relationship(rel, 2540, 3175) == 1
+    saved = document.to_bytes()
+
+    class ShortStream:
+        def write(self, value):
+            return 0
+
+    with pytest.raises(OSError, match="short or invalid"):
+        document.save(ShortStream())
+    _word_piece_work()
+    actual = document.pictures()[0]
+    work = _word_piece_work()
+    assert work is None or work > 0
+    expected = Document.from_bytes(saved).pictures()[0]
+    assert (actual.width, actual.height, actual.bytes) == (expected.width, expected.height, expected.bytes)
+    assert document.paragraphs[0].text == Document.from_bytes(saved).paragraphs[0].text
+
+
+@pytest.mark.parametrize("properties", ["", "<w:tcPr/>", '<w:tcPr><w:tcW w:w="900" w:type="dxa"/></w:tcPr>'])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_fx283_paragraph_text_keeps_its_distinct_existing_owner_policy(properties, fallback):
+    from rdocx import Document, StaleElementError
+
+    controlled = '<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t/></w:r></w:sdtContent></w:sdt>' if fallback else ""
+    document = _fx283_body_document(
+        '<w:tbl><w:tr><w:tc>' + properties + '<w:p>'
+        '<w:r><w:t>first</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>later</w:t></w:r>' + controlled + '</w:p></w:tc></w:tr></w:tbl>'
+    )
+    table = document.tables[0]
+    cell = table.cell(0, 0)
+    selected, later = cell.paragraphs[0], cell.paragraphs[1]
+    selected_format, later_format = selected.paragraph_format, later.paragraph_format
+    selected_run, later_run = selected.runs[0], later.runs[0]
+    cell.shading = "123456"
+    assert selected.text == selected_run.text == "first"
+    assert later.text == later_run.text == "later"
+    selected.text = "changed paragraph"
+    assert selected.text == "changed paragraph"
+    assert later.text == "later"
+    assert selected_format.space_after is None and later_format.space_after is None
+    for run in (selected_run, later_run):
+        with pytest.raises(StaleElementError):
+            _ = run.text
+    assert cell.text == "changed paragraph\nlater"
+    assert Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0).text == cell.text
+    cell.text = "changed cell"
+    assert cell.text == "changed cell\nlater" and len(table.rows) == 1
+    for paragraph in (selected, later):
+        with pytest.raises(StaleElementError):
+            _ = paragraph.text
+    for properties_view in (selected_format, later_format):
+        with pytest.raises(StaleElementError):
+            _ = properties_view.space_after
+
+
+@pytest.mark.parametrize("factory", ["paragraphs", "tables", "section", "pictures", "stories", "comments", "story_items", "header_footer_variants", "hyperlinks", "revisions"])
+def test_fx283_first_factory_after_field_serialization_uses_current_facts(factory):
+    from rdocx import Document
+
+    document = _fx283_body_document(
+        '<w:p xmlns:k="urn:opaque-scope"><w:r><w:t>water </w:t></w:r>'
+        '<w:fldSimple w:instr="MERGEFIELD name"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p>'
+    )
+    assert document.try_replace_text("water", "wine") == 1
+    saved = document.to_bytes()
+    if factory == "section":
+        document.section(0)
+    elif factory == "pictures":
+        document.pictures()
+    else:
+        getattr(document, factory)
+    expected = Document.from_bytes(saved)
+    assert document.paragraphs[0].text == expected.paragraphs[0].text
+    assert [item.text for item in document.story_items] == [item.text for item in expected.story_items]
+    assert document.to_bytes() == saved
+
+
+def test_fx283_plain_hyperlink_records_remove_and_retarget_before_first_factory():
+    from rdocx import Document, Hyperlink, RdocxError, Story
+
+    plain = Story(kind="body", part_name="/word/document.xml", owner_index=0)
+    document = _fx283_body_document('<w:p><w:hyperlink w:anchor="inside"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>')
+    record = Hyperlink(story=plain, index_path=(0,), text="link", url=None, anchor="inside", relationship_id=None)
+    invalid = Hyperlink(story=plain, index_path=(9,), text="missing", url=None, anchor="inside", relationship_id=None)
+    before = document.to_bytes()
+    with pytest.raises(RdocxError):
+        document.remove_hyperlink(invalid)
+    assert document.to_bytes() == before
+    document.remove_hyperlink(record)
+    assert document.paragraphs[0].text == "link" and document.hyperlinks == ()
+    seed = Document()
+    seed.add_paragraph("prefix").add_hyperlink("external", "https://before.example")
+    link = seed.hyperlinks[0]
+    record = Hyperlink(story=plain, index_path=link.index_path, text=link.text, url=link.url,
+                      anchor=link.anchor, relationship_id=link.relationship_id)
+    document = Document.from_bytes(seed.to_bytes())
+    document.set_hyperlink_url(record, "https://after.example")
+    assert document.hyperlinks[0].url == "https://after.example"
+    assert Document.from_bytes(document.to_bytes()).hyperlinks[0].url == "https://after.example"
+
+
+@pytest.mark.parametrize("operation", ["shading", "alignment", "cell_text", "paragraph_text"])
+def test_fx283_clean_cell_edit_does_not_exchange_enclosing_and_nested_neighbor_authority(operation):
+    from rdocx import Document, StaleElementError, WD_CELL_VERTICAL_ALIGNMENT
+
+    document = _fx283_body_document(
+        '<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w="1111" w:type="dxa"/></w:tcPr>'
+        '<w:p><w:pPr><w:spacing w:after="120"/></w:pPr><w:r><w:rPr><w:b/><w:i w:val="0"/></w:rPr><w:t>outer</w:t></w:r></w:p>'
+        '<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w="2222" w:type="dxa"/></w:tcPr>'
+        '<w:p><w:pPr><w:spacing w:after="240"/></w:pPr><w:r><w:rPr><w:b w:val="0"/><w:i/></w:rPr><w:t>inner</w:t></w:r></w:p>'
+        '</w:tc></w:tr></w:tbl></w:tc><w:tc><w:p><w:r><w:t>clean</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+    )
+    table = document.tables[0]
+    outer_cell, clean = table.cell(0, 0), table.cell(0, 1)
+    inner_cell = outer_cell.tables[0].cell(0, 0)
+    outer, inner = outer_cell.paragraphs[0], inner_cell.paragraphs[0]
+    outer_run, inner_run = outer.runs[0], inner.runs[0]
+    outer_font, inner_font = outer_run.font, inner_run.font
+    outer_format, inner_format = outer.paragraph_format, inner.paragraph_format
+    assert (outer.text, inner.text) == ("outer", "inner")
+    assert (outer_format.space_after, inner_format.space_after) == (120 * 635, 240 * 635)
+    assert (outer_font.bold, inner_font.bold, outer_font.italic, inner_font.italic) == (True, False, False, True)
+    if operation == "shading":
+        clean.shading = "123456"
+    elif operation == "alignment":
+        clean.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    elif operation == "cell_text":
+        clean.text = "changed"
+    else:
+        clean.paragraphs[0].text = "changed"
+    # Serialization remains correct even when an authority join is wrong.
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].cell(0, 0).paragraphs[0].text == "outer"
+    assert reopened.tables[0].cell(0, 0).tables[0].cell(0, 0).paragraphs[0].text == "inner"
+    assert (outer.text, inner.text) == ("outer", "inner")
+    assert (outer_cell.width, inner_cell.width) == (1111 * 635, 2222 * 635)
+    assert (outer_format.space_after, inner_format.space_after) == (120 * 635, 240 * 635)
+    if operation in ("shading", "alignment"):
+        assert (outer_run.text, inner_run.text) == ("outer", "inner")
+        assert (outer_font.bold, inner_font.bold, outer_font.italic, inner_font.italic) == (True, False, False, True)
+    else:
+        # Ordinary runs retain the existing document-epoch retirement policy.
+        for run in (outer_run, inner_run):
+            with pytest.raises(StaleElementError):
+                _ = run.text
+        for font in (outer_font, inner_font):
+            with pytest.raises(StaleElementError):
+                _ = font.bold
+
+
+@pytest.mark.parametrize("neighbor", ["controls", "fields", "textboxes"])
+@pytest.mark.parametrize("operation", ["shading", "alignment", "cell_text", "paragraph_text"])
+def test_fx283_one_table_control_field_and_textbox_neighbors_keep_existing_authority(neighbor, operation):
+    from rdocx import StaleElementError, WD_CELL_VERTICAL_ALIGNMENT
+
+    def paragraph(label, index):
+        run = '<w:b/><w:i w:val="0"/>' if index == 0 else '<w:b w:val="0"/><w:i/>'
+        field = '<w:fldSimple w:instr="MERGEFIELD name"><w:r><w:t>cache</w:t></w:r></w:fldSimple>' if neighbor == "fields" else ""
+        return f'<w:p><w:pPr><w:spacing w:after="{120 * (index + 1)}"/></w:pPr><w:r><w:rPr>{run}</w:rPr><w:t>{label}</w:t></w:r>{field}</w:p>'
+
+    first, second = paragraph("first", 0), paragraph("second", 1)
+    if neighbor == "controls":
+        content = ''.join('<w:sdt><w:sdtPr/><w:sdtContent>' + value + '</w:sdtContent></w:sdt>' for value in (first, second))
+    elif neighbor == "textboxes":
+        shapes = ''.join(f'<v:shape xmlns:v="urn:schemas-microsoft-com:vml" id="box{index}" style="width:10pt;height:10pt"><v:textbox><w:txbxContent>{value}</w:txbxContent></v:textbox></v:shape>' for index, value in enumerate((first, second)))
+        content = '<w:p><w:r><w:pict>' + shapes + '</w:pict></w:r></w:p>'
+    else:
+        content = first + second
+    document = _fx283_body_document('<w:tbl><w:tr><w:tc>' + content + '</w:tc><w:tc><w:p><w:r><w:t>clean</w:t></w:r></w:p></w:tc></w:tr></w:tbl>')
+    if neighbor == "textboxes":
+        held = [item.paragraph for item in document.story_items if item.kind == "paragraph" and item.story.kind == "text_box"]
+    else:
+        held = list(document.tables[0].cell(0, 0).paragraphs)
+    assert len(held) == 2
+    runs = [paragraph.runs[0] for paragraph in held]
+    fonts = [run.font for run in runs]
+    formats = [paragraph.paragraph_format for paragraph in held]
+    expected = ["firstcache", "secondcache"] if neighbor == "fields" else ["first", "second"]
+    assert [paragraph.text for paragraph in held] == expected
+    assert [view.space_after for view in formats] == [120 * 635, 240 * 635]
+    assert [view.bold for view in fonts] == [True, False]
+    clean = document.tables[0].cell(0, 1)
+    if operation == "shading":
+        clean.shading = "123456"
+    elif operation == "alignment":
+        clean.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    elif operation == "cell_text":
+        clean.text = "changed"
+    else:
+        clean.paragraphs[0].text = "changed"
+    text_edit = operation in ("cell_text", "paragraph_text")
+    if neighbor == "textboxes" and text_edit:
+        # The existing checked publisher conservatively retires textbox owners.
+        for paragraph, view in zip(held, formats):
+            with pytest.raises(StaleElementError):
+                _ = paragraph.text
+            with pytest.raises(StaleElementError):
+                _ = view.space_after
+    else:
+        assert [paragraph.text for paragraph in held] == expected
+        assert [view.space_after for view in formats] == [120 * 635, 240 * 635]
+    if text_edit:
+        for run, view in zip(runs, fonts):
+            with pytest.raises(StaleElementError):
+                _ = run.text
+            with pytest.raises(StaleElementError):
+                _ = view.bold
+    else:
+        assert [run.text for run in runs] == ["first", "second"]
+        assert [view.bold for view in fonts] == [True, False]
+
+
+@pytest.mark.parametrize("neighbor", ["controlled_row", "controlled_cell"])
+@pytest.mark.parametrize("before", [True, False])
+@pytest.mark.parametrize("operation", ["cell_text", "paragraph_text", "shading", "alignment"])
+def test_fx283_control_owned_cell_membership_preserves_physical_authority(neighbor, before, operation):
+    from rdocx import Document, StaleElementError, WD_CELL_VERTICAL_ALIGNMENT
+
+    controlled = ('<w:tc><w:tcPr><w:tcW w:w="2222" w:type="dxa"/></w:tcPr>'
+                  '<w:p><w:pPr><w:spacing w:after="240"/></w:pPr>'
+                  '<w:r><w:rPr><w:b/></w:rPr><w:t>controlled</w:t></w:r></w:p></w:tc>')
+    clean_xml = ('<w:tc><w:p><w:pPr><w:spacing w:after="120"/></w:pPr>'
+                 '<w:r><w:rPr><w:i/></w:rPr><w:t>clean</w:t></w:r></w:p></w:tc>')
+    if neighbor == "controlled_row":
+        controlled = '<w:tr>' + controlled + '</w:tr>'
+        clean_xml = '<w:tr>' + clean_xml + '</w:tr>'
+    controlled = '<w:sdt><w:sdtPr/><w:sdtContent>' + controlled + '</w:sdtContent></w:sdt>'
+    content = controlled + clean_xml if before else clean_xml + controlled
+    if neighbor == "controlled_cell":
+        content = '<w:tr>' + content + '</w:tr>'
+    document = _fx283_body_document('<w:tbl>' + content + '</w:tbl>')
+    table = document.tables[0]
+    clean = table.cell(0, 0)
+    selected = clean.paragraphs[0]
+    held = next(item.paragraph for item in document.story_items
+                if item.kind == "paragraph" and item.text == "controlled")
+    run, selected_run = held.runs[0], selected.runs[0]
+    view, selected_view = held.paragraph_format, selected.paragraph_format
+    font = run.font
+    assert clean.text == selected.text == "clean"
+    assert held.text == run.text == "controlled"
+    assert (view.space_after, selected_view.space_after) == (240 * 635, 120 * 635)
+    if operation == "cell_text":
+        clean.text = "changed"
+    elif operation == "paragraph_text":
+        selected.text = "changed"
+    elif operation == "shading":
+        clean.shading = "123456"
+    else:
+        clean.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    text_edit = operation in ("cell_text", "paragraph_text")
+    expected = "changed" if text_edit else "clean"
+    physical = [item for item in document.story_items if item.kind == "paragraph"]
+    assert sorted(item.text for item in physical) == sorted(["controlled", expected])
+    assert len({item.story.owner_index for item in physical}) == 2
+    if text_edit:
+        with pytest.raises(StaleElementError):
+            _ = held.text
+        with pytest.raises(StaleElementError):
+            _ = view.space_after
+        held = next(item.paragraph for item in physical if item.text == "controlled")
+    else:
+        assert held.text == "controlled" and "controlled" in held.xml
+        assert view.space_after == 240 * 635
+    assert clean.text == expected
+    fresh = clean.paragraphs[0]
+    assert fresh.text == expected and expected in fresh.xml
+    assert fresh.paragraph_format.space_after == 120 * 635
+    if operation == "cell_text":
+        with pytest.raises(StaleElementError):
+            _ = selected.text
+        with pytest.raises(StaleElementError):
+            _ = selected_view.space_after
+    else:
+        assert selected.text == expected and selected_view.space_after == 120 * 635
+    if text_edit:
+        for old in (run, selected_run):
+            with pytest.raises(StaleElementError):
+                _ = old.text
+        with pytest.raises(StaleElementError):
+            _ = font.bold
+    else:
+        assert run.text == "controlled" and font.bold is True
+        assert selected_run.text == "clean"
+    held.text = "neighbor changed"
+    assert held.text == "neighbor changed"
+    fresh.text = "follow up"
+    assert clean.text == "follow up"
+    assert sorted(item.text for item in document.story_items if item.kind == "paragraph") == ["follow up", "neighbor changed"]
+    reopened = Document.from_bytes(document.to_bytes())
+    assert sorted(item.text for item in reopened.story_items if item.kind == "paragraph") == ["follow up", "neighbor changed"]

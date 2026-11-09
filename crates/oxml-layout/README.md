@@ -16,9 +16,11 @@ raster rendering.
 
 The archive row is regenerated from the complete published package that carries this README.
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-layout | 4,904,118 compressed bytes, 9,841,237 member bytes, 60 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: oxml-layout | 4,918,395 compressed bytes, 9,927,719 member bytes, 60 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-07 |
 
 ## Use it when
 
@@ -45,4 +47,4 @@ let accent = Color::from_hex("3366CC");
 assert_eq!((accent.r, accent.g, accent.b), (0.2, 0.4, 0.8));
 ```
 
-Add `oxml-layout = { version = "0.14.4", default-features = false }` to your dependencies. Enable the default `system-fonts` feature only when host font discovery is intended.
+Add `oxml-layout = { version = "0.15.0", default-features = false }` to your dependencies. Enable the default `system-fonts` feature only when host font discovery is intended.

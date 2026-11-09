@@ -47,9 +47,53 @@ pub struct ImageData {
     pub content_type: String,
 }
 
+/// A semantic chart projection from the current chart part.
+pub struct ChartTable {
+    pub title: Option<String>,
+    pub categories: Vec<String>,
+    pub series: Vec<(String, Vec<f64>)>,
+}
+
+impl ChartTable {
+    /// Header followed by category rows, with absent or non-finite values blank.
+    pub fn rows(&self) -> Vec<Vec<String>> {
+        let mut header = vec![String::new()];
+        header.extend(self.series.iter().map(|(name, _)| name.clone()));
+        let count = self
+            .series
+            .iter()
+            .map(|(_, values)| values.len())
+            .chain(std::iter::once(self.categories.len()))
+            .max()
+            .unwrap_or(0);
+        let mut rows = vec![header];
+        for index in 0..count {
+            let mut row = vec![self.categories.get(index).cloned().unwrap_or_default()];
+            row.extend(self.series.iter().map(|(_, values)| {
+                values
+                    .get(index)
+                    .filter(|value| value.is_finite())
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            }));
+            rows.push(row);
+        }
+        rows
+    }
+}
+
 /// Convert a DOCX document to a complete HTML document string.
 pub fn to_html_document(input: &HtmlInput, options: &HtmlOptions) -> String {
-    let body = to_html_fragment(input, options);
+    to_html_document_with_charts(input, options, &HashMap::new())
+}
+
+/// Convert a DOCX document with current chart tables to complete HTML.
+pub fn to_html_document_with_charts(
+    input: &HtmlInput,
+    options: &HtmlOptions,
+    charts: &HashMap<String, ChartTable>,
+) -> String {
+    let body = to_html_fragment_with_charts(input, options, charts);
     let css = css::generate_base_css();
     format!(
         "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n<style>\n{css}\n</style>\n</head>\n<body>\n{body}\n</body>\n</html>"
@@ -58,6 +102,15 @@ pub fn to_html_document(input: &HtmlInput, options: &HtmlOptions) -> String {
 
 /// Convert a DOCX document to an HTML fragment (body content only).
 pub fn to_html_fragment(input: &HtmlInput, options: &HtmlOptions) -> String {
+    to_html_fragment_with_charts(input, options, &HashMap::new())
+}
+
+/// Convert body content with current chart tables to an HTML fragment.
+pub fn to_html_fragment_with_charts(
+    input: &HtmlInput,
+    options: &HtmlOptions,
+    charts: &HashMap<String, ChartTable>,
+) -> String {
     emitter::emit_body(
         &input.document.body,
         &input.styles,
@@ -65,12 +118,48 @@ pub fn to_html_fragment(input: &HtmlInput, options: &HtmlOptions) -> String {
         &input.images,
         &input.hyperlink_urls,
         options,
+        charts,
     )
 }
 
 /// Convert a DOCX document to Markdown.
 pub fn to_markdown(input: &HtmlInput) -> String {
-    markdown::emit_markdown(input)
+    to_markdown_with_charts(input, &HashMap::new())
+}
+
+/// Convert body content with current chart tables to Markdown.
+pub fn to_markdown_with_charts(input: &HtmlInput, charts: &HashMap<String, ChartTable>) -> String {
+    markdown::emit_markdown(input, charts)
+}
+
+fn paragraph_chart_ids(paragraph: &CT_P) -> Vec<String> {
+    let paragraph = paragraph.accepted_view();
+    paragraph
+        .runs
+        .iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| {
+            if let rdocx_oxml::text::RunContent::Drawing(drawing) = content {
+                Some(drawing)
+            } else {
+                None
+            }
+        })
+        .flat_map(|drawing| {
+            drawing
+                .inline
+                .as_ref()
+                .and_then(|inline| inline.chart_rel_id.as_ref())
+                .into_iter()
+                .chain(
+                    drawing
+                        .anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.chart_rel_id.as_ref()),
+                )
+        })
+        .cloned()
+        .collect()
 }
 
 /// A paragraph or a table that the emitters write as one block.

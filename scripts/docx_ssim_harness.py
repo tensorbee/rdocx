@@ -200,7 +200,7 @@ def build_multi_script_fixtures(output: Path) -> list[dict[str, object]]:
         if script == "simplified-chinese":
             language_attributes += f' w:eastAsia="{language}"'
         paragraphs = "".join(
-            f'''<w:p><w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}" w:eastAsia="{family}" w:cs="{family}"/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang {language_attributes}/></w:rPr><w:t>{xml_text(text)}</w:t></w:r></w:p>'''
+            f'''<w:p><w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}" w:eastAsia="{family}" w:cs="{family}"/><w:kern w:val="1"/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang {language_attributes}/></w:rPr><w:t>{xml_text(text)}</w:t></w:r></w:p>'''
             for _ in range(6)
         )
         document_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -225,7 +225,7 @@ def build_multi_script_fixtures(output: Path) -> list[dict[str, object]]:
     rtl_family = "Noto Sans Arabic"
     rtl_text = "العربية"
     rtl_paragraphs = "".join(
-        f'''<w:p><w:pPr><w:bidi/><w:spacing w:after="0" w:line="480" w:lineRule="exact"/><w:ind w:start="360" w:end="720"/><w:jc w:val="start"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="{rtl_family}" w:hAnsi="{rtl_family}" w:eastAsia="{rtl_family}" w:cs="{rtl_family}"/><w:rtl/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang w:val="en-US" w:bidi="{rtl_language}"/></w:rPr><w:t xml:space="preserve">العربية </w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="{rtl_family}" w:hAnsi="{rtl_family}" w:eastAsia="{rtl_family}" w:cs="{rtl_family}"/><w:rtl w:val="0"/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang w:val="en-US" w:bidi="{rtl_language}"/></w:rPr><w:t>ABC 123</w:t></w:r></w:p>'''
+        f'''<w:p><w:pPr><w:bidi/><w:spacing w:after="0" w:line="480" w:lineRule="exact"/><w:ind w:start="360" w:end="720"/><w:jc w:val="start"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="{rtl_family}" w:hAnsi="{rtl_family}" w:eastAsia="{rtl_family}" w:cs="{rtl_family}"/><w:rtl/><w:kern w:val="1"/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang w:val="en-US" w:bidi="{rtl_language}"/></w:rPr><w:t xml:space="preserve">العربية </w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="{rtl_family}" w:hAnsi="{rtl_family}" w:eastAsia="{rtl_family}" w:cs="{rtl_family}"/><w:rtl w:val="0"/><w:kern w:val="1"/><w:sz w:val="48"/><w:szCs w:val="48"/><w:lang w:val="en-US" w:bidi="{rtl_language}"/></w:rPr><w:t>ABC 123</w:t></w:r></w:p>'''
         for _ in range(6)
     )
     rtl_document_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1086,25 +1086,162 @@ except TimeoutError:
         self.assertEqual(payload["documents"], EXPECTED_COUNT)
 
     def test_multi_script_corpus_pages_meet_the_reviewed_oracle_contract(self) -> None:
+        from copy import deepcopy
+        import xml.etree.ElementTree as ET
+
+        word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        expected = (
+            (
+                "arabic.docx", "arabic", "ar-SA", "Noto Sans Arabic",
+                "العربية مرحبا بالعالم",
+            ),
+            (
+                "devanagari.docx", "devanagari", "hi-IN", "Noto Sans Devanagari",
+                "देवनागरी नमस्ते दुनिया",
+            ),
+            ("thai.docx", "thai", "th-TH", "Noto Sans Thai", "ภาษาไทยยินดีต้อนรับ"),
+            (
+                "simplified-chinese.docx", "simplified-chinese", "zh-CN", "Noto Sans SC",
+                "〈中〉、你好世界",
+            ),
+            ("bidirectional.docx", "bidirectional", "ar-SA", "Noto Sans Arabic", "العربية"),
+        )
+
+        def assert_fixture(tree, spec):
+            _, category, language, family, text = spec
+            bidi = category == "bidirectional"
+            self.assertEqual(tree.tag, word + "document")
+            self.assertEqual([child.tag for child in tree], [word + "body"])
+            body = tree.find(word + "body")
+            self.assertEqual(
+                [child.tag for child in body], [word + "p"] * 6 + [word + "sectPr"]
+            )
+            section = body.find(word + "sectPr")
+            self.assertEqual(
+                [child.tag for child in section], [word + "pgSz", word + "pgMar"]
+            )
+            self.assertEqual(section[0].attrib, {word + "w": "12240", word + "h": "15840"})
+            self.assertEqual(section[1].attrib, {
+                word + key: value for key, value in (
+                    ("top", "1440"), ("right", "1440"), ("bottom", "1440"), ("left", "1440"),
+                    ("header", "720"), ("footer", "720"), ("gutter", "0"),
+                )
+            })
+            for paragraph in body.findall(word + "p"):
+                self.assertEqual(
+                    [child.tag for child in paragraph],
+                    [word + "pPr"] + [word + "r"] * (2 if bidi else 1),
+                )
+                properties = paragraph[0]
+                expected_properties = (
+                    ["bidi", "spacing", "ind", "jc"] if bidi else ["spacing"]
+                )
+                self.assertEqual(
+                    [child.tag for child in properties],
+                    [word + tag for tag in expected_properties],
+                )
+                self.assertEqual(properties.find(word + "spacing").attrib, {
+                    word + "after": "0", word + "line": "480", word + "lineRule": "exact",
+                })
+                if bidi:
+                    self.assertEqual(properties.find(word + "bidi").attrib, {})
+                    self.assertEqual(
+                        properties.find(word + "ind").attrib,
+                        {word + "start": "360", word + "end": "720"},
+                    )
+                    self.assertEqual(
+                        properties.find(word + "jc").attrib, {word + "val": "start"}
+                    )
+                for index, run in enumerate(paragraph.findall(word + "r")):
+                    self.assertEqual([child.tag for child in run], [word + "rPr", word + "t"])
+                    rpr = run[0]
+                    kern = rpr.findall(word + "kern")
+                    self.assertEqual(
+                        len(kern), 1, "each qualified run requires exactly one kern1"
+                    )
+                    self.assertEqual(kern[0].attrib, {word + "val": "1"})
+                    expected_rpr = (
+                        ["rFonts"] + (["rtl"] if bidi else [])
+                        + ["kern", "sz", "szCs", "lang"]
+                    )
+                    self.assertEqual(
+                        [child.tag for child in rpr], [word + tag for tag in expected_rpr]
+                    )
+                    self.assertEqual(rpr.find(word + "rFonts").attrib, {
+                        word + slot: family for slot in ("ascii", "hAnsi", "eastAsia", "cs")
+                    })
+                    for size in ("sz", "szCs"):
+                        self.assertEqual(rpr.find(word + size).attrib, {word + "val": "48"})
+                    languages = {word + "val": "en-US" if bidi else language}
+                    if bidi or category == "arabic":
+                        languages[word + "bidi"] = language
+                    if category == "simplified-chinese":
+                        languages[word + "eastAsia"] = language
+                    self.assertEqual(rpr.find(word + "lang").attrib, languages)
+                    if bidi:
+                        self.assertEqual(
+                            rpr.find(word + "rtl").attrib,
+                            {} if index == 0 else {word + "val": "0"},
+                        )
+                    self.assertEqual(
+                        run[1].text,
+                        ("العربية " if index == 0 else "ABC 123") if bidi else text,
+                    )
+                    self.assertEqual(
+                        run[1].attrib,
+                        {"{http://www.w3.org/XML/1998/namespace}space": "preserve"}
+                        if bidi and index == 0 else {},
+                    )
+
         with TemporaryDirectory() as temporary:
             fixtures = build_multi_script_fixtures(Path(temporary))
             self.assertEqual(
                 [fixture["category"] for fixture in fixtures],
-                [
-                    "arabic",
-                    "devanagari",
-                    "thai",
-                    "simplified-chinese",
-                    "bidirectional",
-                ],
+                [spec[1] for spec in expected],
             )
-            for fixture in fixtures:
-                path = Path(fixture["path"])
-                self.assertTrue(path.is_file())
-                with zipfile.ZipFile(path) as archive:
-                    document_xml = archive.read("word/document.xml").decode("utf-8")
-                self.assertIn(str(fixture["text"]), document_xml)
-                self.assertIn(str(fixture["font"]), document_xml)
+            self.assertEqual(
+                [fixture["document"] for fixture in fixtures],
+                [spec[0] for spec in expected],
+            )
+            total_runs = 0
+            for fixture, spec in zip(fixtures, expected):
+                with self.subTest(fixture=spec[0]):
+                    self.assertEqual(
+                        tuple(fixture[key] for key in (
+                            "document", "category", "language", "font", "text",
+                        )),
+                        spec,
+                    )
+                    path = Path(fixture["path"])
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.name, spec[0])
+                    with zipfile.ZipFile(path) as archive:
+                        self.assertEqual(
+                            archive.namelist(),
+                            ["[Content_Types].xml", "_rels/.rels", "word/document.xml"],
+                        )
+                        tree = ET.fromstring(archive.read("word/document.xml"))
+                    total_runs += len(tree.findall(".//" + word + "r"))
+                    assert_fixture(tree, spec)
+                    # These reject an oracle-fixture policy, not valid Word
+                    # authoring/imported zero or above-size kerning properties.
+                    for mutation in ("absent", "zero", "above-size", "duplicate", "unqualified"):
+                        with self.subTest(fixture=spec[0], mutation=mutation):
+                            changed = deepcopy(tree)
+                            rpr = changed.findall(".//" + word + "rPr")[-1]
+                            kern = rpr.find(word + "kern")
+                            if mutation == "absent":
+                                rpr.remove(kern)
+                            elif mutation in ("zero", "above-size"):
+                                kern.set(word + "val", "0" if mutation == "zero" else "49")
+                            elif mutation == "duplicate":
+                                rpr.append(deepcopy(kern))
+                            else:
+                                kern.tag = "kern"
+                            with self.assertRaises(AssertionError):
+                                assert_fixture(changed, spec)
+                    assert_fixture(tree, spec)
+            self.assertEqual(total_runs, 36)
         self.assertTrue(multi_script_gate_met([0.95] * 4 + [0.94]))
         self.assertFalse(multi_script_gate_met([0.95] * 3 + [0.94] * 2))
 

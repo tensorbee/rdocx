@@ -1,10 +1,41 @@
 # 04, OPC and packaging
 
+Word Source admission borrows temporary decoded namespace pairs while forming its exact validation envelope and projected-alias Boolean. Ordered duplicate handling, original context charges, checked work arithmetic and actual XML/capture/constructor scans remain authoritative. Remaining-reader Word matching does not materialize foreign-lookup bindings. Persistent scopes still own their records, and borrowed temporary views grant no Source or Field authority. Root attribute planning decodes every yielded value before declaration classification. Namespace values drop after decoding, while retained attribute values become owned before namespace resolution and duplicate checks. Unused declarations preserve decoder failures and first-error order.
+
+Within one Word admission scan, a successful checked namespace-context size is reused only while its complete namespace map remains unchanged. Every insert or restore write invalidates the scalar, including redundant bindings. Cold calculation and errors stay at the original point, and per-frame entry charges, later checked work and actual XML/capture/constructor reads remain authoritative. The scalar grants no Source authority and dies with the scan.
+
+Temporary Word admission frames preserve their consumed-or-local name selection. Exact p, r, rPr and t spellings use static byte slices, while every other name owns its original bytes. Namespace and owner classification, Start-only frame construction, full scans, checked work and errors remain independent and unchanged. Frame names grant no Source or Field authority.
+
+Native story scanner frames similarly store only exact p, r, rPr and t spellings as static byte views. All other selected bytes retain one owned copy. Each consumer keeps its original resolver or event-local choice and projection point, including eager Start/Empty temporaries. Actual reads, attributes, raw capture, namespace/owner/SDT/Field state, offsets, resource work and first errors remain authoritative. Storage never borrows Reader or caller buffers and establishes no Source identity.
+
+An ordinary writer may preserve its existing complete block-vector Arc after every original block actually takes the unchanged reuse branch, exact cardinality and successful assembly under an unchanged final frame. Fresh blocks, frame refresh or fallback prevent preservation. This carries an existing identity without reminting an opening witness or granting Source authority.
+
+The ordinary fixed standalone paragraph reader can lend a previously successful finite owned value only for identical complete XML bytes, a valid physical selector and the same immutable staged model Arc. A first miss performs the complete original reader and admission, then the unchanged shared finite grammar on both selected and returned leaves before complete leaf equality. It never compares private siblings or a whole table. Direct paragraphs keep one Vec key. Simple model tables with no raw children, typed controls, nested contents or merged cells keep one key per valid direct paragraph selector under one active Weak root. Factory-local ordinal hints establish no source ancestry or physical affiliation, even on incidental equal-value matches. Root replacement drops the old map and capacity, selector replacement drops its old key, and actual staged replacement detaches the current block cell. Reader failures remain uncached. No AST, receipt, negative cache or root history is stored. Changed input, model or reader policy cannot use that proof.
+
 Owner: `oxml-opc`, with media naming in `oxml-media`.
 
 ## Producer read and writer authority
 
 Word producer reconstruction first proves the exact source partition, namespace frame and actual child reads. Its complete borrowed source-model comparison qualifies all children even after a mismatch and includes root, background and section metadata. A positive current-model result may compose with the independent normal record's exact current writer-byte proof, after the existing fallible resource/frame preflight and conservative field/private checks. None leaves the whole reader authoritative. A valid but unequal source or unavailable writer proof keeps the existing normalization route. Source facts retain no writer staged permission and do not create a generic normalization memo. Generic normalization still executes its own checked relation and full right side after a failed left. No source cache, history edge or publication shortcut is added.
+
+Cold plain-paragraph fact queries require actual retained opening membership, successful writer proof, exact complete model and namespace context. Sharing model values additionally requires exact current staged-model membership for every physical slot. A valid full writer proof without a retained block record keeps its successful fact batch and ordinary binding copies. Their finite ASCII Text grammar and exact property defaults prove the existing model resource graph has maxima(0,0): only Body, Paragraph and Run owners exist and none contributes weighted or table depth. Unsupported post-opening payload still executes the original full resource guard before declining. Parser/source admission, C1 Work and the general resource guard remain unchanged. Only immutable model values are shared with the binding, never source authority or a retained opening.
+
+Within that unchanged finite Text domain, opening fact materialization copies stored decoded text directly after qualification. It preserves spaces and concatenation order and changes no source admission, serialization, XML preservation or fallback/refusal order.
+
+Modeled writer admission retains one child vector per pending new summary instead of cloning it for Finish. Nonempty standard iterator scheduling borrows the local children, then installs that original vector in the saved Finish slot before traversal resumes. The empty case moves directly. Queuing preserves the same children, costs and order across stack growth. Resource/source checks and first causes stay exact. Original child capacity, pending growth and temporary Finish installation remain part of memory calibration.
+
+Standalone paragraph value hits change only returned ownership: the same exact key/live-root proof can lend the immutable selected model value instead of cloning it. First and missed reads remain the actual owned parser result. Source, marker, namespace, admission and resource reads and failures are unchanged. Cache roots remain Weak independently of ephemeral returned strong loans.
+
+
+
+
+Current/opening and optional staged-model comparisons share one physical-order body walk with finite fact construction. Exhaustive document/section metadata and complete opening equality remain mandatory. An opening mismatch returns no facts before any unsupported-payload resource fallback. A finite miss can invoke that fallback only after every opening item matches. Model loans are attached only after complete staged alignment, with all absent on a late mismatch. Equal-prefix allocations are temporary and bounded by the existing successful result.
+
+Modeled owner namespace scanning shares unchanged ordered binding vectors. The attribute iterator still validates every element. A namespace declaration uses the original decoder and original ordered update policy on an owned vector, preserving redundant declarations, default bindings, shadowing, errors and lexical offsets. Its prefix is validated before URI decoding and borrowed until encoded binding construction. The bare Word alias becomes owned only when pushed. Foreign prefixes leave no discarded standalone String, while scope ownership, order and bare Word-alias capacity remain unchanged. Encoded bindings own exact NUL/prefix/NUL/URI bytes in a checked-sized String buffer. Unavailable sizing retains the original formatter fallback. Encoded buffer capacities remain part of final memory calibration.
+
+Typed Word namespace-prefix readers borrow an unchanged inherited scope after visiting every attribute through their normal validation. A declaration materializes the original ordered scope and keeps each reader policy, decoder, shadowing and first error. Cross-event or retained scope storage keeps its necessary owned copy. Pure namespace vectors for run raw XML, drawing raw XML and paragraph equations are constructed only when their existing consumer needs them. Actual reads, raw scanners, root declaration validation, source maps and admission remain unchanged.
+
+The cold query can prove unchanged complete model equality through the private paired opening value owner. Its mutation barrier invalidates that proof before any mutable access. Optional staged-model alignment additionally requires the exact initial immutable writer-block vector, retained only by a Weak identity witness. Every vector mutation passes copy on write and invalidates that identity. Metadata, namespace, finite grammar, all-or-none loan and fallback/error checks remain. Identity skips are limited to items that pass the same finite paragraph/RPr qualification. An unsupported item or an earlier finite miss retains actual opening/staged equality and its transitive private XML reads in the original order. These facts grant neither Source authority nor general writer permission.
 
 ## The package
 Bibliography source transactions resolve the qualified source collection
@@ -78,23 +109,18 @@ serialization. Package serialization validates content-type identity, part
 identity, relationship-owner identity, every relationship-id scope, and output
 ZIP entry identity before opening or truncating a destination path.
 
-**No save writes a character XML 1.0 cannot carry.** Serialization refuses
-`[Content_Types].xml`, every relationship part, and every UTF-8 or UTF-16
-part whose content type ends in `xml` when its bytes hold such a character:
-a C0 control other than tab, LF and CR, or U+FFFE or U+FFFF. The error names
-the part, the code point, and its line and column. A part whose content type
-does not end in `xml`, such as a VML drawing
-(`application/vnd.openxmlformats-officedocument.vmlDrawing`), is not scanned.
-This is the one place every writer of both formats passes, so a value stored
-through an infallible setter or a public field is caught here. An entry that
-already held such a character when the package was read is written back while
-its bytes are unchanged, so producer content passes through verbatim. The
-check is fail-closed: any edit that re-serializes such a part, or a
-relationship part whose source held one, refuses the save rather than write it
-again. The fallible entry points that take free text refuse such a value
-earlier, naming it and the one-based character position, as python-docx and
-python-pptx refuse such strings. DrawingML `a:t` text set through the text
-setters is the exception, stored as `_xHHHH_` as python-pptx stores it.
+**No read or save admits a literal character XML 1.0 cannot carry.**
+The shared OPC reader and serializer refuse `[Content_Types].xml`, every
+relationship part, and every UTF-8 or UTF-16 part whose content type ends in
+`xml` when its bytes hold a C0 control other than tab, LF and CR, or U+FFFE
+or U+FFFF. The error names the part, code point, line and column. Read refusal
+applies to imported producer bytes too. There is no unchanged XML exception
+and no sanitization. Well-formed opaque XML remains verbatim. Opaque non-XML
+parts and binary content are preserved without an XML character scan. A VML
+drawing with content type `application/vnd.openxmlformats-officedocument.vmlDrawing`
+is one such non-XML part. Fallible free-text entry points refuse earlier,
+naming the one-based character position. DrawingML `a:t` setters retain their
+existing `_xHHHH_` text encoding. A legitimate literal `_x0001_` is preserved.
 
 **Saves are deterministic.** Both `part_rels` and `parts` are emitted in sorted
 key order, so writing the same package twice produces byte-identical output.
@@ -152,6 +178,13 @@ records are not public story owners. Each `StoryId` includes the normalized
 source part, owner kind, source-order ordinal, and a structural fingerprint.
 Any changed owner makes a retained identity stale before indexed content can be
 resolved.
+
+Ordinary footnote and endnote creation adds missing explicit separator and
+continuationSeparator records within the note part when their conventional
+ids are free. Actual namespace-qualified source types determine presence,
+including positive-id specials. Occupied ids and imported raw bytes remain
+unchanged. Creation does not add settings `w:footnotePr` or `w:endnotePr` lists.
+The explicit note-policy API retains its separate settings behavior.
 
 Rich footnote authoring reserves the relationship-resolved footnotes part,
 adds one normal note with an available internal ID, and inserts its body
@@ -805,6 +838,19 @@ tolerant and writers use the fixed Word prefixes.
 
 A valid isolated legacy field admits Word's exact own-name bookmark pair at pure begin and end run boundaries. The internal start stays verbatim inside the field source and the external end stays in the paragraph. Its semantic endpoints use the actual accepted and tracked prefix counts, including preceding wrappers. Other interior markers, partial or crossing pairs, duplicate IDs, mismatched names and shared boundary content retain the untyped fallback. The sole nested exception is one total complex ordinary TIME, DATE or formula leaf in either the cached result or one direct instruction argument of an own-bookmarked FORMTEXT TextInput. The instruction variant has no extra literal operand or nested switch argument. Both parsed sources and their physical markers remain authoritative. Children in both regions, multiple or deep children, simple children, nested legacy owners and private interior owners retain the fallback. Actual source inspection excludes an unmodeled simple instruction child and private instruction content without projected display. Untouched and same-current output keeps the child source. A changed literal parent uses the existing result writer, preserving reset metadata and both bookmark markers. It retains an instruction child and removes only a result child. Canonical rebuilding with a retained own-name bookmark refuses if the original instruction identity cannot be preserved. Run-root namespace sidecars are scope metadata, not extra physical run children. Projection retains one exact paragraph namespace frame, including both marker aliases, foreign opaque names and the default namespace, without hoisting child scopes. Bindings conflicting with the shared inline validation scope or the generated `w15` types decline projection before mutation. Existing root declarations are merged once. If typed rich fragment merge makes such an identity authored and canonical ordering renumbers it, the existing whole-XML bookmark patch and reparse updates both markers. Preserved imported IDs remain outside authored renumbering.
 
+Bookmark source metadata retains the original marker occurrences, raw slots,
+namespace scopes and malformed or duplicate evidence. The doc-hidden
+`CT_P::current_bookmark_projection` read accessor recomputes only accepted and
+tracked indexes from current typed paragraph, control and revision owners.
+This keeps deferred revision fields aligned after checked semantic
+materialization. TOC scope, public bookmark reads and layout source, range
+and target registration use current indexes. Physical source mutation and
+lexical custody checks continue to use the stored marker metadata. The
+accessor does not construct Fields, serialize paragraphs or grant input
+allowance. Its bounded raw-marker classifier reuses admitted marker children
+without interpreting opaque paragraph or Field content. Pairing, duplicate
+and original source-offset validation remain separate and unchanged.
+
 Run splitting uses the same encoded raw-child position sidecar. A second
 private classification bit associates each parsed `mc:AlternateContent`
 drawing projection with its verbatim compatibility block, so both move to the
@@ -965,7 +1011,15 @@ the document-wide even-and-odd setting.
 Comment deletion uses namespace-qualified raw source markers across every
 relationship-resolved Word story, including preserved wrappers and revisions.
 The same inventory validates orphan roots without interpreting accepted-view
-ranges. Point references are valid and linked replies need no separate anchor.
+ranges. Point references and imported linked replies without anchors remain
+valid. Newly authored replies require a unique projectable parent range and
+reference in one story. Their start immediately follows its start, and their
+end plus separate reference follow its reference run. The crossing topology
+retains parent content and references, including multi-paragraph ranges.
+Ambiguous or missing parent anchors refuse before publication. The reference
+run must follow the parent end at the same checked boundary. Formatting, retained
+root attributes and empty text remain supported. Unrelated text, fields, drawings
+or opaque payload in the reference run refuse rather than enlarge the reply.
 Deletion of a demonstrably undefined marker follows the existing editing
 lifecycle because there is no definition to orphan. Absence is proved from
 qualified raw definition entries at the actual relationship target. Missing
@@ -978,6 +1032,22 @@ Ambiguous linkage, a surviving endpoint or reference, or unrelated anchors
 inside a removed comment definition refuse atomically. Unknown root and entry
 payload remains unchanged outside the selected owned rows.
 
+Comparison treats an otherwise unchanged document with a newly authored
+crossing reply as one comment-package revision. Existing parent text and anchors
+receive no text revisions for that graph addition. The same checked reply
+authoring owner proves required parent metadata and crossing placement. The
+qualified original-plus-reply replay supplies actual body and related-story
+models and source together, preserving ignored formatting and whitespace.
+Before copying a replay story, comparison checks its complete revision-bearing
+paragraph, table and block-control owners with actual typed content and positive
+owning-source residuals. A changed containing owner refuses, while unrelated
+held owners remain preserved. Revised comment snapshot refusal remains upstream.
+The snapshot records the added reply identities. Rejecting it removes those owned
+anchors before restoring the original related-part snapshot, and accepting it
+retains the reply graph. An existing crossing reply remains outside selected
+text revisions in an otherwise editable owner. Existing protected-owner and
+revised-comment replacement refusals remain in force.
+
 Threaded comments add a document relationship using the Microsoft
 `commentsExtended` relationship type. The facade retains its resolved target
 and writes the standard
@@ -987,7 +1057,9 @@ and both overrides together. An ordinary save retains an accepted standard
 override and unrelated comments-extended sidecar XML. Existing custom targets
 remain authoritative, and removal of the final API-owned thread removes only
 the parts, relationships, and overrides created by the typed model only when
-no opaque root attributes or children remain. Imported empty parts and
+no opaque root attributes or children remain. Authored MC Ignorable metadata
+with only the correctly bound w14 token is library metadata for this cleanup.
+Other tokens, foreign bindings and producer attributes still retain the part. Imported empty parts and
 unrelated companion payload are retained.
 
 Modern PowerPoint collaboration follows two independent relationship scopes.
@@ -1303,6 +1375,35 @@ invariants when the reader moves to `oxml-media`.
 
 ## Package integrity
 
+### Stored-package validation and damaged-input refusal
+
+Both package read routes refuse physical exact duplicate ZIP part names
+before choosing a winner, including unbounded reads. ZIP names use the ZIP
+reader's UTF-8-then-CP437 decoding and existing normalized, case-insensitive
+OPC identity. An unreconciled physical entry-count discrepancy is an invalid
+ZIP rather than an accepted package. Forbidden literal XML characters refuse
+open with the part and code point named. Validators report these as their
+existing error findings or invalid-XML issues. Other malformed XML parts are
+reported without rewriting the source bytes.
+
+Word validation checks a bounded raw subset on related XML story parts:
+qualified body, paragraph and run children and ordering, element-only text,
+justification and color values, tracked-change id and author, drawing extent
+bounds, radical degree and expression children, dangling relationship and
+normal-note references, and deleted text spelling. Relationship attributes
+are checked by namespace URI in their owning part, including aliases and
+opaque elements. Foreign payload stays opaque for semantic checks. At most
+ten new subset findings per part are retained, followed by an omitted-count
+summary, without suppressing existing package findings. The validator also
+uses the actual document-open predicate. It is not a full schema validator.
+
+Imported ordinary bookmark ids may repeat within or across story parts.
+Their multiplicity is retained separately from the globally occupied id set,
+so allocation avoids occupied ids and authored changes cannot introduce or
+increase repeats on either candidate reopen route. This does not weaken
+physical pairing, reserved-marker ownership or custody checks. Validation
+may warn about ordinary repeated ids. No imported renumbering policy is added.
+
 A qualified self-closing Word comment owner has an empty paragraph inventory.
 Its record and opaque attributes remain byte-preserved through listing, field
 updates and save/reopen. Namespace ownership and excerpt bounds are checked
@@ -1315,7 +1416,41 @@ relationship ids, missing content-type overrides, relationship targets that
 resolve to no part, and orphan media. `rpptx` adds its own presentation-specific
 checks, listed in `06-presentationml-model.md`.
 
+The PowerPoint facade adds `validate_presentation_file`, a read-only stored
+route that validates the original XML bytes a read admits, never a
+reserialized model, and never writes its input. For every indexed unique OPC
+identity it checks XML 1.0 lexical and character faults, exactly one complete
+document root, and non-whitespace text outside the root, over the original
+bytes of ordinary parts and, through a read-only archive over the retained
+file bytes, of `[Content_Types].xml` and relationship parts. Metadata is selected
+by the loader's existing normalized OPC identities, including dot and parent
+segments, rather than a raw suffix or a newly imposed path policy. The lexical
+reader and presentation field-identity inventory track namespace lifetimes with
+heap-backed frame marks, retaining vendor declaration rules, raw URI matching
+and the existing per-element declaration cap without a numeric nesting overflow.
+Root-count and structural readers use the already checked source and their
+explicit scoped state. A private lossless decode step preserves existing opaque UTF-8 with BOM and UTF-16
+LE/BE XML support and rejects malformed encodings instead of replacing
+characters. Qualified structural checks cover the SDK 3.0.1
+`p:presentation` direct-child sequence including `p:kinsoku`, unknown direct
+children of `p:spTree` and nested `p:grpSp`, required unqualified `cNvPr` id
+and name attributes on actual physical shape owners, physical table row
+against that table's own grid column equality, and role content-type
+overrides for internal slide, layout, master, notes slide, notes master and
+handout master relationships resolved through their actual owning part.
+Compatibility wrappers are honored as a finite observation: qualified
+immediate PresentationML members of both `mc:Choice` and `mc:Fallback` at a
+real tree-member position inherit the same checks, extension lists,
+`p:contentPart` and foreign namespaces declared `mc:Ignorable` stay opaque
+islands, and no branch is selected. This is a bounded subset, not a full
+schema validator, and it is not the duplicate or open-refusal behavior that
+remains with the B story. Existing parsed-model issues are appended after the
+stored ones and deduplicated through the existing issue equality, a model
+open failure returns the stored issues when any exist, and a model failure
+without stored issues propagates.
+
 Presentation HTML conversion publishes only a serialized, reopened, validated
+
 candidate. Projection failure returns `Error::Html` or an existing package
 error before any partial presentation escapes. Default master, layout, and
 theme parts remain byte-identical while new slide children follow the existing
@@ -1636,6 +1771,14 @@ comments-extended relationship graph reachable from the main document, with
 matching overrides and namespace declarations. A failed validation or
 allocation leaves anchors, typed parts, relationships, and overrides unchanged.
 
+Authored Word comments use canonical w and w14 writer bindings. Original
+foreign bindings at the comments root, a comment, or its actual paragraph
+destination refuse when their retained declarations would reinterpret generated
+names. The check precedes serialization and does not scan opaque descendants.
+Compatible aliases remain supported and opaque children retain their source.
+MC metadata is merged only when a comment is authored. commentsIds is optional,
+never synthesized, and an existing part and its graph remain unchanged.
+
 Comment moves stage marker removal, narrowly qualified Google wrapper pruning,
 destination placement and package reopen together. Unchanged definition and
 companion parts retain their owned identities. Typed run references retain
@@ -1660,8 +1803,54 @@ deterministic save path writes the validated result later and preserves every
 unrelated part and relationship.
 
 Document comparison uses the same package boundary. It clones the complete
-typed document and package state, resolves identical story shells and
-relationships, and aligns modeled owners in each nonignored story. The prepared
+typed document and package state, resolves compatible story shells and
+relationships, and aligns modeled owners in each nonignored story.
+Normal-footnote additions and removals use checked discovery of exactly one
+internal footnotes relationship, its existing target and matching content type.
+Duplicate identities, missing targets and ambiguous relationship multiplicity
+refuse before publication. Numeric note ids remain destination identities.
+Omitted and explicit-normal owners at any signed id are normal. Explicit empty
+and unknown owners preserve legacy reading and exact imported bytes, with any
+owner or reference change refused. Namespace-qualified attributes use the actual
+inherited and local bindings.
+
+Footnote definition custody is persisted by two zero-width standard bookmark
+pairs. Names encode a persistent token and transaction-local presence bits.
+Recognition checks actual pair cardinality, effective namespace, adjacent ends,
+owner and reference association, first note paragraph placement and current
+revision wrappers. The note pair is inside an added content insertion and
+outside a deleted content wrapper. Token identity does not depend on current
+revision ids. Pending and resolved tombstones are open while any unit in the
+part remains pending. Completed imported markers are excluded from open votes,
+preserved when untouched and retired before an affected comparison emits new
+custody. Save and reopen rediscover these states from bytes without a custom
+part or in-memory history.
+
+Creation reserves the part, relationship and override through existing bundle
+allocation and carries the edited input's exact special inventory. It does not
+manufacture missing specials. Selective resolution removes only a fully selected
+owned definition whose references are removed. Original unused and still
+referenced notes remain. Unowned invalid and opaque records keep the part.
+With no retained normal definition or unowned record, an open original-absent
+or edited-absent vote removes the part. Otherwise imported specials remain.
+Removing a part removes its main relationship, override and own relationships.
+Footnotes-part removal also removes the document-settings references to its
+special records, including preserved aliased Word reference roots. Numbering
+and placement policy, endnote settings and foreign or unrelated opaque children
+remain. The actual property-owner namespace scope identifies these edges.
+Definition-owned relationships and targets are removed only after checking
+remaining references and package-wide sharing. Unrelated relationships retain
+their ids and order. Settlement retires every library pair, while tombstones
+remain if another unit is pending. A body pair without a note counterpart has
+no surviving owner identity. It does not bind an adjacent reference, including
+one in a revision wrapper. It follows the existing tombstone or completed-marker
+lifetime without selecting or deleting unrelated definitions. Positively bound
+note pairs still require exact normal owner, reference, token, bits and pair
+cardinality. A note pair without its body pair refuses. The convention cannot
+distinguish every missing-note-pair corruption from an identical valid history.
+Checked reopen, signature invalidation and
+ordinary held-handle invalidation precede atomic publication. Any refusal keeps
+the original live model, package graph, handles and output unchanged. The prepared
 package's main-document bytes are authoritative. Exact source spans flow through
 body items, paragraphs, tables, rows, cells, controls, and runs, including when
 another child of the same owner changes. An unchanged drawing-bearing run keeps
@@ -1736,6 +1925,12 @@ and relationships remain in place. Cloned row and cell property sequences keep
 grid spans, vertical merge state, and unmodelled children byte for byte.
 Repeated numbered paragraphs keep their existing numbering part reference and
 level. No numbering relationship, instance, or abstract definition is added.
+Internal scoped template staging writes live numbering IDs in both its main
+part and numbering part. The actual main Source stays paired with those package
+bytes through fragment export and its existing import remap. There is no
+inverse-ID guess on a reader or second Field serialization for callback
+locations. Final public output still performs the canonical numbering projection
+and restores live model bindings before same-document publication.
 Markers are removed only from the candidate. Scalar syntax and JSON values are
 resolved against lexical loop scopes before replacement reaches typed body
 content, relationship-resolved headers and footers, the notes of the footnotes
@@ -1950,6 +2145,18 @@ DrawingML text watermark compatibility preserves one WPS choice and a real VML t
 
 ## Checked Word operation source ownership
 
+The scoped prepared-Field installer preserves a successful Revision owner's
+private same-operation reader companion through actual Field-slot cloning and
+refresh. Copied old root prefix/suffix images and the mapped new body retain
+separate coordinates. The same substantive Revision factory commits the new
+record and reader facts only on success. Ordinary edits invalidate the companion,
+and dead or foreign operation anchors supply no authority. A returned-context
+install requires its matching live companion. A new operation may independently
+qualify a retained model as genuine frozen ingress without using an old receipt.
+This private state
+retains no model, Source buffer or Work reference and grants no new input.
+
+
 Opaque relationship masking uses canonical writer bytes and exact owner-span proofs before authoritative namespace replay. A tail-only masked query may compose unchanged closed-child XML facts with a freshly checked frame when the head, bindings and physical occurrence still match. Field, private, malformed, changed-head and crossing-span cases retain the existing fallback. A modeled relationship ID occurring in opaque XML remains occupied. The query result does not become a stored source parse or writer proof.
 
 Trusted byte-opening provenance includes an actual ZIP file read. A successful checked story-hyperlink reopen may supply the current package and actual source parse while the authored typed body stays intact. The actual reopened parse is never replaced by that authored model. New documents still require their first checked ZIP commit, and an unrelated part error refuses before publication. Equivalent ordering of query namespace declarations does not change relationship resolution. Namespace values, declaration multiplicity and stored source-frame identity remain checked.
@@ -2035,6 +2242,26 @@ text-box cost16, resetting between siblings. Recognized tables retain the
 inclusive32 boundary. Iterative borrowed-model admission precedes staging
 clones and serialization. Opaque foreign routes do not consume modeled nesting
 authority.
+
+Complete document, paragraph-fragment, header/footer, notes, comments and
+glossary readers begin admission with no implicit Word alias. Their declarations
+establish the real scope. Consumed readers retain their legacy inherited
+semantics. Constructor qualification, capture planning and weighted admission
+use the same selected context. Paragraph-only part readers do not construct
+tables or block controls retained or skipped as raw XML. Header/footer, notes
+and comments also preserve their actual global wrapper-loop semantics: a
+recognized started wrapper updates persistent scope, including for later items
+after its End. An Empty wrapper does not perform that Word-scope update. A
+wrapper name inside a selected item or opaque subtree does not become a global
+wrapper action. The same physical dispatch facts drive capture and weighted
+admission, so schema-only parent grammar cannot hide an item the real reader
+constructs.
+
+Checked raw-block editing separates ordinary input refusal from resource
+refusal at their producers. Its original-source admission runs before typed
+construction. Ordinary preservation fallback remains available, while a known
+resource refusal escapes to the uninstalled outer candidate. Public error types
+and legacy infallible refusal policies remain unchanged.
 
 Checked paragraph replacement admits the finite fifth-edition Transitional
 CT_P particle:33 Word names, including optional single pPr first, plus
@@ -2244,3 +2471,193 @@ whole output set while protecting the input, including aliases and hard links.
 The workspace uses zip9.0.3. Decoded names try UTF8 regardless of the ZIP flag and otherwise CP437. OPC normalization and duplicate detection operate on those decoded names. ODT retains its separate raw central-name UTF8 check. ODP keeps contextual decoder errors and existing traversal, duplicate, compression and expansion limits. No new strict raw-name policy is implied.
 
 Ordinary Deflate entries use central-directory made-by version20. Retained ZIP8 native packages also use version20, so the source-only prediction of a45-to20 output change is refuted. Entry order, selected compression backend, fixed timestamps and permissions remain deterministic. Container bytes can differ while exact inflated XML and opaque member bytes remain equal. ZIP64 and malformed header behavior require dedicated controls, not a general byte-neutrality claim.
+
+Word retained-owner publication uses the actual part root and emitted local
+declarations, including independent related-story and glossary roots. Matching
+current global bindings suppress redundant raw-root closure. Changed or shadowed
+bindings restore original meaning locally. Namespace transport has serialization
+lifetime only, with no persistent history or cross-document cache. Legacy r, mc
+and wp omission guarantees retain their original policy and are disabled under
+foreign local shadows. Synthetic source and validation compositions establish
+their own context and restore the outer carrier afterward.
+
+Retained field, revision, control and Ruby completion work uses the unchanged
+affected-source accounting policy. Borrowed physical-root planning checks total
+required declaration and escaping growth before expanded output construction.
+The allowance comes from actual original source, original scope and current
+model values, never from predicted expansion. Existing raw capture allocations
+remain part of parsing work. Needed Ruby capture declarations intentionally
+change those public retained vectors without adding public struct state. Unknown
+QNames, existing attributes and descendant payload bytes keep their identity.
+
+Missing destination default knowledge remains unknown. Complete actual part
+and fixed validation roots record an empty default internally when no default
+declaration exists. Child overlays inherit their parent. Source resets and
+canonical-Word-only Ruby capture do not invent an empty default. Ruby uses the
+existing full namespace-scope updater so original property-root clears and
+foreign/default alias shadows are captured before retained-root completion.
+MC-value root metadata keeps its prior local w14 declaration policy. QName-backed
+late w14 guarantees apply only to the original same-part writer context.
+
+
+A scoped grammar source may carry Word text correspondence from an actual
+frozen current serialization record or retained model XML. That role is not
+Original OPC correspondence and supplies no Field source or current allowance.
+Copied physical intervals survive carrier slicing and namespace insertion,
+while inserted declarations and replacement bytes remain generated. The actual
+Word Text decoder and its selected walk determine operand use. Catalog
+membership and emitted bytes alone never activate the input.
+
+The glossary carrier follows the same structural edit recipe as its retained
+writer. Unchanged entries remain copied source gaps. Changed bodies carry the
+actual body writer's Text events through wrapper replacement. New entries,
+pending insertion offsets and removed entries use their actual edit outcomes.
+Separate record sinks share immutable invocation origin catalogs and keep
+independent output positions. Retained glossary and doc-part accessors borrow
+stored records without asserting publication eligibility or selecting input.
+
+A synchronous current/frozen Field pair can prove unchanged private Parsed
+XML storage through its actual shared immutable FieldSource Arc. The frozen
+ingress Field keeps that exact record alive. This adds only a raw Word view
+for actual copied intervals, independently of mutable CachedResult authority.
+Equal bytes in another allocation are not a record relationship, and changed
+or rebuilt payloads require their actual producer maps. No Field source or
+current allowance follows from this Word-only correspondence.
+
+Actual escaped Word Text payloads carry a synchronous producer receipt to the
+operation's existing output metadata. Each sink records its own coordinates.
+The receipt borrows the exact payload through that write, restores on error or
+unwind and holds no metadata lock during sink reentry. Instruction, deleted
+Text and equal generated bytes do not acquire Word input facts. New normalized
+records retain their full XML demand while forwarding only actual Word facts.
+
+Changed parsed Field records return their Word maps alongside their bytes.
+Simple and complex cache writers preserve actual scalar payload intervals,
+while header-only and lock edits preserve surviving raw intervals and mark
+insertions generated. Retained-root namespace closure carries those maps in
+the same piece visit, including the final validation writer's streaming path.
+No extra whole-record serialization is needed to recover metadata. This does
+not establish ordered requested-Text, typed-cache or arbitrary rebuilt-record
+lineage, which require their actual assignment and parser-return producers.
+
+The mapped final paragraph writer preserves the existing final Vec transport
+role. Its sink carries an exact live writer target and checks that target
+against the same operation ledger's lexical final-writer scope. Distinct
+normalization sinks have no such target. Inner escaped payloads, changed
+records and namespace closure retain their existing reservations, while the
+outer final buffer obtains maps and events during that same serialization.
+Both the existing Vec validator and the mapped sink use the same substantive
+block serializer. Error and unwind restore the sink target and ledger scope.
+
+Scoped raw textbox sources retain the actual capture and branch recipe across
+discovery and rewrite. Capture copy ranges bind the live reader input and its
+already-consumed opening. Closing-tag and DocType normalization distinguish
+copied payload from generated syntax. Trim modes use their exact consumed
+windows, while unproved modes preserve ordinary bytes and return no transcript.
+A copy tape carries neither Field baseline nor Word input authority by itself.
+Returned publication metadata unions only positively proved copied and produced
+Field ranges. Missing capture or consumer coverage stays unknown.
+
+
+Capture publication windows describe CURRENT-coordinate transport, independently
+of OPC input ranges or Word input roles. A known selected child can retain its
+original consumed End syntax through an event-preserving capture even when that
+syntax normalizes in the returned record. Only copied boundary images inside
+one retained window establish that projection. Disjoint assembly never fills
+removed outside bytes. Expired window collectors supply no fresh role, while
+already committed numeric roles survive in the returned carrier without keeping
+the old source buffer alive. No namespace insertion becomes input credit.
+
+A source-aware document parse keeps the carrier operation anchor and its
+existing original/generated correspondence through the substantive factory.
+Failed whole-document parsing does not publish partial Field coverage. A
+generated document carrier remains generated after parsing, even when its
+bytes equal a frozen part. Root attributes, backgrounds and raw fallback use
+the ordinary parser behavior. Unvisited raw consumers remain unproved.
+
+A scoped Native main-document context must match its producer package entry.
+Class, namespace and existing owner checks remain in their normal order. Only
+the fresh model branch invokes the scoped lower factory, without an additional
+model parse. Reused model facts remain limited to their actual prior evidence.
+
+Scoped document construction can retain actual root-event ordinary intervals
+without classifying an entire package part. Failed whole factories publish none
+of those root facts. Source assembly, slicing, namespace closure and repetition
+retain copied current-coordinate images, with inserted bytes still unknown
+until an actual relevant producer observes them. This is private disposition
+metadata, independent of Original input identity and every resource allowance.
+
+Namespace closure inserts at its own reader actual physical opening boundary,
+including a retained UTF8 BOM. It preserves the BOM and all other source bytes.
+The change does not strip input or broaden namespace/encoding acceptance.
+
+Imported XML scalar payloads carry exact parent-source binding and owner bounds.
+A moved rewrite validates all edit geometry and receipts before output growth,
+then reserves unprepaid Field demand through the existing ledger. An empty edit
+list moves its source without a byte copy. Replacements, including equal-byte
+values, produce a fresh source occurrence with unknown constructor facts. Raw
+mode is not an extra XML validator. Unknown interior ownership remains pending
+until its actual consumer supplies proof, rather than becoming a new refusal
+for otherwise valid imports.
+
+The first scoped template preparation keeps the existing package preparation
+order and ordinary None callers. Its initial clone correspondence applies
+only before structural edits or model reopening, after a package-only initial
+flush. It cannot be reused after preparation. Actual installed Field receipts
+move with the model, while later package and import writers still need their
+producer handoffs. No equality or serialized package lookup discovers an origin.
+
+Scoped document and standalone-paragraph readers publish selected property facts
+only after successful retained factory return and delivered Field joins. Child
+container companions stay pending through late parent failures and control raw
+fallback. Actual smartTag/customXml wrapper readers can contribute their own
+facts after success, without initial document parsing guessing that outcome.
+Captured source maps project only copied event images. Generated gaps stay
+unknown, including under overlapping collector tapes. Neither the whole property
+subtree nor the Field complement is certified ordinary. Existing attribute-byte
+policy, aliases and physical BOM coordinates remain unchanged. Revision, Ruby
+and drawing-specific property handbacks require their own actual producers.
+
+
+Checked scoped-source composition reserves the union of positively observed
+Field intervals from both mapped and delivered publication facts before its
+actual byte materialization. Distinct output occurrences each consume demand,
+even when they share an input origin. Namespace closure prepares its lexical
+insertion, maps, admission and event positions before the copy reservation. A
+no-insertion closure moves its existing buffer while preserving admission and
+generated-delivery policy. Namespace insertions remain generated. Invalid
+preparation consumes no copy reservation, and resource refusal remains sticky.
+Unknown publication remains unknown. Imported source rewrite retains its own
+reservation and is not charged again by shared materialization.
+
+The shared w14 declaration planner reads borrowed events and locates root end
+in actual physical source coordinates, including UTF8 BOM. Scoped no-insertion
+calls move the original source and payload unchanged. Insertion composes the
+selected before/after images with generated declaration bytes, carrying maps,
+Word events and positive Field coverage under the existing copy reservation.
+The ordinary helper consumes the same decision. Its BOM insertion uses the
+physical root location rather than the reader's BOM-excluded logical count.
+
+Scoped namespace replay records only actual live Reader slices or the currently
+borrowed checked replacement event. It does not grow a whole output Vec before
+reservation or recover origin from output equality. The ordinary writer uses
+the same event loop and retains its byte/error route. The scoped row wrapper
+also uses checked composition before its existing table reader. Actual direct
+and all marker-view String copies pay the selected text-copy ledger.
+
+Cached block source selection uses the exact immutable record the existing
+reuse producer chose. Its ingress-frozen storage handle establishes CURRENT
+SOURCE membership, with no Original Field or JSON input role. Sharing that
+handle does not waive subsequent copied-byte demand. First-clone retained-part
+selection is consumed once and never applies to a later generated package part.
+
+Scoped comments publication preserves the actual comments relationship target
+and binds each installed part buffer to its produced Source. The dirty writer
+retains canonical root namespace admission, compatibility attributes, author,
+date, initials, IDs, paragraph IDs and root/comment opaque child order through
+the existing substantive serializer. Its whole-part drawing namespace
+preparation uses the same concrete policy as ordinary prepared publication.
+Refresh and fragment loading pass the actual related Source to the existing
+comments factory. Returned-model facts commit only after factory success and
+remain paired with that installed package storage. Opaque record maps transport
+selected bytes without certifying their contents as ordinary or Field XML.

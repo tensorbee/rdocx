@@ -1,0 +1,11 @@
+# F-X272, lock namespace producer, Root final 1
+
+Reviewed the bounded retained field-lock producer repair at text source54d8c88f7967de7d3c534b1bf9678accdb5577812625e22bc31c15bccdc96380, the two existing-module regressions and operative plan/HLD clarification. Independent Codex source support was performed by /root/s96_prepared_integration_readiness on the frozen source, with report SHA058431ab8745364ef6e98ec49f003521cf723958c3fcde3a33f56ff972c8ebd1. Root inspected the actual producer, parsed-owner guarantee and assertions. This is not whole C1 or a reset of original peer caps.
+
+Verdict: 0 defects, 0 smells, 0 nitpicks in this bounded repair.
+
+The parsed simple owner requires a Word-qualified instruction attribute. The complex owner requires a Word-qualified beginning marker attribute. Each therefore supplies a genuinely bound nonempty Word prefix even when its element is unprefixed. The producer at crates/rdocx-oxml/src/text.rs:22301 reuses that binding and never inserts a duplicate or foreign-rebinding namespace declaration. Prefix bytes remain borrowed from the actual source or the known effective canonical binding. Lock removal retains its prior behavior and adds no prefix requirement. The existing projected-length, reserve-before-growth and prepaid-transfer rules remain unchanged.
+
+The compiled RED reproduced two xmlns:w declarations on one actual output root. The successful GREEN batch has5passes with no failures or ignored cases. It covers default-Word/foreign-w inputs with absent and true initial locks, true/false/None requests, complex local canonical declaration, old flag states, large preallocation refusal and the coalesced source recipe. Shared strict XML and reopened field values are checked independently of output substrings. Actual source and executables are retained under /private/tmp/rdocx-s96-root-c1-implementation/root-lock-namespace. Clippy all targets/all features, formatting, affected prose and diff whitespace checks exit0 on that text source.
+
+Whole C1 still requires remaining source composition, original constructor reservations/policies, actual native/template consumers and datum/filter accounting. Provider completion, final integrated/native/schema/installed/hash/CI/performance evidence and release approval remain unproved. No feature status or completion ledger was changed.

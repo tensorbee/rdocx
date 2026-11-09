@@ -44,9 +44,11 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 ## Measured footprint and speed
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 111,071 compressed bytes, 516,134 member bytes, 8 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx-cli | 126,182 compressed bytes, 593,817 member bytes, 8 members | 0.17.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-07 |
 
 ## Use it when
 
@@ -62,7 +64,7 @@ conventions with `rpptx-cli` through `oxml-cli-support`.
 ## Example
 
 ```sh
-cargo install rdocx-cli --version '^0.16.4'
+cargo install rdocx-cli --version '^0.17.0'
 
 rdocx inspect report.docx
 rdocx text report.docx
@@ -119,7 +121,26 @@ story of the original, where `KIND` is a Python `Story.kind` name: `body`,
 the `comment` story excludes only the comments part, so a pair whose comments
 differ needs `--ignore-comments`. An unknown granularity or story name is a
 usage error, a repeated story fails, and neither creates the output. The
-`--json` record states the options that ran.
+`--json` record states the options that ran. The original may already hold
+tracked changes. A paragraph, table or block content control holding one stays
+byte for byte when both inputs hold it unchanged. Editing, deleting, moving or
+inserting such an owner is refused with its location, without publishing output.
+Section properties holding revisions must also stay unchanged in both inputs.
+Changing them fails without publishing output.
+Reported counts include newly created revisions only, even when a new review
+uses an existing author's name.
+
+For an unsupported edit, retain the original redline separately. Resolve the
+prior revisions on two independent input copies, then compare those resolved
+copies. This removes the selected prior markup from the new baseline:
+
+```bash
+rdocx revision accept original-redline.docx --author "Reviewer A" --output original-resolved.docx
+rdocx revision accept edited-redline.docx --author "Reviewer A" --output edited-resolved.docx
+rdocx compare original-resolved.docx edited-resolved.docx --author "Reviewer B" --timestamp 2026-10-27T13:00:00Z --output second-review.docx
+```
+
+Use the existing `--id` selector when the same author has several reviews.
 
 Revision `list` reports every supported story and names the story of each
 revision. Revision `accept` and `reject` operate across every supported story
@@ -258,6 +279,16 @@ file only once it is complete, so a failed run leaves no truncated output.
 missing part, a part without a content type, or a prefix that `mc:Ignorable`
 or `mc:MustUnderstand` lists without a namespace declaration. Empty
 paragraphs, heading level gaps, and missing metadata are warnings only.
+
+The documented WordprocessingML subset also checks well-formed XML 1.0 in
+XML parts, style ids, direct body/p/r children and order, text placement,
+paragraph/table `jc` values, `color`, tracked-change `id` and `author`, drawing
+extents, required `m:rad` children, relationship ids, note references and deleted
+text. Relationship attributes use their actual namespace and owning part.
+Repeated imported bookmark ids are warnings. This is not a full schema
+validator. Both Word and PowerPoint opens refuse exact duplicate ZIP part names
+and literal forbidden XML characters, naming the affected part. Validators
+report the character fault without rewriting it to an OOXML escape.
 
 
 Run `rdocx --help` or `rdocx <command> --help` for the complete option set.

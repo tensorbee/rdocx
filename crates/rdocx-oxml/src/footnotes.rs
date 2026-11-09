@@ -1,13 +1,13 @@
 //! Footnote and endnote elements: `CT_Footnotes`, `CT_Footnote`.
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::Result;
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::word_prefixes_at;
-use crate::properties::is_word_element;
-use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root, root_binding_scope};
+use crate::properties::{is_word_attribute, is_word_element};
+use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root};
 
 /// `ST_FtnEdn` — what a note in the stream is for.
 ///
@@ -96,7 +96,20 @@ impl CT_Footnotes {
 
     /// Parse from XML bytes (the content of footnotes.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
+        let admitted = crate::document::admit_reader_source(
+            xml,
+            crate::document::WordSourceReader::Part(crate::document::PartReaderKind::Notes),
+        )?;
+        let mut controls = admitted.controls_for(xml);
+        Self::from_xml_with_read_output(xml, &mut controls, None)
+    }
+
+    pub(crate) fn from_xml_with_read_output(
+        xml: &[u8],
+        controls: &mut crate::document::ControlSourceCursor<'_>,
+        read_output: Option<&mut Vec<Vec<(usize, crate::text::WordBlockSourceMaps)>>>,
+    ) -> Result<Self> {
+        let mut retained_reads = Vec::new();
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
 
@@ -114,34 +127,47 @@ impl CT_Footnotes {
                     {
                         let mut id: i32 = 0;
                         let mut note_type = NoteType::Normal;
+                        let mut raw_type = None;
                         for attr in e.attributes().flatten() {
-                            if matches_local_name(attr.key.as_ref(), b"id") {
-                                id = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("0")
+                            if is_word_attribute(attr.key.as_ref(), b"id", &prefixes) {
+                                id = attr
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        e.decoder(),
+                                    )?
                                     .parse()
                                     .unwrap_or(0);
-                            } else if matches_local_name(attr.key.as_ref(), b"type") {
-                                note_type = NoteType::from_str(
-                                    std::str::from_utf8(&attr.value).unwrap_or(""),
-                                );
+                            } else if is_word_attribute(attr.key.as_ref(), b"type", &prefixes) {
+                                let value = attr.decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    e.decoder(),
+                                )?;
+                                note_type = NoteType::from_str(&value);
+                                raw_type = Some(value.into_owned());
                             }
                         }
 
-                        // `w:type` decides what an entry is, because the ids
-                        // separators conventionally use are a convention
-                        // rather than a rule, and a `continuationSeparator`
-                        // sitting at id 1 must not read as note number one.
-                        //
-                        // An untyped entry at id 0 or below is still treated
-                        // as a separator. That is the older convention, and
-                        // producers that predate writing `w:type` rely on it.
-                        if note_type == NoteType::Normal && id <= 0 {
+                        // Omitted and explicit normal types are normal at every id.
+                        // Retain only the historical read of invalid empty/unknown
+                        // types at nonpositive ids. Comparison discriminates those
+                        // retained raw states separately before allowing an edit.
+                        if id <= 0
+                            && note_type == NoteType::Normal
+                            && raw_type.as_deref().is_some_and(|value| value != "normal")
+                        {
                             note_type = NoteType::Separator;
                         }
 
                         // Separators are kept rather than dropped, so a round
                         // trip preserves them.
-                        let paragraphs = parse_footnote_content(&mut reader, &prefixes)?;
+                        let mut reads = Vec::new();
+                        let paragraphs = parse_footnote_content(
+                            &mut reader,
+                            &prefixes,
+                            controls,
+                            read_output.as_ref().map(|_| &mut reads),
+                        )?;
+                        retained_reads.push(reads);
                         footnotes.push(CT_Footnote {
                             id,
                             note_type,
@@ -151,7 +177,7 @@ impl CT_Footnotes {
                         || is_word_element(name.as_ref(), b"endnotes", &prefixes)
                     {
                         // Continue into the root element
-                        word_prefixes = prefixes;
+                        word_prefixes = prefixes.into_owned();
                     } else {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
@@ -163,6 +189,9 @@ impl CT_Footnotes {
             buf.clear();
         }
 
+        if let Some(output) = read_output {
+            *output = retained_reads;
+        }
         Ok(CT_Footnotes { footnotes })
     }
 
@@ -177,13 +206,41 @@ impl CT_Footnotes {
     }
 
     fn to_xml_root(&self, root_tag: &str, item_tag: &str) -> Result<Vec<u8>> {
-        for note in &self.footnotes {
+        let mut writer = Writer::new(Vec::new());
+        self.write_xml_root_in(&mut writer, root_tag, item_tag, None)?;
+        let mut xml = writer.into_inner();
+        declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    pub(crate) fn write_xml_root_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        root_tag: &str,
+        item_tag: &str,
+        work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<()> {
+        Self::write_notes_root_in(
+            &self.footnotes.iter().collect::<Vec<_>>(),
+            writer,
+            root_tag,
+            item_tag,
+            work,
+        )
+    }
+
+    pub(crate) fn write_notes_root_in<W: std::io::Write>(
+        notes: &[&CT_Footnote],
+        writer: &mut Writer<W>,
+        root_tag: &str,
+        item_tag: &str,
+        mut work: Option<&mut crate::text::WordOperationWork>,
+    ) -> Result<()> {
+        for note in notes {
             for paragraph in &note.paragraphs {
                 paragraph.validate_resource_limits()?;
             }
         }
-        let _binding_scope = root_binding_scope(ROOT_R_BINDING);
-        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",
@@ -197,10 +254,11 @@ impl CT_Footnotes {
             "xmlns:r",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         ));
+        let _binding_scope = crate::text::emitted_root_binding_scope(&start, ROOT_R_BINDING, true)?;
         writer.write_event(Event::Start(start))?;
 
         let mut buf = itoa::Buffer::new();
-        for footnote in &self.footnotes {
+        for footnote in notes {
             let mut fn_start = BytesStart::new(item_tag);
             // `w:type` precedes `w:id` in the schema's attribute listing, and
             // is omitted entirely for a normal note, which is what Word writes.
@@ -211,7 +269,18 @@ impl CT_Footnotes {
             writer.write_event(Event::Start(fn_start))?;
 
             for p in &footnote.paragraphs {
-                p.to_xml(&mut writer)?;
+                if let Some(work) = work.as_deref_mut() {
+                    p.write_xml_core_in(
+                        writer,
+                        None,
+                        crate::text::XmlWriteRole::Publication,
+                        None,
+                        work,
+                        None,
+                    )?;
+                } else {
+                    p.to_xml(writer)?;
+                }
             }
 
             writer.write_event(Event::End(BytesEnd::new(item_tag)))?;
@@ -219,9 +288,7 @@ impl CT_Footnotes {
 
         writer.write_event(Event::End(BytesEnd::new(root_tag)))?;
 
-        let mut xml = writer.into_inner();
-        declare_w14_on_part_root(&mut xml)?;
-        Ok(xml)
+        Ok(())
     }
 }
 
@@ -235,6 +302,8 @@ impl Default for CT_Footnotes {
 fn parse_footnote_content(
     reader: &mut Reader<&[u8]>,
     word_prefixes: &[String],
+    controls: &mut crate::document::ControlSourceCursor<'_>,
+    mut read_output: Option<&mut Vec<(usize, crate::text::WordBlockSourceMaps)>>,
 ) -> Result<Vec<CT_P>> {
     let mut paragraphs = Vec::new();
     let mut buf = Vec::new();
@@ -245,11 +314,28 @@ fn parse_footnote_content(
                 let name = e.name();
                 let prefixes = word_prefixes_at(e, word_prefixes)?;
                 if is_word_element(name.as_ref(), b"p", &prefixes) {
-                    paragraphs.push(CT_P::from_xml_with_prefixes_and_root(
+                    let mut extras = Vec::new();
+                    let mut texts = Vec::new();
+                    let mut maps = crate::text::WordBlockSourceMaps::default();
+                    let paragraph = CT_P::from_xml_with_read_output(
                         reader,
                         &prefixes,
                         Some(e),
-                    )?);
+                        Some(controls),
+                        crate::text::WordParagraphReadOutput {
+                            extra_maps: read_output.as_ref().map(|_| &mut extras),
+                            text_facts: read_output.as_ref().map(|_| &mut texts),
+                            nested_maps: read_output.as_ref().map(|_| &mut maps),
+                            ..Default::default()
+                        },
+                    )?;
+                    if let Some(output) = read_output.as_deref_mut() {
+                        maps.paragraph(extras);
+                        maps.word_texts
+                            .push((Vec::new(), controls.paragraph_word_facts(reader, texts)));
+                        output.push((paragraphs.len(), maps));
+                    }
+                    paragraphs.push(paragraph);
                 } else {
                     reader.read_to_end_into(name, &mut Vec::new())?;
                 }
@@ -280,6 +366,34 @@ fn parse_footnote_content(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue430_normal_notes_at_every_signed_id() {
+        for id in [-1, 0, 2] {
+            for kind in ["", " w:type=\"normal\""] {
+                let xml = format!(
+                    r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="{id}"{kind}><w:p><w:r><w:t>normal</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+                );
+                let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+                assert_eq!(
+                    notes.footnotes[0].note_type,
+                    NoteType::Normal,
+                    "id={id} type={kind}"
+                );
+                assert!(notes.get_by_id(id).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn issue430_note_attributes_use_actual_word_namespace() {
+        let xml = format!(
+            r#"<q:footnotes xmlns:q="{W_NS}" xmlns:x="urn:foreign"><q:footnote q:id="7" x:id="99" x:type="separator"><q:p/></q:footnote></q:footnotes>"#
+        );
+        let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(notes.footnotes[0].id, 7);
+        assert_eq!(notes.footnotes[0].note_type, NoteType::Normal);
+    }
+
     use super::*;
 
     #[test]
@@ -308,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn qualified_note_ids_decode_character_references() {
+        let xml = format!(
+            r#"<q:footnotes xmlns:q="{W_NS}"><q:footnote q:id="&#45;1"><q:p/></q:footnote><q:footnote q:id="&#48;"><q:p/></q:footnote><q:footnote q:id="&#x35;"><q:p/></q:footnote></q:footnotes>"#
+        );
+        let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            notes
+                .footnotes
+                .iter()
+                .map(|note| note.id)
+                .collect::<Vec<_>>(),
+            [-1, 0, 5]
+        );
+        for id in [-1, 0, 5] {
+            assert!(notes.get_by_id(id).is_some());
+        }
+    }
+
+    #[test]
     fn parse_footnotes_xml() {
         let xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -324,11 +457,11 @@ mod tests {
         </w:footnotes>"#;
 
         let footnotes = CT_Footnotes::from_xml(xml).unwrap();
-        // The untyped id=0 entry is retained as a separator, so a round trip
-        // preserves it, but it is not reachable as a note.
+        // An omitted type is normal even at id0. Conventional separator ids
+        // cannot override the schema type.
         assert_eq!(footnotes.footnotes.len(), 3);
-        assert_eq!(footnotes.footnotes[0].note_type, NoteType::Separator);
-        assert!(footnotes.get_by_id(0).is_none());
+        assert_eq!(footnotes.footnotes[0].note_type, NoteType::Normal);
+        assert!(footnotes.get_by_id(0).is_some());
 
         let first = footnotes.get_by_id(1).unwrap();
         assert_eq!(first.paragraphs.len(), 1);
@@ -350,7 +483,7 @@ mod tests {
 
         let endnotes = CT_Footnotes::from_xml(xml).unwrap();
         assert_eq!(endnotes.footnotes.len(), 2);
-        assert_eq!(endnotes.footnotes[0].note_type, NoteType::Separator);
+        assert_eq!(endnotes.footnotes[0].note_type, NoteType::Normal);
         assert_eq!(
             endnotes.get_by_id(1).unwrap().paragraphs[0].text(),
             "An endnote."

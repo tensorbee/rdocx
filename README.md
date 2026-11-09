@@ -37,9 +37,11 @@ already own one of those boundaries.
 Archive size is regenerated from tracked package contents. The performance
 rows are the enforced release-mode bounds plus one dated observation.
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx | 4,105,912 compressed bytes, 54,118,469 member bytes, 37 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx | 4,501,789 compressed bytes, 56,396,845 member bytes, 37 members | 0.17.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-09 |
 | Large-document layout throughput | minimum 250 pages/s, observed 31,019.1 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
 | Large-document layout peak allocation | maximum 64 MiB, observed 29.03 MiB | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | peak live allocation | 2026-09-19 |
 | Large-document PDF throughput | minimum 1,000 pages/s, observed 60,058.0 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 deterministic layout pages | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
@@ -142,7 +144,7 @@ Most Rust applications need only the facade:
 
 ```toml
 [dependencies]
-rdocx = "0.16.4"
+rdocx = "0.17.0"
 ```
 
 Bundled metric-compatible fonts are always available through deterministic
@@ -151,14 +153,14 @@ features when an application must use only the bundled set:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.4", default-features = false }
+rdocx = { version = "0.17.0", default-features = false }
 ```
 
 Native encryption and signing APIs are opt-in:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.4", features = ["agile-encryption", "digital-signatures"] }
+rdocx = { version = "0.17.0", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 The workspace requires Rust 1.93 or newer and uses edition 2024.
@@ -168,7 +170,7 @@ The workspace requires Rust 1.93 or newer and uses edition 2024.
 Install the CLI version from the same stable family:
 
 ```sh
-cargo install rdocx-cli --version '^0.16.4'
+cargo install rdocx-cli --version '^0.17.0'
 ```
 
 Common commands:
@@ -276,6 +278,33 @@ rdocx preserves safe unmodeled XML, but it does not execute VBA, ActiveX, OLE,
 add-ins, or embedded applications. Binary DOC and Word 2003 XML are permanent
 non-goals. Exact authoring, reading, rendering, and preservation coverage lives
 in the [modern DOCX capability matrix](https://github.com/tensorbee/rdocx/blob/main/docs/hld/02-scope-and-non-goals.md#modern-docx-capability-matrix).
+
+Existing tracked changes can be preserved when their paragraph, table or block
+content control stays unchanged in both comparison inputs. Editing, moving or
+deleting one of those revision-bearing owners is refused with its location.
+Section properties that hold revisions must also stay unchanged in both inputs.
+Changing them is refused.
+This bounded preservation resembles Word Combine. Word Compare instead accepts
+existing revisions for its comparison baseline.
+
+For an unsupported edit, retain the original redline separately and make two
+independent copies. Resolve the earlier revisions in both copies using checked
+APIs, then compare the resolved inputs. Resolution removes the selected earlier
+markup, so this workaround does not preserve that markup in the new redline.
+For example, Python callers can use:
+
+```python
+left = rdocx.Document.from_bytes(original_redline.to_bytes())
+right = rdocx.Document.from_bytes(edited_redline.to_bytes())
+left.accept_revisions_by_author("Reviewer A")
+right.accept_revisions_by_author("Reviewer A")
+left.compare(right, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word")
+```
+
+Use `accept_revision_id` for selected changes when several reviews share an
+author name. Rust exposes the same checked author and id operations. The CLI
+uses `rdocx revision accept --author` on each independent copy before comparison.
+Counts reported by `rdocx compare` include only newly created revisions.
 
 ## License
 

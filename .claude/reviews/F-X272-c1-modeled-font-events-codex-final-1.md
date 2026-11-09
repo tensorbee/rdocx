@@ -1,0 +1,11 @@
+# F-X272, modeled root/font/language events, Root final 1
+
+Root reviewed the qualified modeled producer increment at text sourcee56f7b26d32d37a18db48b020759775bb7311779ed51dfb59da030b595da8331 and RPr sourcec158b92b58178a6dbe3701366cfbce94624940a048002bb9522733929638901d. The exact prefix plan, preallocation arithmetic, namespace policy, immediate transfer receipt and inherited Field-only selection were inspected with the bounded independent support report. This is not a whole peer-cap reset.
+
+Verdict: 0 defects, 0 smells, 0 nitpicks. Correctness, namespace/error behavior, structure, budget ownership, fieldless compatibility and evidence have zero findings in this increment.
+
+Root/font/language payloads reserve before QName, escaping or event growth. End QName uses the same ledger. The symbolic prefix plan shares actual original policy with generated_word_start, including ordered aliases, default Word, exact fresh collisions and leading-zero distinctions. Each Source child uses its original caller frame, retaining old declarations. Publication keeps canonical spelling. Nonempty retained attribute branches remain unchanged and unqualified.
+
+Actual old-source font RED compiled and observed one event allocated before refusal. Nine actual old namespace outputs form fixed successor byte assertions. Final expanded cohort377passes, actual build and child exit0, retained binarybd52b391055868d63a9ea36c5d675d4b943069d8e02c47987e1e40d8ed3eba6e. Four final gates exit0 with unchanged pinned inputs. The initial376plus1failure remains historical evidence. It exposed an old test that expected refusal of raw header/comment blocks and skipped note content. Root corrected the expectation against actual dispatch and Q-C1-01, retained main/glossary and inline257refusals, and added inline2success with actual accepted text across all related readers. No production admission rule changed. Root's two wrong serializer method calls and missing comment-ID fixture correction remain recorded costs.
+
+Color/toggle, retained attributes, compound, positioned-raw/control stages, complete formatter/source/native input bridges, whole C1/provider and final union qualification remain mandatory. This bounded review supplies none of those acceptances.

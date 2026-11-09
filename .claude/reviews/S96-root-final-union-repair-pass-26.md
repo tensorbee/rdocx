@@ -1,0 +1,31 @@
+# S96 Root final repair review, pass 26
+
+## Scope and verdict
+
+Root audits the temporary admission binding allocation increment against approved investigation11 and the F-X268 plan during S96/F-X275 qualification remediation. Root25 and support7 remain applicable to the unchanged opening-model and fixed standalone reader mechanisms. The new increment changes4tracked paths,345added and19removed lines, with4305other4309tracked inputs unchanged. Most added lines are the literal predecessor and3discriminating tests in the existing test module.
+
+Zero defects, zero smells, zero nitpicks. Correctness, contract, panics, OOXML, tests, structure and evidence custody were examined with no findings. This clears Root's source/scoped audit only. Independent implementation support8 is still pending and is not represented by this report.
+
+## Mechanism and policy boundaries
+
+The helper at crates/rdocx-oxml/src/document.rs:9056 borrows existing decoded pairs through the single existing splitter at crates/rdocx-oxml/src/numbering.rs:632. Tuple reference hashing and equality retain content semantics. Reverse, exact-pair retain and reverse preserve the last identical pair without collapsing conflicting same-name pairs. Plain aliases retain their original append rule and order. Checked context/effective byte additions, Word marker charges, saturating duplicate subtraction, escaped envelope bytes and the later checked work multiplication/addition keep their original order and causes. The returned envelope owns its bytes and no borrowed view escapes.
+
+The classified reader at document.rs:9108 still builds the same source chunks and performs its full actual event, namespace, constructor, control and weighted-work scan. The projected-alias Boolean remains post-scan and consumes the same pure split/predicate policy. Short circuiting that Boolean removes no fallible decoder or XML validation. The fallible input length and complete source-map construction remain unchanged. Remaining-reader admission at document.rs:9669 still clones the actual QName stack, checks closes/depth/qualification, preserves the original cursor and invokes real admission. Only the foreign branch builds the owned binding vector that it uses.
+
+All substantive classified callers were traced: ordinary original-input admission, explicit constructor admission, complete reader admission and revision/scoped consumers. Persistent owned namespace consumers and policies are unchanged. No public API, grammar, Source receipt, input allowance, Field authority, reader-value certificate, token/vector guard, error cache or AST history is introduced. No new product file, module, crate, generic, trait or dependency appears. Plan and HLD04 describe the implemented allocation boundary without promising performance qualification.
+
+## Actual evidence and custody
+
+Root reauthenticates all4309current tracked hashes against FINAL-inputs, the4path boundary, both successful/restored diagnostic producer capsules, all20diagnostic payload members, all16observed output ZIPs and the retained Native binary. SOURCE_BOUNDARY SHA-256c2c8164f30ef24fe2f7118e36267efa1af3ba355a591967ca14d4af4ce5bec34 and INCREMENT SHA-2566efd93c70dbd2830caee47751a5dbf746af15d8500dc79412e07547a626d88ee bind this review.
+
+The3new tests run on actual predecessor allocation policy before the borrowed implementation, then on the successor. All96complete classified/remaining results are identical, including work, constructor/control facts, projected aliases, full source-map correspondence and Input/Resource first causes. Contiguous/every-byte pieces, consumed paragraph/run, complete part, default/foreign/alias/conflicting/duplicate/malformed/Unicode/XML-sensitive contexts, inclusive resource boundary, bad closes, EOF and unchanged production cursors are represented. The exact old envelope is retained under cfgtest. The first nonexistent Main variant compile failure is retained as a test-authoring failure, not semantic RED.
+
+All262additional selected Source/namespace/Field/resource tests pass with0failures and0ignored. Together with the3new already-executed controls,265unique tests pass in the same retained uninstru-mented binary4345f6b7fb7c59ef63553fb780783d828f6f62e129d22baf52a47f028a9a1d70. Fresh ordinary debug wheel0a73838b15bd8fd6c6a2b4e4760507f18b0b2c45e476bb4af0cbdec5fa6ff356 authenticates all10installed payloads and passes64focused public cases with0skips. The later sole plan prose correction has an explicit4308other-input applicability record. Actual child, semantic and ignored counts are distinct. The original prose failure remains preserved. Scoped all-target check, strict all-target/all-feature Clippy and final fmt/prose/adapter/diff checks pass.
+
+Both diagnostic builds execute the exact original reply action2 and Cell picture action1 after original setup and preceding actions on the same25/100inputs, two trials each. All8successor semantics, Cell stale-first-cause and reopens pass. Every complete output ZIP and every part equals its predecessor. Actual classified/remaining XML attempts and bytes match. Targeted envelope, dedup and projected temporary String materializations have positive predecessor work and no successor materializations at those literal sites, with positive borrowed views. This does not qualify total allocations, RSS or elapsed time. Vec, HashSet, envelope and persistent ownership still allocate. The public cohort does not visit remaining-reader admission and claims no measured saving there. Its route is covered separately by actual predecessor/successor reader tests.
+
+## Remaining acceptance
+
+Independent support8 must complete. If clean, build and authenticate a new normal release artifact, then obtain a fresh compiler-free admission for the unchanged complete79flat,5linear and both407protocols. The latest actual ordinary reply and Cell picture misses remain failures. No favorable retry, threshold, workload or source-credit adjustment is authorized by this audit.
+
+Pinned native Office, whole installed/typing, current memory/equivalence/calibration/history, hosted/archive and final integrated union remain due. Historical F268completion and F275qualification hold are unchanged. No tracker, ledger, baseline, commit, push, main, tag or publication follows. The review pass ends here.

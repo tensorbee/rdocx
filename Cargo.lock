@@ -1102,7 +1102,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "oxml-chart"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-cli-support"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-opc",
  "serde_json",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-core"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-drawing"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-core",
  "oxml-opc",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-layout"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "fontdb 0.23.0",
  "harfrust",
@@ -1156,11 +1156,11 @@ dependencies = [
 
 [[package]]
 name = "oxml-media"
-version = "0.14.4"
+version = "0.15.0"
 
 [[package]]
 name = "oxml-opc"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "aes",
  "base64",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-pdf"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.9.1",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-py-support"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "oxml-core",
  "oxml-opc",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-sml"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-opc",
  "quick-xml",
@@ -1369,9 +1369,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags",
  "memchr",
@@ -1503,7 +1503,7 @@ checksum = "a611d15b50743feb4c76b7d03edcb0e64f399c26961e4efe6975bc398be6aa3d"
 
 [[package]]
 name = "rdocx"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-cli"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "clap",
  "oxml-cli-support",
@@ -1549,51 +1549,53 @@ dependencies = [
 
 [[package]]
 name = "rdocx-html"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "rdocx-oxml",
 ]
 
 [[package]]
 name = "rdocx-layout"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
  "oxml-layout",
+ "quick-xml",
  "rdocx-oxml",
  "ttf-parser",
 ]
 
 [[package]]
 name = "rdocx-opc"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "oxml-opc",
 ]
 
 [[package]]
 name = "rdocx-oxml"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "itoa",
  "oxml-core",
  "oxml-drawing",
  "quick-xml",
  "regex",
+ "serde_json",
  "thiserror",
 ]
 
 [[package]]
 name = "rdocx-pdf"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "oxml-pdf",
 ]
 
 [[package]]
 name = "rdocx-py"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "oxml-layout",
  "oxml-pdf",
@@ -1607,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-wasm"
-version = "0.16.4"
+version = "0.17.0"
 dependencies = [
  "js-sys",
  "oxml-opc",
@@ -1733,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "gif",
  "jpeg-encoder",
@@ -1762,14 +1764,14 @@ dependencies = [
 
 [[package]]
 name = "rpptx-chart"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-chart",
 ]
 
 [[package]]
 name = "rpptx-cli"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "clap",
  "oxml-cli-support",
@@ -1782,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-layout"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -1793,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-oxml"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -1803,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-py"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-drawing",
  "oxml-layout",
@@ -1816,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-render"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "oxml-drawing",
  "oxml-layout",

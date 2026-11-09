@@ -179,6 +179,23 @@ pub(crate) fn set_non_visual_drawing_name(xml: &mut Vec<u8>, name: &str) -> Resu
 }
 
 /// Reads an unqualified accessibility attribute from preserved drawing properties.
+/// Read only an unqualified hidden attribute on the actual qualified drawing owner.
+pub(crate) fn non_visual_drawing_hidden(xml: &[u8], inherited: &NamespaceBindings) -> bool {
+    let mut reader = Reader::from_reader(xml);
+    let Ok(Event::Start(start) | Event::Empty(start)) = reader.read_event() else {
+        return false;
+    };
+    let Ok(bindings) = inherited.with_start(&start) else {
+        return false;
+    };
+    bindings.element_uri(start.name().as_ref()) == Some(P_NS)
+        && start.local_name().as_ref() == b"cNvPr"
+        && matches!(
+            non_visual_drawing_text(xml, "hidden").as_deref(),
+            Some("true" | "1")
+        )
+}
+
 pub(crate) fn non_visual_drawing_text(xml: &[u8], key: &str) -> Option<String> {
     let mut reader = Reader::from_reader(xml);
     match reader.read_event().ok()? {

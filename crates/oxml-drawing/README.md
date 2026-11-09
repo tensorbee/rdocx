@@ -16,9 +16,11 @@ depending on a document format.
 
 The archive row is regenerated from the package that carries this README.
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-drawing | 226,588 compressed bytes, 1,494,418 member bytes, 24 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-drawing` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: oxml-drawing | 226,625 compressed bytes, 1,494,577 member bytes, 24 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `oxml-drawing` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-06 |
 
 ## Use it when
 
@@ -43,4 +45,4 @@ assert!(matches!(fill, Fill::NoFill(_)));
 # Ok::<(), oxml_drawing::fill::FillError>(())
 ```
 
-Add `oxml-drawing = "0.14.4"` to your dependencies. Browse the [typed DrawingML API](https://docs.rs/oxml-drawing) before constructing schema-level values directly.
+Add `oxml-drawing = "0.15.0"` to your dependencies. Browse the [typed DrawingML API](https://docs.rs/oxml-drawing) before constructing schema-level values directly.

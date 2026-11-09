@@ -129,6 +129,9 @@ enum Command {
         /// Directory of caller fonts used before bundled fallback
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Output point-space body fragments as schema-1 JSON
         #[arg(long)]
         json: bool,
@@ -155,6 +158,9 @@ enum Command {
         /// Directory containing caller font files (.ttf/.otf/.ttc)
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Revision view for PDF and image output
         #[arg(long, value_parser = commands::parse_revision_view)]
         revision_view: Option<rdocx::RevisionView>,
@@ -228,7 +234,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Validate OOXML conformance
+    /// Validate the package and a documented WordprocessingML subset
+    ///
+    /// Checks package relationships, well-formed XML 1.0, style ids, body/p/r
+    /// children and order, text placement, jc and color, tracked-change id and
+    /// author, extents, m:rad required children, relationship ids, note references
+    /// and deleted text. Repeated bookmark ids are warnings. This is not a full
+    /// schema validator.
     Validate {
         /// Path to the DOCX file
         file: PathBuf,
@@ -240,6 +252,9 @@ enum Command {
         /// Directory of caller fonts used before bundled fallback
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Output directory (defaults to current directory)
         #[arg(long, short = 'o')]
         output_dir: Option<PathBuf>,
@@ -283,6 +298,13 @@ enum Command {
         command: RevisionCommand,
     },
     /// Create a tracked-changes document from an original and edited file
+    ///
+    /// The original may already hold tracked changes, such as the redline of
+    /// an earlier comparison. A paragraph, table or content control that
+    /// holds one is kept byte for byte when the edited file holds it
+    /// unchanged. Any other change to it fails with its location and creates
+    /// no output. Section properties holding revisions must also remain
+    /// unchanged in both inputs. Changing them fails without creating output.
     Compare {
         /// Original DOCX file
         original: PathBuf,
@@ -551,6 +573,9 @@ enum CommentCommand {
         /// Reply text, one paragraph per line
         #[arg(long)]
         text: String,
+        /// Optional reply author initials
+        #[arg(long)]
+        initials: Option<String>,
         /// RFC 3339 reply timestamp, omitted from the reply when absent
         #[arg(long)]
         date: Option<String>,
@@ -803,7 +828,8 @@ fn run_cli() {
             file,
             json,
             font_dir,
-        } => commands::layout(&file, json, font_dir.as_deref()),
+            system_fonts,
+        } => commands::layout(&file, json, font_dir.as_deref(), system_fonts),
         Command::Convert {
             file,
             to,
@@ -812,6 +838,7 @@ fn run_cli() {
             force,
             dpi,
             font_dir,
+            system_fonts,
             revision_view,
             revision_style,
             pages,
@@ -827,11 +854,13 @@ fn run_cli() {
                 || quality.is_some()
                 || pages.is_some()
                 || transparent
-                || font_dir.is_some(),
+                || font_dir.is_some()
+                || system_fonts,
             output.as_deref(),
             force,
             dpi.unwrap_or(150),
             font_dir.as_deref(),
+            system_fonts,
             revision_view.unwrap_or(rdocx::RevisionView::Accepted),
             revision_style.unwrap_or(rdocx::RevisionStyle::Plain),
             commands::ImageOptions {
@@ -871,6 +900,7 @@ fn run_cli() {
         Command::Render {
             file,
             font_dir,
+            system_fonts,
             output_dir,
             force,
             dpi,
@@ -888,6 +918,7 @@ fn run_cli() {
             dpi,
             commands::RenderOptions {
                 font_dir: font_dir.as_deref(),
+                system_fonts,
                 page,
                 pages: pages.as_deref(),
                 format: &format,
@@ -962,9 +993,19 @@ fn run_cli() {
                 author,
                 text,
                 date,
+                initials,
                 output,
                 json,
-            } => commands::comment_reply(&file, id, &author, &text, date.as_deref(), &output, json),
+            } => commands::comment_reply(
+                &file,
+                id,
+                &author,
+                initials.as_deref(),
+                &text,
+                date.as_deref(),
+                &output,
+                json,
+            ),
             CommentCommand::Resolve {
                 file,
                 id,

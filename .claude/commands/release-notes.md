@@ -147,3 +147,14 @@ conclusion, and the successful check and render commands.
   record.
 - The requested action would tag, push, publish, or create a release. Continue
   through `/release` after review and full sprint verification.
+
+## Compatibility evidence claims
+
+Inspect the selected family's authenticated strict SemVer evidence and actual
+compiler witnesses before describing compatibility. An initial unpublished
+minor's empty compatible line and an all-skipped migration call do not prove
+old-line compatibility. Preserve published notes verbatim. Issue429 recovery
+and any optional old-line yank remain separate, explicitly qualified actions.
+Do not claim issue430 fixed or included until its actual acceptance succeeds.
+Use actual final-source CI and installed artifact outcomes, with pending native
+or hosted checks stated honestly.

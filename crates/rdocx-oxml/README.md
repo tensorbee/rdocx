@@ -15,9 +15,11 @@ schema order, and retains unmodelled XML alongside typed edits.
 
 ## Measured footprint and speed
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-oxml | 565,559 compressed bytes, 3,484,893 member bytes, 32 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx-oxml | 1,006,737 compressed bytes, 6,177,983 member bytes, 32 members | 0.17.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-09 |
 
 ## Use it when
 
@@ -44,5 +46,5 @@ assert_eq!(document.body.paragraphs().count(), 1);
 
 ```toml
 [dependencies]
-rdocx-oxml = "0.16.4"
+rdocx-oxml = "0.17.0"
 ```

@@ -499,6 +499,19 @@ Anything not in the list above is captured verbatim through
 `oxml_core::raw_xml::capture_element` and re-emitted in place. That is not a
 fallback, it is the design: parse what you render, preserve the rest.
 
+Chart title export reads the current complete chart-part bytes after the ordinary
+chart parser accepts them. Namespace-aware direct paths select the chart title's
+rich DrawingML run or field text, or its string-reference cache in physical
+order. A present rich representation takes precedence even when empty. Foreign
+lookalikes, nested extension text, series names and axes are excluded. The reader
+does not assign `CT_Title.text` or rewrite the source. Chart tables use cached
+series numbers and retain their display value independently of label formatting.
+
+Bar, line and area plots retain their first two axis ids as typed values. Later
+axis ids remain raw in physical order after that pair, including repeated ids.
+Other plot families retain their existing refusal rules. Preserving an imported
+third id does not make that package schema-conformant.
+
 ## PowerPoint field and theme access
 
 Paragraph field insertion supports slidenum, the imported datetime alias and datetime1 through

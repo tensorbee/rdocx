@@ -16,6 +16,13 @@ replaces text, and produces deterministic fixed output.
 - Scriptable output covers slide order, notes, comments, recursive group
   content, relationship-backed media, and deterministic rendering diagnostics.
 
+`rpptx validate FILE` validates the stored package through its original XML
+bytes: XML 1.0 lexical and character faults, one complete root per XML part
+including package metadata, the `p:presentation` root child sequence, unknown
+direct shape-tree children, required unqualified `cNvPr` id and name on
+physical owners, table row against grid column equality, role content-type
+overrides, and the parsed-model issues. It is not a full schema validator.
+
 
 ## Package signatures
 
@@ -37,9 +44,11 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 ## Measured footprint and speed
 
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 67,536 compressed bytes, 310,592 member bytes, 8 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rpptx-cli | 74,678 compressed bytes, 345,296 member bytes, 8 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-11-06 |
 
 ## Use it when
 
@@ -52,7 +61,7 @@ It uses `oxml-cli-support` for shared command conventions and the real `rpptx` f
 ## Example
 
 ```sh
-cargo install rpptx-cli --version '^0.14.4'
+cargo install rpptx-cli --version '^0.15.0'
 rpptx inspect deck.pptx --json
 rpptx text deck.pptx --json
 rpptx outline deck.pptx --notes

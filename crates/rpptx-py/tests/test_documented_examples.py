@@ -3579,11 +3579,31 @@ def test_validate_returns_the_issues_the_cli_prints_as_frozen_snapshots(tmp_path
     (issue,) = broken_deck.validate()
     assert (issue.kind, issue.message) == (
         "duplicate_shape_id",
-        f"DuplicateShapeId {{ slide: 0, id: {first} }}",
+        f"slide 1: duplicate shape ID {first}, shared by more than one shape",
     )
     assert broken_deck.validate() == (issue,)
     with pytest.raises(AttributeError):
         issue.kind = "other"
+
+    # The CLI prints exactly the same Display sentence for the same input,
+    # whether it reaches the issue through the parsed model or the stored
+    # package route. The Python API stays parsed-model only.
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    log = tmp_path / "cli-validate.log"
+    with open(log, "w") as sink:
+        completed = subprocess.run(
+            ["cargo", "run", "--quiet", "-p", "rpptx-cli", "--", "validate", str(broken)],
+            cwd=root, stdout=sink, stderr=sink,
+        )
+    assert completed.returncode == 1
+    lines = [
+        line for line in log.read_text().splitlines()
+        if line.startswith("slide 1:")
+    ]
+    assert lines == [issue.message]
 
 
 def test_try_replace_text_scoped_to_a_slide_or_a_text_frame(tmp_path):
@@ -12510,3 +12530,365 @@ def test_issue389_empty_body_removal_has_no_ghost_owner_or_resurrection():
     assert len(fresh.text_frame.paragraphs) == 1
     with pytest.raises(rpptx.StaleElementError):
         _ = held_body.text
+
+
+def test_issue431_slides_index_returns_the_live_position_python_pptx_returns():
+    import rpptx
+
+    presentation = rpptx.Presentation()
+    for title in ("One", "Two", "Three"):
+        presentation.slides.add_slide(presentation.slide_layouts[5]).shapes.title.text = title
+    slide = presentation.slides[2]
+    assert presentation.slides.index(slide) == 2
+    assert presentation.slides.index(presentation.slides[2]) == 2
+    presentation.slides.move(2, 0)
+    assert presentation.slides.index(slide) == 0
+    assert presentation.slides.index(presentation.slides[0]) == 0
+
+    other = rpptx.Presentation()
+    foreign = other.slides.add_slide(other.slide_layouts[5])
+    for bad in (foreign, "slide", 0, None):
+        with pytest.raises(ValueError, match="slide is not in this collection"):
+            presentation.slides.index(bad)
+
+    twin = rpptx.Presentation.from_bytes(presentation.to_bytes())
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(twin.slides[0])
+
+    reopened = rpptx.Presentation.from_bytes(presentation.to_bytes())
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(reopened.slides[1])
+
+    empty = rpptx.Presentation()
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        empty.slides.index(presentation.slides[1])
+
+    held = presentation.slides[1]
+    presentation.slides.remove(held)
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(held)
+
+    # Other accessors keep their existing errors. The removed handle is
+    # causally stale through slide_id, and an invalid numeric collection lookup
+    # stays IndexError. The defensive absent-owner IndexError branch is
+    # unchanged and is not presented as a reachable public case.
+    with pytest.raises(rpptx.StaleElementError, match="stale"):
+        _ = held.slide_id
+    with pytest.raises(IndexError):
+        _ = presentation.slides[999]
+
+
+def _fx281_red_emf():
+    records = b"".join(struct.pack("<" + "I" * len(words), *words) for words in [
+        [39, 24, 1, 0, 255, 0], [37, 12, 1], [37, 12, 0x80000008],
+        [43, 24, 0, 0, 200, 100], [14, 20, 0, 16, 20]])
+    header = bytearray(88)
+    for offset, value in [(0, 1), (4, 88), (16, 199), (20, 99), (32, 5290), (36, 2645),
+                          (44, 0x10000), (48, 88 + len(records)), (52, 6),
+                          (72, 1024), (76, 768), (80, 270), (84, 203)]:
+        struct.pack_into("<I", header, offset, value)
+    header[40:44] = b" EMF"
+    struct.pack_into("<H", header, 56, 2)
+    return bytes(header) + records
+
+
+def _fx281_red_png(interlaced):
+    width, height = 64, 32
+    passes = [(0, 0, 1, 1)] if not interlaced else [
+        (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+        (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+    raw = b""
+    for x, y, dx, dy in passes:
+        columns = len(range(x, width, dx))
+        if columns:
+            raw += (b"\0" + b"\xff\0\0" * columns) * len(range(y, height, dy))
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, int(interlaced)))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _fx281_png_colours(data, *, rows=False):
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    offset, packed = 8, bytearray()
+    while offset < len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        kind, payload = data[offset + 4:offset + 8], data[offset + 8:offset + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", payload)
+            assert depth == 8 and interlace == 0 and colour in (2, 6)
+        elif kind == b"IDAT":
+            packed.extend(payload)
+        offset += length + 12
+    channels = 3 if colour == 2 else 4
+    stride = width * channels
+    raw = zlib.decompress(packed)
+    previous = bytearray(stride)
+    red = other = 0
+    decoded_rows = []
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_kind = raw[start]
+        row = bytearray(raw[start + 1:start + 1 + stride])
+        for x in range(stride):
+            left = row[x - channels] if x >= channels else 0
+            above = previous[x]
+            upper_left = previous[x - channels] if x >= channels else 0
+            if filter_kind == 0: prediction = 0
+            elif filter_kind == 1: prediction = left
+            elif filter_kind == 2: prediction = above
+            elif filter_kind == 3: prediction = (left + above) // 2
+            else:
+                assert filter_kind == 4
+                estimate = left + above - upper_left
+                distances = [abs(estimate - value) for value in (left, above, upper_left)]
+                prediction = (left, above, upper_left)[distances.index(min(distances))]
+            row[x] = (row[x] + prediction) & 255
+        for x in range(0, stride, channels):
+            rgb = row[x:x + 3]
+            is_red = rgb[0] > 150 and rgb[1] < 80 and rgb[2] < 80
+            red += is_red
+            other += max(rgb) - min(rgb) > 80 and not is_red
+        decoded_rows.append(bytes(row))
+        previous = row
+    return (width, height, channels, decoded_rows) if rows else (red, other)
+
+
+def _fx281_replace_chart_title(package_bytes):
+    source, output = io.BytesIO(package_bytes), io.BytesIO()
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(output, "w") as target:
+        for entry in archive.infolist():
+            payload = archive.read(entry.filename)
+            if re.fullmatch(r"(?:word|ppt)/charts/chart\d+\.xml", entry.filename):
+                payload = payload.replace(b"<c:chart>", b'<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>')
+            target.writestr(entry, payload)
+    return output.getvalue()
+
+
+def test_fx281_ppt_emf_page_pixels_width_only_adam7_and_decode_diagnostics():
+    import rpptx
+    for explicit_height in [False, True]:
+        deck = rpptx.Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        picture = slide.shapes.add_picture(io.BytesIO(_fx281_red_emf()), 0, 0, width=rpptx.Inches(3),
+                                           height=rpptx.Inches(1.5) if explicit_height else None)
+        assert picture.width == rpptx.Inches(3) and picture.height == rpptx.Inches(1.5)
+        png, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+        red, other = _fx281_png_colours(png)
+        print("FX281_PAGE ppt_emf", explicit_height, red, other)
+        assert red >= 2700 and other == 0
+        assert diagnostics == ()
+    counts = []
+    for interlaced in [False, True]:
+        deck = rpptx.Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        slide.shapes.add_picture(io.BytesIO(_fx281_red_png(interlaced)), 0, 0, width=rpptx.Inches(3), height=rpptx.Inches(1.5))
+        png, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+        counts.append(_fx281_png_colours(png))
+        assert diagnostics == ()
+    print("FX281_PAGE ppt_plain_adam7", counts)
+    assert counts[0] == counts[1] and counts[0][0] >= 2700 and counts[0][1] == 0
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    slide.shapes.add_picture(io.BytesIO(b"\x89PNG\r\n\x1a\n"), 0, 0, width=rpptx.Inches(1), height=rpptx.Inches(1))
+    _, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+    assert len([message for message in diagnostics if "could not be decoded" in message]) == 1
+
+
+def test_fx281_ppt_python_string_and_save_exports_project_current_chart_title(tmp_path):
+    import rpptx
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    data = rpptx.CategoryChartData()
+    data.categories = ["Q1", "Q2"]
+    data.add_series("Zeta region", [1150, 1820])
+    slide.shapes.add_chart(51, 0, 0, rpptx.Inches(4), rpptx.Inches(2), data)
+    deck = rpptx.Presentation.from_bytes(_fx281_replace_chart_title(deck.to_bytes()))
+    before = deck.to_bytes()
+    for text in [deck.to_html(), deck.to_markdown()]:
+        assert isinstance(text, str)
+        for token in ["Quarter", "Q1", "Zeta region", "1150"]:
+            assert token in text
+    for extension, method in [("html", deck.save_html), ("md", deck.save_markdown)]:
+        path = tmp_path / f"chart.{extension}"
+        method(path)
+        for token in ["Quarter", "Q1", "Zeta region", "1150"]:
+            assert token in path.read_text()
+    assert deck.to_bytes() == before
+
+
+def test_fx281_hidden_shapes_keep_semantics_and_match_single_visible_paint():
+    import xml.etree.ElementTree as ET
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    owners = []
+    for x, text in [(0, "Hidden semantic one"), (2, "Hidden semantic two"), (4, "Visible semantic")]:
+        shape = slide.shapes.add_shape(1, rpptx.Inches(x), rpptx.Inches(1), rpptx.Inches(1), rpptx.Inches(1))
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(255, 0, 0)
+        shape.text = text
+        owners.append(shape.shape_id)
+    source = deck.to_bytes()
+    def project(remove):
+        output = io.BytesIO()
+        p = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+        with zipfile.ZipFile(io.BytesIO(source)) as archive, zipfile.ZipFile(output, "w") as target:
+            for entry in archive.infolist():
+                data = archive.read(entry.filename)
+                if entry.filename == "ppt/slides/slide1.xml":
+                    root = ET.fromstring(data)
+                    tree = root.find(f"{p}cSld/{p}spTree")
+                    for child in list(tree):
+                        owner = child.find(f"{p}nvSpPr/{p}cNvPr")
+                        if owner is not None and int(owner.attrib["id"]) in owners[:2]:
+                            if remove: tree.remove(child)
+                            else: owner.set("hidden", "1")
+                    data = ET.tostring(root)
+                target.writestr(entry, data)
+        return rpptx.Presentation.from_bytes(output.getvalue())
+    hidden, control = project(False), project(True)
+    before = hidden.to_bytes()
+    assert "Hidden semantic one" in hidden.to_html() and "Hidden semantic two" in hidden.to_markdown()
+    for method, kwargs in [("render_slide_to_png", {"slide_index": 0}),
+                           ("render_all_notes", {}), ("render_all_handouts", {"slides_per_page": 2})]:
+        if method == "render_slide_to_png":
+            a = getattr(hidden, method)(0, dpi=30)
+            b = getattr(control, method)(0, dpi=30)
+            a, b = [a], [b]
+        else:
+            a = getattr(hidden, method)(dpi=30, **kwargs)
+            b = getattr(control, method)(dpi=30, **kwargs)
+        assert a == b
+        assert any(_fx281_png_colours(page)[0] > 0 for page in a)
+    assert hidden.to_pdf() == control.to_pdf()
+    assert hidden.to_notes_pdf() == control.to_notes_pdf()
+    assert hidden.to_handout_pdf(slides_per_page=2) == control.to_handout_pdf(slides_per_page=2)
+    assert hidden.to_bytes() == before
+
+
+def test_fx281_two_content_ink_tops_share_body_family_without_geometry_changes():
+    import rpptx
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[3])
+    left, right = slide.placeholders[1], slide.placeholders[2]
+    left.text = right.text = "Same text"
+    explicit = [(shape.left, shape.top, shape.width, shape.height) for shape in [left, right]]
+    geometry = [shape.effective_geometry() for shape in [left, right]]
+    before = deck.to_bytes()
+    width, height, channels, rows = _fx281_png_colours(deck.render_slide_to_png(0, dpi=50), rows=True)
+    tops = []
+    for x, y, w, h in geometry:
+        x0, x1 = max(0, int(x * 50 / 914400)), min(width, int((x + w) * 50 / 914400) + 1)
+        y0, y1 = max(0, int(y * 50 / 914400)), min(height, int((y + h) * 50 / 914400) + 1)
+        tops.append(next(row for row in range(y0, y1)
+                         if any(max(rows[row][column * channels:column * channels + 3]) <= 40
+                                for column in range(x0, x1))))
+    print("FX281_TWO_CONTENT_TOPS", tops)
+    assert abs(tops[0] - tops[1]) <= 5
+    assert geometry == [shape.effective_geometry() for shape in [left, right]]
+    assert explicit == [(shape.left, shape.top, shape.width, shape.height) for shape in [left, right]]
+    assert deck.to_bytes() == before
+
+
+def test_issue435_add_textbox_and_add_shape_refuse_a_negative_size(tmp_path):
+    """Expected on old source: every negative-size call is accepted and
+    changes the package. The contract is a call-time RpptxError naming the
+    negative dimensions, an unchanged package and counts after every failed
+    call, and previously held collection, picture, group, group-member and
+    text handles that keep authority and stay usable afterwards.
+    """
+    import rpptx
+
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    collection = slide.shapes
+    held_shape = collection.add_textbox(100, 200, 300000, 400000)
+    held_text = held_shape.text_frame.paragraphs[0]
+    # A relationship-backed companion member.
+    image = tmp_path / "seed.png"
+    image.write_bytes(_tiny_png())
+    held_picture = collection.add_picture(str(image), 500, 600)
+    # A populated group with an existing member and its own text handle.
+    group = collection.add_group_shape()
+    held_group_shapes = group.shapes
+    held_member = held_group_shapes.add_textbox(30, 40, 500000, 600000)
+    held_member_text = held_member.text_frame.paragraphs[0]
+    before = deck.to_bytes()
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got -100 by 200 EMU"):
+        collection.add_textbox(-100, 200, -100, 200)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got 100 by -200 EMU"):
+        collection.add_shape("rect", 100, 200, 100, -200)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got -1 by 0 EMU"):
+        held_group_shapes.add_textbox(0, 0, -1, 0)
+    assert deck.to_bytes() == before
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got 1 by -2 EMU"):
+        held_group_shapes.add_shape("rect", 0, 0, 1, -2)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    # Held handles keep authority and stay usable after the refusals.
+    held_member_text.add_run(" kept")
+    assert held_member_text.text == " kept"
+    assert held_member.text == " kept"
+    assert held_member.width == 500000
+    assert held_picture.width is not None
+    assert held_shape.text == ""
+    assert held_group_shapes.add_shape("rect", 0, 0, 10, 20).shape_type is not None
+    assert len(held_group_shapes) == 2
+    assert collection.add_textbox(0, 0, 100, 100).text == ""
+    assert len(collection) == 4
+    assert deck.to_bytes() != before
+
+    reopened = rpptx.Presentation.from_bytes(deck.to_bytes())
+    reopened_shapes = reopened.slides[0].shapes
+    assert len(reopened_shapes) == 4
+    assert reopened_shapes[1].shape_type is not None
+    reopened_group = reopened_shapes[2].shapes
+    assert len(reopened_group) == 2
+    assert reopened_group[0].text == " kept"
+    assert reopened_group[0].width == 500000
+    assert reopened_group[1].width == 10
+    assert reopened.slides[0].shapes.add_textbox(0, 0, 1, 1) is not None
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
+    import rpptx
+    import copy
+
+    owner = rpptx.Presentation()
+    slide = owner.slides.add_slide(owner.slide_layouts[6])
+    held = slide.shapes.add_textbox(0, 0, 1000000, 500000)
+    held.text = "Issue435 seed"
+    before = owner.to_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(before)) as source, zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            data = source.read(info)
+            if info.filename == "ppt/slides/slide1.xml" and not duplicate:
+                data = data.replace(b"Issue435 seed", b"Issue435 \x01seed")
+            target.writestr(copy.copy(info), data)
+        if duplicate:
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                target.writestr("ppt/slides/slide1.xml", source.read("ppt/slides/slide1.xml"))
+    with pytest.raises(rpptx.PackageError, match="ppt/slides/slide1.xml") as failure:
+        rpptx.Presentation.from_bytes(output.getvalue())
+    assert "duplicate" in str(failure.value).lower() if duplicate else "U+0001" in str(failure.value)
+    assert owner.to_bytes() == before
+    assert held.text == "Issue435 seed"

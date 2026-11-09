@@ -5,24 +5,33 @@ use quick_xml::{Reader, Writer, XmlVersion};
 
 use std::borrow::Cow;
 
-use quick_xml::events::attributes::Attribute;
-use quick_xml::name::QName;
-
 use crate::borders::CT_BorderEdge;
-use crate::error::Result;
+use crate::error::{OxmlError, Result};
 use crate::namespace::matches_local_name;
 use crate::properties::{
-    CT_Shd, append_modeled_toggle_attributes, get_word_val_attr, is_word_attribute,
-    is_word_element, parse_integer_measurement, parse_uchar_hex, parse_word_toggle, push_uchar_hex,
-    raw_is_modeled_attribute_carrier, raw_occurrence, record_modeled_toggle_candidate,
-    remove_redundant_modeled_toggle_candidate, replay_modeled_toggle_raw,
-    toggle_element_is_explicitly_empty, toggle_has_unsupported_attributes, word_prefixes_at,
-    write_toggle,
+    CT_Shd, get_word_val_attr, is_word_attribute, is_word_element, parse_integer_measurement,
+    parse_uchar_hex, parse_word_toggle, raw_is_modeled_attribute_carrier, raw_occurrence,
+    record_modeled_toggle_candidate, remove_redundant_modeled_toggle_candidate,
+    replay_modeled_toggle_raw, toggle_element_is_explicitly_empty,
+    toggle_has_unsupported_attributes, word_prefixes_at, write_toggle,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::revision::CT_Revision;
 use crate::shared::{ST_HighlightColor, ST_Underline};
 use crate::units::{HalfPoint, Twips};
+
+/// The Empty-event bold action shared by construction and source qualification.
+/// Started bold elements retain their separate raw-child handling.
+pub(crate) fn empty_bold_value(
+    element: &BytesStart<'_>,
+    prefixes: &[String],
+) -> Result<Option<bool>> {
+    if is_word_element(element.name().as_ref(), b"b", prefixes) {
+        Ok(Some(parse_word_toggle(element, prefixes)?))
+    } else {
+        Ok(None)
+    }
+}
 
 const RPR_STYLE_SLOT: u8 = 0;
 const RPR_FONTS_SLOT: u8 = 1;
@@ -249,16 +258,32 @@ fn parse_on_off(value: &str) -> bool {
     crate::shared::ST_OnOff::from_str_or_default(Some(value)).is_on()
 }
 
-fn push_on_off(e: &mut BytesStart<'_>, name: &str, value: bool) {
-    e.push_attribute((name, if value { "1" } else { "0" }));
+/// Numeric attributes whose compound property constructors consume every occurrence.
+#[derive(Clone, Copy)]
+pub(crate) enum RunCompoundMeasurement {
+    FitWidth(i32),
+    FitId(i32),
+    EastAsianId(i32),
 }
 
-fn push_retained_attributes(e: &mut BytesStart<'_>, attributes: &[(String, String)]) {
-    for (name, value) in attributes {
-        e.push_attribute(Attribute {
-            key: QName(name.as_bytes()),
-            value: Cow::Borrowed(value.as_bytes()),
-        });
+impl RunCompoundMeasurement {
+    pub(crate) fn for_names(element: &[u8], attribute: &[u8]) -> Option<Self> {
+        match (element, attribute) {
+            (b"fitText", b"val") => Some(Self::FitWidth(0)),
+            (b"fitText", b"id") => Some(Self::FitId(0)),
+            (b"eastAsianLayout", b"id") => Some(Self::EastAsianId(0)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn decode(self, element: &[u8], attribute: &[u8], value: &str) -> Result<Self> {
+        Ok(match self {
+            Self::FitWidth(_) => {
+                Self::FitWidth(parse_integer_measurement(element, attribute, value)?)
+            }
+            Self::FitId(_) => Self::FitId(value.parse()?),
+            Self::EastAsianId(_) => Self::EastAsianId(value.parse()?),
+        })
     }
 }
 
@@ -275,11 +300,20 @@ impl CT_FitText {
             let attribute = attribute?;
             let key = attribute.key.as_ref();
             let value = std::str::from_utf8(&attribute.value)?;
-            if is_word_attribute(key, b"val", prefixes) {
-                fit_text.val = Twips(parse_integer_measurement(e.name().as_ref(), key, value)?);
-                width_seen = true;
-            } else if is_word_attribute(key, b"id", prefixes) {
-                fit_text.id = Some(value.parse()?);
+            if let Some(measurement) =
+                RunCompoundMeasurement::for_names(b"fitText", attribute.key.local_name().as_ref())
+                    .filter(|_| {
+                        is_word_attribute(key, attribute.key.local_name().as_ref(), prefixes)
+                    })
+            {
+                match measurement.decode(e.name().as_ref(), key, value)? {
+                    RunCompoundMeasurement::FitWidth(value) => {
+                        fit_text.val = Twips(value);
+                        width_seen = true;
+                    }
+                    RunCompoundMeasurement::FitId(value) => fit_text.id = Some(value),
+                    RunCompoundMeasurement::EastAsianId(_) => unreachable!("fitText selector"),
+                }
             } else {
                 fit_text
                     .extra_attributes
@@ -289,15 +323,31 @@ impl CT_FitText {
         Ok(width_seen.then_some(fit_text))
     }
 
-    fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let mut buf = itoa::Buffer::new();
-        let mut e = BytesStart::new("w:fitText");
-        push_retained_attributes(&mut e, &self.extra_attributes);
-        e.push_attribute(("w:val", buf.format(self.val.0)));
-        if let Some(id) = self.id {
-            e.push_attribute(("w:id", buf.format(id)));
+        let mut e = crate::text::FieldXmlStart::new("w:fitText", emission)?;
+        for (name, value) in &self.extra_attributes {
+            e.push_raw(name, value)?;
         }
-        writer.write_event(Event::Empty(e))?;
+        let word_prefix = if role == crate::text::XmlWriteRole::Source {
+            Cow::Owned(e.qualify(&[], role, source_context)?)
+        } else {
+            Cow::Borrowed("w")
+        };
+        e.push_word(&word_prefix, "val", buf.format(self.val.0))?;
+        if let Some(id) = self.id {
+            e.push_word(&word_prefix, "id", buf.format(id))?;
+        }
+        #[cfg(test)]
+        crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS.get() + 1);
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -309,8 +359,18 @@ impl CT_EastAsianLayout {
             let attribute = attribute?;
             let key = attribute.key.as_ref();
             let value = std::str::from_utf8(&attribute.value)?;
-            if is_word_attribute(key, b"id", prefixes) {
-                layout.id = Some(value.parse()?);
+            if let Some(measurement) = RunCompoundMeasurement::for_names(
+                b"eastAsianLayout",
+                attribute.key.local_name().as_ref(),
+            )
+            .filter(|_| is_word_attribute(key, attribute.key.local_name().as_ref(), prefixes))
+            {
+                let RunCompoundMeasurement::EastAsianId(value) =
+                    measurement.decode(e.name().as_ref(), key, value)?
+                else {
+                    unreachable!("eastAsianLayout selector")
+                };
+                layout.id = Some(value);
             } else if is_word_attribute(key, b"combine", prefixes) {
                 layout.combine = Some(parse_on_off(value));
             } else if is_word_attribute(key, b"combineBrackets", prefixes) {
@@ -328,26 +388,46 @@ impl CT_EastAsianLayout {
         Ok(layout)
     }
 
-    fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+    fn write_xml<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         let mut buf = itoa::Buffer::new();
-        let mut e = BytesStart::new("w:eastAsianLayout");
-        push_retained_attributes(&mut e, &self.extra_attributes);
+        let mut e = crate::text::FieldXmlStart::new("w:eastAsianLayout", emission)?;
+        for (name, value) in &self.extra_attributes {
+            e.push_raw(name, value)?;
+        }
+        let word_prefix = if role == crate::text::XmlWriteRole::Source {
+            Cow::Owned(e.qualify(&[], role, source_context)?)
+        } else {
+            Cow::Borrowed("w")
+        };
         if let Some(id) = self.id {
-            e.push_attribute(("w:id", buf.format(id)));
+            e.push_word(&word_prefix, "id", buf.format(id))?;
         }
         if let Some(combine) = self.combine {
-            push_on_off(&mut e, "w:combine", combine);
+            e.push_word(&word_prefix, "combine", if combine { "1" } else { "0" })?;
         }
         if let Some(ref brackets) = self.combine_brackets {
-            e.push_attribute(("w:combineBrackets", brackets.as_str()));
+            e.push_word(&word_prefix, "combineBrackets", brackets.as_str())?;
         }
         if let Some(vert) = self.vert {
-            push_on_off(&mut e, "w:vert", vert);
+            e.push_word(&word_prefix, "vert", if vert { "1" } else { "0" })?;
         }
         if let Some(vert_compress) = self.vert_compress {
-            push_on_off(&mut e, "w:vertCompress", vert_compress);
+            e.push_word(
+                &word_prefix,
+                "vertCompress",
+                if vert_compress { "1" } else { "0" },
+            )?;
         }
-        writer.write_event(Event::Empty(e))?;
+        #[cfg(test)]
+        crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS.get() + 1);
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -486,8 +566,279 @@ pub struct CT_RPr {
     pub revision_xml_positions: Vec<(u8, usize)>,
 }
 
-#[allow(non_snake_case)]
+/// Empty measurement leaves share exact scalar decoding with source qualification.
+/// A missing kerning value remains raw. Other missing values retain prior state.
+#[derive(Clone, Copy)]
+pub(crate) enum RunMeasurement {
+    Size(Option<u32>),
+    SizeCs(Option<u32>),
+    Spacing(Option<i32>),
+    Width(Option<u32>),
+    Position(Option<i32>),
+    Kern(Option<u32>),
+}
+
+impl RunMeasurement {
+    pub(crate) fn for_local(local: &[u8]) -> Option<Self> {
+        match local {
+            b"sz" => Some(Self::Size(None)),
+            b"szCs" => Some(Self::SizeCs(None)),
+            b"spacing" => Some(Self::Spacing(None)),
+            b"w" => Some(Self::Width(None)),
+            b"position" => Some(Self::Position(None)),
+            b"kern" => Some(Self::Kern(None)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn decode(self, element: &[u8], value: Option<&str>) -> Result<Self> {
+        let signed = || {
+            value
+                .map(|value| parse_integer_measurement(element, b"w:val", value))
+                .transpose()
+        };
+        let unsigned = || {
+            value
+                .map(|value| parse_integer_measurement(element, b"w:val", value))
+                .transpose()
+        };
+        Ok(match self {
+            Self::Size(_) => Self::Size(unsigned()?),
+            Self::SizeCs(_) => Self::SizeCs(unsigned()?),
+            Self::Spacing(_) => Self::Spacing(signed()?),
+            Self::Width(_) => Self::Width(value.map(str::parse).transpose()?),
+            Self::Position(_) => Self::Position(signed()?),
+            Self::Kern(_) => Self::Kern(unsigned()?),
+        })
+    }
+
+    fn slot(self) -> Option<u8> {
+        match self {
+            Self::Size(_) => Some(RPR_SIZE_SLOT),
+            Self::SizeCs(_) => Some(RPR_SIZE_CS_SLOT),
+            Self::Spacing(_) => Some(RPR_SPACING_SLOT),
+            Self::Width(_) => Some(RPR_WIDTH_SLOT),
+            Self::Position(_) => Some(RPR_POSITION_SLOT),
+            Self::Kern(Some(_)) => Some(RPR_KERN_SLOT),
+            Self::Kern(None) => None,
+        }
+    }
+
+    fn apply(self, rpr: &mut CT_RPr) {
+        match self {
+            Self::Size(Some(value)) => rpr.sz = Some(HalfPoint(value)),
+            Self::SizeCs(Some(value)) => rpr.sz_cs = Some(HalfPoint(value)),
+            Self::Spacing(Some(value)) => rpr.spacing = Some(Twips(value)),
+            Self::Width(Some(value)) => rpr.width_scale = Some(value),
+            Self::Position(Some(value)) => rpr.position = Some(value),
+            Self::Kern(Some(value)) => rpr.kern = Some(HalfPoint(value)),
+            _ => {}
+        }
+    }
+}
+
 impl CT_RPr {
+    /// Retained formatting records positively selected by the containing field
+    /// writer. This measures stored input, never serialized output bytes.
+    pub(crate) fn selected_input_work(&self) -> Result<usize> {
+        let mut bytes = 0usize;
+        let mut add = |length: usize| -> Result<()> {
+            bytes = bytes.checked_add(length).ok_or_else(|| {
+                OxmlError::InvalidValue("normalization affected-source work overflow".into())
+            })?;
+            Ok(())
+        };
+        for raw in &self.revision_xml {
+            add(raw.len())?;
+        }
+        for revision in &self.revision_markers {
+            add(revision.retained_source_len())?;
+        }
+        if let Some(change) = &self.change {
+            add(change.retained_source_len())?;
+        }
+        if let Some(raw) = self
+            .border
+            .as_ref()
+            .and_then(|border| border.source_xml.as_ref())
+        {
+            add(raw.len())?;
+        }
+        // These are retained name/value records, not raw lexical XML and not
+        // semantic current namespace facts. In particular, an unused xmlns
+        // record cannot receive the affine current-value multiplier.
+        for attributes in [
+            Some(&self.font_extra_attributes),
+            Some(&self.color_extra_attributes),
+            Some(&self.language_extra_attributes),
+            self.shading.as_ref().map(|value| &value.extra_attributes),
+            self.border.as_ref().map(|value| &value.extra_attributes),
+            self.fit_text.as_ref().map(|value| &value.extra_attributes),
+            self.east_asian_layout
+                .as_ref()
+                .map(|value| &value.extra_attributes),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for (name, value) in attributes {
+                add(name.len())?;
+                add(value.len())?;
+            }
+        }
+        let current = self.selected_current_bytes()?;
+        crate::text::retained_owner_work(bytes, &[], current)
+    }
+
+    fn selected_current_bytes(&self) -> Result<usize> {
+        let mut total = 0usize;
+        let mut add = |bytes: usize| -> Result<()> {
+            total = total.checked_add(bytes).ok_or_else(|| {
+                OxmlError::InvalidValue("normalization affected-source work overflow".into())
+            })?;
+            Ok(())
+        };
+        for value in [
+            &self.style_id,
+            &self.font_ascii,
+            &self.font_hansi,
+            &self.font_east_asia,
+            &self.font_cs,
+            &self.font_ascii_theme,
+            &self.font_hansi_theme,
+            &self.font_east_asia_theme,
+            &self.font_cs_theme,
+            &self.font_hint,
+            &self.color,
+            &self.color_theme,
+            &self.vert_align,
+            &self.language,
+            &self.language_east_asia,
+            &self.language_bidi,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            add(value.len())?;
+        }
+        // Toggle writers use one canonical 0/1 byte, including val-less true.
+        for value in [
+            self.bold,
+            self.bold_cs,
+            self.italic,
+            self.italic_cs,
+            self.strike,
+            self.dstrike,
+            self.caps,
+            self.small_caps,
+            self.vanish,
+            self.outline,
+            self.shadow,
+            self.emboss,
+            self.imprint,
+            self.no_proof,
+            self.snap_to_grid,
+            self.web_hidden,
+            self.complex_script,
+            self.spec_vanish,
+            self.office_math,
+            self.rtl,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = value;
+            add(1)?;
+        }
+        let mut number = itoa::Buffer::new();
+        for value in [
+            self.sz.map(|value| i64::from(value.0)),
+            self.sz_cs.map(|value| i64::from(value.0)),
+            self.spacing.map(|value| i64::from(value.0)),
+            self.width_scale.map(i64::from),
+            self.position.map(i64::from),
+            self.kern.map(|value| i64::from(value.0)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            add(number.format(value).len())?;
+        }
+        // Tint and shade writers use exactly two hexadecimal digits.
+        for _ in [self.color_theme_tint, self.color_theme_shade]
+            .into_iter()
+            .flatten()
+        {
+            add(2)?;
+        }
+        for value in [
+            self.underline.map(|value| value.to_str()),
+            self.highlight.map(|value| value.to_str()),
+            self.effect.as_ref().map(|value| value.as_str()),
+            self.emphasis_mark.as_ref().map(|value| value.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            add(value.len())?;
+        }
+        if let Some(shading) = &self.shading {
+            add(shading.val.len())?;
+            for value in [
+                &shading.color,
+                &shading.fill,
+                &shading.theme_color,
+                &shading.theme_fill,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                add(value.len())?;
+            }
+            for _ in [
+                shading.theme_tint,
+                shading.theme_shade,
+                shading.theme_fill_tint,
+                shading.theme_fill_shade,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                add(2)?;
+            }
+        }
+        if let Some(border) = &self.border {
+            add(border.val.to_str().len())?;
+            for value in [border.sz, border.space].into_iter().flatten() {
+                add(number.format(value).len())?;
+            }
+            if let Some(color) = &border.color {
+                add(color.len())?;
+            }
+        }
+        if let Some(fit) = &self.fit_text {
+            add(number.format(fit.val.0).len())?;
+            if let Some(id) = fit.id {
+                add(number.format(id).len())?;
+            }
+        }
+        if let Some(layout) = &self.east_asian_layout {
+            if let Some(id) = layout.id {
+                add(number.format(id).len())?;
+            }
+            for _ in [layout.combine, layout.vert, layout.vert_compress]
+                .into_iter()
+                .flatten()
+            {
+                add(1)?;
+            }
+            if let Some(brackets) = &layout.combine_brackets {
+                add(brackets.len())?;
+            }
+        }
+        Ok(total)
+    }
+
     /// Resolve qualified solid text fill retained as opaque source.
     /// Other extension representations retain their source without being guessed.
     pub fn solid_text_fill(&self) -> Option<(String, f64)> {
@@ -603,6 +954,19 @@ impl CT_RPr {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_property_observation(reader, word_prefixes, owner_bindings, None)
+    }
+
+    pub(crate) fn from_xml_with_property_observation(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        mut ordinary: Option<&mut Option<std::ops::Range<usize>>>,
+    ) -> Result<Self> {
+        if let Some(output) = &mut ordinary {
+            **output = None;
+        }
+        let mut selected_style = None;
         let mut rpr = CT_RPr::default();
         let mut change_raw_index = 0usize;
         let mut pending_raw = Vec::new();
@@ -611,11 +975,29 @@ impl CT_RPr {
         let mut buf = Vec::new();
 
         loop {
+            let event_start = ordinary.as_ref().map(|_| reader.buffer_position() as usize);
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
-                    if is_word_element(name.as_ref(), b"rStyle", &prefixes) {
+                    if let Some(measurement) = RunMeasurement::for_local(e.local_name().as_ref())
+                        .filter(|_| {
+                            is_word_element(name.as_ref(), e.local_name().as_ref(), &prefixes)
+                        })
+                    {
+                        let value = get_word_val_attr(e, &prefixes)?;
+                        let measurement = measurement.decode(name.as_ref(), value.as_deref())?;
+                        if let Some(slot) = measurement.slot() {
+                            record_rpr_modeled(&mut rpr, &mut pending_raw, &mut occurrences, slot);
+                            measurement.apply(&mut rpr);
+                        } else {
+                            let raw = crate::text::raw_with_external_bindings(
+                                &capture_empty_element(e)?,
+                                owner_bindings,
+                            )?;
+                            record_rpr_raw_at(&mut rpr, raw, RPR_KERN_SLOT, 0);
+                        }
+                    } else if is_word_element(name.as_ref(), b"rStyle", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
                             &mut pending_raw,
@@ -623,6 +1005,10 @@ impl CT_RPr {
                             RPR_STYLE_SLOT,
                         );
                         rpr.style_id = get_word_val_attr(e, &prefixes)?;
+                        // Only the last selected style assignment survives.
+                        // Decoder failure exits before any observation escapes.
+                        selected_style =
+                            event_start.map(|start| start..reader.buffer_position() as usize);
                     } else if is_word_element(name.as_ref(), b"rFonts", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
@@ -657,14 +1043,14 @@ impl CT_RPr {
                                     .push((std::str::from_utf8(key)?.to_owned(), val));
                             }
                         }
-                    } else if is_word_element(name.as_ref(), b"b", &prefixes) {
+                    } else if let Some(bold) = empty_bold_value(e, &prefixes)? {
                         record_rpr_modeled(
                             &mut rpr,
                             &mut pending_raw,
                             &mut occurrences,
                             RPR_BOLD_SLOT,
                         );
-                        rpr.bold = Some(parse_word_toggle(e, &prefixes)?);
+                        rpr.bold = Some(bold);
                     } else if is_word_element(name.as_ref(), b"bCs", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
@@ -717,34 +1103,6 @@ impl CT_RPr {
                             RPR_DSTRIKE_SLOT,
                         );
                         rpr.dstrike = Some(parse_word_toggle(e, &prefixes)?);
-                    } else if is_word_element(name.as_ref(), b"sz", &prefixes) {
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_SIZE_SLOT,
-                        );
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            rpr.sz = Some(HalfPoint(parse_integer_measurement(
-                                name.as_ref(),
-                                b"w:val",
-                                &val,
-                            )?));
-                        }
-                    } else if is_word_element(name.as_ref(), b"szCs", &prefixes) {
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_SIZE_CS_SLOT,
-                        );
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            rpr.sz_cs = Some(HalfPoint(parse_integer_measurement(
-                                name.as_ref(),
-                                b"w:val",
-                                &val,
-                            )?));
-                        }
                     } else if is_word_element(name.as_ref(), b"color", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
@@ -813,41 +1171,6 @@ impl CT_RPr {
                             RPR_VERT_ALIGN_SLOT,
                         );
                         rpr.vert_align = get_word_val_attr(e, &prefixes)?;
-                    } else if is_word_element(name.as_ref(), b"spacing", &prefixes) {
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_SPACING_SLOT,
-                        );
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            rpr.spacing = Some(Twips(parse_integer_measurement(
-                                name.as_ref(),
-                                b"w:val",
-                                &val,
-                            )?));
-                        }
-                    } else if is_word_element(name.as_ref(), b"w", &prefixes) {
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_WIDTH_SLOT,
-                        );
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            rpr.width_scale = Some(val.parse()?);
-                        }
-                    } else if is_word_element(name.as_ref(), b"position", &prefixes) {
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_POSITION_SLOT,
-                        );
-                        if let Some(val) = get_word_val_attr(e, &prefixes)? {
-                            rpr.position =
-                                Some(parse_integer_measurement(name.as_ref(), b"w:val", &val)?);
-                        }
                     } else if is_word_element(name.as_ref(), b"shd", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
@@ -872,23 +1195,6 @@ impl CT_RPr {
                         let value = parse_word_toggle(e, &prefixes)?;
                         *toggle = Some(value);
                         record_rpr_modeled(&mut rpr, &mut pending_raw, &mut occurrences, slot);
-                    } else if is_word_element(name.as_ref(), b"kern", &prefixes)
-                        && let Some(val) = get_word_val_attr(e, &prefixes)?
-                    {
-                        // A `w:kern` without its required `w:val` carries no
-                        // typed value, so it stays raw rather than being
-                        // consumed into a field that would drop it on save.
-                        record_rpr_modeled(
-                            &mut rpr,
-                            &mut pending_raw,
-                            &mut occurrences,
-                            RPR_KERN_SLOT,
-                        );
-                        rpr.kern = Some(HalfPoint(parse_integer_measurement(
-                            name.as_ref(),
-                            b"w:val",
-                            &val,
-                        )?));
                     } else if is_word_element(name.as_ref(), b"effect", &prefixes) {
                         record_rpr_modeled(
                             &mut rpr,
@@ -1148,6 +1454,9 @@ impl CT_RPr {
             rtl_carrier_required,
         );
 
+        if let Some(output) = ordinary {
+            *output = selected_style;
+        }
         Ok(rpr)
     }
 
@@ -1160,218 +1469,494 @@ impl CT_RPr {
         writer: &mut Writer<W>,
         foreign_word_namespace: Option<&str>,
     ) -> Result<()> {
-        if self.is_empty() {
+        self.write_xml_role(
+            writer,
+            foreign_word_namespace,
+            crate::text::XmlWriteRole::Publication,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn write_xml_role<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        foreign_word_namespace: Option<&str>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        self.write_xml_role_core(
+            writer,
+            foreign_word_namespace,
+            role,
+            source_context,
+            emission,
+            true,
+        )
+    }
+
+    fn write_xml_role_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        foreign_word_namespace: Option<&str>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+        positioned: bool,
+    ) -> Result<()> {
+        if if positioned {
+            self.is_empty()
+        } else {
+            self.is_empty_in(false)
+        } {
             return Ok(());
         }
-
-        if !self.revision_xml.is_empty()
+        if positioned
+            && !self.revision_xml.is_empty()
             && self.revision_xml_positions.len() == self.revision_xml.len()
         {
-            let mut modeled = self.clone();
-            modeled.revision_xml.clear();
-            modeled.revision_xml_positions.clear();
-            let mut generated = Writer::new(Vec::new());
-            if modeled.is_empty() {
-                generated.write_event(Event::Start(BytesStart::new("w:rPr")))?;
-                generated.write_event(Event::End(BytesEnd::new("w:rPr")))?;
+            let generated = if let Some(emission) = emission {
+                let (output, _outer) = emission.new_source_record_output();
+                let mut generated = Writer::new(output);
+                self.write_modeled_record(
+                    &mut generated,
+                    foreign_word_namespace,
+                    role,
+                    source_context,
+                    Some(emission),
+                )?;
+                generated.into_inner().into_mapped_parts().0
             } else {
-                modeled.to_xml_with_word_override(&mut generated, foreign_word_namespace)?;
-            }
+                let mut generated = Writer::new(Vec::new());
+                self.write_modeled_record(
+                    &mut generated,
+                    foreign_word_namespace,
+                    role,
+                    source_context,
+                    None,
+                )?;
+                generated.into_inner()
+            };
             return write_rpr_with_positioned_raw(
                 writer,
-                &generated.into_inner(),
+                &generated,
                 self,
                 foreign_word_namespace,
+                emission,
             );
         }
 
         let mut buf = itoa::Buffer::new();
-        writer.write_event(Event::Start(BytesStart::new("w:rPr")))?;
+        let shadowed_word = role == crate::text::XmlWriteRole::Publication
+            && crate::text::emitted_bindings().has_foreign_word_binding();
+        let mut restored_start = if shadowed_word {
+            let mut start = crate::text::FieldXmlStart::new("w:rPr", emission)?;
+            start.restore_word_binding()?;
+            Some(start)
+        } else {
+            None
+        };
+        let _property_scope = restored_start
+            .as_ref()
+            .map(|start| crate::text::emitted_binding_scope(start.element(), false, false))
+            .transpose()?;
+        let word_prefix = if let Some(start) = restored_start.take() {
+            start.write(writer, false)?;
+            "w".to_owned()
+        } else if let Some(emission) = emission {
+            let plan = if role == crate::text::XmlWriteRole::Source {
+                crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+            } else {
+                crate::text::GeneratedWordName::fixed("w")
+            };
+            emission.write_word_attributes(writer, plan, "rPr", &[], false)?
+        } else {
+            let (start, prefix) = if role == crate::text::XmlWriteRole::Source {
+                crate::text::generated_word_start(
+                    BytesStart::new("w:rPr"),
+                    &[],
+                    role,
+                    source_context,
+                )?
+            } else {
+                (BytesStart::new("w:rPr"), "w".to_owned())
+            };
+            writer.write_event(Event::Start(start))?;
+            prefix
+        };
 
         if let Some(ref style_id) = self.style_id {
-            let mut e = BytesStart::new("w:rStyle");
-            e.push_attribute(("w:val", style_id.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "rStyle", style_id.as_str(), emission)?;
         }
 
         // rFonts
         if self.has_fonts() {
-            let mut e = BytesStart::new("w:rFonts");
-            push_retained_attributes(&mut e, &self.font_extra_attributes);
-            if let Some(ref f) = self.font_hint {
-                e.push_attribute(("w:hint", f.as_str()));
+            if let Some(emission) = emission.filter(|_| self.font_extra_attributes.is_empty()) {
+                let attributes = [
+                    self.font_hint.as_deref().map(|v| ("hint", v)),
+                    self.font_ascii.as_deref().map(|v| ("ascii", v)),
+                    self.font_hansi.as_deref().map(|v| ("hAnsi", v)),
+                    self.font_east_asia.as_deref().map(|v| ("eastAsia", v)),
+                    self.font_cs.as_deref().map(|v| ("cs", v)),
+                    self.font_ascii_theme.as_deref().map(|v| ("asciiTheme", v)),
+                    self.font_hansi_theme.as_deref().map(|v| ("hAnsiTheme", v)),
+                    self.font_east_asia_theme
+                        .as_deref()
+                        .map(|v| ("eastAsiaTheme", v)),
+                    self.font_cs_theme.as_deref().map(|v| ("cstheme", v)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed(&word_prefix)
+                };
+                emission.write_word_attributes(writer, plan, "rFonts", &attributes, true)?;
+            } else {
+                let mut e = crate::text::FieldXmlStart::word(&word_prefix, "rFonts", emission)?;
+                for (name, value) in &self.font_extra_attributes {
+                    e.push_raw(name, value)?;
+                }
+                let word_prefix = if role == crate::text::XmlWriteRole::Source {
+                    e.qualify(&[], role, source_context)?
+                } else {
+                    word_prefix.clone()
+                };
+                if let Some(ref f) = self.font_hint {
+                    e.push_word(&word_prefix, "hint", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_ascii {
+                    e.push_word(&word_prefix, "ascii", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_hansi {
+                    e.push_word(&word_prefix, "hAnsi", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_east_asia {
+                    e.push_word(&word_prefix, "eastAsia", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_cs {
+                    e.push_word(&word_prefix, "cs", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_ascii_theme {
+                    e.push_word(&word_prefix, "asciiTheme", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_hansi_theme {
+                    e.push_word(&word_prefix, "hAnsiTheme", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_east_asia_theme {
+                    e.push_word(&word_prefix, "eastAsiaTheme", f.as_str())?;
+                }
+                if let Some(ref f) = self.font_cs_theme {
+                    e.push_word(&word_prefix, "cstheme", f.as_str())?;
+                }
+                #[cfg(test)]
+                crate::text::WORD_FONT_EVENT_MATERIALIZATIONS
+                    .set(crate::text::WORD_FONT_EVENT_MATERIALIZATIONS.get() + 1);
+                e.write(writer, true)?;
             }
-            if let Some(ref f) = self.font_ascii {
-                e.push_attribute(("w:ascii", f.as_str()));
-            }
-            if let Some(ref f) = self.font_hansi {
-                e.push_attribute(("w:hAnsi", f.as_str()));
-            }
-            if let Some(ref f) = self.font_east_asia {
-                e.push_attribute(("w:eastAsia", f.as_str()));
-            }
-            if let Some(ref f) = self.font_cs {
-                e.push_attribute(("w:cs", f.as_str()));
-            }
-            if let Some(ref f) = self.font_ascii_theme {
-                e.push_attribute(("w:asciiTheme", f.as_str()));
-            }
-            if let Some(ref f) = self.font_hansi_theme {
-                e.push_attribute(("w:hAnsiTheme", f.as_str()));
-            }
-            if let Some(ref f) = self.font_east_asia_theme {
-                e.push_attribute(("w:eastAsiaTheme", f.as_str()));
-            }
-            if let Some(ref f) = self.font_cs_theme {
-                e.push_attribute(("w:cstheme", f.as_str()));
-            }
-            writer.write_event(Event::Empty(e))?;
         }
 
         if let Some(bold) = self.bold {
-            write_toggle(writer, "w:b", bold)?;
+            write_word_toggle(writer, "b", bold, role, source_context, emission)?;
         }
         if let Some(bold_cs) = self.bold_cs {
-            write_toggle(writer, "w:bCs", bold_cs)?;
+            write_word_toggle(writer, "bCs", bold_cs, role, source_context, emission)?;
         }
         if let Some(italic) = self.italic {
-            write_toggle(writer, "w:i", italic)?;
+            write_word_toggle(writer, "i", italic, role, source_context, emission)?;
         }
         if let Some(italic_cs) = self.italic_cs {
-            write_toggle(writer, "w:iCs", italic_cs)?;
+            write_word_toggle(writer, "iCs", italic_cs, role, source_context, emission)?;
         }
         if let Some(caps) = self.caps {
-            write_toggle(writer, "w:caps", caps)?;
+            write_word_toggle(writer, "caps", caps, role, source_context, emission)?;
         }
         if let Some(small_caps) = self.small_caps {
-            write_toggle(writer, "w:smallCaps", small_caps)?;
+            write_word_toggle(
+                writer,
+                "smallCaps",
+                small_caps,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(strike) = self.strike {
-            write_toggle(writer, "w:strike", strike)?;
+            write_word_toggle(writer, "strike", strike, role, source_context, emission)?;
         }
         if let Some(dstrike) = self.dstrike {
-            write_toggle(writer, "w:dstrike", dstrike)?;
+            write_word_toggle(writer, "dstrike", dstrike, role, source_context, emission)?;
         }
         if let Some(outline) = self.outline {
-            write_toggle(writer, "w:outline", outline)?;
+            write_word_toggle(writer, "outline", outline, role, source_context, emission)?;
         }
         if let Some(shadow) = self.shadow {
-            write_toggle(writer, "w:shadow", shadow)?;
+            write_word_toggle(writer, "shadow", shadow, role, source_context, emission)?;
         }
         if let Some(emboss) = self.emboss {
-            write_toggle(writer, "w:emboss", emboss)?;
+            write_word_toggle(writer, "emboss", emboss, role, source_context, emission)?;
         }
         if let Some(imprint) = self.imprint {
-            write_toggle(writer, "w:imprint", imprint)?;
+            write_word_toggle(writer, "imprint", imprint, role, source_context, emission)?;
         }
         if let Some(no_proof) = self.no_proof {
-            write_toggle(writer, "w:noProof", no_proof)?;
+            write_word_toggle(writer, "noProof", no_proof, role, source_context, emission)?;
         }
         if let Some(snap_to_grid) = self.snap_to_grid {
-            write_toggle(writer, "w:snapToGrid", snap_to_grid)?;
+            write_word_toggle(
+                writer,
+                "snapToGrid",
+                snap_to_grid,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(vanish) = self.vanish {
-            write_toggle(writer, "w:vanish", vanish)?;
+            write_word_toggle(writer, "vanish", vanish, role, source_context, emission)?;
         }
         if let Some(web_hidden) = self.web_hidden {
-            write_toggle(writer, "w:webHidden", web_hidden)?;
+            write_word_toggle(
+                writer,
+                "webHidden",
+                web_hidden,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
         if self.has_color() {
-            let mut e = BytesStart::new("w:color");
-            push_retained_attributes(&mut e, &self.color_extra_attributes);
-            if let Some(ref color) = self.color {
-                e.push_attribute(("w:val", color.as_str()));
+            if let Some(emission) = emission.filter(|_| self.color_extra_attributes.is_empty()) {
+                let tint = self
+                    .color_theme_tint
+                    .map(crate::properties::uchar_hex_bytes);
+                let shade = self
+                    .color_theme_shade
+                    .map(crate::properties::uchar_hex_bytes);
+                let tint = tint
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let shade = shade
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let attributes = [
+                    self.color.as_deref().map(|value| ("val", value)),
+                    self.color_theme
+                        .as_deref()
+                        .map(|value| ("themeColor", value)),
+                    tint.map(|value| ("themeTint", value)),
+                    shade.map(|value| ("themeShade", value)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed(&word_prefix)
+                };
+                emission.write_word_attributes(writer, plan, "color", &attributes, true)?;
+            } else {
+                let mut e = crate::text::FieldXmlStart::word(&word_prefix, "color", emission)?;
+                for (name, value) in &self.color_extra_attributes {
+                    e.push_raw(name, value)?;
+                }
+                let word_prefix = if role == crate::text::XmlWriteRole::Source {
+                    e.qualify(&[], role, source_context)?
+                } else {
+                    word_prefix.clone()
+                };
+                if let Some(ref color) = self.color {
+                    e.push_word(&word_prefix, "val", color.as_str())?;
+                }
+                if let Some(ref tc) = self.color_theme {
+                    e.push_word(&word_prefix, "themeColor", tc.as_str())?;
+                }
+                if let Some(tint) = self.color_theme_tint {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    let value = [HEX[usize::from(tint >> 4)], HEX[usize::from(tint & 15)]];
+                    e.push_word(
+                        &word_prefix,
+                        "themeTint",
+                        std::str::from_utf8(&value).expect("ASCII hex"),
+                    )?;
+                }
+                if let Some(shade) = self.color_theme_shade {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    let value = [HEX[usize::from(shade >> 4)], HEX[usize::from(shade & 15)]];
+                    e.push_word(
+                        &word_prefix,
+                        "themeShade",
+                        std::str::from_utf8(&value).expect("ASCII hex"),
+                    )?;
+                }
+                #[cfg(test)]
+                crate::text::WORD_COLOR_EVENT_MATERIALIZATIONS
+                    .set(crate::text::WORD_COLOR_EVENT_MATERIALIZATIONS.get() + 1);
+                e.write(writer, true)?;
             }
-            if let Some(ref tc) = self.color_theme {
-                e.push_attribute(("w:themeColor", tc.as_str()));
-            }
-            if let Some(tint) = self.color_theme_tint {
-                push_uchar_hex(&mut e, "w:themeTint", tint);
-            }
-            if let Some(shade) = self.color_theme_shade {
-                push_uchar_hex(&mut e, "w:themeShade", shade);
-            }
-            writer.write_event(Event::Empty(e))?;
         }
 
         if let Some(ref spacing) = self.spacing {
-            let mut e = BytesStart::new("w:spacing");
-            e.push_attribute(("w:val", buf.format(spacing.0)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(
+                writer,
+                &word_prefix,
+                "spacing",
+                buf.format(spacing.0),
+                emission,
+            )?;
         }
         if let Some(ws) = self.width_scale {
-            let mut e = BytesStart::new("w:w");
-            e.push_attribute(("w:val", buf.format(ws)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "w", buf.format(ws), emission)?;
         }
         if let Some(ref kern) = self.kern {
-            let mut e = BytesStart::new("w:kern");
-            e.push_attribute(("w:val", buf.format(kern.0)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "kern", buf.format(kern.0), emission)?;
         }
         if let Some(pos) = self.position {
-            let mut e = BytesStart::new("w:position");
-            e.push_attribute(("w:val", buf.format(pos)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "position", buf.format(pos), emission)?;
         }
 
         if let Some(ref sz) = self.sz {
-            let mut e = BytesStart::new("w:sz");
-            e.push_attribute(("w:val", buf.format(sz.0)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "sz", buf.format(sz.0), emission)?;
         }
         if let Some(ref sz_cs) = self.sz_cs {
-            let mut e = BytesStart::new("w:szCs");
-            e.push_attribute(("w:val", buf.format(sz_cs.0)));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "szCs", buf.format(sz_cs.0), emission)?;
         }
 
         if let Some(ref highlight) = self.highlight {
-            let mut e = BytesStart::new("w:highlight");
-            e.push_attribute(("w:val", highlight.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(
+                writer,
+                &word_prefix,
+                "highlight",
+                highlight.to_str(),
+                emission,
+            )?;
         }
 
         if let Some(underline) = self.underline {
-            let mut e = BytesStart::new("w:u");
-            e.push_attribute(("w:val", underline.to_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "u", underline.to_str(), emission)?;
         }
 
         if let Some(ref effect) = self.effect {
-            let mut e = BytesStart::new("w:effect");
-            e.push_attribute(("w:val", effect.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "effect", effect.as_str(), emission)?;
         }
         if let Some(ref border) = self.border {
-            border.to_xml(writer, "w:bdr")?;
+            if let Some(emission) = emission
+                .filter(|_| border.extra_attributes.is_empty() && border.source_xml.is_none())
+            {
+                let mut size_buffer = itoa::Buffer::new();
+                let mut space_buffer = itoa::Buffer::new();
+                let size = border.sz.map(|size| size_buffer.format(size));
+                let space = border.space.map(|space| space_buffer.format(space));
+                let attributes = [
+                    Some(("val", border.val.to_str())),
+                    size.map(|value| ("sz", value)),
+                    space.map(|value| ("space", value)),
+                    border.color.as_deref().map(|value| ("color", value)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed("w")
+                };
+                emission.write_word_attributes(writer, plan, "bdr", &attributes, true)?;
+            } else {
+                if role == crate::text::XmlWriteRole::Source {
+                    border.write_xml_in(writer, "bdr", role, source_context, emission)?;
+                } else {
+                    border.write_xml_in(writer, "w:bdr", role, source_context, emission)?;
+                }
+            }
         }
 
         if let Some(ref shd) = self.shading {
-            shd.write_xml(writer, "w:shd")?;
+            if let Some(emission) = emission.filter(|_| shd.extra_attributes.is_empty()) {
+                let tint = shd.theme_tint.map(crate::properties::uchar_hex_bytes);
+                let shade = shd.theme_shade.map(crate::properties::uchar_hex_bytes);
+                let fill_tint = shd.theme_fill_tint.map(crate::properties::uchar_hex_bytes);
+                let fill_shade = shd.theme_fill_shade.map(crate::properties::uchar_hex_bytes);
+                let tint = tint
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let shade = shade
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let fill_tint = fill_tint
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let fill_shade = fill_shade
+                    .as_ref()
+                    .map(|bytes| std::str::from_utf8(bytes))
+                    .transpose()?;
+                let attributes = [
+                    Some(("val", shd.val.as_str())),
+                    shd.color.as_deref().map(|value| ("color", value)),
+                    shd.theme_color
+                        .as_deref()
+                        .map(|value| ("themeColor", value)),
+                    tint.map(|value| ("themeTint", value)),
+                    shade.map(|value| ("themeShade", value)),
+                    shd.fill.as_deref().map(|value| ("fill", value)),
+                    shd.theme_fill.as_deref().map(|value| ("themeFill", value)),
+                    fill_tint.map(|value| ("themeFillTint", value)),
+                    fill_shade.map(|value| ("themeFillShade", value)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed("w")
+                };
+                emission.write_word_attributes(writer, plan, "shd", &attributes, true)?;
+            } else {
+                if role == crate::text::XmlWriteRole::Source {
+                    shd.write_xml_in(writer, "shd", role, source_context, emission)?;
+                } else {
+                    shd.write_xml_in(writer, "w:shd", role, source_context, emission)?;
+                }
+            }
         }
 
         if let Some(ref fit_text) = self.fit_text {
-            fit_text.write_xml(writer)?;
+            if let Some(emission) = emission.filter(|_| fit_text.extra_attributes.is_empty()) {
+                let mut value_buffer = itoa::Buffer::new();
+                let mut id_buffer = itoa::Buffer::new();
+                let id = fit_text.id.map(|id| id_buffer.format(id));
+                let attributes = [
+                    Some(("val", value_buffer.format(fit_text.val.0))),
+                    id.map(|value| ("id", value)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed("w")
+                };
+                emission.write_word_attributes(writer, plan, "fitText", &attributes, true)?;
+            } else {
+                fit_text.write_xml(writer, role, source_context, emission)?;
+            }
         }
 
         if let Some(ref vert_align) = self.vert_align {
-            let mut e = BytesStart::new("w:vertAlign");
-            e.push_attribute(("w:val", vert_align.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(
+                writer,
+                &word_prefix,
+                "vertAlign",
+                vert_align.as_str(),
+                emission,
+            )?;
         }
 
         if let Some(rtl) = self.rtl {
-            write_toggle(writer, "w:rtl", rtl)?;
+            write_word_toggle(writer, "rtl", rtl, role, source_context, emission)?;
         }
         if let Some(complex_script) = self.complex_script {
-            write_toggle(writer, "w:cs", complex_script)?;
+            write_word_toggle(writer, "cs", complex_script, role, source_context, emission)?;
         }
         if let Some(ref emphasis_mark) = self.emphasis_mark {
-            let mut e = BytesStart::new("w:em");
-            e.push_attribute(("w:val", emphasis_mark.as_str()));
-            writer.write_event(Event::Empty(e))?;
+            write_word_value(writer, &word_prefix, "em", emphasis_mark.as_str(), emission)?;
         }
 
         if self.language.is_some()
@@ -1379,44 +1964,167 @@ impl CT_RPr {
             || self.language_bidi.is_some()
             || !self.language_extra_attributes.is_empty()
         {
-            let mut e = BytesStart::new("w:lang");
-            if let Some(language) = &self.language {
-                e.push_attribute(("w:val", language.as_str()));
+            if let Some(emission) = emission.filter(|_| self.language_extra_attributes.is_empty()) {
+                let attributes = [
+                    self.language.as_deref().map(|v| ("val", v)),
+                    self.language_east_asia.as_deref().map(|v| ("eastAsia", v)),
+                    self.language_bidi.as_deref().map(|v| ("bidi", v)),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed(&word_prefix)
+                };
+                emission.write_word_attributes(writer, plan, "lang", &attributes, true)?;
+            } else {
+                let mut e = crate::text::FieldXmlStart::word(&word_prefix, "lang", emission)?;
+                if role == crate::text::XmlWriteRole::Source {
+                    for (name, value) in &self.language_extra_attributes {
+                        e.push_raw(name, value)?;
+                    }
+                }
+                let word_prefix = if role == crate::text::XmlWriteRole::Source {
+                    e.qualify(&[], role, source_context)?
+                } else {
+                    word_prefix.clone()
+                };
+                if let Some(language) = &self.language {
+                    e.push_word(&word_prefix, "val", language.as_str())?;
+                }
+                if let Some(language) = &self.language_east_asia {
+                    e.push_word(&word_prefix, "eastAsia", language.as_str())?;
+                }
+                if let Some(language) = &self.language_bidi {
+                    e.push_word(&word_prefix, "bidi", language.as_str())?;
+                }
+                if role != crate::text::XmlWriteRole::Source {
+                    for (name, value) in &self.language_extra_attributes {
+                        e.push(name, value)?;
+                    }
+                }
+                e.write(writer, true)?;
             }
-            if let Some(language) = &self.language_east_asia {
-                e.push_attribute(("w:eastAsia", language.as_str()));
-            }
-            if let Some(language) = &self.language_bidi {
-                e.push_attribute(("w:bidi", language.as_str()));
-            }
-            for (name, value) in &self.language_extra_attributes {
-                e.push_attribute((name.as_str(), value.as_str()));
-            }
-            writer.write_event(Event::Empty(e))?;
         }
 
         if let Some(ref layout) = self.east_asian_layout {
-            layout.write_xml(writer)?;
+            if let Some(emission) = emission.filter(|_| layout.extra_attributes.is_empty()) {
+                let mut id_buffer = itoa::Buffer::new();
+                let id = layout.id.map(|id| id_buffer.format(id));
+                let attributes = [
+                    id.map(|value| ("id", value)),
+                    layout
+                        .combine
+                        .map(|value| ("combine", if value { "1" } else { "0" })),
+                    layout
+                        .combine_brackets
+                        .as_deref()
+                        .map(|value| ("combineBrackets", value)),
+                    layout
+                        .vert
+                        .map(|value| ("vert", if value { "1" } else { "0" })),
+                    layout
+                        .vert_compress
+                        .map(|value| ("vertCompress", if value { "1" } else { "0" })),
+                ];
+                let plan = if role == crate::text::XmlWriteRole::Source {
+                    crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+                } else {
+                    crate::text::GeneratedWordName::fixed("w")
+                };
+                emission.write_word_attributes(
+                    writer,
+                    plan,
+                    "eastAsianLayout",
+                    &attributes,
+                    true,
+                )?;
+            } else {
+                layout.write_xml(writer, role, source_context, emission)?;
+            }
         }
         if let Some(spec_vanish) = self.spec_vanish {
-            write_toggle(writer, "w:specVanish", spec_vanish)?;
+            write_word_toggle(
+                writer,
+                "specVanish",
+                spec_vanish,
+                role,
+                source_context,
+                emission,
+            )?;
         }
         if let Some(office_math) = self.office_math {
-            write_toggle(writer, "w:oMath", office_math)?;
+            write_word_toggle(writer, "oMath", office_math, role, source_context, emission)?;
         }
 
         for revision in &self.revision_markers {
-            revision.write_xml_with_word_override(writer, foreign_word_namespace)?;
+            revision.write_xml_with_role_override(
+                writer,
+                foreign_word_namespace,
+                role,
+                source_context,
+                emission,
+            )?;
         }
-        for raw in &self.revision_xml {
-            crate::text::write_raw_with_word_override(writer, raw, foreign_word_namespace)?;
+        if positioned {
+            for raw in &self.revision_xml {
+                crate::text::write_raw_with_word_override_in(
+                    writer,
+                    raw,
+                    foreign_word_namespace,
+                    emission,
+                )?;
+            }
         }
         if let Some(change) = &self.change {
-            change.write_xml_with_word_override(writer, foreign_word_namespace)?;
+            change.write_xml_with_role_override(
+                writer,
+                foreign_word_namespace,
+                role,
+                source_context,
+                emission,
+            )?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:rPr")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &word_prefix, "rPr")?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new(format!("{word_prefix}:rPr"))))?;
+        }
         Ok(())
+    }
+
+    fn write_modeled_record<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        foreign_word_namespace: Option<&str>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        if self.is_empty_in(false) {
+            let mut start = crate::text::FieldXmlStart::new("w:rPr", emission)?;
+            if role == crate::text::XmlWriteRole::Publication
+                && crate::text::emitted_bindings().has_foreign_word_binding()
+            {
+                start.restore_word_binding()?;
+            }
+            start.write(writer, false)?;
+            if let Some(emission) = emission {
+                emission.write_end_name(writer, "w:rPr")?;
+            } else {
+                writer.write_event(Event::End(BytesEnd::new("w:rPr")))?;
+            }
+            Ok(())
+        } else {
+            self.write_xml_role_core(
+                writer,
+                foreign_word_namespace,
+                role,
+                source_context,
+                emission,
+                false,
+            )
+        }
     }
 
     /// Whether any `w:rFonts` attribute is set.
@@ -1443,6 +2151,10 @@ impl CT_RPr {
     }
 
     fn is_empty(&self) -> bool {
+        self.is_empty_in(true)
+    }
+
+    fn is_empty_in(&self, raw: bool) -> bool {
         self.style_id.is_none()
             && self.font_ascii.is_none()
             && self.font_hansi.is_none()
@@ -1500,11 +2212,12 @@ impl CT_RPr {
             && self.language_extra_attributes.is_empty()
             && self.revision_markers.is_empty()
             && self.change.is_none()
-            && self.revision_xml.is_empty()
+            && (!raw || self.revision_xml.is_empty())
     }
 
-    /// Merge another CT_RPr into this one (non-None fields override).
-    /// Used for style inheritance.
+    /// Merge another CT_RPr for style inheritance.
+    /// A declared colour replaces its complete colour property. Other absent
+    /// properties inherit.
     pub fn merge_from(&mut self, other: &CT_RPr) {
         // Only a recognized semantic solid fill participates in style precedence.
         // Opaque extension children are not transported into an effective style.
@@ -1592,17 +2305,18 @@ impl CT_RPr {
         if other.sz_cs.is_some() {
             self.sz_cs = other.sz_cs;
         }
-        if other.color.is_some() {
+        if other.color.is_some() || other.color_theme.is_some() {
             self.color = other.color.clone();
-        }
-        if other.color_theme.is_some() {
             self.color_theme = other.color_theme.clone();
-        }
-        if other.color_theme_tint.is_some() {
             self.color_theme_tint = other.color_theme_tint;
-        }
-        if other.color_theme_shade.is_some() {
             self.color_theme_shade = other.color_theme_shade;
+        } else {
+            if other.color_theme_tint.is_some() {
+                self.color_theme_tint = other.color_theme_tint;
+            }
+            if other.color_theme_shade.is_some() {
+                self.color_theme_shade = other.color_theme_shade;
+            }
         }
         if !other.color_extra_attributes.is_empty() {
             self.color_extra_attributes = other.color_extra_attributes.clone();
@@ -1738,11 +2452,60 @@ pub(crate) fn language_element_is_explicitly_empty(xml: &[u8]) -> Result<bool> {
     ))
 }
 
+pub(crate) fn write_word_toggle<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    local: &str,
+    value: bool,
+    role: crate::text::XmlWriteRole,
+    source_context: Option<&[(&str, &str)]>,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    if let Some(emission) = emission {
+        let plan = if role == crate::text::XmlWriteRole::Source {
+            crate::text::generated_word_name(source_context.unwrap_or(&[]))?
+        } else {
+            crate::text::GeneratedWordName::fixed("w")
+        };
+        emission.write_word_attributes(
+            writer,
+            plan,
+            local,
+            &[(!value).then_some(("val", "false"))],
+            true,
+        )?;
+        Ok(())
+    } else if role == crate::text::XmlWriteRole::Source {
+        crate::properties::write_toggle_source(writer, local, value, source_context)
+    } else {
+        write_toggle(writer, &format!("w:{local}"), value)
+    }
+}
+
+fn write_word_value<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    local: &str,
+    value: &str,
+    emission: Option<&crate::text::FieldXmlEmission>,
+) -> Result<()> {
+    if let Some(emission) = emission {
+        return emission.write_word_value(writer, prefix, local, value);
+    }
+    let mut element = BytesStart::new(format!("{prefix}:{local}"));
+    element.push_attribute((format!("{prefix}:val").as_str(), value));
+    #[cfg(test)]
+    crate::text::WORD_VALUE_EVENT_MATERIALIZATIONS
+        .set(crate::text::WORD_VALUE_EVENT_MATERIALIZATIONS.get() + 1);
+    writer.write_event(Event::Empty(element))?;
+    Ok(())
+}
+
 fn write_rpr_with_positioned_raw<W: std::io::Write>(
     writer: &mut Writer<W>,
     generated: &[u8],
     rpr: &CT_RPr,
     foreign_word_namespace: Option<&str>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     let mut raw_order = (0..rpr.revision_xml.len())
         .filter(|index| {
@@ -1760,13 +2523,20 @@ fn write_rpr_with_positioned_raw<W: std::io::Write>(
     let mut occurrences = [0usize; RPR_END_SLOT as usize + 1];
     let mut reader = Reader::from_reader(generated);
     reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
     let mut inside = false;
     loop {
-        match reader.read_event_into(&mut buffer)? {
+        let event_start = reader.buffer_position() as usize;
+        match reader.read_event()? {
             Event::Start(element) if !inside => {
                 inside = true;
-                writer.write_event(Event::Start(element.into_owned()))?;
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(Event::Start(element))?;
+                }
             }
             Event::Start(element) => {
                 let slot = rpr_slot_for_name(element.local_name().as_ref());
@@ -1775,33 +2545,39 @@ fn write_rpr_with_positioned_raw<W: std::io::Write>(
                     rpr,
                     &raw_order,
                     &mut raw_index,
-                    slot,
-                    occurrences[slot as usize],
+                    (slot, occurrences[slot as usize]),
                     foreign_word_namespace,
+                    emission,
                 )?;
-                let raw = capture_element(&mut reader, &element)?;
-                writer.get_mut().write_all(&raw)?;
+                let end = crate::text::generated_subtree_end(&mut reader, element.name().as_ref())?;
+                if let Some(emission) = emission {
+                    emission.write_copy(writer, &generated[event_start..end])?;
+                } else {
+                    writer.get_mut().write_all(&generated[event_start..end])?;
+                }
                 occurrences[slot as usize] += 1;
             }
-            Event::Empty(mut element) => {
+            Event::Empty(element) => {
                 let slot = rpr_slot_for_name(element.local_name().as_ref());
                 write_rpr_raw_before(
                     writer,
                     rpr,
                     &raw_order,
                     &mut raw_index,
-                    slot,
-                    occurrences[slot as usize],
+                    (slot, occurrences[slot as usize]),
                     foreign_word_namespace,
+                    emission,
                 )?;
-                append_modeled_toggle_attributes(
-                    &mut element,
+                let attributes = crate::properties::modeled_toggle_attributes(
                     &rpr.revision_xml,
                     &rpr.revision_xml_positions,
                     slot,
-                    occurrences[slot as usize],
                 )?;
-                writer.write_event(Event::Empty(element.into_owned()))?;
+                let mut element = crate::text::FieldXmlStart::from_start(element, emission)?;
+                for (name, value) in attributes {
+                    element.push(&name, &value)?;
+                }
+                element.write(writer, true)?;
                 occurrences[slot as usize] += 1;
             }
             Event::End(element) if inside => {
@@ -1810,25 +2586,41 @@ fn write_rpr_with_positioned_raw<W: std::io::Write>(
                     rpr,
                     &raw_order,
                     &mut raw_index,
-                    RPR_END_SLOT,
-                    0,
+                    (RPR_END_SLOT, 0),
                     foreign_word_namespace,
+                    emission,
                 )?;
                 while let Some(index) = raw_order.get(raw_index).copied() {
-                    crate::text::write_raw_with_word_override(
+                    crate::text::write_raw_with_word_override_in(
                         writer,
                         &rpr.revision_xml[index],
                         foreign_word_namespace,
+                        emission,
                     )?;
                     raw_index += 1;
                 }
-                writer.write_event(Event::End(element.into_owned()))?;
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(Event::End(element))?;
+                }
                 return Ok(());
             }
             Event::Eof => return Ok(()),
-            event => writer.write_event(event.into_owned())?,
+            event => {
+                if let Some(emission) = emission {
+                    emission.write_copy(
+                        writer,
+                        &generated[event_start..reader.buffer_position() as usize],
+                    )?;
+                } else {
+                    writer.write_event(event)?;
+                }
+            }
         }
-        buffer.clear();
     }
 }
 
@@ -1837,19 +2629,20 @@ fn write_rpr_raw_before<W: std::io::Write>(
     rpr: &CT_RPr,
     raw_order: &[usize],
     raw_index: &mut usize,
-    slot: u8,
-    occurrence: usize,
+    before: (u8, usize),
     foreign_word_namespace: Option<&str>,
+    emission: Option<&crate::text::FieldXmlEmission>,
 ) -> Result<()> {
     while let Some(index) = raw_order.get(*raw_index).copied() {
         let position = effective_rpr_raw_position(rpr, index);
-        if position.0 > slot || (position.0 == slot && position.1 > occurrence) {
+        if position > before {
             break;
         }
-        crate::text::write_raw_with_word_override(
+        crate::text::write_raw_with_word_override_in(
             writer,
             &rpr.revision_xml[index],
             foreign_word_namespace,
+            emission,
         )?;
         *raw_index += 1;
     }
@@ -2026,6 +2819,96 @@ pub(crate) fn rpr_schema_slot(name: &[u8], word_prefixes: &[String]) -> Option<u
     (slot != RPR_END_SLOT && is_word_element(name, local, word_prefixes)).then_some(slot)
 }
 
+/// Attribute ownership of the full run-property reader. Numbering owns only a subset.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    if parent != b"rPr" {
+        return None;
+    }
+    rpr_schema_slot(local, &[String::new()])?;
+    let shared = crate::numbering::property_attributes(crate::numbering::PropertyKind::Run, local);
+    Some(match local {
+        b"rFonts" => &[
+            b"ascii",
+            b"hAnsi",
+            b"eastAsia",
+            b"cs",
+            b"asciiTheme",
+            b"hAnsiTheme",
+            b"eastAsiaTheme",
+            b"cstheme",
+            b"hint",
+        ],
+        b"color" => &[b"val", b"themeColor", b"themeTint", b"themeShade"],
+        b"shd" => crate::properties::source_shading_attributes(),
+        b"bdr" | b"border" => crate::properties::source_border_attributes(),
+        b"lang" => &[b"val", b"eastAsia", b"bidi"],
+        b"fitText" => &[b"val", b"id"],
+        b"eastAsianLayout" => &[
+            b"id",
+            b"combine",
+            b"combineBrackets",
+            b"vert",
+            b"vertCompress",
+        ],
+        b"ins" | b"del" | b"moveFrom" | b"moveTo" | b"rPrChange" => &[b"id", b"author", b"date"],
+        _ if !shared.is_empty() => shared,
+        _ => &[b"val"],
+    })
+}
+
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent != b"rPr" {
+        return true;
+    }
+    if key == b"val" {
+        if local == b"highlight" {
+            return ST_HighlightColor::from_str(value).is_ok();
+        }
+        if local == b"u" {
+            return ST_Underline::from_str(value).is_ok();
+        }
+        if matches!(
+            local,
+            b"b" | b"bCs"
+                | b"i"
+                | b"iCs"
+                | b"caps"
+                | b"smallCaps"
+                | b"strike"
+                | b"dstrike"
+                | b"outline"
+                | b"shadow"
+                | b"emboss"
+                | b"imprint"
+                | b"noProof"
+                | b"snapToGrid"
+                | b"vanish"
+                | b"webHidden"
+                | b"rtl"
+                | b"cs"
+                | b"specVanish"
+                | b"oMath"
+        ) {
+            return crate::numbering::parse_on_off_token(value).is_some();
+        }
+    }
+    if local == b"color" && matches!(key, b"themeTint" | b"themeShade") {
+        return parse_uchar_hex(value).is_some();
+    }
+    if local == b"eastAsianLayout" && matches!(key, b"combine" | b"vert" | b"vertCompress") {
+        return crate::numbering::parse_on_off_token(value).is_some();
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2044,6 +2927,38 @@ mod tests {
             buf.clear();
         }
         CT_RPr::from_xml(&mut reader).unwrap()
+    }
+
+    #[test]
+    fn shared_run_measurements_preserve_unsigned_signed_and_missing_values() {
+        let rpr = parse_rpr(
+            r#"<w:sz w:val="4294967295"/><w:sz/><w:szCs w:val="2.5"/><w:spacing w:val="-2.5"/><w:position w:val="-2147483648"/><w:w w:val="4294967295"/><w:kern/>"#,
+        );
+        assert_eq!(rpr.sz, Some(HalfPoint(u32::MAX)));
+        assert_eq!(rpr.sz_cs, Some(HalfPoint(3)));
+        assert_eq!(rpr.spacing, Some(Twips(-3)));
+        assert_eq!(rpr.position, Some(i32::MIN));
+        assert_eq!(rpr.width_scale, Some(u32::MAX));
+        assert_eq!(rpr.kern, None);
+        assert!(rpr.revision_xml.iter().any(|raw| raw == b"<w:kern/>"));
+        assert!(
+            RunMeasurement::for_local(b"sz")
+                .unwrap()
+                .decode(b"w:sz", Some("-1"))
+                .is_err()
+        );
+        assert!(
+            RunMeasurement::for_local(b"w")
+                .unwrap()
+                .decode(b"w:w", Some("1.5"))
+                .is_err()
+        );
+        assert!(
+            RunMeasurement::for_local(b"spacing")
+                .unwrap()
+                .decode(b"w:spacing", Some("-1"))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2110,6 +3025,70 @@ mod tests {
         assert_eq!(base.bold, Some(true)); // kept
         assert_eq!(base.sz, Some(HalfPoint(28))); // overridden
         assert_eq!(base.italic, Some(true)); // added
+    }
+
+    #[test]
+    fn nearer_run_color_replaces_the_inherited_theme_and_its_attributes() {
+        let inherited = parse_rpr(
+            r#"<w:color xmlns:old="urn:old" w:val="467886" w:themeColor="hyperlink" w:themeTint="66" w:themeShade="33" old:kept="old"/>"#,
+        );
+        let direct = parse_rpr(r#"<w:color xmlns:new="urn:new" w:val="0563C1" new:kept="new"/>"#);
+        let mut effective = inherited.clone();
+        effective.merge_from(&direct);
+        assert_eq!(effective.color.as_deref(), Some("0563C1"));
+        assert_eq!(effective.color_theme, None);
+        assert_eq!(effective.color_theme_tint, None);
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(
+            effective.color_extra_attributes,
+            direct.color_extra_attributes
+        );
+        assert_eq!(inherited.color_theme.as_deref(), Some("hyperlink"));
+        assert_eq!(inherited.color_theme_tint, Some(0x66));
+        assert_eq!(direct.color_theme, None);
+    }
+
+    #[test]
+    fn nearer_run_color_theme_does_not_inherit_replaced_tint_or_shade() {
+        let mut effective = parse_rpr(
+            r#"<w:color xmlns:old="urn:old" w:val="111111" w:themeColor="accent1" w:themeTint="66" w:themeShade="33" old:kept="old"/>"#,
+        );
+        let opaque = effective.color_extra_attributes.clone();
+        effective.merge_from(&parse_rpr(
+            r#"<w:color w:val="222222" w:themeColor="accent2"/>"#,
+        ));
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        assert_eq!(effective.color_theme_tint, None);
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(effective.color_extra_attributes, opaque);
+
+        effective.merge_from(&CT_RPr {
+            bold: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        effective.merge_from(&CT_RPr {
+            color_theme_shade: Some(0x20),
+            color_extra_attributes: vec![("xmlns:x".into(), "urn:opaque".into())],
+            ..Default::default()
+        });
+        assert_eq!(effective.color.as_deref(), Some("222222"));
+        assert_eq!(effective.color_theme.as_deref(), Some("accent2"));
+        assert_eq!(effective.color_theme_shade, Some(0x20));
+
+        effective.merge_from(&CT_RPr {
+            color_theme: Some("accent3".into()),
+            ..Default::default()
+        });
+        assert_eq!(effective.color, None);
+        assert_eq!(effective.color_theme.as_deref(), Some("accent3"));
+        assert_eq!(effective.color_theme_shade, None);
+        assert_eq!(
+            effective.color_extra_attributes,
+            vec![("xmlns:x".to_owned(), "urn:opaque".to_owned())]
+        );
     }
 
     #[test]

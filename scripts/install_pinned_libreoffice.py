@@ -17,9 +17,9 @@ import urllib.request
 
 LIBREOFFICE_VERSION = "26.2.5.2"
 LIBREOFFICE_SHA256 = "2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e"
-LIBREOFFICE_ARCHIVE = "LibreOffice_26.2.5_Linux_x86-64_deb.tar.gz"
+LIBREOFFICE_ARCHIVE = "LibreOffice_26.2.5.2_Linux_x86-64_deb.tar.gz"
 LIBREOFFICE_URL = (
-    "https://download.documentfoundation.org/libreoffice/stable/26.2.5/"
+    "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/"
     f"deb/x86_64/{LIBREOFFICE_ARCHIVE}"
 )
 ARCHIVE_ROOT = f"LibreOffice_{LIBREOFFICE_VERSION}_Linux_x86-64_deb"

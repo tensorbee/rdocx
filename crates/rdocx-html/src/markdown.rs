@@ -12,7 +12,10 @@ use rdocx_oxml::text::{BreakType, CT_P, CT_R, RunContent, SpecialCharacter};
 use crate::{Block, HtmlInput, ImageData, body_blocks, cell_blocks};
 
 /// Emit the full body content as Markdown.
-pub(crate) fn emit_markdown(input: &HtmlInput) -> String {
+pub(crate) fn emit_markdown(
+    input: &HtmlInput,
+    charts: &HashMap<String, crate::ChartTable>,
+) -> String {
     let styles = &input.styles;
     let hyperlink_urls = &input.hyperlink_urls;
     let images = &input.images;
@@ -58,6 +61,12 @@ pub(crate) fn emit_markdown(input: &HtmlInput) -> String {
         match block {
             Block::Paragraph(p, boundaries) => {
                 emit_paragraph(&mut out, &p, &boundaries, input, &mut list_levels);
+                for id in crate::paragraph_chart_ids(&p) {
+                    if let Some(chart) = charts.get(&id) {
+                        leave_list(&mut out, &mut list_levels);
+                        emit_chart_table(&mut out, chart);
+                    }
+                }
             }
             Block::Table(tbl) => {
                 let mut table = String::new();
@@ -1207,4 +1216,36 @@ fn collect_cell_text(
     }
 
     parts.join(" ")
+}
+
+fn emit_chart_table(out: &mut String, chart: &crate::ChartTable) {
+    let escaped = |text: &str| {
+        let mut result = String::new();
+        for ch in text.chars() {
+            if ch == '|' {
+                result.push('\\');
+            }
+            push_escaped(&mut result, ch);
+        }
+        result.replace('\n', "<br>").replace('\r', "")
+    };
+    if let Some(title) = chart.title.as_ref().filter(|title| !title.is_empty()) {
+        out.push_str(&escape_block_starts(&escaped(title)));
+        out.push_str("\n\n");
+    }
+    for (index, row) in chart.rows().iter().enumerate() {
+        out.push('|');
+        for cell in row {
+            out.push_str(&format!(" {} |", escaped(cell)));
+        }
+        out.push('\n');
+        if index == 0 {
+            out.push('|');
+            for _ in row {
+                out.push_str(" --- |");
+            }
+            out.push('\n');
+        }
+    }
+    out.push('\n');
 }

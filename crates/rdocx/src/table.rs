@@ -732,6 +732,94 @@ fn formatted_empty_cell(source: &CT_Tc, width: Option<CT_TblWidth>) -> Result<CT
     Ok(cell)
 }
 
+/// Continue the last paragraph's formatting in a newly added row or column.
+/// New owners never inherit list, section or paragraph revision ownership.
+fn inherited_empty_paragraph(source: &CT_Tc) -> CT_P {
+    let mut paragraph = CT_P::new();
+    let Some(source) = source
+        .content
+        .iter()
+        .rev()
+        .find_map(|content| match content {
+            CellContent::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+    else {
+        return paragraph;
+    };
+    let fallback = source.runs.last().and_then(|run| run.properties.as_ref());
+    let Some(mut properties) = source
+        .properties
+        .clone()
+        .or_else(|| fallback.map(|_| rdocx_oxml::properties::CT_PPr::default()))
+    else {
+        return paragraph;
+    };
+    if properties.rpr.is_none() {
+        properties.rpr = fallback.cloned();
+    }
+    properties.sect_pr = None;
+    properties.num_ilvl = None;
+    properties.num_ilvl_raw = None;
+    properties.num_id = None;
+    properties.num_id_raw = None;
+    properties.num_pr_extra_attributes.clear();
+    properties.num_pr_extra_xml.clear();
+    properties.numbering_revision = None;
+    properties.numbering_revision_xml.clear();
+    properties.numbering_revision_xml_positions.clear();
+    properties.numbering_revision_position = None;
+    properties.change = None;
+    // Duplicate or malformed Word properties may be preserved as raw children.
+    // Qualified identity keeps foreign lookalikes and other opaque children.
+    let retained = properties
+        .revision_xml
+        .iter()
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let mut reader = quick_xml::NsReader::from_reader(raw.as_slice());
+            let removed = loop {
+                match reader.read_resolved_event() {
+                    Ok((
+                        namespace,
+                        quick_xml::events::Event::Start(root)
+                        | quick_xml::events::Event::Empty(root),
+                    )) => {
+                        let word = match namespace {
+                            quick_xml::name::ResolveResult::Bound(uri) => uri.as_ref()
+                                == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                            // The existing model also retains canonical w: fragments
+                            // without repeating its implicit Word namespace.
+                            quick_xml::name::ResolveResult::Unknown(prefix) => {
+                                prefix.as_slice() == b"w"
+                            }
+                            _ => false,
+                        };
+                        break word
+                            && matches!(
+                                root.local_name().as_ref(),
+                                b"numPr" | b"sectPr" | b"pPrChange"
+                            );
+                    }
+                    Ok((_, quick_xml::events::Event::Eof)) | Err(_) => break false,
+                    _ => {}
+                }
+            };
+            (!removed).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    properties.revision_xml = retained
+        .iter()
+        .map(|index| properties.revision_xml[*index].clone())
+        .collect();
+    properties.revision_xml_positions = retained
+        .iter()
+        .filter_map(|index| properties.revision_xml_positions.get(*index).copied())
+        .collect();
+    paragraph.properties = Some(properties);
+    paragraph
+}
+
 /// Add `amount` twips to a fixed width, never below zero, leaving `auto` and
 /// percentages alone.
 fn widen_fixed(width: &mut Option<CT_TblWidth>, amount: i32) -> Result<()> {
@@ -949,6 +1037,7 @@ impl<'a> Table<'a> {
         for cell in &last.cells {
             let source = cell.properties.as_ref();
             let mut copy = formatted_empty_cell(cell, source.and_then(|p| p.width.clone()))?;
+            copy.content = vec![CellContent::Paragraph(inherited_empty_paragraph(cell))];
             if let Some(span) = source.and_then(|properties| properties.grid_span) {
                 copy.properties
                     .get_or_insert_with(CT_TcPr::default)
@@ -1043,7 +1132,10 @@ impl<'a> Table<'a> {
                 .iter()
                 .position(|(start, end)| (*start..*end).contains(&reference))
                 .ok_or_else(|| Error::Other("reference column has no physical cell".into()))?;
-            let cell = formatted_empty_cell(&row.cells[source], Some(CT_TblWidth::dxa(width)))?;
+            let mut cell = formatted_empty_cell(&row.cells[source], Some(CT_TblWidth::dxa(width)))?;
+            cell.content = vec![CellContent::Paragraph(inherited_empty_paragraph(
+                &row.cells[source],
+            ))];
             insert_row_cell(row, at, cell);
         }
         if let Some(properties) = candidate.properties.as_mut() {
@@ -1115,10 +1207,28 @@ impl<'a> Table<'a> {
         }
         let mut candidate = self.inner.clone();
         let mut content = Vec::new();
+        let mut all_lone_empty = true;
         for (offset, (first, last)) in selected.iter().enumerate() {
             for cell in &candidate.rows[top + offset].cells[*first..=*last] {
-                content.extend(cell.content.clone());
+                let lone_empty = match cell.content.as_slice() {
+                    [CellContent::Paragraph(paragraph)] => {
+                        let mut payload = paragraph.clone();
+                        payload.properties = None;
+                        payload.extra_xml.retain(|(position, raw)| {
+                            !CT_P::raw_is_root_attributes(*position, raw)
+                        });
+                        payload == CT_P::new()
+                    }
+                    _ => false,
+                };
+                if !lone_empty {
+                    all_lone_empty = false;
+                    content.extend(cell.content.clone());
+                }
             }
+        }
+        if all_lone_empty {
+            content = candidate.rows[top].cells[selected[0].0].content.clone();
         }
         let width = candidate
             .grid
@@ -3496,5 +3606,276 @@ mod tests {
         let mut table = Table { inner: &mut inner };
         assert!(table.set_row_grid_omissions(0, None, None).is_err());
         assert_eq!(*table.inner, before);
+    }
+
+    fn issue432_paragraph(xml: &str) -> CT_P {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>{xml}</w:body></w:document>"#
+        );
+        let document = rdocx_oxml::CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let rdocx_oxml::document::BodyContent::Paragraph(paragraph) =
+            document.body.content.into_iter().next().unwrap()
+        else {
+            panic!("paragraph fixture")
+        };
+        *paragraph
+    }
+
+    #[test]
+    fn issue432_merge_drops_only_a_lone_empty_paragraph() {
+        let empty = issue432_paragraph(
+            r#"<w:p w:rsidR="12345678"><w:pPr><w:jc w:val="center"/></w:pPr></w:p>"#,
+        );
+        let text = issue432_paragraph("<w:p><w:r><w:t>Total</w:t></w:r></w:p>");
+        let mut failures = Vec::new();
+        for vertical in [false, true] {
+            for (first, second, expected) in [
+                (text.clone(), empty.clone(), vec![text.clone()]),
+                (empty.clone(), text.clone(), vec![text.clone()]),
+                (empty.clone(), empty.clone(), vec![empty.clone()]),
+                (text.clone(), text.clone(), vec![text.clone(), text.clone()]),
+            ] {
+                let mut document = crate::Document::new();
+                let mut table =
+                    document.add_table(if vertical { 2 } else { 1 }, if vertical { 1 } else { 2 });
+                table.inner.rows[0].cells[0].content = vec![CellContent::Paragraph(first)];
+                let (r, c) = if vertical { (1, 0) } else { (0, 1) };
+                table.inner.rows[r].cells[c].content = vec![CellContent::Paragraph(second)];
+                table.merge_cells((0, 0), (r, c)).unwrap();
+                let actual = &table.inner.rows[0].cells[0].content;
+                let expected = expected
+                    .into_iter()
+                    .map(CellContent::Paragraph)
+                    .collect::<Vec<_>>();
+                if actual != &expected {
+                    failures.push(format!("vertical={vertical}: {actual:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "lone-empty paragraphs retained: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn issue432_new_cells_inherit_paragraph_mark_not_numbering() {
+        let first = issue432_paragraph(r#"<w:p><w:pPr><w:jc w:val="right"/></w:pPr></w:p>"#);
+        let source = issue432_paragraph(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="7"/></w:numPr><w:jc w:val="center"/><x:keep xmlns:x="urn:opaque"/><w:sectPr><w:pgSz w:w="12240"/></w:sectPr><w:pPrChange w:id="4" w:author="Prior"><w:pPr/></w:pPrChange></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>source</w:t></w:r></w:p>"#,
+        );
+        for operation in ["row", "before", "after"] {
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 1);
+            table.inner.rows[0].cells[0].content = vec![
+                CellContent::Paragraph(first.clone()),
+                CellContent::Paragraph(source.clone()),
+            ];
+            let original = table.inner.rows[0].cells[0].clone();
+            let target = if operation == "row" {
+                table.add_row().unwrap();
+                (1, 0)
+            } else {
+                let before = operation == "before";
+                table.insert_column(0, before, None).unwrap();
+                (0, usize::from(!before))
+            };
+            let added = &table.inner.rows[target.0].cells[target.1];
+            let [CellContent::Paragraph(p)] = added.content.as_slice() else {
+                panic!("one empty paragraph")
+            };
+            assert!(p.runs.is_empty());
+            let properties = p
+                .properties
+                .as_ref()
+                .expect("new cell must inherit last paragraph properties");
+            assert_eq!(properties.jc, Some(ST_Jc::Center));
+            assert_eq!(properties.rpr.as_ref().unwrap().bold, Some(true));
+            assert!(
+                properties.num_id.is_none()
+                    && properties.num_ilvl.is_none()
+                    && properties.sect_pr.is_none()
+                    && properties.change.is_none()
+            );
+            assert!(
+                properties
+                    .revision_xml
+                    .iter()
+                    .any(|raw| String::from_utf8_lossy(raw).contains("x:keep"))
+            );
+            let original_index = if operation == "before" { 1 } else { 0 };
+            assert_eq!(table.inner.rows[0].cells[original_index], original);
+        }
+        let mut document = crate::Document::new();
+        let mut table = document.add_table(1, 1);
+        table.inner.rows[0].cells[0]
+            .properties
+            .get_or_insert_with(CT_TcPr::default)
+            .extra_xml
+            .push((0, b"<x:keep xmlns:x=\"urn:opaque\"/>".to_vec()));
+        let before = table.inner.clone();
+        assert!(table.add_row().is_err());
+        assert_eq!(*table.inner, before);
+        assert!(table.insert_column(0, false, None).is_err());
+        assert_eq!(*table.inner, before);
+    }
+
+    #[test]
+    fn issue432_merge_keeps_nontext_owners_and_multiple_empty_paragraphs() {
+        let fragments = [
+            r#"<w:bookmarkStart w:id="1" w:name="kept"/><w:bookmarkEnd w:id="1"/>"#,
+            r#"<w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>"#,
+            r#"<w:ins w:id="1" w:author="A"><w:r><w:t>revision</w:t></w:r></w:ins>"#,
+            r#"<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+            r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>"#,
+            r#"<w:ruby><w:rubyPr/><w:rt><w:r><w:t>reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>base</w:t></w:r></w:rubyBase></w:ruby>"#,
+            r#"<x:keep xmlns:x="urn:opaque" x:flag="verbatim"/>"#,
+        ];
+        for fragment in fragments {
+            let payload = issue432_paragraph(&format!("<w:p>{fragment}</w:p>"));
+            assert_ne!(
+                payload,
+                CT_P::new(),
+                "fixture must carry actual content: {fragment}"
+            );
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 2);
+            table.inner.rows[0].cells[0].content = vec![CellContent::Paragraph(payload.clone())];
+            table.inner.rows[0].cells[1].content = vec![CellContent::Paragraph(payload.clone())];
+            table.merge_cells((0, 0), (0, 1)).unwrap();
+            assert_eq!(
+                table.inner.rows[0].cells[0].content,
+                vec![
+                    CellContent::Paragraph(payload.clone()),
+                    CellContent::Paragraph(payload)
+                ],
+                "payload was discarded: {fragment}"
+            );
+        }
+        for content in [
+            vec![
+                CellContent::Paragraph(CT_P::new()),
+                CellContent::Paragraph(CT_P::new()),
+            ],
+            vec![
+                CellContent::Table(CT_Tbl::new()),
+                CellContent::Paragraph(CT_P::new()),
+            ],
+        ] {
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 2);
+            table.inner.rows[0].cells[0].content = content.clone();
+            table.merge_cells((0, 0), (0, 1)).unwrap();
+            assert_eq!(table.inner.rows[0].cells[0].content, content);
+        }
+    }
+
+    #[test]
+    fn issue432_added_cells_preserve_mark_priority_and_split_defaults() {
+        for empty_source in [false, true] {
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 1);
+            let source = issue432_paragraph(
+                r#"<w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>source</w:t></w:r></w:p>"#,
+            );
+            table.inner.rows[0].cells[0].content = if empty_source {
+                vec![]
+            } else {
+                vec![CellContent::Paragraph(source)]
+            };
+            table.add_row().unwrap();
+            let [CellContent::Paragraph(added)] = table.inner.rows[1].cells[0].content.as_slice()
+            else {
+                panic!("one paragraph")
+            };
+            if empty_source {
+                assert_eq!(added, &CT_P::new());
+            } else {
+                let mark = added.properties.as_ref().unwrap().rpr.as_ref().unwrap();
+                assert_eq!(mark.italic, Some(true));
+                assert!(mark.bold.is_none());
+            }
+        }
+        let mut fallback_document = crate::Document::new();
+        let mut fallback_table = fallback_document.add_table(1, 1);
+        let fallback = issue432_paragraph(
+            r#"<w:p w:rsidR="12345678"><w:r><w:rPr><w:b/></w:rPr><w:t>direct only</w:t></w:r></w:p>"#,
+        );
+        fallback_table.inner.rows[0].cells[0].content = vec![CellContent::Paragraph(fallback)];
+        fallback_table.add_row().unwrap();
+        let [CellContent::Paragraph(added)] =
+            fallback_table.inner.rows[1].cells[0].content.as_slice()
+        else {
+            panic!("one paragraph")
+        };
+        assert_eq!(
+            added
+                .properties
+                .as_ref()
+                .unwrap()
+                .rpr
+                .as_ref()
+                .unwrap()
+                .bold,
+            Some(true)
+        );
+        assert!(
+            added.extra_xml.is_empty(),
+            "source paragraph identity must not be cloned"
+        );
+        let mut document = crate::Document::new();
+        let mut table = document.add_table(1, 2);
+        let source = issue432_paragraph(
+            r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>source</w:t></w:r></w:p>"#,
+        );
+        table.inner.rows[0].cells[0].content = vec![CellContent::Paragraph(source.clone())];
+        table.merge_cells((0, 0), (0, 1)).unwrap();
+        table.split_cell(0, 0).unwrap();
+        assert_eq!(
+            table.inner.rows[0].cells[0].content,
+            vec![CellContent::Paragraph(source)]
+        );
+        assert_eq!(
+            table.inner.rows[0].cells[1].content,
+            vec![CellContent::Paragraph(CT_P::new())]
+        );
+    }
+
+    #[test]
+    fn issue432_inheritance_clears_raw_word_ownership_but_keeps_foreign_names() {
+        let source = issue432_paragraph(
+            r#"<w:p><w:pPr><w:numPr><w:numId w:val="7"/><w:numberingChange w:id="9"/></w:numPr><w:sectPr/><w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange><w:pPrChange w:id="2" w:author="B"><w:pPr/></w:pPrChange><x:pPrChange xmlns:x="urn:foreign" x:flag="keep"/><x:numPr xmlns:x="urn:foreign"/><w:sectPr xmlns:w="urn:foreign"/></w:pPr></w:p>"#,
+        );
+        let mut document = crate::Document::new();
+        let mut table = document.add_table(1, 1);
+        table.inner.rows[0].cells[0].content = vec![CellContent::Paragraph(source)];
+        table.add_row().unwrap();
+        let [CellContent::Paragraph(added)] = table.inner.rows[1].cells[0].content.as_slice()
+        else {
+            panic!("one paragraph")
+        };
+        let properties = added.properties.as_ref().unwrap();
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.to_xml(&mut writer).unwrap();
+        let xml = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(
+            properties.num_id.is_none()
+                && properties.numbering_revision.is_none()
+                && properties.change.is_none()
+                && properties.sect_pr.is_none()
+        );
+        assert!(
+            !xml.contains("w:pPrChange")
+                && !xml.contains("w:numPr")
+                && !xml.contains("w:numberingChange"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("x:pPrChange")
+                && xml.contains("x:numPr")
+                && xml.contains("urn:foreign")
+                && xml.contains("<w:sectPr xmlns:w=\"urn:foreign\""),
+            "{xml}"
+        );
     }
 }

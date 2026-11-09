@@ -50,14 +50,14 @@ contracts require integrated gates at each sprint boundary.
 M23 closes the five-document from-scratch business-document boundary. M24 then
 classifies and closes the broader modern DOCX authoring surface before M19 may
 begin. The spreadsheet programme remains a business decision and proceeds only
-if F-184 confirms a material gap in the Rust ecosystem at S101.
+if F-184 confirms a material gap in the Rust ecosystem at S103.
 
 The stopping and compression choices are:
 
 - **Stop after M23.** S73 can generate the five private reference documents
   from `Document::new()` through public modeled APIs, with no base template,
   raw OOXML, or LibreOffice field-update pass.
-- **Stop after M24.** S99 provides the complete modern DOCX authoring boundary.
+- **Stop after M24.** S101 provides the complete modern DOCX authoring boundary.
   Every in-scope feature is authorable, readable, mutable, round-trip safe,
   rendered where applicable, and classified across the public bindings.
 - **Archive M19 at its decision gate.** F-184 may still find that the advanced
@@ -1604,7 +1604,7 @@ decision lands.
 OPC, DrawingML, the chart engine, the layout engine and the PDF backend all
 exist and are format-neutral, which lowers the cost of a third family. That is
 not sufficient reason to build one. F-184 must reassess the Rust ecosystem when
-S101 begins. M19 proceeds only if no credible maintained crate provides the
+S103 begins. M19 proceeds only if no credible maintained crate provides the
 combined lifecycle required here: open an existing advanced workbook, preserve
 what is not executed, edit typed features, recalculate formulas and local
 pivots, refresh a declared Power Query subset, automate it through an Office
@@ -1626,7 +1626,7 @@ render to PDF.
 
 ### F-184, Advanced spreadsheet go or no-go (S)
 The go or no-go decision record. Reassess the maintained Rust spreadsheet
-ecosystem at S101, state whether the combined lifecycle gap still exists, and
+ecosystem at S103, state whether the combined lifecycle gap still exists, and
 archive M19 if it does not. If it does, amend `02-scope-and-non-goals.md`, define
 the boundary between `oxml-sml` as chart support and `rxlsx` as a library, and
 publish the preserve, model, and execute classification for every advanced
@@ -1639,7 +1639,7 @@ CLI/Python workflow with rendering. Compare integration, installation,
 maintenance and release costs, including reuse behind a consistent facade.
 Evaluate the utility and limits of a reader/editor stage before calculation
 and pivots, retaining formula and pivot state with explicit stale-result
-diagnostics when edits cannot be recalculated. The existing S110 distribution
+diagnostics when edits cannot be recalculated. The existing S112 distribution
 boundary remains until a separate reviewed roadmap decision changes it.
 
 The reporter's [follow-up](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6063901190)
@@ -1926,7 +1926,7 @@ element after a round trip.
 byte-identical, and an `isLgl` raw child stays before `suff` after parse and
 write.
 
-### External Word benchmark, S100
+### External Word benchmark, S102
 
 Issue 377 reports that `neurotic_docx_bench` scores `rdocx convert` against
 pinned Microsoft Word PDF exports. Its 2026-10-14 cohort ranks rdocx 0.16.0
@@ -2331,7 +2331,7 @@ documents only as anonymous, non-identifying capability families. The audit
 found no duplicate scope, missing owner, dangling dependency, dependency cycle,
 or scheduling conflict in F-243 through F-310. Their boundaries, sizes, and
 dependencies remain authoritative. The current plan places them in S71 through
-S75, S86, S89 through S91, S95.2 through S95.4, and S97 through S99.
+S75, S86, S89 through S91, S95.2 through S95.4, and S99 through S101.
 **Capability matrix owner**: `docs/hld/02-scope-and-non-goals.md`, "Modern DOCX
 capability matrix".
 **Test gate**: regression. Every in-scope matrix row has evidence, an owner
@@ -6736,7 +6736,7 @@ before sprint close.
 
 ### F-X192, Complete the remaining Word bibliography catalogue (L)
 
-Complete the unfinished Word bibliography catalogue scheduled for S96. F-282 delivers the native source-authoring foundation and its measured
+Complete the unfinished Word bibliography catalogue scheduled for S98. F-282 delivers the native source-authoring foundation and its measured
 formatter subset. This story owns the full pinned Word catalogue result
 contract, without claiming the existing subset establishes complete parity.
 
@@ -7019,7 +7019,7 @@ raise once, preserving explicit position shifts. Native typeface substitution
 and print-background preferences are reported separately from deterministic
 repository paint.
 
-The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the unfinished full-range DrawingML text opacity work in S96 under an explicit user-approved carry. Legacy VML text opacity and DrawingML image opacity remain unchanged.
+The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the unfinished full-range DrawingML text opacity work now scheduled in S98 after the original user-approved S96 carry. Legacy VML text opacity and DrawingML image opacity remain unchanged.
 
 **Depends on**: F-X206.
 **Test gate**: regression. Reproduce each missing operation or reported defect
@@ -7859,7 +7859,7 @@ Detached results carry text, owned assets and ordered diagnostics. Python string
 
 ### F-X219, Qualify full-range text watermark interoperability
 
-**Scheduling**: S96, explicitly carried unfinished from S95.11. No faithful shared
+**Scheduling**: S98 after the 2026-10-28 capacity reorganization. Originally carried unfinished from S95.11 to S96. No faithful shared
 Word and pinned LibreOffice representation was established. Preserve the0.5-only
 restriction and original failed endpoints. Reopen design before implementation.
 
@@ -8697,7 +8697,7 @@ Q24, answered by the user on 2026-10-25, is `Require all 79 flat-cost gates (Rec
 Candidate [PR415](https://github.com/tensorbee/rdocx/pull/415) at 2839e22c14f96aeaeab5245581b5681509774559, candidate [PR417](https://github.com/tensorbee/rdocx/pull/417) at bdf49f0005d1d15078b76b5da83c5f3e2b8cce12, and candidate [PR418](https://github.com/tensorbee/rdocx/pull/418) at dba496fcd8b4d482995a23ab81d27ad2bfcbf5e7 stay unmerged. They are not accepted code. The historical PR415 pin 0fbf3e96709198dbd01b9e810181109d106d9f68 remains the F-X266 record. Candidate [PR419](https://github.com/tensorbee/rdocx/pull/419) at 9916bcdc01bc4acc065ae45afa8bd8ae07a2d30c and candidate [PR420](https://github.com/tensorbee/rdocx/pull/420) at 37851676af3e82a0500c4743ef86da417950d2c3 are own increments on that chain. They stay unmerged and they are not accepted code. Actions run 40092396584 on the PR419 head failed Word fidelity because the LibreOffice 26.2.5.2 download hit TLS CERTIFICATE_VERIFY_FAILED before a comparison. That log is donor evidence only. A green PR420 check is not a PR419 pass. A later run 40103891571 on the same PR419 head concluded success, including Word fidelity job 120901503513 and CI gate job 120914750403. That later run stays donor evidence and is not local acceptance. Candidate [PR421](https://github.com/tensorbee/rdocx/pull/421) at ab038a21bb88a38d46c8f640587c3a20b57f6770 is the own increment after the PR420 head. It has 7 commits and 10 paths. Its own diff SHA-256 is 50c390ff8038d69b95d19510122ab51d2fd3c37b30f5b5d79a89dc610f805e35. It stays unmerged and it is not accepted code. Its checks were incomplete at cutoff 2026-10-24T17:02:28Z. Candidate [PR422](https://github.com/tensorbee/rdocx/pull/422) at cf7bf55edfab1e0617f6fe35810355cb02126018 is the own increment after that PR421 head. The chain is linear and has 5 commits. The compare is ahead by 5 and behind by 0. The merge base is the PR421 head. The 5 paths are `README.md`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/src/document.rs`, `docs/hld/03-architecture.md`, and `scripts/readme_doctests.py`. The own diff is 60325 bytes and its SHA-256 is ee0a8ce239fafea714c7bc1a49601fab4f2c864c3931b8ff4c98c3fb9dce189c. Comments and reviews are 0. Nineteen donor check runs completed with success or skip conclusions, and the donor CI gate succeeded. The legacy combined status endpoint records pending. That field is literal and is not acceptance. The candidate stays unmerged and it is not accepted code. Final own-union fidelity stays mandatory.
 
 ### F-X269, Qualify PowerPoint shadow falloff and wipe paint domains
-**Sprint**: S96
+**Sprint**: S98
 **Size**: M
 **Depends on**: F-X267
 **Test gate**: regression
@@ -8715,3 +8715,406 @@ Pending. Native PowerPoint16.114.1 shadowed rectangle controls expose a static s
 Prepare the user's requested post-S95.4 Rust, CLI and Python releases within the retained Word0.16.x and shared/PowerPoint0.14.x lines. Select fresh absent0.16.4 and0.14.4 across the exact seven and fifteen Rust packages, matching Python distributions and remote tags. Preserve already published0.16.3/0.14.3 changelog sections exactly and place only S95.4 additions in the new family sections, with explicit approved Arc source-break migration and native, private-input and performance limits. Align current manifest carriers, internal pins, lockfile, package metadata, README evidence and current policy assertions without rewriting historical version controls or the separate nonpublished WASM boundary.
 
 Preparation adds no product API or algorithm. Require actual current-source22-package verified dryrun below10MiB, accurate README inventories/examples, actual build-only wheels.yml jobs and exact downloaded CLI/wheel/sdist qualification, host CLI version checks, Python3.9/3.12 installed priority calls and strict3.12 typing/stub checks. Existing product/native/performance/memory evidence remains applicable only through an explicit reviewed version-only source and consumer analysis. All eight product stories' final criteria, including Cell.add_picture, remain mandatory and block completion. A reviewed clean canonical sprint source-availability checkpoint may push only this sprint ref to run the named hosted build-only jobs, with publication jobs skipped. Only close-sprint merges. Subsequent release commands require fresh mutable preflights and separate approval at the exact reviewed main SHA, shared/PowerPoint first.
+
+
+### F-X271, Restore pinned viewer downloads and planning policy
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Restore the exact LibreOffice 26.2.5.2 oracle for Linux and macOS CI without upgrading the viewer, weakening TLS/checksums, skipping gates or silently changing executable identity. Current stable URLs return 404before Test, MSRV, Word fidelity and rpptx installed tests. Official old-release HEAD candidates return200but are not authenticated archives. Verify actual platform bytes, safe bounded extraction and executable version against retained independent pins before switching retrieval. Preserve failed CI logs. Reconcile the existing hard-coded roadmap policy with the authorized whole-number sprint shift, and keep metadata/classification policies meaningful. Scope is tooling/policy only. Source scripts and workflow changes belong to later implementation, not the analysis intake. Require current-head CI successors to run the previously blocked gates.
+
+The oracle-tooling boundary also requires explicit shared enabled-kerning policy in the five generated script fixtures. Preserve their text, fonts, language, direction, geometry, complete accepted-copy path, exact oracle identities and existing SSIM/coverage and bidi gates. Word absent, zero, threshold and inheritance behavior retains its separate K1 controls and native qualification. This alignment does not authorize a Word default change or a successful verdict for earlier failed fixtures.
+
+### F-X272, Preserve existing revisions during document comparison
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X229, F-X230, F-X245
+**Test gate**: regression
+
+Finish every criterion of Issue 425 using the current own commits of PR 427, not its stale base or donor archive measurements. Preserve unchanged existing revision owners byte for byte, allocate new ids without collisions and add the new reviewer's changes elsewhere across body and related stories. CLI counts only newly created revisions, with binding/stub behavior aligned. Prove author-filtered accept/reject reconstruct both inputs while retaining the first review. Cover no-op, ignored stories/comments, tables/controls, headers, notes, section changes, comment graphs, moved/deleted owners and late atomic refusal. PR 427 still refuses changes to a revision-bearing owner. Implement those required cases or explicitly meet the issue's documented-limitation plus usable-workaround alternative before closure. The contribution calls this Combine-like preservation, while Word Compare uses accepted-view semantics. Verify that compatibility fact before approving the bounded policy. Ignored stories retain their current id-seeding exclusions, so do not claim global id uniqueness from compared-story allocation. No blanket Word Compare parity follows from the supplied positive. Preserve S95.4 physical/live-owner and package-cache invariants. Full native/installed and composition acceptance stays due.
+
+### F-X272a, Compare and resolve footnote ownership and lifecycle
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X229, F-X230, F-X245
+**Test gate**: regression
+
+Deliver the complete already admitted Issue430 contract as a child of F-X272.
+Cover all five issue rows within all45acceptance rows and14evidence gates:
+normal-note identity, added/removed referenced definitions, source-preserved
+unused/invalid/opaque notes, coherent ignored stories, following-paragraph
+alignment, persistent standard-bookmark custody, per-element selectors,
+partial-unit atomic refusal, mixed open transactions, settlement cleanup and
+accept/reject destination restoration across reopen. Preserve the approved
+bounded unchanged prior-revision owner policy and all existing public APIs.
+The one-release Q-A430-28 native exception remains unproved, never passed.
+The separately user-approved Word-save carry assigns only the observed note-plus-body-text and mixed-author native gaps to pending S96.1 F-X287. The original45A/14G requirements remain repair acceptance and Issue430 stays open. All other native and product gates remain unchanged.
+Its actual completed LOCAL checkpoint may supply F-X277b and F-X280b only
+for their specified note identity and reserved custody prerequisites. Whole
+F-X272 and umbrella completion still require all actual final acceptance.
+
+Use existing comparison, allocator, resolver and staged-package APIs on the
+reviewed clean claim Base. No new C1 carrier API is a prerequisite. C1 and this
+child use separate worktrees, then require serial semantic reconciliation and
+final combined qualification. Any actually required unfinished operation is a
+real blocker, not permission to weaken a case. The parent cannot complete or
+unblock F-X277/F-X279/F-X280 until this child and its own C1 work satisfy their
+actual gates. Splitting adds no issue scope, aggregate effort or review passes.
+
+### F-X273, Repair header body clearance and complete TOC navigation
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-283, F-X264
+**Test gate**: differential
+
+Finish Issues 424 and426 using PR 428 as partial input. Keep variant-selection refactoring, geometry behavior and navigation behavior separately labelled. Clear body layout against the actual selected header/footer extents, including paragraph spacing and the logo/table reproduction. Pin primary semantics and independently qualify positive/negative margins, first/even/default/blank variants, flow versus floating table/frame owners, anchors, borders and notes with Word. Pinned LO is additional evidence, not a replacement for promised native behavior. Preserve furniture geometry and recalculate body height, page count and TOC page targets. Give every physical source paragraph qualified navigation facts while distinguishing placed versus unplaced vertical-merge continuation/deleted-row content. Rebuild all supplied TOC switch combinations through Rust, Python and CLI without stale-fact bypass. Include placed headings, nested tables, styled unplaced headings and adjacent STYLEREF/outline consumers. The donor spacing mismatch and no-outline-switch styled-heading failure remain explicit incomplete acceptance until repaired or separately dispositioned. Run actual current-source native geometry/cache/PDF/PNG and combined comparison/page-format controls. Never close on the partial donor fixture alone.
+
+### F-X274, Honor section and field page-number formats
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: F-X273
+**Test gate**: differential
+
+Resolve uncovered Issue 423without inventing a contribution or silently adding a public authoring API. Read preserved pgNumType format alongside restart values and use a common section/field formatting policy in layout, header/footer rendering and explicit page-field cache updates. Before design approval pin ECMA 17.6.12 and ordinary PAGE field-format switch precedence, explicit absence/unknown-format handling, roman bounds and alphabetic rollover. Qualify decimal, lower/upper roman, lower/upper letters, repeated section restarts, all selected header/footer variants and explicit switches. The original four-page file must display i,ii,1,2in native Word, saved/updated caches, library PDF text and CLI output. Preserve unknown XML, existing numeric conversion and default decimal behavior. Prove geometry and rebuilt TOC targets remain coherent with F-X273 after save/reopen. Unsupported imported states stay preserved and diagnostic, never guessed as successful parity.
+
+### F-X275, Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X270
+**Test gate**: release regression
+**Spec reference**: `10-bindings-spec.md`, Packaging and CI, and `15-build-and-toolchain.md`, Packaging and Release process.
+
+Prepare the explicitly approved post-S96 Word0.17.0andshared/PowerPoint0.15.0Rust, CLI and Python families. Align current manifests, internal pins, lockfile, package identities, README evidence and current policy assertions. Preserve published notes and F-X270history. Enforce complete numeric compatible/yanked/equal published baselines with pinned native API checks and external compiler canaries. Initial new-minor applicability and migration limits stay explicit. Prepare the validated narrow0.14.3reporter workaround and a separately held optional only-OPC.4yank candidate, without promising a universal compatible .14patch. Add family-only notes with authenticated credits and supported/refused boundaries, without inventing PowerPoint product changes.
+
+Require the actual final-source22-package verified dryrun below10MiB, current README measurements, reviewed build-only wheels jobs and exact downloaded artifacts, host CLI identities, installed Python3.9/3.12priority calls and3.12typing/stubs. All F-X271through274final criteria remain mandatory in one common integrated union. Formal start dependency is the completed F-X270 machinery, without using a local checkpoint to waive F-X271actual hosted acceptance. The existing validated F-X271source-availability route may expose only the clean reviewed canonical sprint source for actual normal CI and build-only qualification. Publication is separate after close-sprint and requires final exact-main approval for each family, shared/PowerPoint first. Implement the strict release gate in existing workflow/script/command carriers. No new product API, source file or npm publication is included.
+
+
+The strict gate uses the existing `release-semver` subcommand, native producer
+jobs, fixed signed packet subjects and independently acquired current sprint
+authority. Execute, exact-row reuse and frozen evidence consumption are
+separate modes. The existing wheels consumer requires completed CI and fresh
+selected-family publication preflight. Local implementation or synthetic tests
+do not satisfy the required actual three-host and final hosted acceptance.
+
+### F-X276, Complete rpptx fit, table rows, fit text, Markdown and slide indexing
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `08-rendering-spec.md`, Read-only fit and count consumers, and `10-bindings-spec.md`, Python colour inputs and live font formats, CLIs and Presentation semantic text export.
+
+Complete Issue 431 and PR 438 final outcomes for rpptx fit reports, grown table rows, plain fit text, Markdown spacing and slide indexing. Historical PR head `653053058a9a9c6647732179219f40ed2725caba`, captured 2026-10-31T15:01:27Z. Duplicate shape id and notes placeholder idx report the whole deck, name each unassessable frame and why, resolve the notes placeholder by type, and `validate` prints the duplicate as a sentence. Python `ValidationIssue.message` must equal CLI Display. A cell whose row grows but the table stays on the slide is not an overflow or has a distinct status, while a table that runs off is still an overflow. Fit text names each frame by shape and cell, prints child paths as plain indices, prints context or lists shared frames once with zero exact repeats. Markdown preserves single inner spaces, uses `&#32;` only where Markdown would drop or merge a space, escapes punctuation only where it could start syntax, and keeps a repeated space entity across runs and run boundaries. `prs.slides.index(slide)` returns the zero-based position and raises `ValueError` for a slide of another presentation.
+
+Rider debt stays explicit: actual rpptx CLI and Python calls, render and PDF for fit and Markdown, hash unchanged and README measurements recorded once by the single final owner. No native PowerPoint claim follows unless separately qualified. Historical donor limitations, including per-run escaping, run-boundary `&#32;` and a notes fix that is fit measurement only, are named residuals, not desired behavior. Provider edges are none. Clean Base is mandatory before claim. F-X276 preparation V4 was accepted by the Codex preparation pass2 as a basis for later canonical design adoption, subject to normal contract approval and a clean-Base claim. That acceptance is not implementation, microscope or feature acceptance. No canonical design, approval or claim follows from this intake. Eventual implementer Grok, with owner '-' until an actual claim.
+
+### F-X277, Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272, F-X277a, F-X277b, F-X277c. Parent rollup, no product source lease
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
+
+Complete Issue 432 and PR 441 final outcomes for Word-like written markup. Historical PR head `aca195c4412f65cfc497a955b34a3e52efd3e2e7`, captured 2026-10-31T21:11:35Z. The earlier R3 head `54e5351efd443faac6e1e21ffd351a0b68fc0985` is historical only. Every `m:rad` written by `add_equation` holds `m:deg` after `m:radPr`, empty for a square root. A note number run has `w:rPr` before the note reference, the notes part holds separator and continuation-separator notes, and a space separates the number from the text. Links written by `Paragraph.add_hyperlink`, `add_heading_hyperlink`, Markdown with a template and HTML carry `w:rStyle Hyperlink`, with the built-in style added when missing, or at least colour and underline, including the low-level Rust publishers. An empty cell's lone empty paragraph is not carried into the merged cell, and second-empty and first-empty give one paragraph while both-with-text keeps both. Cells made by `insert_column` and `add_row` get the source cell's `w:pPr` and run properties of its paragraph mark, including `w:jc center` and `w:b`. A numbering definition id returned by `add_numbering_definition` stays valid for the life of the document. `rebuild_toc()` fills a TOC that `insert_toc()` wrote before the document had headings, in both orders. Replacement and text agree on what is searched, charts are left alone, count 1, the CLI accepts `--expect 1`, and cache and workbook agree.
+
+Completion edge F-X272 remains mandatory for this umbrella. Child implementation prerequisites follow their operative contracts, including F-X277b's actual completed LOCAL F-X272a checkpoint. Do not manufacture completion or use an oracle-only pending gate. Residual R-A277-7 foreign single-paragraph TOC stays with F-X277c. Authored note spacing and hyperlink changes require actual regression and final composition evidence. Attribute every intentional hash/pixel delta at the exclusive final union gate, without inventing an unnamed fifth key.
+
+Split ownership: F-X277 is the completion umbrella. A277-1 belongs wholly to F-X277a. A277-2, A277-3 and A277-6 belong wholly to F-X277b, using its actual F-X272a LOCAL checkpoint. A277-4, A277-5, A277-7 and A277-8 belong wholly to F-X277c. All children and the parent retain their actual original design-peer history. Root affected final audit does not create a fourth peer. F-X280's umbrella retains its full parent barriers. F-X280b follows its actual completed LOCAL child-provider chain. The parent estimate is historical aggregate effort and is not added to child implementation effort.
+
+### F-X277a, Emit authored radical degrees and preserve imported absence
+
+**Sprint**: S96
+**Size**: S
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, OfficeMath ownership and raw-boundary publication, and `10-bindings-spec.md`, native equation conversion and Python `Paragraph.add_equation`.
+
+Own exactly Issue432 A277-1. New square roots contain an empty `m:deg` immediately after `m:radPr`, with `degHide`1. Nth roots retain their degree. Imported missing degree stays missing, imported missing radical properties retains the existing `degHide`0 normalization, and opaque imported children retain their exact bytes and existing slots. Exercise direct grammar, native LaTeX/MathML, native paragraph publication and actual Python publication through save/reopen. Official SDK3.0.1 Radical metadata pins `radPr`0..1, `deg`1..1, `e`1..1 in sequence. Imported preservation does not assert validity of an imported missing-degree radical. No new public API. Childa does not consume or complete F-X272. Final SDK, raw-preservation, installed binding, normal CI, packaging and deterministic-font hash riders remain with the integrated owner. Native radical drawing remains the original pending residual.
+
+### F-X277b, Complete Word-like notes, links and numbering
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272a, actual approved genuine LOCAL notes provider checkpoint
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
+
+Own exactly original Issue432 A277-2, A277-3 and A277-6. Preserve authored note
+order, special records, leading space and imported raw-part custody, authored
+hyperlink style and missing-definition publication, and live numbering identity
+through output, normalizing assignment, signing and real same-document reopen.
+Use existing baseline APIs plus the integrated notes classification provider.
+Separate worktrees isolate this work from unfinished C1. Serial semantic
+reconciliation and final C1 normalization/native/schema/installed/hash riders
+remain mandatory. No radical, cell, TOC or replacement scope belongs to B.
+The F-X277 umbrella still requires F-X272 and all three children. Original
+review history and allowances remain unchanged. Its approved completed LOCAL
+A277-2 checkpoint may supply F-X280b's authored-note prerequisite, with final
+C1 and all native/schema/installed/hash riders retained.
+
+### F-X278, Complete Word rendering fidelity and font policy
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: none
+**Test gate**: differential
+**Spec reference**: `08-rendering-spec.md`, Embedded face selection across exports and Native Office font consumption, and the tables, indent, borders, row-split, automatic-colour and Wingdings sections, plus a distinct `10-bindings-spec.md` font-policy subsection.
+
+Complete Issue 433 and PR 440 final outcomes for Word rendering fidelity and font policy. Historical PR head `94b8c9f15c62de00e355208ed590a7100e8263c1`, captured 2026-10-31T16:09:30Z. Word-made TOC entries with Hyperlink run style are drawn in TOC paragraph styles, black and not underlined. `w:firstLine` and `w:hanging` are one first-line-indent property, and the most specific level that sets either decides, with all four cases at 72 pt. A TableGrid table whose own `w:tblBorders` set all six edges to none is drawn with no ruled line, while the style-only table keeps 3 plus 3. `w:vAlign` does not change where a row breaks, and the row starts on page 1 and breaks within one line of the no-vAlign case. Automatic-colour text is white on black and navy, black on white. Wingdings 2 bullet U+F0A1 maps to a Unicode square, or is reported, like Wingdings and Symbol. Every entry point resolves fonts the same way for the same folder. Omission uses the bundled set. Explicit system fallback is documented and opt-in in CLI and Python. Caller fonts keep the highest priority. Substitution is reported, and one font and page count per folder holds across `rdocx convert`, `to_pdf`, `page_count` and `layout`.
+
+A278-7 remains unmet. Q-S96-07 is answered, so the font-policy choice no longer blocks it. Provider edges are none. Clean Base and F-X274's reviewed engine source are resource bases, not formal providers. HLD08 and a distinct HLD10 font-policy subsection are added. Hash baseline moves 14 automatic-colour entries. F-X273 and F-X274 affected output evidence is re-run in the final union.
+
+### F-X279, Complete comment ranges, comparison, revisions and insert_document
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272, F-X279a, F-X279b, approved contract for design, actual provider completion for implementation
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, comment graph and comparison identity, `04-opc-and-packaging.md`, comment parts and package revisions, and `10-bindings-spec.md`, Native Word facade stability.
+
+Complete Issue 434 and PR 444 final outcomes for comments, comparison, revisions and insert_document. Historical PR head `fac363eb9701918ad0d9d6672e386921506b7c02`, captured 2026-10-31T17:23:44Z. After `reply_to`, the reply id has its own range start and end covering its parent's text and a reference after its parent's, and `reply_to` and `rdocx comment reply` take initials. `w:comments` root declares `mc` and lists `w14` in `mc:Ignorable`, each comment's first paragraph uses CommentText and opens with CommentReference plus `w:annotationRef`, both styles are defined when missing, and `commentsIds.xml` is optional. Two paragraphs with the same text and formatting compare equal whatever their run boundaries, with zero revisions at every granularity, and a real word edit gives one deletion and one insertion at word granularity across fields, tabs, drawings, markers and hyperlinks. Each revision record in Python and `--json` carries its text, and each kind has one snake_case spelling across both surfaces. After `insert_document`, B's paragraphs resolve to B's font and size through a renamed style, a style carrying B's defaults, or direct formatting, with the three cases agreeing. With the default policy, each inserted document's lists keep their own numbering, 1, 2, 1, 2, 1, 2, MAY reuse an equal abstract definition and MUST keep instances distinct, including the Rust default.
+
+Provider edge F-X272: design may use the approved comment-graph and comparison contract, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Issue430 footnote lifecycle and following-paragraph alignment rows are preserved. HLD03 and HLD04 are assessed. The story declares its hash delta or unchanged. Rust `insert_document` defaults and list behavior must be resolved rather than left at donor behavior.
+
+Operative split: parent has no product source lease and waits all children plus F272. A279-4 wholly A, A1/2/3/5/6 wholly B. Native comment new-candidate gate unchanged, no provider credit or review-cap reset.
+
+### F-X280, Complete validation and damaged-input refusal
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X277, F-X272, F-X280a, F-X280b and F-X280c. Original providers and all child completion gates retained
+**Test gate**: regression
+**Spec reference**: `04-opc-and-packaging.md`, duplicate ZIP refusal, XML 1.0 open refusal, bookmark ids and stored-package validation, and `10-bindings-spec.md`, `rpptx::validate_presentation_file` and Python validation.
+
+Complete Issue 435 and PR 439 final outcomes for validation and damaged inputs. Historical PR head `7c4b5cf879014247ee370653537f9fa9745721d3` from the 18:26:06Z capture. The reviewed re-authenticated captured head `1e8e5a98c7177117ebca917e343264bc74176493`, updated 2026-10-31T18:29:26Z, supersedes it for source coverage. CI belongs only to the exact captured head and is not acceptance. `rdocx validate` exits non-zero on schema faults for order, unknown element, enum, required attribute, negative extent and `m:rad` without `m:deg`, naming the part, while the base document validates. Each dangling reference exits non-zero naming the part and dangling id for picture blip, header reference, footnote reference and `w:t` inside `w:del`, and `validate` fails every file `rdocx.Document()` refuses. Both validators exit non-zero on a malformed `docProps/app.xml` and a ZIP storing a part twice, naming the part, and on open both libraries refuse a duplicate entry name or warn and say which copy they read. `rpptx validate` exits non-zero on unknown element, missing required `name`, misordered `presentation.xml` children, missing content type and short table row, naming the part, while the base deck validates. `validate` reports a part holding U+0001 as not well-formed, and opening fails naming the part for both libraries and both `word/document.xml` and `ppt/slides/slide1.xml`, while well-formed opaque content remains verbatim and is never rewritten to `_x0001_`. Two bookmarks sharing a `w:id` open and render in the same part and across body and header, `validate` may report the duplicate, and a save may renumber the pair without weakening Issue430 ownership or collision rules. `add_textbox` and `add_shape` raise at the call for a negative width or height, and nothing is written, while zero extent stays allowed.
+
+Provider edges F-X277 for note run order and F-X272 for bookmark and footnote identity and Issue430 ownership: design may use the approved contracts, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. HLD04 and HLD10 are added. Hash unchanged.
+
+### F-X280a, Refuse negative authored shape sizes before publication
+
+**Sprint**: S96
+**Size**: S
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 10-bindings-spec.md, ShapeCollection authoring/owner atomicity, and 01-glossary.md, EMU.
+
+Own original Issue435 A280-7 only. One private sized_transform guards textbox, styled preset and actual crate-private unstyled preset additions before append. Negative width or height refuses with existing native InvalidShapeMutation and Python RpptxError. Zero shape dimensions and negative positions remain accepted, table positivity and connector geometry unchanged. Compare package bytes, source identities and Python held handles after failure, save/reopen accepted controls. Existing carriers only, no new public API/module/source file. Inherits all three used design peers and original final integrated riders. Root approval and exact metadata/path exception pending.
+
+### F-X280b, Complete validation and damaged-input refusal
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272a and F-X277b, actual approved and completed genuine LOCAL child-provider checkpoints
+**Test gate**: regression
+**Spec reference**: 04-opc-and-packaging.md, package/validation contracts, and 10-bindings-spec.md, validation APIs.
+
+Own original A280-1/2/3/5/6, Word validation, both-family shared OPC duplicate/open refusal and bookmark criteria/residuals. F-X280a owns A280-7 and F-X280c owns A280-4. C does not complete shared open policy, and final duplicate/open composition remains due. Use the completed child prefixes only for actual signed-note/custody and authored-note provider behavior. Both source integrations must precede the clean claim Base. Preserve complete peer lineage and all final C1 open/error/resource/snapshot and both-family OPC/C-file composition gates. Existing reviewed Display policy stays authoritative. The parent F-X280 rolls up all three children and all seven original criteria, with no second implementation or added effort estimate.
+
+### F-X280c, Validate stored PresentationML packages through the public file route
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 04-opc-and-packaging.md, original XML/package validation, 06-presentationml-model.md, root/shape/table structure, and 10-bindings-spec.md, validation consumers.
+
+Own original Issue435 A280-4 completely: all six stored faults, valid controls, public validate_presentation_file, CLI/help and unchanged Python parsed-model Display messages. Existing OPC APIs and error variants suffice. Validate original indexed unique source identities, including raw metadata unavailable through package.parts, without serialized zip_entries as evidence. Do not add duplicate/open policy or a central-directory scanner. B retains original A280-1/2/3/5/6, all Word providers and both-family duplicate/forbidden-open obligations, including final composition through this file/CLI route. A remains original A7. Parent retains all completion/final gates. Existing files only, three used design peers, Root affected audit and exact hunk/metadata/path readiness pending. No new aggregate effort estimate or scope.
+
+### F-X281, Complete picture, chart, export and layout fidelity
+
+**Sprint**: S96
+**Size**: XL
+**Depends on**: none
+**Test gate**: differential
+**Spec reference**: `05-drawingml-model.md`, chart title and series values, `07-inheritance-and-resolution.md`, the master-placeholder chain, `08-rendering-spec.md`, EMF, PNG, chart formats, hidden shapes, ActualText and placeholder inheritance, and `10-bindings-spec.md`, export APIs and the additive chart table.
+
+Complete Issue 436 and PR 442 final outcomes for pictures, charts, exports and layout. Historical PR head `745504503af4c3cdae724d3d66f1d9ecf34d037d`, captured 2026-10-31T16:22:37Z. EMF pictures are drawn, or until supported both libraries report the undrawn picture with a diagnostic naming the unsupported format, not a missing relationship, including the rdocx diagnostic gap. An interlaced Adam7 PNG renders like its plain copy in both libraries, with the same red pixel count, no other colour and no diagnostic, and an undecodable picture is reported as such. A bar, line or area chart with a third `c:axId` is read and drawn, ignoring an axis id that names no axis. Every script number format draws the chart with no placeholder, and an unsupported format falls back to General for labels with a diagnostic. A chart is exported as at least its title when one exists and a table of categories, series names and values in `export_markdown`, `export_html`, `to_markdown`, `to_html`, `rpptx convert --to md` and `html`, and `rdocx convert --to md` and `html`. Shapes and groups with `hidden="1"` are not drawn in render, PDF or handouts, on slides, layouts and masters. Each word of an rpptx PDF extracts with its own box, with no `/ActualText` on spans whose glyphs map through ToUnicode, or one per span holding that span's own text, including bidi-reordered lines. The right column of the default Two Content layout starts at the same height and is black in render, CLI and PDF.
+
+Provider edges are none. F-X276, F-X278 and F-X280 are resource predecessors. Clean Base is mandatory. Reject `HtmlInput::charts` as a public field and use an additive API that keeps external `HtmlInput` literals compiling. Table-cell, header, footer and text-box charts remain named consumer-map residuals, not promoted criteria. The exported value `1150` is required. The `General` number-format token is separate and remains supported. HLD05, HLD07, HLD08 and HLD10 are added. Hash unchanged. F-X273 and F-X274 affected evidence is re-run in the final union.
+
+### F-X282, Bound edit cost across styles, body and cells
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, staged clones, styles sharing and package part identity, `10-bindings-spec.md`, Word checked XML owner authority, and `12-testing-strategy.md`, the F-X268 performance gates.
+
+Complete Issue 437 and PR 443 final outcomes for edit cost across styles, body and cells. Historical PR head `6dc9ed82a3c8257e187c26de8060389d472f8060`, captured 2026-10-31T16:56:34Z. `run.text`, `try_replace_text`, `add_row`, `clone_row` and a cell paragraph setter cost at most 3 times more with a 419 KB styles part than with a 6 KB one, and the equal-model flush risk is proved or explicitly refused. A setter on a cell paragraph or run costs at most 3 times more in row 40 than row 1, and at most 3 times more with 2000 body paragraphs than without, measured at the issue script boundary: the cell-place check is cold with three calls and the first included, and the body check is warm with one untimed call on each document. Warming the cell-place check is rejected because it weakens the reported first-operation cost contract, and counter evidence may complement but not replace the timing row. Filling a table cell by cell is flat per call, at most 2 times from 30 to 120 cells.
+
+Provider edges are none. Clean Base and the F-X272 measurement base are resource bases. HLD03, HLD10 and HLD12 are assessed. Hash unchanged. Q-S96-16carries numerical performance qualification to S96.1 F-X285. Current correctness, saved bytes and hash49remain release gates. Original numerical criteria below remain unchanged for that successor.
+
+### F-X283, Bound whole-cell setters and Python open-replace-save cost
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, staged edits and package identity, `10-bindings-spec.md`, Word checked XML owner authority and live handle routes, and `12-testing-strategy.md`, performance strategy.
+
+Complete Issue 445 and PR 443 final outcomes for whole-cell setter cost and the Python open-replace-save cost. Issue445 body SHA-256 `60e20b2e1ca33a3ff0829d10dea13e973d61278f6c6f769a90503c28e32750c1`, captured in the non-atomic Task07 window 2026-11-01T09:17:25.616049Z to 2026-11-01T09:17:27.432844Z. PR443 moved to `7b3dcd0e4a3f89c4ecc7b88718c68a9a58159ad8`, body SHA-256 `597097f97b237401ddd048147e39962d2e4ebbbdeb9f652b6d8f3d8ec4bcabe4`. CI at that head is unknown. Earlier heads, dates and pins stay historical. No source is accepted from PR443.
+
+Case 1 retains the exact 20 by 5 table, 100 cells set once sequentially, bodies 0, 500 and 2000, and no invented warmup. `Cell.text`, `Cell.vertical_alignment` and `Cell.shading` each require a distinct PASS at 2000 below 1.0 ms and at most 1.5 times the empty-body cost plus 0.05 ms. Case 2 retains 4000 paragraphs of three runs each, a bold prefix, a normal middle and an italic end, water every fourth paragraph, and 1000 replacements. Python `Document.open` plus `try_replace_text` plus `save` must cost at most 1.2 times the same-build CLI including subprocess start. Three paired trials select min(python) as the lexicographic total, opened, replaced, saved tuple by total, and compare min(command), never minima of independent stages. It qualifies an actual Linux x86_64 release wheel and matching CLI, not donor acceptance.
+
+The separate `Paragraph.text`-in-cell observation stays in the consumer and regression work list without an invented numeric criterion. The other `PyCell::edit` setters `width`, `set_border` and `set_margins` get correctness coverage, not unrequested timing promises. Held live handles, first-handle activation, mandatory open checks, atomic failure, tracked/comments/notes and saved bytes remain design obligations. The updated PR443 explicitly leaves `Cell.text` failing and case 2 upstream. This is a genuinely additional story, not an F282 repair-cycle reset. The existing 44 A-ID rows and F282's original three A-IDs and exhausted design peers remain intact.
+
+Provider edges are none. Clean Base is mandatory. Shared facade, binding and HLD files make F-X283 a resource serial after F-X282, not a formal provider edge. HLD03, HLD10 and HLD12 are assessed. Hash unchanged.
+
+### F-X277c, Complete cells, authored TOC and chart-excluding replacement agreement
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 03-architecture.md table/TOC/search and 10-bindings-spec.md Native Word facade stability.
+
+Operative second split: C owns original A277-4,5,7,8 completely. B retains only A277-2,3,6 and F272. This ownership overrides inherited B ranges and checklist rows. C retains authored TOC scope and foreign single-paragraph residual, plus WHOLE actual text/report/replacement agreement including text boxes. The stale inferred CLI mismatch is not evidence or a waiver. Parent waits all three children and F272, F280 barriers unchanged. All three design peers remain exhausted. C is draft until Root affected final audit. Worker HLD impact is narrow HLD03/HLD10, notes HLD04 remains B. No new source/provider completion or baseline allocation follows.
+
+### F-X279a, Expose owned revision text and one kind vocabulary
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 owned revision projections, HLD10 Revision/StoryRevision/Python/CLI snapshots.
+
+Own complete original A279-4 including exact text rules, all eight kinds, constructor omission defaults and native/Python/CLI consumers. Existing tree/source context only, no unchecked helper/quota. Draft until Root affected final. Existing design peers exhausted, implementation cap unchanged.
+
+### F-X279b, Complete comments, comparison and insert_document
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272
+**Test gate**: regression
+**Spec reference**: Original F279 HLD03/04/10 comment/comparison/import contracts.
+
+Own complete original A279-1,2,3,5,6, P1/P2 composition and mandatory new-candidate native comment gate. A279-4 belongs wholly A. Preserve original final union, provider and review-cap obligations. Draft until Root affected final.
+
+
+### F-X279c, Author comment markup and styles without changing reply ranges
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 Shared Word document operations. HLD04 Part naming and Package integrity, comment creation and preservation. HLD10 Native Word facade stability and Python API shape.
+
+Own complete original A279-2/C2 comment markup/styles, original fixed-prefix
+writer admission, MC URI/local-name merge and imported preservation. Use the
+existing integrated Native comment/style APIs and minimal lower comments
+writer/admission hunks. Consume no C1 source/output/budget, comparison or import
+provider. Reconcile the separate C1 comments parser/scope hunks at integration.
+Fresh native comment-candidate acceptance and all original final riders remain
+mandatory. B retains A1/3/5/6, P1/P2 and F272. Parent completion requires A/B/C
+and F272. Existing review lineage and caps remain unchanged.
+
+
+### F-X279d, Author crossing comment replies with initials
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 Shared Word document operations. HLD04 Part naming and
+Package integrity, comment anchors and checked publication. HLD10 Native Word
+facade stability and Python Word document operations.
+
+Draft complete A279-1 AUTHORING/initials, existing reply shims plus additive
+reply_to_with_initials, Python initials keyword and CLI --initials. Preserve
+crossing order, unique actual parent range, missing/ambiguous atomic refusal,
+save/reopen/remove/resolve and held views. Baseline Native comments/anchor and
+binding/CLI APIs predate unfinished C1 and C2. Preserve integrated C2 neighbor
+code, without claiming its formal final gate complete. No comparison/import
+lease. B retains P1/P2/C6 COMPOSITION and actual F272 prerequisite. On adoption
+parent completion requires F272 and A/B/C/D. Original caps and all final/native
+riders remain. No approval, claim or provider completion from this registration.
+
+
+### F-X284, Review performance and memory and rank optimization work
+
+**Sprint**: S96.1
+**Size**: M
+**Depends on**: none
+**Test gate**: authenticated performance and memory review with a ranked, reproducible worklist.
+**Spec reference**: 03-architecture.md ownership and caching, 04-opc-and-packaging.md Source/resource limits, 10-bindings-spec.md actual public consumers, and 12-testing-strategy.md measurement and evidence.
+
+Begin the Optimization Sprint by reviewing the actual released source/artifacts and retained failed/unqualified observations. Separate elapsed timings, structural work, allocations, retained capacity, current/peak RSS and ownership history. Rank bottlenecks and memory costs using repeatable Native/Python/CLI workloads and explicit confidence limits. Produce bounded candidate designs and realistic qualification sequencing before implementation. Existing reports are inputs, not a new passed baseline or permission to skip readers. Q-S96-16carries optimization work without changing safety/API/output contracts.
+
+### F-X285, Complete carried numerical performance targets
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X284
+**Test gate**: original complete numerical protocols with source/artifact identity and retained raw observations.
+**Spec reference**: 03-architecture.md bounded operations, 10-bindings-spec.md public workloads, and 12-testing-strategy.md unchanged performance protocols.
+
+Own the numerical acceptance carried from F-X268, F-X282andF-X283under Q-S96-16. Preserve79flat/5linear/Issue407andthe exact Issue437/445sizes, cold/warm boundaries, ratios, clocks, aggregation and thresholds. Begin from released-source measurements, including the latest historical76/79snapshot and its reply/Documentpicture/Cellpicture misses. Optimize measured producers without weakening Source/Field/resource, saved output, callbacks or handle publication. Do not retry unchanged artifacts for favorable values or claim that historical passes qualify new source. Retain Issue437/445until their actual criteria pass. Review determines whether concrete children are needed before claim.
+
+### F-X286, Qualify and reduce memory footprint and retained history
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X284
+**Test gate**: complete approved A7/Q18/Q22equivalence, calibration, paired RSS/history and lifetime observations.
+**Spec reference**: 03-architecture.md retained ownership, 04-opc-and-packaging.md Source limits, 10-bindings-spec.md binding ownership, and 12-testing-strategy.md memory evidence.
+
+Own unfinished F-X268A7/Q18/Q22qualification and the review-ranked memory work. Preserve the concrete omission endpoint registry, actual missing-payload fallbacks, all mandatory identifiers/provenance, Native/Python consumers, ordinary/private calibration, three fresh alternating pairs, raw current/peak units and equal-terminal N/4Nhistory/last-owner release proof. First adopt the precise current-source baseline and openly reconstructed20k6fixture contract in the existing F-X268plan, with full semantic admission/reopen checks. The interrupted debug smoke is not completed qualification. No new RSS ceiling, Source allowance, hidden retained candidates/loans or shadow AST is approved. Preserve every original failed/unperformed outcome. Review determines an honest implementation split before claim.
+
+### F-X287, Repair note comparison after Word-save normalization
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X272a
+**Test gate**: differential
+**Spec reference**: 03-architecture.md comparison custody, 10-bindings-spec.md normal-footnote comparison and resolution, and 12-testing-strategy.md explicit release exceptions and native evidence.
+
+Pending design and unclaimed. Resolve the user-approved carry for note-plus-body-text and mixed-author Word-save note histories while preserving the original45A/14G acceptance requirements and all unaffected supported note behavior. Restore successful current-source resolution and unrelated comparison for the authenticated native middle save. Restore mixed-author destination and open-marker lifetime behavior through both author orders, accept/reject choices and reopens, including the successful first-author action that retires markers while another author remains pending. Each failed action must remain atomic relative to its immediate prior state. Do not hide earlier successful changes by calling the whole sequence unchanged.
+
+Use the retained RC3 middle and mixed native/runtime packets as failing inputs, not a passed baseline. Keep exact source/output hashes, native version, selector outcomes, held handles, cache/package/relationship/part inventories and original errors. Include a different invariant discriminator during design. No guard relaxation, adjacency-based lost-owner inference, skipped reader, API narrowing or success through deleting native markers is approved. Preserve the exact independent Q-A430-28 unproved exception. Issue430 remains open until the carried requirements are actually qualified. No new plan, claim, source implementation, review-cap reset or completion follows from registration.
+
+### F-X288, Repair seven native ordinary furniture-frame differences
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md ordinary header/footer frames, furniture placement and same-story wrapping, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+Pending design and unclaimed. Own only the seven user-approved F273 A3 failures: header and footer margin/omitted/page controls at0.551202pt measured edge error and the explicit-text footer control with off-page frame paint and144pt following-flow difference. Restore affected original native matching requirements with the unchanged0.5pt criterion, exact page/text inventories and qualified fonts. Keep Issue424 open until these requirements are actually qualified. Preserve every original failed observation and its exact source/native artifact identity.
+
+Design must distinguish the small metric differences from the footer placement/wrap invariant. Preserve nominal11pt/16pt source fonts, authored offsets, grouping, actual owner/anchor presence and one coherent prepared rectangle for paint and applicable obstacles. A universal footer clamp, font-size substitution or offset fudge is not approved. Include a different invariant discriminator and preserve previously qualified page-offset and same-story controls. Do not broaden general body-frame or drop-cap support, alter Source/resource limits, or waive schema/other native checks. The separate row-split23/17 versus26/14 disposition is outside this story.
+
+Use the retained anchor-eight, remaining24 and footer-and-row source-triage packets under `.claude/scratch/S96-final-evidence/s96-release-freeze-20261108-1/native-refresh` as failed inputs and source facts, not a passed baseline. The normal design, claim, implementation, independent review and qualification lifecycle remains required. Coordinate exclusive Word layout source ownership with other S96.1 work. Registration creates no new plan, claim, status reset, peer-cap reset, completion credit or public API change.
+
+### F-X289, Requalify historical native kerning and right-edge coverage
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md effective Word kerning and source nominal fonts, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+Pending design and unclaimed. Own only the approved qualification carry for50historical native right-edge measurement instances, not50named files. Recover the per-instance source, text/owner occurrence, font profile and native/library artifact joins where possible. Do not invent historical ZIP/PDF custody or identify the current55recipes or five K1 threshold inputs as the original set without proof. Preserve original tests, historical failures, absent observations, fresh reported-case checks and the unchanged0.5pt metric.
+
+Restore the original every-original same-font qualification obligation or obtain an explicit reviewed finite replacement contract where original mapping remains unrecoverable. Record honest source/artifact identities, affected A1/A3/A4/A7/A8 consumer applicability and a different invariant discriminator before qualification. No arbitrary50-case campaign, new API, font substitution, source offset, kerning-policy change, tolerance relaxation or blanket native waiver is approved. Existing current failures and original public/operation checks remain separate gates. Use the sealed f273-original50-recovery-1 packet as custody analysis, not passed native equivalence. The normal lifecycle remains pending, with no provider-status, count, review-cap or completion reset.
+
+### F-X290, Repair measured legacy Word kerning and line-number edge differences
+
+**Sprint**: S96.1
+**Size**: L
+**Depends on**: F-X273
+**Test gate**: differential
+**Spec reference**: 08-rendering-spec.md effective Word shaping and generated line numbers, and 12-testing-strategy.md bounded release exceptions and native evidence.
+
+F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved three measured legacy Word compatibility kerning/superscript cases and one measured line-number edge. The legacy cases are k1-threshold-1, k1-threshold-3 and k1-threshold-4 under the original mode12/default-compatibility profile, with maxima3.715936pt,3.715936pt and4.946208pt. The fourth case is label3bottom in native-line-style-enabled-explicit-defaults at0.511225pt against0.5pt. Preserve every failed outcome and the unchanged0.5pt metric. The single mode15direct-enabled control passes, but does not qualify all threshold/superscript variants. Historical50instance recovery remains separately owned by F-X289. No other current failure, source policy, native/runtime/release gate, provider status, completion count or review cap changes.
+
+Restore affected native behavior or explicitly close its source-supported compatibility contract through the normal approved design before implementation. Preserve exact mode12/mode15 source distinctions, source nominal sizes and qualified physical glyph/metric identities. Include threshold inheritance/direct override, nominal superscript decision, generated-number tuple and a genuinely different invariant. Do not apply font/offset/spacing adjustments merely to fit the reference. Keep old failures and all input/producer/Word-version joins. No historical50instance equivalence, new API, source-model scope, tolerance relaxation or broad native waiver follows. Normal claim, implementation, independent review and fresh affected qualification remain pending, with no completion credit or cap reset.

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -428,7 +429,7 @@ fn validate_reports_duplicate_paragraph_properties_while_text_remains_readable()
     let validated = cli(&["validate", deck.to_str().unwrap()]);
     assert!(!validated.status.success());
     let diagnostic = String::from_utf8(validated.stderr).unwrap();
-    assert!(diagnostic.contains("InvalidXmlChild"), "{diagnostic}");
+    assert!(!diagnostic.contains("InvalidXmlChild"), "{diagnostic}");
     assert!(diagnostic.contains(&slide_part), "{diagnostic}");
     assert!(
         diagnostic.contains("finite XML child order or multiplicity is invalid"),
@@ -535,14 +536,99 @@ fn validate_rejects_corruption_and_accepts_the_pinned_corpus() {
             "missing pinned corpus deck {}",
             deck.display()
         );
+        let before = fs::read(&deck).unwrap();
         let output = cli(&["validate", deck.to_str().unwrap()]);
+        if entry == "LIBRE_OFFICE-100610-0.pptx" {
+            // The one classified raw mismatch: the stored route reports the
+            // exact finite diagnostic against the original bytes while the
+            // old parsed-model route still loads and validates the deck
+            // clean. The input file is not changed.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "classified corpus deck must fail the stored route: {stderr}"
+            );
+            assert!(stderr.contains("/ppt/slides/slide8.xml"), "{stderr}");
+            assert!(
+                stderr.contains("table row has 10 cells but its grid has 12 columns"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("tr[4]"), "{stderr}");
+            let opened = Presentation::open(&deck).unwrap();
+            assert!(opened.validate().is_empty(), "{:?}", opened.validate());
+            assert_eq!(fs::read(&deck).unwrap(), before, "input must not change");
+            continue;
+        }
         assert!(
             output.status.success(),
             "validate failed for {}: {}",
             deck.display(),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_eq!(
+            fs::read(&deck).unwrap(),
+            before,
+            "input must not change: {}",
+            deck.display()
+        );
     }
+}
+
+#[test]
+fn issue435_stored_scan_handles_deep_opaque_input_without_native_recursion() {
+    // Deep valid opaque content inside a real role part's extension island,
+    // and the same inside an unused custom part, must scan iteratively. The
+    // case runs in the CLI child process so an unexpected native abort of an
+    // old candidate cannot take down the test orchestrator.
+    // Cross the former u16 namespace-depth boundary in both the lexical
+    // scanner and legacy field-identity inventory, without adding a quota.
+    let deep = "<x>".repeat(100_000) + &"</x>".repeat(100_000);
+    let temp = TempWorkspace::new("issue435-deep");
+
+    let mut deck_package = {
+        let bytes = issue435_probe_deck().to_bytes().unwrap();
+        OpcPackage::from_reader(Cursor::new(&bytes)).unwrap()
+    };
+    let slide = issue435_slide_part(&deck_package);
+    let xml = String::from_utf8(deck_package.get_part(&slide).unwrap().to_vec()).unwrap();
+    let tree_end = xml.find("</p:spTree>").expect("spTree close");
+    let edited = format!(
+        "{}<p:extLst>{}</p:extLst>{}",
+        &xml[..tree_end],
+        deep,
+        &xml[tree_end..]
+    );
+    deck_package.set_part(&slide, edited.into_bytes());
+    let role_path = temp.path.join("deep-role-island.pptx");
+    deck_package
+        .save(&role_path)
+        .expect("write deep role fixture");
+
+    let validated = cli(&["validate", role_path.to_str().unwrap()]);
+    assert!(
+        validated.status.success(),
+        "deep opaque island in a real role must validate clean: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+
+    let mut custom_package = {
+        let bytes = issue435_probe_deck().to_bytes().unwrap();
+        OpcPackage::from_reader(Cursor::new(&bytes)).unwrap()
+    };
+    custom_package.set_part("/customXml/deep.xml", deep.into_bytes());
+    custom_package
+        .content_types
+        .add_override("/customXml/deep.xml", "application/xml");
+    let custom_path = temp.path.join("deep-custom.pptx");
+    custom_package
+        .save(&custom_path)
+        .expect("write deep custom fixture");
+    let validated = cli(&["validate", custom_path.to_str().unwrap()]);
+    assert!(
+        validated.status.success(),
+        "deep unused custom XML must validate clean: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
 }
 
 #[test]
@@ -2994,6 +3080,284 @@ fn fit_reports_every_supported_overflow_and_needed_scale() {
 }
 
 #[test]
+fn issue431_fit_text_output_names_each_frame_once() {
+    let temp = TempWorkspace::new("issue431-fit-text");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    for _ in 0..3 {
+        presentation.add_slide(5).unwrap();
+    }
+    {
+        let mut slide = presentation.slide_mut(2).unwrap();
+        let mut shape = slide
+            .add_table(
+                2,
+                2,
+                Emu(914_400),
+                Emu(1_828_800),
+                Emu(7_315_200),
+                Emu(914_400),
+            )
+            .unwrap();
+        let mut table = shape.table_mut().unwrap();
+        for (row, column) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            table
+                .cell_mut(row, column)
+                .unwrap()
+                .set_text(&format!("r{row}c{column}"));
+        }
+    }
+    presentation.save(&input).unwrap();
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.starts_with("Diagnostic: "))
+        .collect::<Vec<_>>();
+    let native = presentation.fit_report(&[]).unwrap();
+    assert_eq!(lines.len(), native.frames.len());
+    let unique = lines.iter().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), lines.len(), "{stdout}");
+    for (row, column) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let cell = format!(
+            "/ppt/slides/slide3.xml 1 \"Table 3\" cell {row},{column}: status=unchanged, \
+             overflow=false, needed_scale=100000"
+        );
+        assert!(lines.contains(&cell.as_str()), "{cell} in {stdout}");
+    }
+    assert!(!stdout.contains("Array ["), "{stdout}");
+    assert!(!stdout.contains("Number("), "{stdout}");
+}
+
+#[test]
+fn issue431_fit_reports_an_unsupported_frame_with_cannot_assess() {
+    let temp = TempWorkspace::new("issue431-fit-unsupported");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.set_notes_text(0, "A note").unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let notes_part = package
+        .parts
+        .keys()
+        .find(|part| {
+            package.content_types.content_type_for(part) == Some(content_types::NOTES_SLIDE)
+        })
+        .unwrap()
+        .clone();
+    let xml = String::from_utf8(package.get_part(&notes_part).unwrap().to_vec()).unwrap();
+    let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Diagram 9"/><p:cNvSpPr/><p:nvPr><p:ph type="dgm" idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>1</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let xml = xml.replace("</p:spTree>", &format!("{shape}</p:spTree>"));
+    package.set_part(&notes_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let text = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        text.status.code(),
+        Some(1),
+        "{}{}",
+        String::from_utf8_lossy(&text.stdout),
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("status=unsupported"))
+        .unwrap();
+    assert!(line.contains("cannot assess:"), "{line}");
+    assert!(
+        line.contains("notes placeholder idx 10 matches no notes-master placeholder"),
+        "{line}"
+    );
+
+    let json = cli(&["fit", input.to_str().unwrap(), "--json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let frame = value["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| frame["status"] == "unsupported")
+        .unwrap();
+    assert_eq!(frame["reason"], "cannot-assess");
+    assert_eq!(frame["overflow"], true);
+}
+
+#[test]
+fn issue431_fit_prints_a_picture_duplicate_diagnostic_once() {
+    let temp = TempWorkspace::new("issue431-fit-picture-diagnostic");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(914400), Emu(914400), Emu(914400), Emu(457200))
+        .unwrap()
+        .set_text("text")
+        .unwrap();
+    presentation
+        .add_picture(
+            0,
+            &fx218_cli_png(),
+            "pixel.png",
+            Emu(914400),
+            Emu(1_828_800),
+            None,
+            None,
+        )
+        .unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let text_start = xml.find("<p:sp>").unwrap();
+    let text_end = text_start + xml[text_start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let text_id_start = xml[text_start..text_end].find("id=\"").unwrap() + text_start + 4;
+    let text_id_end = text_id_start + xml[text_id_start..].find('"').unwrap();
+    let text_id = &xml[text_id_start..text_id_end];
+    let picture_start = xml.find("<p:pic>").unwrap();
+    let picture_end =
+        picture_start + xml[picture_start..].find("</p:pic>").unwrap() + "</p:pic>".len();
+    let picture_block = &xml[picture_start..picture_end];
+    let id_start = picture_block.find("id=\"").unwrap() + 4;
+    let id_end = id_start + picture_block[id_start..].find('"').unwrap();
+    let old_id = &picture_block[id_start..id_end];
+    let duplicate =
+        picture_block.replacen(&format!("id=\"{old_id}\""), &format!("id=\"{text_id}\""), 1);
+    let xml = format!(
+        "{}{}{}",
+        &xml[..picture_start],
+        duplicate,
+        &xml[picture_end..]
+    );
+    package.set_part(slide_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let diagnostics = stdout
+        .lines()
+        .filter(|line| line.contains("is shared with an earlier shape"))
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{stdout}");
+    assert_eq!(
+        diagnostics[0],
+        format!(
+            "Diagnostic: /ppt/slides/slide1.xml 1: shape ID {text_id} is shared with an earlier shape"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn issue431_fit_prints_the_contextless_smartart_cause_once() {
+    let temp = TempWorkspace::new("issue431-fit-smartart");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="42" name="SmartArt"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="5080000" cy="2540000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:dm="smart-data" r:lo="smart-layout" r:qs="smart-style" r:cs="smart-colors"/></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let xml = xml.replace("</p:spTree>", &format!("{frame}</p:spTree>"));
+    package.set_part(slide_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("uninstantiated"))
+        .unwrap();
+    assert!(line.contains("status=unsupported, overflow=true"), "{line}");
+    assert!(
+        line.contains("cannot assess: opaque or unresolved text owner"),
+        "{line}"
+    );
+    assert_eq!(
+        stdout.matches("opaque or unresolved text owner").count(),
+        1,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn issue431_fit_exits_two_for_matching_notes_master_keys() {
+    let temp = TempWorkspace::new("issue431-fit-notes-collision");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.set_notes_text(0, "note").unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let master_part = package
+        .parts
+        .keys()
+        .find(|part| {
+            package.content_types.content_type_for(part) == Some(content_types::NOTES_MASTER)
+        })
+        .unwrap()
+        .clone();
+    let xml = String::from_utf8(package.get_part(&master_part).unwrap().to_vec()).unwrap();
+    let placeholder = xml.find("<p:ph ").unwrap();
+    let start = xml[..placeholder].rfind("<p:sp>").unwrap();
+    let end = start + xml[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let block = &xml[start..end];
+    let id_start = block.find("id=\"").unwrap() + 4;
+    let id_end = id_start + block[id_start..].find('"').unwrap();
+    let id: u32 = block[id_start..id_end].parse().unwrap();
+    let duplicate = block.replacen(&format!("id=\"{id}\""), &format!("id=\"{}\"", id + 100), 1);
+    let xml = format!("{}{}{}", &xml[..end], duplicate, &xml[end..]);
+    package.set_part(&master_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("ambiguous placeholder"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn every_new_command_has_help_and_reference_contract() {
     for command in [
         vec!["replace"],
@@ -3936,4 +4300,475 @@ fn fx254_missing_font_and_output_messages() {
     assert!(!result.status.success());
     assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
     assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+}
+
+#[test]
+fn fx281_cli_chart_tables_and_separate_read_diagnostics() {
+    let workspace = TempWorkspace::new("fx281-chart-export");
+    let input = workspace.path.join("source.pptx");
+    let data = rpptx::ChartData {
+        categories: vec!["Q1".into(), "Q2".into()],
+        series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+        ..Default::default()
+    };
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.add_chart(
+        0,
+        rpptx::ChartKind::Bar,
+        Emu(0),
+        Emu(0),
+        Emu(4572000),
+        Emu(2743200),
+        &data,
+    )
+    .unwrap();
+    deck.save(&input).unwrap();
+    let mut package = OpcPackage::open(&input).unwrap();
+    let rel = package
+        .get_part_rels("/ppt/slides/slide1.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::CHART)
+        .unwrap()
+        .clone();
+    let part = OpcPackage::resolve_rel_target("/ppt/slides/slide1.xml", &rel.target);
+    let original = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+    let title =
+        "<c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>";
+    let titled = original.replace("<c:chart>", &format!("<c:chart>{title}"));
+    assert_ne!(titled, original);
+    package.set_part(&part, titled.as_bytes().to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("success.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap().replace("&#32;", " ");
+        for token in ["Quarter", "Q1", "Zeta region", "1150"] {
+            assert!(text.contains(token), "{text}");
+        }
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("chart table omitted"));
+    }
+    package.set_part(&part, br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("omitted.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap();
+        assert!(!text.contains("Zeta region") && !text.contains("chart table omitted"));
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr)
+                .matches("chart table omitted:")
+                .count(),
+            1
+        );
+    }
+}
+
+// F-X280c, original Issue435 A280-4: the CLI validate route moves to the
+// stored-package validator. These tests compile against the Base CLI and
+// fail there while it still validates only the parsed model, then pass once
+// the stored route lands.
+
+fn issue435_probe_deck() -> Presentation {
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(3_000_000), Emu(500_000))
+        .unwrap()
+        .set_text("Issue435 stored validation probe")
+        .unwrap();
+    let mut slide = deck.slide_mut(0).unwrap();
+    let mut shape = slide
+        .add_table(2, 2, Emu(0), Emu(1_000_000), Emu(3_000_000), Emu(900_000))
+        .unwrap();
+    let mut table = shape.table_mut().unwrap();
+    for (row, column, text) in [
+        (0, 0, "Head"),
+        (0, 1, "Value"),
+        (1, 0, "Cell"),
+        (1, 1, "1|2"),
+    ] {
+        table.cell_mut(row, column).unwrap().set_text(text);
+    }
+    deck
+}
+
+fn issue435_fault_deck(
+    temp: &TempWorkspace,
+    name: &str,
+    mutate: impl FnOnce(&mut OpcPackage),
+) -> PathBuf {
+    let bytes = issue435_probe_deck().to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+    mutate(&mut package);
+    let path = temp.path.join(format!("{name}.pptx"));
+    package.save(&path).expect("write fault fixture");
+    path
+}
+
+fn issue435_slide_part(package: &OpcPackage) -> String {
+    package
+        .content_types
+        .overrides
+        .iter()
+        .find_map(|(part, content_type)| {
+            (content_type.as_str() == content_types::SLIDE).then_some(part.clone())
+        })
+        .expect("slide part")
+}
+
+#[test]
+fn issue435_cli_stored_validation_reports_the_six_original_faults() {
+    let temp = TempWorkspace::new("issue435-cli-stored");
+
+    let clean = temp.path.join("clean.pptx");
+    issue435_probe_deck().save(&clean).unwrap();
+    let before = fs::read(&clean).unwrap();
+    let passed = cli(&["validate", clean.to_str().unwrap()]);
+    assert!(passed.status.success(), "clean deck must validate");
+    assert!(
+        String::from_utf8_lossy(&passed.stdout).contains("Validation passed"),
+        "{}",
+        String::from_utf8_lossy(&passed.stdout)
+    );
+    assert_eq!(
+        fs::read(&clean).unwrap(),
+        before,
+        "validate must not rewrite input"
+    );
+
+    type Issue435Fault = (&'static str, &'static str, fn(&mut OpcPackage));
+    let faults: [Issue435Fault; 7] = [
+        (
+            "bogus-in-sptree",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let tree = xml.find("<p:spTree ").expect("spTree start tag");
+                let after_grp = tree
+                    + xml[tree..].find("<p:grpSpPr/>").expect("grpSpPr")
+                    + "<p:grpSpPr/>".len();
+                package.set_part(
+                    &slide,
+                    format!("{}<p:bogus/>{}", &xml[..after_grp], &xml[after_grp..]).into_bytes(),
+                );
+            },
+        ),
+        (
+            "cnvpr-missing-name",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let owner = xml.find("<p:nvSpPr>").expect("nvSpPr");
+                let cnvpr = owner + xml[owner..].find("<p:cNvPr ").expect("nvSpPr cNvPr");
+                let tag_end = cnvpr + xml[cnvpr..].find('>').expect("cNvPr close");
+                let tag = &xml[cnvpr..=tag_end];
+                let name_at = tag.find(" name=\"").expect("name attribute");
+                let value_end = tag[name_at + 7..].find('"').unwrap() + name_at + 7;
+                let edited = format!(
+                    "{}{}",
+                    &xml[..cnvpr + name_at],
+                    &xml[cnvpr + value_end + 1..]
+                );
+                package.set_part(&slide, edited.into_bytes());
+            },
+        ),
+        (
+            "notesmaster-after-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let after_slides =
+                    xml.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+                let edited = format!(
+                    "{}<p:notesMasterIdLst><p:notesMasterId id=\"2147483649\" r:id=\"rId8\"/></p:notesMasterIdLst>{}",
+                    &xml[..after_slides],
+                    &xml[after_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+        (
+            "sldsz-before-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let start = xml.find("<p:sldSz ").expect("sldSz");
+                let end = xml[start..].find("/>").unwrap() + start + 2;
+                let size = xml[start..end].to_string();
+                let without = format!("{}{}", &xml[..start], &xml[end..]);
+                let before_slides = without.find("<p:sldIdLst>").expect("sldIdLst");
+                let edited = format!(
+                    "{}{}{}",
+                    &without[..before_slides],
+                    size,
+                    &without[before_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+        (
+            "override-removed-xml-default",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                package
+                    .content_types
+                    .overrides
+                    .remove(&issue435_slide_part(package));
+            },
+        ),
+        (
+            "short-table-row",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let table = xml.find("<a:tbl ").expect("table");
+                let row = table + xml[table..].find("<a:tr ").expect("row");
+                let row_end = row + xml[row..].find("</a:tr>").expect("row close");
+                let last_tc = xml[row..row_end].rfind("<a:tc>").expect("cell");
+                package.set_part(
+                    &slide,
+                    format!("{}{}", &xml[..row + last_tc], &xml[row_end..]).into_bytes(),
+                );
+            },
+        ),
+        (
+            "sldmaster-after-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let start = xml.find("<p:sldMasterIdLst>").expect("sldMasterIdLst");
+                let end =
+                    xml.find("</p:sldMasterIdLst>").expect("close") + "</p:sldMasterIdLst>".len();
+                let list = xml[start..end].to_string();
+                let without = format!("{}{}", &xml[..start], &xml[end..]);
+                let after_slides =
+                    without.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+                let edited = format!(
+                    "{}{}{}",
+                    &without[..after_slides],
+                    list,
+                    &without[after_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+    ];
+    for (name, part, mutate) in faults {
+        let path = issue435_fault_deck(&temp, name, mutate);
+        let before = fs::read(&path).unwrap();
+        let validated = cli(&["validate", path.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&validated.stderr);
+        assert!(
+            !validated.status.success(),
+            "{name} must fail stored validation, got success"
+        );
+        assert!(stderr.contains("Validation failed"), "{name}: {stderr}");
+        assert!(stderr.contains(part), "{name} must name {part}: {stderr}");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "{name} input bytes must not change"
+        );
+    }
+}
+
+#[test]
+fn issue435_cli_stored_validation_keeps_the_already_caught_control() {
+    let temp = TempWorkspace::new("issue435-cli-control");
+    let bytes = issue435_probe_deck().to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+    package
+        .content_types
+        .overrides
+        .remove(&issue435_slide_part(&package));
+    package.content_types.defaults.remove("xml");
+    let path = temp.path.join("override-removed-no-fallback.pptx");
+    package.save(&path).expect("write control fixture");
+
+    let validated = cli(&["validate", path.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&validated.stderr);
+    assert!(!validated.status.success(), "no-fallback control must fail");
+    assert!(stderr.contains("/ppt/slides/slide1.xml"), "{stderr}");
+}
+
+#[test]
+fn issue435_cli_help_names_the_checked_subset_and_disclaims_full_validation() {
+    let help = cli(&["validate", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("stored presentation package"), "{text}");
+    assert!(text.contains("not a full schema validator"), "{text}");
+
+    // File and package errors keep the existing propagation and exit.
+    let missing = cli(&["validate", "/nonexistent/issue435.pptx"]);
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.starts_with("Error:"), "{stderr}");
+}
+
+// Stored ZIP fixture construction bypasses the serializer's intentional refusal
+// so the CLI receives actual damaged source bytes, including correct CRCs.
+fn issue435_raw_package_zip(package: &OpcPackage, part: &str, duplicate: bool) -> Vec<u8> {
+    let mut entries = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            package.content_types.to_xml().unwrap(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            package.package_rels.to_xml().unwrap(),
+        ),
+    ];
+    for (owner, relationships) in &package.part_rels {
+        let (directory, file) = owner.trim_start_matches('/').rsplit_once('/').unwrap();
+        entries.push((
+            format!("{directory}/_rels/{file}.rels"),
+            relationships.to_xml().unwrap(),
+        ));
+    }
+    for (name, data) in &package.parts {
+        let mut data = data.to_vec();
+        if name == part && !duplicate {
+            let offset = data
+                .windows(b"Issue435 seed".len())
+                .position(|text| text == b"Issue435 seed")
+                .unwrap();
+            data[offset] = 1;
+        }
+        entries.push((name.trim_start_matches('/').to_owned(), data));
+    }
+    if duplicate {
+        entries.push((
+            part.trim_start_matches('/').to_owned(),
+            package.get_part(part).unwrap().to_vec(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut output = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in &entries {
+        let offset = output.len() as u32;
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        let crc = !crc;
+        let size = data.len() as u32;
+        let length = name.len() as u16;
+        output.extend_from_slice(b"PK\x03\x04");
+        for value in [20u16, 0, 0, 0, 0] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        output.extend_from_slice(&length.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        for value in [20u16, 20, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [length, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = output.len() as u32;
+    let size = central.len() as u32;
+    output.extend_from_slice(&central);
+    output.extend_from_slice(b"PK\x05\x06");
+    for value in [0u16, 0, entries.len() as u16, entries.len() as u16] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [size, start] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output
+}
+
+#[test]
+fn issue435_cli_shared_opc_errors_reach_stored_validation() {
+    let temp = TempWorkspace::new("issue435-shared");
+    let mut deck = issue435_probe_deck();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(1000000), Emu(500000))
+        .unwrap()
+        .set_text("Issue435 seed")
+        .unwrap();
+    let source = deck.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(Cursor::new(&source)).unwrap();
+    let part = issue435_slide_part(&package);
+    for duplicate in [false, true] {
+        let bytes = issue435_raw_package_zip(&package, &part, duplicate);
+        let input = temp.path.join(if duplicate {
+            "duplicate.pptx"
+        } else {
+            "forbidden.pptx"
+        });
+        fs::write(&input, &bytes).unwrap();
+        let output = cli(&["validate", input.to_str().unwrap()]);
+        assert!(!output.status.success());
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(message.contains("ppt/slides/slide1.xml"), "{message}");
+        assert!(
+            message
+                .to_ascii_lowercase()
+                .contains(if duplicate { "duplicate" } else { "u+0001" }),
+            "{message}"
+        );
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+    }
 }

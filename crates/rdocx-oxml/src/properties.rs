@@ -1,10 +1,6 @@
 //! Paragraph properties (`CT_PPr`) and run properties (`CT_RPr`).
 
-use std::borrow::Cow;
-
-use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::QName;
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{OxmlError, Result};
@@ -76,13 +72,12 @@ pub(crate) fn parse_uchar_hex(value: &str) -> Option<u8> {
         .flatten()
 }
 
-pub(crate) fn push_uchar_hex(e: &mut BytesStart<'_>, name: &str, value: u8) {
+pub(crate) fn uchar_hex_bytes(value: u8) -> [u8; 2] {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    let encoded = [
+    [
         DIGITS[usize::from(value >> 4)],
         DIGITS[usize::from(value & 0x0f)],
-    ];
-    e.push_attribute((name.as_bytes(), encoded.as_slice()));
+    ]
 }
 
 impl CT_Shd {
@@ -190,39 +185,85 @@ impl CT_Shd {
     }
 
     pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        let mut e = BytesStart::new(tag);
-        for (name, value) in &self.extra_attributes {
-            e.push_attribute(Attribute {
-                key: QName(name.as_bytes()),
-                value: Cow::Borrowed(value.as_bytes()),
-            });
+        self.write_xml_in(
+            writer,
+            tag,
+            crate::text::XmlWriteRole::Publication,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn write_xml_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        name: &str,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        if role == crate::text::XmlWriteRole::Source {
+            let mut root = crate::text::FieldXmlStart::word("w", name, emission)?;
+            for (name, value) in &self.extra_attributes {
+                root.push_raw(name, value)?;
+            }
+            let prefix = root.qualify(&[], role, source_context)?;
+            self.write_xml_core(writer, root, &prefix, false)
+        } else {
+            let root = crate::text::FieldXmlStart::new(name, emission)?;
+            self.write_xml_core(writer, root, "w", true)
         }
-        e.push_attribute(("w:val", self.val.as_str()));
+    }
+
+    fn write_xml_core<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        mut e: crate::text::FieldXmlStart<'_, '_>,
+        word_prefix: &str,
+        include_retained: bool,
+    ) -> Result<()> {
+        if include_retained {
+            for (name, value) in &self.extra_attributes {
+                e.push_raw(name, value)?;
+            }
+        }
+        e.push_word(word_prefix, "val", self.val.as_str())?;
         if let Some(ref c) = self.color {
-            e.push_attribute(("w:color", c.as_str()));
+            e.push_word(word_prefix, "color", c.as_str())?;
         }
         if let Some(ref c) = self.theme_color {
-            e.push_attribute(("w:themeColor", c.as_str()));
+            e.push_word(word_prefix, "themeColor", c.as_str())?;
         }
         if let Some(tint) = self.theme_tint {
-            push_uchar_hex(&mut e, "w:themeTint", tint);
+            let encoded = uchar_hex_bytes(tint);
+            e.push_word(word_prefix, "themeTint", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(shade) = self.theme_shade {
-            push_uchar_hex(&mut e, "w:themeShade", shade);
+            let encoded = uchar_hex_bytes(shade);
+            e.push_word(word_prefix, "themeShade", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(ref f) = self.fill {
-            e.push_attribute(("w:fill", f.as_str()));
+            e.push_word(word_prefix, "fill", f.as_str())?;
         }
         if let Some(ref f) = self.theme_fill {
-            e.push_attribute(("w:themeFill", f.as_str()));
+            e.push_word(word_prefix, "themeFill", f.as_str())?;
         }
         if let Some(tint) = self.theme_fill_tint {
-            push_uchar_hex(&mut e, "w:themeFillTint", tint);
+            let encoded = uchar_hex_bytes(tint);
+            e.push_word(word_prefix, "themeFillTint", std::str::from_utf8(&encoded)?)?;
         }
         if let Some(shade) = self.theme_fill_shade {
-            push_uchar_hex(&mut e, "w:themeFillShade", shade);
+            let encoded = uchar_hex_bytes(shade);
+            e.push_word(
+                word_prefix,
+                "themeFillShade",
+                std::str::from_utf8(&encoded)?,
+            )?;
         }
-        writer.write_event(Event::Empty(e))?;
+        #[cfg(test)]
+        crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS.get() + 1);
+        e.write(writer, true)?;
         Ok(())
     }
 }
@@ -329,44 +370,91 @@ pub(crate) fn toggle_has_unsupported_attributes(
     Ok(false)
 }
 
-pub(crate) fn append_modeled_toggle_attributes(
-    element: &mut BytesStart<'_>,
-    raw_xml: &[Vec<u8>],
+pub(crate) fn modeled_toggle_attributes<'a>(
+    raw_xml: &'a [Vec<u8>],
     positions: &[(u8, usize)],
     slot: u8,
-    _occurrence: usize,
-) -> Result<()> {
+) -> Result<Vec<(std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>)>> {
+    let mut preserved = Vec::new();
     for (raw, position) in raw_xml.iter().zip(positions) {
         if position.0 != slot || !raw_is_modeled_attribute_carrier(*position) {
             continue;
         }
         let mut reader = Reader::from_reader(raw.as_slice());
-        let mut buffer = Vec::new();
-        let source = match reader.read_event_into(&mut buffer)? {
-            Event::Start(source) | Event::Empty(source) => source.into_owned(),
+        let (source, close) = match reader.read_event()? {
+            Event::Start(source) => (source, 1),
+            Event::Empty(source) => (source, 2),
             _ => continue,
         };
-        let prefixes = word_prefixes_at(&source, &["w".to_owned()])?;
-        let mut preserved = Vec::new();
-        for attribute in source.attributes() {
-            let attribute = attribute?;
-            if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
-                continue;
+        let prefixes = word_prefixes_at(&source, &["w".to_owned()])?.into_owned();
+        // Actual reader positions select the borrowed physical header. The
+        // UTF8 probe selects borrowing only, it never refuses a legacy input.
+        let end = reader.buffer_position() as usize - close;
+        let header = &raw[end - source.as_ref().len()..end];
+        if let Ok(header) = std::str::from_utf8(header) {
+            for attribute in
+                quick_xml::events::attributes::Attributes::new(header, source.name().as_ref().len())
+            {
+                let attribute = attribute?;
+                if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
+                    continue;
+                }
+                let name = std::str::from_utf8(attribute.key.0)?;
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?;
+                preserved.push((std::borrow::Cow::Borrowed(name), value));
             }
-            let name = std::str::from_utf8(attribute.key.as_ref())?.to_owned();
-            let value = attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?
-                .into_owned();
-            preserved.push((name, value));
-        }
-        for (name, value) in &preserved {
-            element.push_attribute((name.as_str(), value.as_str()));
+        } else {
+            // An invalid outer QName was not decoded by the legacy helper.
+            // Keep that exact acceptance/error path instead of validating it.
+            for attribute in source.attributes() {
+                let attribute = attribute?;
+                if is_word_attribute(attribute.key.as_ref(), b"val", &prefixes) {
+                    continue;
+                }
+                let name = std::str::from_utf8(attribute.key.as_ref())?.to_owned();
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, source.decoder())?
+                    .into_owned();
+                preserved.push((
+                    std::borrow::Cow::Owned(name),
+                    std::borrow::Cow::Owned(value),
+                ));
+            }
         }
     }
-    Ok(())
+    Ok(preserved)
 }
 
-pub(crate) fn word_prefixes_at(
+pub(crate) fn word_prefixes_at<'scope>(
+    start: &BytesStart<'_>,
+    inherited: &'scope [String],
+) -> Result<std::borrow::Cow<'scope, [String]>> {
+    let mut prefixes: std::borrow::Cow<'_, [String]> = std::borrow::Cow::Borrowed(inherited);
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let name = attribute.key.as_ref();
+        let prefix = if name == b"xmlns" {
+            b"".as_slice()
+        } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
+            prefix
+        } else {
+            continue;
+        };
+        let prefix = std::str::from_utf8(prefix)?.to_string();
+        let prefixes = prefixes.to_mut();
+        prefixes.retain(|candidate| candidate != &prefix);
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
+        if value.as_bytes() == W_NS.as_bytes() {
+            prefixes.push(prefix);
+        }
+    }
+    Ok(prefixes)
+}
+
+#[cfg(test)]
+fn fx268_legacy_word_prefixes_at(
     start: &BytesStart<'_>,
     inherited: &[String],
 ) -> Result<Vec<String>> {
@@ -494,20 +582,652 @@ pub(crate) fn write_toggle<W: std::io::Write>(
     tag: &str,
     value: bool,
 ) -> Result<()> {
+    write_toggle_core(writer, BytesStart::new(tag), "w", value)
+}
+
+pub(crate) fn write_toggle_source<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    local: &str,
+    value: bool,
+    source_context: Option<&[(&str, &str)]>,
+) -> Result<()> {
+    let (start, prefix) = crate::text::generated_word_start(
+        BytesStart::new(format!("w:{local}")),
+        &[],
+        crate::text::XmlWriteRole::Source,
+        source_context,
+    )?;
+    write_toggle_core(writer, start, &prefix, value)
+}
+
+fn write_toggle_core<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    mut start: BytesStart<'_>,
+    word_prefix: &str,
+    value: bool,
+) -> Result<()> {
+    #[cfg(test)]
+    if start.local_name().as_ref() == b"b" {
+        crate::text::WORD_BOLD_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_BOLD_EVENT_MATERIALIZATIONS.get() + 1);
+    }
     if value {
-        writer.write_event(Event::Empty(BytesStart::new(tag)))?;
+        writer.write_event(Event::Empty(start))?;
     } else {
-        let mut e = BytesStart::new(tag);
-        e.push_attribute(("w:val", "false"));
-        writer.write_event(Event::Empty(e))?;
+        start.push_attribute((format!("{word_prefix}:val").as_str(), "false"));
+        writer.write_event(Event::Empty(start))?;
     }
     Ok(())
+}
+
+// These sets are owned by the corresponding typed shading/border adapters.
+pub(crate) fn source_shading_attributes() -> &'static [&'static [u8]] {
+    &[
+        b"val",
+        b"color",
+        b"fill",
+        b"themeColor",
+        b"themeTint",
+        b"themeShade",
+        b"themeFill",
+        b"themeFillTint",
+        b"themeFillShade",
+    ]
+}
+pub(crate) fn source_border_attributes() -> &'static [&'static [u8]] {
+    &[b"val", b"sz", b"space", b"color"]
+}
+
+type ResidualName = (Option<String>, String);
+struct ResidualNode {
+    name: ResidualName,
+    known: bool,
+    text: bool,
+    attributes: Vec<String>,
+    scope: std::collections::BTreeMap<String, String>,
+    range: std::ops::Range<usize>,
+    opening_end: usize,
+    items: Vec<ResidualItem>,
+}
+enum ResidualItem {
+    Node(usize),
+    Event { raw: Vec<u8>, modeled: bool },
+}
+
+/// Return the source facts omitted from the existing typed Word model.
+///
+/// This read-only bridge serves comparison internals. Its strings are an opaque
+/// internal identity representation, not an authoring or persistent interchange
+/// format. Modeled values retain their existing parser normalization. Opaque
+/// attributes, payloads, events, order and effective context remain source facts.
+#[doc(hidden)]
+pub fn protected_source_residual(
+    xml: &[u8],
+    inherited_bindings: &[(String, String)],
+) -> Result<Vec<String>> {
+    let mut wrapper = BytesStart::new("rdocxResidual");
+    for (prefix, uri) in inherited_bindings {
+        let name = if prefix == "xmlns" || prefix.starts_with("xmlns:") {
+            prefix.clone()
+        } else if prefix.is_empty() {
+            "xmlns".to_owned()
+        } else {
+            format!("xmlns:{prefix}")
+        };
+        wrapper.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(Event::Start(wrapper))?;
+    writer.get_mut().extend_from_slice(xml);
+    writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "rdocxResidual",
+    )))?;
+    let source = writer.into_inner();
+    let mut reader = quick_xml::NsReader::from_reader(source.as_slice());
+    reader.config_mut().trim_text(false);
+    let mut nodes = Vec::<ResidualNode>::new();
+    let mut stack = Vec::<usize>::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader.read_resolved_event()?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let namespace = residual_namespace(namespace)?;
+                let local = std::str::from_utf8(element.local_name().as_ref())?.to_owned();
+                let parent = stack.last().copied();
+                let parent_local = parent
+                    .filter(|index| {
+                        *index != 0
+                            && nodes[*index].known
+                            && nodes[*index].name.0.as_deref() == Some(W_NS)
+                    })
+                    .map(|index| nodes[index].name.1.as_bytes())
+                    .unwrap_or_default();
+                let root = parent == Some(0);
+                let owned = if nodes.is_empty() {
+                    Some(&[][..])
+                } else if namespace.as_deref() == Some(W_NS) && (root || !parent_local.is_empty()) {
+                    residual_owned_attributes(parent_local, local.as_bytes(), root)
+                } else {
+                    None
+                };
+                let known = owned.is_some();
+                let text = known
+                    && matches!(
+                        local.as_str(),
+                        "t" | "delText" | "instrText" | "delInstrText"
+                    );
+                let mut attributes = Vec::new();
+                for attribute in element.attributes() {
+                    let attribute = attribute?;
+                    if attribute.key.as_ref() == b"xmlns"
+                        || attribute.key.as_ref().starts_with(b"xmlns:")
+                    {
+                        continue;
+                    }
+                    let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+                    let namespace = residual_namespace(namespace)?;
+                    let decoded = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?
+                        .into_owned();
+                    let modeled = if namespace.as_deref() == Some(W_NS) {
+                        owned.is_some_and(|keys| keys.contains(&name.as_ref()))
+                            && residual_owned_value(
+                                parent_local,
+                                local.as_bytes(),
+                                name.as_ref(),
+                                &decoded,
+                            )
+                    } else if namespace.as_deref() == Some("http://www.w3.org/XML/1998/namespace") {
+                        name.as_ref() == b"space"
+                            && matches!(local.as_str(), "t" | "delText")
+                            && parent_local == b"r"
+                            && matches!(decoded.as_str(), "default" | "preserve")
+                    } else {
+                        namespace.as_deref() == Some(crate::namespace::R_NS)
+                            && name.as_ref() == b"id"
+                            && matches!(
+                                (parent_local, local.as_str()),
+                                (b"sectPr", "headerReference" | "footerReference")
+                                    | (b"p", "hyperlink")
+                            )
+                    };
+                    if !modeled || !known {
+                        let identity = format!(
+                            "{namespace:?}:{:?}:{:?}:{decoded:?}",
+                            name.as_ref(),
+                            attribute.value.as_ref()
+                        );
+                        attributes.push(if known {
+                            identity
+                        } else {
+                            // The opaque root keeps every non-declaration attribute,
+                            // including its lexical name and encoded value.
+                            format!("{:?}:{identity}", attribute.key.as_ref())
+                        });
+                    }
+                }
+                if known {
+                    attributes.sort();
+                }
+                let mut scope = std::collections::BTreeMap::new();
+                for (prefix, uri) in reader.resolver().bindings() {
+                    let prefix = match prefix {
+                        quick_xml::name::PrefixDeclaration::Default => String::new(),
+                        quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                            std::str::from_utf8(prefix)?.to_owned()
+                        }
+                    };
+                    let uri = quick_xml::escape::unescape(std::str::from_utf8(uri.as_ref())?)
+                        .map_err(|error| OxmlError::InvalidValue(error.to_string()))?
+                        .into_owned();
+                    if prefix != "xml" && !(prefix.is_empty() && uri.is_empty()) {
+                        scope.insert(prefix, uri);
+                    }
+                }
+                let index = nodes.len();
+                let end = reader.buffer_position() as usize;
+                nodes.push(ResidualNode {
+                    name: (namespace, local),
+                    known,
+                    text,
+                    attributes,
+                    scope,
+                    range: before..end,
+                    opening_end: end,
+                    items: Vec::new(),
+                });
+                if let Some(parent) = parent {
+                    nodes[parent].items.push(ResidualItem::Node(index));
+                }
+                if !empty {
+                    stack.push(index);
+                }
+            }
+            Event::End(_) => {
+                let index = stack
+                    .pop()
+                    .ok_or_else(|| OxmlError::InvalidValue("unbalanced residual source".into()))?;
+                nodes[index].range.end = reader.buffer_position() as usize;
+            }
+            Event::Eof => break,
+            event => {
+                if let Some(index) = stack.last().copied() {
+                    let modeled = nodes[index].text
+                        && matches!(
+                            event,
+                            Event::Text(_) | Event::CData(_) | Event::GeneralRef(_)
+                        );
+                    let raw = source[before..reader.buffer_position() as usize].to_vec();
+                    nodes[index]
+                        .items
+                        .push(ResidualItem::Event { raw, modeled });
+                }
+            }
+        }
+    }
+    if !stack.is_empty() {
+        return Err(OxmlError::InvalidValue("unclosed residual source".into()));
+    }
+    let mut output = Vec::new();
+    if !nodes.is_empty() {
+        residual_emit_children(0, &nodes, &source, &[], &mut output);
+    }
+    Ok(output)
+}
+
+fn residual_namespace(namespace: quick_xml::name::ResolveResult<'_>) -> Result<Option<String>> {
+    match namespace {
+        quick_xml::name::ResolveResult::Unbound => Ok(None),
+        quick_xml::name::ResolveResult::Bound(uri) => Ok(Some(
+            quick_xml::escape::unescape(std::str::from_utf8(uri.as_ref())?)
+                .map_err(|error| OxmlError::InvalidValue(error.to_string()))?
+                .into_owned(),
+        )),
+        quick_xml::name::ResolveResult::Unknown(prefix) => Ok(Some(format!("unbound:{prefix:?}"))),
+    }
+}
+
+fn residual_revision_root(local: &[u8]) -> bool {
+    matches!(
+        local,
+        b"ins"
+            | b"del"
+            | b"moveFrom"
+            | b"moveTo"
+            | b"pPrChange"
+            | b"rPrChange"
+            | b"tblPrChange"
+            | b"sectPrChange"
+            | b"tblGridChange"
+            | b"numberingChange"
+    )
+}
+
+fn residual_owned_attributes(
+    parent: &[u8],
+    local: &[u8],
+    root: bool,
+) -> Option<&'static [&'static [u8]]> {
+    // Revision subtrees remain exact source, independently of modeled formatting.
+    if residual_revision_root(local) {
+        return None;
+    }
+    if root
+        && matches!(
+            local,
+            b"p" | b"r"
+                | b"tbl"
+                | b"tr"
+                | b"tc"
+                | b"sdt"
+                | b"pPr"
+                | b"rPr"
+                | b"tblPr"
+                | b"trPr"
+                | b"tcPr"
+                | b"sdtPr"
+                | b"sectPr"
+        )
+    {
+        return Some(&[]);
+    }
+    crate::paragraph_properties::source_modeled_attributes(parent, local)
+        .or_else(|| crate::run_properties::source_modeled_attributes(parent, local))
+        .or_else(|| crate::table::source_modeled_attributes(parent, local))
+        .or_else(|| crate::document::source_modeled_attributes(parent, local))
+        .or_else(|| crate::content_control::source_modeled_attributes(parent, local))
+        .or_else(|| crate::text::source_modeled_attributes(parent, local))
+        .or_else(|| match (parent, local) {
+            (b"p", b"pPr" | b"r" | b"sdt")
+            | (b"r", b"rPr")
+            | (b"tbl", b"tblPr" | b"tblGrid" | b"tr" | b"sdt")
+            | (b"tr", b"tblPrEx" | b"trPr" | b"tc" | b"sdt")
+            | (b"tc", b"tcPr" | b"p" | b"tbl" | b"sdt")
+            | (b"sdt", b"sdtPr" | b"sdtContent")
+            | (b"sdtContent", b"p" | b"r" | b"tbl" | b"tr" | b"tc" | b"sdt")
+            | (b"hyperlink", b"r" | b"sdt") => Some(&[]),
+            (b"numPr", b"ilvl" | b"numId") => Some(&[b"val"]),
+            (b"tabs", b"tab") => Some(crate::numbering::property_attributes(
+                crate::numbering::PropertyKind::Paragraph,
+                local,
+            )),
+            (
+                b"pBdr" | b"pgBorders",
+                b"top" | b"left" | b"start" | b"bottom" | b"right" | b"end" | b"between" | b"bar",
+            ) => Some(source_border_attributes()),
+            _ => None,
+        })
+}
+
+fn residual_owned_value(parent: &[u8], local: &[u8], key: &[u8], value: &str) -> bool {
+    if local == b"shd"
+        && matches!(
+            key,
+            b"themeTint" | b"themeShade" | b"themeFillTint" | b"themeFillShade"
+        )
+        && parse_uchar_hex(value).is_none()
+    {
+        return false;
+    }
+    if key == b"val"
+        && (matches!((parent, local), (b"rPr", b"bdr" | b"border"))
+            || matches!(
+                parent,
+                b"pBdr" | b"pgBorders" | b"tblBorders" | b"tcBorders"
+            ))
+        && crate::shared::ST_Border::from_str(value).is_err()
+    {
+        return false;
+    }
+    crate::paragraph_properties::source_value_is_modeled(parent, local, key, value)
+        && crate::run_properties::source_value_is_modeled(parent, local, key, value)
+        && crate::table::source_value_is_modeled(parent, local, key, value)
+        && crate::document::source_value_is_modeled(parent, local, key, value)
+        && crate::text::source_value_is_modeled(parent, local, key, value)
+}
+
+fn residual_default_container(index: usize, nodes: &[ResidualNode]) -> bool {
+    let node = &nodes[index];
+    node.known && node.attributes.is_empty()
+        && matches!(node.name.1.as_str(), "pPr" | "rPr" | "tblPr" | "tblPrEx" | "trPr" | "tcPr" | "numPr" | "tabs" | "pBdr" | "tblBorders" | "tcBorders" | "tcMar" | "tblCellMar" | "sdtPr" | "tblGrid")
+        && node.items.iter().all(|item| matches!(item, ResidualItem::Node(child) if residual_default_container(*child, nodes)))
+}
+
+fn residual_emit_children(
+    index: usize,
+    nodes: &[ResidualNode],
+    source: &[u8],
+    path: &[String],
+    output: &mut Vec<String>,
+) {
+    let mut occurrences = std::collections::BTreeMap::<ResidualName, usize>::new();
+    let mut previous = "start".to_owned();
+    let mut event_ordinal = 0usize;
+    for item in &nodes[index].items {
+        match item {
+            ResidualItem::Node(child) => {
+                let node = &nodes[*child];
+                let default = residual_default_container(*child, nodes);
+                let occurrence = occurrences.entry(node.name.clone()).or_default();
+                let slot = format!("{:?}#{occurrence}", node.name);
+                if !default {
+                    *occurrence += 1;
+                }
+                let mut child_path = path.to_vec();
+                child_path.push(slot.clone());
+                if !node.known {
+                    if node.name.0.as_deref() == Some(W_NS)
+                        && residual_revision_root(node.name.1.as_bytes())
+                    {
+                        output.push(format!(
+                            "revision:{child_path:?}:after:{previous}:{:?}:{:?}",
+                            &source[node.range.clone()],
+                            node.scope
+                        ));
+                    } else {
+                        // Only the opaque root opening admits namespace declaration
+                        // plumbing. Its actual expanded identity, all other attributes,
+                        // effective context and shape remain checked. The remainder,
+                        // including descendant-local declarations, is untouched source.
+                        output.push(format!(
+                            "opaque:{child_path:?}:after:{previous}:{:?}:{:?}:empty={}:{:?}",
+                            node.attributes,
+                            node.scope,
+                            node.opening_end == node.range.end,
+                            &source[node.opening_end..node.range.end]
+                        ));
+                    }
+                } else {
+                    if !node.attributes.is_empty() {
+                        output.push(format!(
+                            "attributes:{child_path:?}:{:?}:{:?}",
+                            node.attributes, node.scope
+                        ));
+                    }
+                    residual_emit_children(*child, nodes, source, &child_path, output);
+                }
+                if !default {
+                    previous = slot;
+                }
+            }
+            ResidualItem::Event { raw, modeled } if !modeled => {
+                output.push(format!(
+                    "event:{path:?}:after:{previous}:#{event_ordinal}:{raw:?}:{:?}",
+                    nodes[index].scope
+                ));
+                event_ordinal += 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shared::ST_Jc;
+
+    fn residual(xml: &str) -> Vec<String> {
+        protected_source_residual(
+            xml.as_bytes(),
+            &[
+                ("w".to_owned(), W_NS.to_owned()),
+                ("v".to_owned(), "urn:producer".to_owned()),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn protected_residual_opaque_root_namespace_closure_checks_only_root_plumbing() {
+        for (prefix, uri, local) in [("v", "urn:producer", "opaque"), ("q", W_NS, "future")] {
+            let root = format!(r#"<{prefix}:{local} {prefix}:note="a&amp;b"/>"#);
+            let source = format!(r#"<w:pPr xmlns:{prefix}="{uri}">{root}</w:pPr>"#);
+            let moved = format!(
+                r#"<w:pPr><{prefix}:{local} {prefix}:note="a&amp;b" xmlns:{prefix}="{uri}"/></w:pPr>"#
+            );
+            assert_eq!(residual(&source), residual(&moved), "{prefix}");
+            for changed in [
+                moved.replace(uri, "urn:changed"),
+                moved.replace("a&amp;b", "a&#38;b"),
+                moved.replace("a&amp;b", "changed"),
+            ] {
+                assert_ne!(residual(&source), residual(&changed));
+            }
+        }
+        let inner = r#"<!--same--><?opaque same?><![CDATA[same]]><v:child xmlns:v="urn:shadow" v:note="v:meaning"/>"#;
+        let source = format!(
+            r#"<w:pPr xmlns:v="urn:producer"><v:opaque v:note="same">{inner}</v:opaque><v:opaque v:note="second"/></w:pPr>"#
+        );
+        let moved = format!(
+            r#"<w:pPr><v:opaque v:note="same" xmlns:v="urn:producer">{inner}</v:opaque><v:opaque v:note="second" xmlns:v="urn:producer"/></w:pPr>"#
+        );
+        assert_eq!(residual(&source), residual(&moved));
+        for changed in [
+            moved.replace("<!--same-->", "<!--changed-->"),
+            moved.replace("<?opaque same?>", "<?opaque changed?>"),
+            moved.replace("CDATA[same]", "CDATA[changed]"),
+            moved.replace("urn:shadow", "urn:other"),
+            moved.replace("v:meaning", "v:other"),
+            moved.replace(r#"<v:opaque v:note="second" xmlns:v="urn:producer"/>"#, ""),
+            moved.replace(inner, ""),
+        ] {
+            assert_ne!(residual(&source), residual(&changed));
+        }
+        let reversed = format!(
+            r#"<w:pPr xmlns:v="urn:producer"><v:opaque v:note="second"/><v:opaque v:note="same">{inner}</v:opaque></w:pPr>"#
+        );
+        assert_ne!(residual(&source), residual(&reversed));
+        let duplicate = source.replace("</w:pPr>", r#"<v:opaque v:note="second"/></w:pPr>"#);
+        assert_ne!(residual(&source), residual(&duplicate));
+        assert_ne!(
+            residual(&source),
+            residual(&source.replace("<!--same--><?opaque same?>", "<?opaque same?><!--same-->"))
+        );
+        assert_ne!(
+            residual("<w:pPr><v:opaque/></w:pPr>"),
+            residual("<w:pPr><v:opaque></v:opaque></w:pPr>")
+        );
+        // A revision's declaration bytes are separately protected, even when
+        // that declaration is redundant in the effective root scope.
+        let revision =
+            r#"<w:p><w:ins w:id="7" w:author="A"><w:r><w:t>old</w:t></w:r></w:ins></w:p>"#;
+        assert_ne!(
+            residual(revision),
+            residual(&revision.replace("<w:ins ", &format!("<w:ins xmlns:w=\"{W_NS}\" ")))
+        );
+    }
+
+    #[test]
+    fn protected_residual_excludes_actual_modeled_values_across_owner_families() {
+        let source = concat!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="00120" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="00120"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="00120" w:hRule="atLeast"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="00120" w:type="dxa"/></w:tcPr>"#,
+            r#"<w:p><w:pPr><w:spacing w:before="00120"/><w:rPr><w:b w:val="true"/></w:rPr></w:pPr><w:r><w:rPr><w:i w:val="on"/></w:rPr><w:t v:note="held">Anchor.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let canonical = source
+            .replace("00120", "120")
+            .replace(r#" w:val="true""#, "")
+            .replace(r#" w:val="on""#, "");
+        assert_eq!(residual(source), residual(&canonical));
+        let section = r#"<w:sectPr><w:pgSz w:w="00120" w:h="00120"/><w:pgMar w:top="00120"/><w:cols w:num="02"><w:col w:w="00120"/></w:cols></w:sectPr>"#;
+        assert_eq!(
+            residual(section),
+            residual(&section.replace("00120", "120").replace("02", "2"))
+        );
+        let control = r#"<w:sdt><w:sdtPr><w:id w:val="0007"/><w:tag w:val="same"/></w:sdtPr><w:sdtContent><w:r><w:t>text</w:t></w:r></w:sdtContent></w:sdt>"#;
+        assert_eq!(residual(control), residual(&control.replace("0007", "7")));
+    }
+
+    #[test]
+    fn protected_residual_keeps_mixed_unknown_and_unsupported_values() {
+        let mixed = r#"<w:p><w:pPr v:note="root"><w:spacing w:before="00120" w:unknown="word" v:note="producer"/><w:rPr><w:b w:val="true" w:unknown="word" v:note="producer"/></w:rPr></w:pPr><w:r><w:t v:note="content">Anchor.</w:t></w:r></w:p>"#;
+        let canonical = mixed
+            .replace("00120", "120")
+            .replace(r#" w:val="true""#, "");
+        assert!(!residual(mixed).is_empty());
+        assert_eq!(residual(mixed), residual(&canonical));
+        for (before, after) in [
+            (r#"w:unknown="word""#, r#"w:unknown="changed""#),
+            (r#"v:note="producer""#, r#"v:note="changed""#),
+            (r#"v:note="content""#, r#"v:note="changed""#),
+        ] {
+            assert_ne!(residual(mixed), residual(&canonical.replace(before, after)));
+        }
+        let unsupported = r#"<w:pPr><w:jc w:val="futureA"/></w:pPr>"#;
+        assert!(!residual(unsupported).is_empty());
+        assert_ne!(
+            residual(unsupported),
+            residual(&unsupported.replace("futureA", "futureB"))
+        );
+        let partial_raw = r#"<w:sectPr><w:docGrid w:linePitch="futureA"/></w:sectPr>"#;
+        assert!(!residual(partial_raw).is_empty());
+        assert_ne!(
+            residual(partial_raw),
+            residual(&partial_raw.replace("futureA", "futureB"))
+        );
+        for source in [
+            r#"<w:rPr><w:bdr w:val="futureA"/></w:rPr>"#,
+            r#"<w:rPr><w:bdr w:themeTint="futureA"/></w:rPr>"#,
+            r#"<w:rPr><w:shd w:themeTint="futureA"/></w:rPr>"#,
+            r#"<w:sectPr><w:headerReference w:type="futureA"/></w:sectPr>"#,
+            r#"<w:sectPr><w:cols w:equalWidth="futureA"/></w:sectPr>"#,
+            r#"<w:r><w:br w:type="futureA"/></w:r>"#,
+            r#"<w:r><w:footnoteReference w:id="futureA"/></w:r>"#,
+            r#"<w:r><w:t xml:space="futureA">text</w:t></w:r>"#,
+            r#"<w:p><w:hyperlink w:history="futureA"/></w:p>"#,
+            r#"<w:r><w:fldChar w:fldCharType="begin" w:dirty="futureA"/></w:r>"#,
+        ] {
+            assert!(
+                !residual(source).is_empty(),
+                "omitted source value: {source}"
+            );
+            assert_ne!(
+                residual(source),
+                residual(&source.replace("futureA", "futureB")),
+                "omitted changed source value: {source}"
+            );
+        }
+        let encoded = r#"<w:rPr v:note="a&amp;b"/>"#;
+        assert_ne!(
+            residual(encoded),
+            residual(&encoded.replace("&amp;", "&#38;"))
+        );
+        assert_ne!(
+            residual(r#"<w:rPr><v:b w:val="true"/></w:rPr>"#),
+            residual("<w:rPr><v:b/></w:rPr>")
+        );
+    }
+
+    #[test]
+    fn protected_residual_retains_full_events_context_and_multiplicity() {
+        let source = r#"<w:pPr><!--one--><?opaque one?><![CDATA[opaque]]>text<w:jc w:val="left"/><v:opaque/><v:opaque/></w:pPr>"#;
+        for changed in [
+            source.replace("one", "two"),
+            source.replace("opaque]]", "changed]]"),
+            source.replace("text", "changed"),
+            source.replacen("<v:opaque/>", "", 1),
+            source.replace("<!--one--><?opaque one?>", "<?opaque one?><!--one-->"),
+        ] {
+            assert_ne!(residual(source), residual(&changed));
+        }
+        assert_ne!(
+            residual("<w:pPr><!--same--><w:jc w:val=\"left\"/></w:pPr>"),
+            residual("<w:pPr><w:jc w:val=\"left\"/><!--same--></w:pPr>")
+        );
+        let inherited = r#"<w:pPr v:note="v:meaning"/>"#;
+        let declared = r#"<w:pPr xmlns:v="urn:producer" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" v:note="v:meaning"/>"#;
+        assert_eq!(residual(inherited), residual(declared));
+        assert_ne!(
+            residual(declared),
+            residual(&declared.replace("urn:producer", "urn:changed"))
+        );
+    }
+
+    #[test]
+    fn protected_residual_default_omission_keeps_actual_residual_association() {
+        let before = r#"<w:p><w:pPr/><w:r><w:rPr/><w:t v:note="kept">Anchor.</w:t></w:r></w:p>"#;
+        let after = r#"<w:p><w:r><w:t v:note="kept">Anchor.</w:t></w:r></w:p>"#;
+        assert_eq!(residual(before), residual(after));
+        assert_eq!(
+            residual(&before.replace("<w:rPr/>", "<w:rPr></w:rPr>")),
+            residual(after)
+        );
+        assert_ne!(
+            residual(&before.replace("<w:rPr/>", r#"<w:rPr v:note="metadata"/>"#)),
+            residual(after)
+        );
+        assert_ne!(
+            residual(&before.replace("<w:rPr/>", "<w:rPr><!--opaque--></w:rPr>")),
+            residual(after)
+        );
+        let duplicates = r#"<w:r><w:rPr/><w:rPr v:note="metadata"/><w:t>text</w:t></w:r>"#;
+        assert_eq!(
+            residual(duplicates),
+            residual(&duplicates.replacen("<w:rPr/>", "", 1))
+        );
+    }
 
     #[test]
     fn integer_measurements_round_a_decimal_half_away_from_zero() {
@@ -1014,5 +1734,88 @@ mod tests {
             .rtl,
             None
         );
+    }
+    #[test]
+    fn fx268_reader_scope_matches_legacy_values_and_errors() {
+        use quick_xml::events::BytesStart;
+        let scopes = [
+            Vec::new(),
+            vec!["w".to_owned()],
+            vec![
+                "w".to_owned(),
+                format!("\0w\0{}", crate::namespace::W_NS),
+                "\0a\0urn:first".to_owned(),
+                "\0\0urn:default".to_owned(),
+                "a".to_owned(),
+            ],
+            (0..24)
+                .map(|index| format!("\0p{index}\0urn:long:{index}"))
+                .collect(),
+        ];
+        let attributes = [
+            "",
+            " ordinary='value'",
+            " x='1' y='2'",
+            " xmlns=''",
+            " xmlns='urn:foreign'",
+            " xmlns:w='urn:foreign'",
+            " xmlns:a='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'",
+            " xmlns:a='urn:second' xmlns:b='urn:third'",
+            " xmlns:a='urn:second' xmlns:a='urn:duplicate'",
+            " ordinary='first' xmlns:a='urn:second' after='last'",
+            " xmlns:a='urn:one&#x26;two'",
+            " xmlns:a='urn:one&amp;two'",
+            " bad xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad",
+            " xmlns:a='&missing;'",
+            " bad='1' bad='2' xmlns:a='urn:later'",
+            " xmlns:a='urn:earlier' bad='1' bad='2'",
+            " xmlns:a='unterminated",
+            " xmlns:a='urn:earlier' bad=unquoted",
+        ];
+        for scope in &scopes {
+            for attributes in attributes {
+                let source = format!("w:x{attributes}");
+                let start = BytesStart::from_content(source, 3);
+                let old = super::fx268_legacy_word_prefixes_at(&start, scope);
+                let new = super::word_prefixes_at(&start, scope);
+                match (old, new) {
+                    (Ok(old), Ok(new)) => {
+                        assert_eq!(old.as_slice(), new.as_ref(), "{attributes:?}");
+                        if !attributes.contains("xmlns") {
+                            assert!(matches!(new, std::borrow::Cow::Borrowed(_)));
+                            assert_eq!(new.as_ptr(), scope.as_ptr());
+                        } else {
+                            assert!(matches!(new, std::borrow::Cow::Owned(_)));
+                        }
+                    }
+                    (Err(old), Err(new)) => assert_eq!(format!("{old:?}"), format!("{new:?}")),
+                    (old, new) => {
+                        panic!("scope result changed for {attributes:?}: {old:?} / {new:?}")
+                    }
+                }
+            }
+        }
+        for earlier_declaration in [false, true] {
+            let mut start = BytesStart::new("w:x");
+            if earlier_declaration {
+                start.push_attribute(("xmlns:a", "urn:earlier"));
+            }
+            start.push_attribute((b"xmlns:\xff".as_slice(), b"urn:invalid".as_slice()));
+            start.push_attribute(("xmlns:later", "&missing;"));
+            let scope = vec!["w".to_owned()];
+            let old = super::fx268_legacy_word_prefixes_at(&start, &scope).unwrap_err();
+            let new = super::word_prefixes_at(&start, &scope).unwrap_err();
+            assert!(matches!(old, crate::error::OxmlError::Utf8(_)));
+            assert!(matches!(new, crate::error::OxmlError::Utf8(_)));
+            assert_eq!(format!("{old:?}"), format!("{new:?}"));
+        }
+        let scope = vec!["w".to_owned(), "\0w\0urn:old".to_owned(), "tail".to_owned()];
+        let result = {
+            let start = BytesStart::from_content("w:x xmlns:w='urn:new'", 3);
+            super::word_prefixes_at(&start, &scope).unwrap()
+        };
+        assert_eq!(result.as_ref(), ["\0w\0urn:old", "tail"]);
     }
 }

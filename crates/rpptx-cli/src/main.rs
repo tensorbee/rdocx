@@ -174,7 +174,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Validate package and PresentationML invariants
+    /// Validate a stored presentation package through its original XML
+    ///
+    /// Checks a finite stored subset: XML 1.0 lexical and character faults,
+    /// one complete root per XML part including package metadata, the
+    /// p:presentation root child sequence, unknown direct shape-tree
+    /// children, required unqualified cNvPr id and name on physical owners,
+    /// table row against grid column equality, PowerPoint role content-type
+    /// overrides, and the existing parsed-model issues. This is not a full
+    /// schema validator.
     Validate { file: PathBuf },
     /// Render selected slides to deterministic image files
     Render {

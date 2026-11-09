@@ -172,3 +172,55 @@ fn text_content_is_escaped() {
     assert!(html.contains("&lt;script&gt;"), "{html}");
     assert!(html.contains("&amp; more"), "{html}");
 }
+
+#[test]
+fn fx281_chart_tables_escape_cells_keep_display_values_and_stay_out_of_cells() {
+    use rdocx_html::{ChartTable, to_html_fragment_with_charts, to_markdown_with_charts};
+    use rdocx_oxml::drawing::{CT_Drawing, CT_Inline};
+    use rdocx_oxml::text::RunContent;
+    let mut doc = CT_Document::new();
+    let mut paragraph = CT_P::new();
+    let mut inline = CT_Inline::new("", 914400, 914400);
+    inline.chart_rel_id = Some("chart".into());
+    paragraph.add_run("").content = vec![RunContent::Drawing(CT_Drawing::inline(inline))];
+    doc.body.add_paragraph(paragraph.clone());
+    let mut table = rdocx_oxml::table::CT_Tbl::new();
+    let mut row = rdocx_oxml::table::CT_Row::new();
+    let mut cell = rdocx_oxml::table::CT_Tc::new();
+    cell.content = vec![rdocx_oxml::table::CellContent::Paragraph(paragraph)];
+    row.cells.push(cell);
+    table.rows.push(row);
+    doc.body.add_table(table);
+    let input = input_from(doc, HashMap::new());
+    let charts = HashMap::from([(
+        "chart".into(),
+        ChartTable {
+            title: Some("# Quarter <&>".into()),
+            categories: vec!["Q|1".into()],
+            series: vec![("Zeta <script>".into(), vec![1150.0, f64::NAN, 1190.5])],
+        },
+    )]);
+    let rows = charts["chart"].rows();
+    assert_eq!(
+        rows,
+        vec![
+            vec!["", "Zeta <script>"],
+            vec!["Q|1", "1150"],
+            vec!["", ""],
+            vec!["", "1190.5"]
+        ]
+    );
+    let html = to_html_fragment_with_charts(&input, &HtmlOptions::default(), &charts);
+    assert_eq!(html.matches("class=\"chart-data\"").count(), 1);
+    assert!(html.contains("# Quarter &lt;&amp;&gt;") && html.contains("Zeta &lt;script&gt;"));
+    assert!(!html.contains("<script>"));
+    let markdown = to_markdown_with_charts(&input, &charts);
+    assert!(
+        markdown.trim_start().starts_with("\\# Quarter"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("Q\\|1") && markdown.contains("1150") && markdown.contains("1190.5"));
+    assert!(!markdown.contains("NaN"));
+    assert!(!to_html_fragment(&input, &HtmlOptions::default()).contains("chart-data"));
+    assert!(!to_markdown(&input).contains("Zeta"));
+}

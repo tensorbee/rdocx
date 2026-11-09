@@ -1,5 +1,48 @@
 # 12, Testing strategy
 
+S96 release acceptance records the approved Q-S96-16 numerical and unfinished memory-qualification carry to S96.1 Optimization Sprint. Original measurement protocols and failed/unperformed outcomes remain intact. Except for the separately approved two-case Word-save, seven-case ordinary-frame, historical native right-edge qualification and four-case current Word rendering carries below, current correctness, ownership/resource safety, actual native/oracle applicability, installed typing/runtime and package/release checks remain gates. The successor starts with an authenticated review before optimization or a new baseline claim.
+
+The additional release exception is limited to the observed note-plus-body-text and mixed-author Word-save lifetime gaps owned by pending S96.1 F-X287. Their original45A/14G acceptance and raw failures remain required repair evidence. Atomic refused actions are not successful native qualification, and successful partial marker retirement while another author is pending is not preservation. Issue430 remains open. This does not waive other native/SDK/public/runtime gates or narrow ordinary note APIs. Q-A430-28 remains its separate exact unproved exception, not a passed result. Design, claim, review and qualification for F-X287 remain pending.
+
+The separate ordinary-frame release exception is limited to seven observed F273 A3 cases owned by pending S96.1 F-X288: header and footer margin/omitted/page controls with0.551202pt edge errors, and the explicit-text footer control with an off-page frame and144pt following-flow difference. The original0.5pt criterion and failed raw comparisons remain unchanged. Nominal source fonts and authored offsets remain authoritative. Issue424 remains open. This is the user's bounded release carry, not matching native qualification or a source-supported intentional parity disposition. It creates no general body-frame/drop-cap, schema or other native waiver. The row-split observation is separate. F-X288 design, claim, review and fresh affected native qualification remain pending. All unaffected correctness, safety and release gates remain required.
+
+F-X289 is pending design and unclaimed in S96.1. It owns only the user-approved historical native kerning/right-edge qualification limit: fresh checks do not prove equivalence to all50older measurement instances. These are not50named files. Original tests, failed/absent measurements, the0.5pt metric and fresh reported-case checks remain intact. Recover/authenticate the original logical instance map or explicitly review a replacement finite qualification contract before closing that debt. No other current failure, source policy, public reproduction, A8 operation union or native/runtime/release gate is waived. Other approved carries and all existing statuses/caps remain separate.
+
+F-X290 is pending design and unclaimed in S96.1. It owns only the user-approved three measured legacy Word compatibility kerning/superscript cases and one measured line-number edge. The legacy cases are k1-threshold-1, k1-threshold-3 and k1-threshold-4 under the original mode12/default-compatibility profile, with maxima3.715936pt,3.715936pt and4.946208pt. The fourth case is label3bottom in native-line-style-enabled-explicit-defaults at0.511225pt against0.5pt. Preserve every failed outcome and the unchanged0.5pt metric. The single mode15direct-enabled control passes, but does not qualify all threshold/superscript variants. Historical50instance recovery remains separately owned by F-X289. No other current failure, source policy, native/runtime/release gate, provider status, completion count or review cap changes.
+
+This four-case carry is a release exception, not repaired native acceptance. Retain the mode12 failures, exact saved-line source and metric proofs. The normal design/claim/review lifecycle and all unaffected gates remain required. F-X289 missing historical instance custody is a separate obligation.
+
+## Styles and cell edit performance contract
+
+The styles regression records actual parse and serialization work after an
+open-time proof. Unchanged staged edits must do neither operation. Replaced
+part allocations require fresh parsing even for equal bytes. Copy-on-write
+checks preserve the original clone. Malformed replacement tests prove refusal
+and exact retention of the replacement bytes. Cell checks cover direct
+publication, checked fallback, callback-at-most-once behavior, invalid indices,
+failed edit atomicity and saved values. Retained lexical acceptance controls
+prove that duplicate expanded attributes, a literal less-than attribute, an
+invalid qualified name and an unbound prefix survive typed serialization as
+strict-unqualified candidates. The actual checked publisher and bridge must
+both accept them with one callback and identical saved bytes. An ordinary
+strict-qualified control proves direct selection. Control-owned nested tables
+contribute reader paragraphs while direct nested tables do not. The former
+must retain actual checked-source preflight refusal before the callback when
+modeled/source correspondence is unsupported, preserving physical reader
+values, held handles, source bytes and saved bytes.
+
+The release Python 3.12 Linux performance gate retains the reported cold
+sampling boundaries. Styles comparisons use 6,466 and 419,136-byte inputs,
+five operations and ten calls including the first, with ratio at most three.
+The 40 by 6 table compares first and last cells with three cold samples and
+ratio at most three. The 2,000-paragraph body variant uses exactly one warmup
+per side before three samples with the same bound. Filling 30 and 120 cells
+uses one loop and a per-call ratio at most two. Native counters and debug
+Python diagnostics cannot substitute for these release timing gates. The
+existing byte preservation, F-X268, issue 79, 252 and 407, native and external
+oracle riders remain independent final integrated checks.
+
+
 
 Materialized timeline geometry controls start with actual CT_Slide presets/custom paths, then inspect positioned corners and raster extents at the native1980ms scale/rotation/motion phase. Asymmetric nonorigin cubic controls and text rectangles distinguish independent axes and parent transforms. Factor1, signed/zero factors, overflow refusal, picture custom clipping, ordinary/fallback geometry and a single text/content owner protect the existing consumer boundaries. Numeric state or changed bounds alone cannot discharge painted-geometry correctness.
 
@@ -2973,14 +3016,29 @@ trend are scored evidence rather than orchestration failures.
 The same harness source-builds five one-page Word fixtures for Arabic,
 Devanagari, Thai, Simplified Chinese, and mixed bidirectional text. Each uses an
 approved deterministic Noto family, complete `w:lang` attributes, 24 point
-text, and exact 24 point line spacing. The bidirectional page also carries an
-RTL paragraph base, explicit RTL and LTR runs, logical start and end indents,
-and start justification. Unlike the five-document trend, these five pages have
-a hard raw luminance SSIM gate of at least 0.95 on at least 80 percent of pages.
-The reviewed evidence passes five of five pages with scores 0.956809869,
-0.972241230, 0.997558968, 0.997294132, and 0.992810907 respectively. The TSV
-records each page and the JSON records fixture identities, coverage, threshold,
-and per-document page counts.
+text, and exact 24 point line spacing. Every one of the36runs explicitly sets
+qualified `w:kern w:val="1"` with nominal and complex size48half-points. This
+selects enabled kerning under both Word's size-threshold policy and the pinned
+Writer's nonzero Boolean policy. It qualifies the shared enabled domain only.
+Absent, zero, above-size and inherited Word kerning retain separate K1controls
+and actual native Word qualification.
+
+The bidirectional page also carries an RTL paragraph base, explicit RTL and LTR
+runs, logical start and end indents, and start justification. Unlike the
+five-document trend, these five pages have a hard raw luminance SSIM gate of at
+least 0.95 on at least 80 percent of pages. Separate bidi evidence requires every
+bidirectional page to reach0.95. The unchanged accepted-copy stage precedes
+Writer export. The generated minimal inputs have no revisions and their accepted
+copies preserve every byte, including all36qualified kern properties.
+
+The retained earlier omitted-property calibration recorded five passing pages
+with scores0.956809869,0.972241230,0.997558968,0.997294132and0.992810907.
+Those historical scores do not qualify the explicit-policy input domain at a
+new source. The final source-qualified harness and hosted gate must execute all
+five current fixtures with the same tools, fonts, normalization and thresholds.
+The TSV records each page and the JSON records fixture identities, coverage,
+threshold, and per-document page counts. Original failed inputs and measurements
+remain separate from these current acceptance requirements.
 
 The Writer oracle registers the three fixed Noto files and one checked-in
 oracle-only static Thin instance of the exact bundled Noto Sans SC subset. The
@@ -4891,6 +4949,37 @@ and individual native normalizations. Do not turn no repair prompt into a
 claim of complete structural or behavioral equality.
 
 The same native Word 16.114 producer supplies the independent form reference for source-built Rust and Python packages. It requires an independent Word PDF, equal page count, exact text and checkbox semantics, per-page SSIM of at least 0.95 at 144 DPI, matched fonts, deterministic drawing, and documented margin alignment. Current artifact acceptance requires exact source and input applicability to the complete native comparison. A local Poppler bounding box does not substitute for it. Older typed-control evidence does not qualify this form surface. Full hash, rustdoc, WASM, publish dry-run, strict installed mypy, stubtest, and the full suite remain final-union gates.
+
+Whole-cell setter controls compare actual traversed body-piece alignments and
+selected-table owner work with unrelated body growth. Held first/later
+paragraphs and runs cover absent, empty and existing tcPr, property retention,
+text retirement, empty-cell births and neighboring cells. A clean edited cell
+beside an enclosing and nested row0/cell0 checks distinct held text, run/font
+and paragraph-property views through properties and both text publishers.
+Native/reopened bytes alone do not establish held physical-owner identity. Preparation and actual
+revision-commit refusal leave native bytes, authority and serial unchanged.
+Source-custody controls reject equal bytes in a different allocation and changed
+namespace metadata, then require fresh qualification after save/reopen. Width
+controls retain signed truncation and both i32 twip wrap boundaries. Border and
+margin refusals compare the complete package with a later successful edit.
+
+Dormant controls retain eager missing-link errors, zero/mismatch/positive ordered
+replacement, activation at serial zero and later serials, every first-handle
+factory, held-epoch refusal, direct unbound hyperlink operations, image
+replacement/resize and serializer stream failure. First activation compares
+current native and reopened facts. No dormant fact or piece survives any call.
+Debug work and these local semantics do not qualify wallclock acceptance.
+
+Issue445 release qualification uses the exact 20 by 5 table at body sizes 0,
+500 and 2000, acquiring and reusing its 100 handles before sequential text,
+vertical alignment and shading setter loops without warmup. Each 2000-body
+setter must cost below 1.0 ms and at most 1.5 times empty-body cost plus 0.05 ms.
+The independent 4000-paragraph three-run workload replaces 1000 water matches.
+Three paired trials select the lexicographic minimum Python total/open/replace/
+save tuple and minimum same-build CLI time including process start. Actual Linux
+x86_64 release Python total must be at most 1.2 times CLI. Installed runtime,
+typing, schema, native Office, hash and retained union riders remain separate
+final integrated obligations.
 
 ## Word checked XML qualification
 

@@ -1311,6 +1311,22 @@ impl<'a> ResolveCtx<'a> {
                     fonts,
                 ) {
                     Ok(group) => {
+                        for code in oxml_chart::unsupported_number_formats(&chart_space.chart)
+                            .map_err(|error| ResolveError::ConcreteValue {
+                                kind: "chart number format",
+                                detail: error.to_string(),
+                            })?
+                        {
+                            let message = format!(
+                                "chart number format `{code}` is not supported and its labels use General"
+                            );
+                            if !diagnostics
+                                .iter()
+                                .any(|diagnostic| diagnostic.message == message)
+                            {
+                                diagnostics.push(Diagnostic { message });
+                            }
+                        }
                         return Ok((ResolvedContent::Group(group), None, false));
                     }
                     Err(error) => error.to_string(),
@@ -4078,6 +4094,9 @@ fn emit_tree_inner<'a>(
         .map(|c| (c, parent_transform, parent_issues))
         .collect::<Vec<_>>();
     while let Some((child, parent, inherited_issues)) = pending.pop() {
+        if child.hidden() {
+            continue;
+        }
         match child {
             ShapeTreeChild::GroupShape(group) => {
                 let (transform, issues) = group
@@ -4385,7 +4404,70 @@ fn placeholder_chain<'a>(
     else {
         return (None, None);
     };
-    let master_shape = find_placeholder(&master.common_slide_data.shape_tree.children, &layout_key);
+    let children = &master.common_slide_data.shape_tree.children;
+    let mut pending = children.iter().rev().collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let family = PlaceholderKey {
+        ph_type: layout_key.ph_type.clone(),
+        idx: None,
+    };
+    while let Some(child) = pending.pop() {
+        match child {
+            ShapeTreeChild::Shape(shape) => {
+                if let Some(ph) = &shape.placeholder {
+                    let candidate = PlaceholderKey {
+                        ph_type: ph.effective_type(),
+                        idx: None,
+                    };
+                    if family.matches(&candidate) {
+                        candidates.push(shape);
+                    }
+                }
+            }
+            ShapeTreeChild::GroupShape(group) => pending.extend(group.children.iter().rev()),
+            ShapeTreeChild::AlternateContent(alternate) => {
+                if let Some(fallback) = alternate.selected_fallback() {
+                    pending.extend(fallback.iter().rev());
+                }
+            }
+            _ => {}
+        }
+    }
+    let master_shape = candidates
+        .iter()
+        .copied()
+        .find(|shape| {
+            layout_key.idx.is_some()
+                && shape
+                    .placeholder
+                    .as_ref()
+                    .is_some_and(|ph| ph.idx == layout_key.idx)
+        })
+        .or_else(|| {
+            candidates.iter().copied().find(|shape| {
+                shape
+                    .placeholder
+                    .as_ref()
+                    .is_some_and(|ph| ph.effective_type() == layout_key.ph_type)
+            })
+        })
+        .or_else(|| {
+            matches!(
+                layout_key.ph_type,
+                PhType::Body | PhType::Subtitle | PhType::Object
+            )
+            .then(|| {
+                candidates.iter().copied().find(|shape| {
+                    shape
+                        .placeholder
+                        .as_ref()
+                        .is_some_and(|ph| ph.effective_type() == PhType::Body)
+                })
+            })
+            .flatten()
+        })
+        .or_else(|| candidates.first().copied())
+        .or_else(|| find_placeholder(children, &layout_key));
     (Some(layout_shape), master_shape)
 }
 
@@ -9995,5 +10077,103 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("non-finite timeline state"))
         );
+    }
+    #[test]
+    fn fx281_master_family_precedes_unrelated_shared_idx() {
+        for kind in [Some("obj"), None, Some("body")] {
+            let fixture = Fixture::new(
+                &shape(kind, Some(2)),
+                &shape(kind, Some(2)),
+                &(shape(Some("dt"), Some(2))
+                    + &shape(Some("subTitle"), Some(8))
+                    + &shape(Some("body"), Some(7))),
+            );
+            let context = fixture.context();
+            let (_, master) = context.placeholder_chain(fixture.slide_shape(0));
+            assert_eq!(
+                master
+                    .unwrap()
+                    .placeholder
+                    .as_ref()
+                    .unwrap()
+                    .effective_type(),
+                PhType::Body
+            );
+        }
+    }
+    #[test]
+    fn fx281_hidden_shape_and_group_leave_only_visible_flattened_owners() {
+        let visible = shape(None, None);
+        let hidden = visible.replace("<p:cNvPr/>", "<p:cNvPr hidden=\"1\"/>");
+        let group = format!(
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden=\"true\"/></p:nvGrpSpPr><p:grpSpPr/>{visible}</p:grpSp>"
+        );
+        let fixture = Fixture::new(&(visible + &hidden + &group), "", "");
+        assert_eq!(fixture.context().flatten().len(), 1);
+    }
+    #[test]
+    fn fx281_master_selection_priority_and_picture_occupancy_remain_distinct() {
+        for (kind, masters, expected) in [
+            (
+                "obj",
+                shape(Some("body"), Some(2)) + &shape(Some("obj"), Some(7)),
+                2,
+            ),
+            (
+                "obj",
+                shape(Some("body"), Some(7)) + &shape(Some("obj"), Some(8)),
+                8,
+            ),
+            (
+                "obj",
+                shape(Some("subTitle"), Some(8)) + &shape(Some("body"), Some(7)),
+                7,
+            ),
+            ("obj", shape(Some("subTitle"), Some(8)), 8),
+            (
+                "pic",
+                shape(Some("body"), Some(2)) + &shape(Some("pic"), Some(7)),
+                7,
+            ),
+            ("pic", shape(Some("body"), Some(2)), 2),
+        ] {
+            let fixture = Fixture::new(
+                &shape(Some(kind), Some(2)),
+                &shape(Some(kind), Some(2)),
+                &masters,
+            );
+            let context = fixture.context();
+            let (_, master) = context.placeholder_chain(fixture.slide_shape(0));
+            assert_eq!(
+                master.unwrap().placeholder.as_ref().unwrap().idx,
+                Some(expected),
+                "{kind}"
+            );
+        }
+    }
+    #[test]
+    fn fx281_hidden_attribute_namespace_controls_preserve_source_and_inheritance() {
+        for (attribute, count) in [
+            ("hidden='1'", 0),
+            ("hidden='true'", 0),
+            ("hidden='&#49;'", 0),
+            ("hidden='0'", 1),
+            ("hidden='false'", 1),
+            ("xmlns:f='urn:foreign' f:hidden='1'", 1),
+        ] {
+            let xml = shape(None, None).replace("<p:cNvPr/>", &format!("<p:cNvPr {attribute}/>"));
+            let fixture = Fixture::new(&xml, "", "");
+            let before = fixture.slide.to_xml().unwrap();
+            assert_eq!(fixture.context().flatten().len(), count, "{attribute}");
+            assert_eq!(before, fixture.slide.to_xml().unwrap());
+        }
+        let xml = shape(None, None).replace(
+            "<p:cNvPr/>",
+            "<p:cNvPr xmlns:p='urn:foreign' hidden='1'/><p:cNvPr/>",
+        );
+        let fixture = Fixture::new(&xml, "", "");
+        let before = fixture.slide.to_xml().unwrap();
+        assert_eq!(fixture.context().flatten().len(), 1);
+        assert_eq!(before, fixture.slide.to_xml().unwrap());
     }
 }

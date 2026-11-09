@@ -41,6 +41,43 @@ pub struct CT_BorderEdge {
     pub source_xml: Option<Vec<u8>>,
 }
 
+/// Actual border and tab numeric decoding, shared with constructor admission.
+#[derive(Clone, Copy)]
+pub(crate) enum BorderMeasurement {
+    Size(u32),
+    Space(u32),
+    TabPosition(i32),
+}
+
+impl BorderMeasurement {
+    pub(crate) fn border_attribute(local: &[u8]) -> Option<Self> {
+        match local {
+            b"sz" => Some(Self::Size(0)),
+            b"space" => Some(Self::Space(0)),
+            _ => None,
+        }
+    }
+    pub(crate) fn tab_attribute(local: &[u8]) -> Option<Self> {
+        (local == b"pos").then_some(Self::TabPosition(0))
+    }
+    pub(crate) fn decode(self, element: &[u8], attribute: &[u8], value: &str) -> Result<Self> {
+        Ok(match self {
+            Self::Size(_) => Self::Size(parse_integer_measurement(element, attribute, value)?),
+            Self::Space(_) => Self::Space(parse_integer_measurement(element, attribute, value)?),
+            Self::TabPosition(_) => {
+                Self::TabPosition(parse_integer_measurement(element, attribute, value)?)
+            }
+        })
+    }
+    fn apply_border(self, edge: &mut CT_BorderEdge) {
+        match self {
+            Self::Size(value) => edge.sz = Some(value),
+            Self::Space(value) => edge.space = Some(value),
+            Self::TabPosition(_) => unreachable!("border selector"),
+        }
+    }
+}
+
 impl CT_BorderEdge {
     pub fn new(val: ST_Border) -> Self {
         CT_BorderEdge {
@@ -98,10 +135,12 @@ impl CT_BorderEdge {
             let v = std::str::from_utf8(&attr.value)?;
             if matches_local_name(key, b"val") {
                 edge.val = ST_Border::from_str(v).unwrap_or(edge.val);
-            } else if matches_local_name(key, b"sz") {
-                edge.sz = Some(parse_integer_measurement(e.name().as_ref(), key, v)?);
-            } else if matches_local_name(key, b"space") {
-                edge.space = Some(parse_integer_measurement(e.name().as_ref(), key, v)?);
+            } else if let Some(measurement) =
+                BorderMeasurement::border_attribute(attr.key.local_name().as_ref())
+            {
+                measurement
+                    .decode(e.name().as_ref(), key, v)?
+                    .apply_border(&mut edge);
             } else if matches_local_name(key, b"color") {
                 edge.color = Some(v.to_string());
             } else {
@@ -125,10 +164,14 @@ impl CT_BorderEdge {
             let value = std::str::from_utf8(&attr.value)?;
             if is_word_attribute(key, b"val", word_prefixes) {
                 edge.val = ST_Border::from_str(value).unwrap_or(edge.val);
-            } else if is_word_attribute(key, b"sz", word_prefixes) {
-                edge.sz = Some(parse_integer_measurement(e.name().as_ref(), key, value)?);
-            } else if is_word_attribute(key, b"space", word_prefixes) {
-                edge.space = Some(parse_integer_measurement(e.name().as_ref(), key, value)?);
+            } else if let Some(measurement) =
+                BorderMeasurement::border_attribute(attr.key.local_name().as_ref()).filter(|_| {
+                    is_word_attribute(key, attr.key.local_name().as_ref(), word_prefixes)
+                })
+            {
+                measurement
+                    .decode(e.name().as_ref(), key, value)?
+                    .apply_border(&mut edge);
             } else if is_word_attribute(key, b"color", word_prefixes) {
                 edge.color = Some(value.to_string());
             } else {
@@ -141,33 +184,121 @@ impl CT_BorderEdge {
     }
 
     pub fn write_xml_attrs(&self, e: &mut BytesStart) {
-        let mut buf = itoa::Buffer::new();
-        for (name, value) in &self.extra_attributes {
+        self.write_xml_attrs_core(e, "w", true);
+    }
+
+    fn modeled_xml_attributes<'a>(
+        &'a self,
+        size: &'a mut itoa::Buffer,
+        space: &'a mut itoa::Buffer,
+    ) -> [Option<(&'static str, &'a str)>; 4] {
+        [
+            Some(("val", self.val.to_str())),
+            self.sz.map(|value| ("sz", size.format(value) as &str)),
+            self.space
+                .map(|value| ("space", space.format(value) as &str)),
+            self.color.as_deref().map(|value| ("color", value)),
+        ]
+    }
+
+    fn write_xml_attrs_core(
+        &self,
+        e: &mut BytesStart<'_>,
+        word_prefix: &str,
+        include_retained: bool,
+    ) {
+        for (name, value) in self.extra_attributes.iter().filter(|_| include_retained) {
             e.push_attribute(Attribute {
                 key: QName(name.as_bytes()),
                 value: Cow::Borrowed(value.as_bytes()),
             });
         }
-        e.push_attribute(("w:val", self.val.to_str()));
-        if let Some(sz) = self.sz {
-            e.push_attribute(("w:sz", buf.format(sz)));
+        let (mut size, mut space) = (itoa::Buffer::new(), itoa::Buffer::new());
+        for (name, value) in self
+            .modeled_xml_attributes(&mut size, &mut space)
+            .into_iter()
+            .flatten()
+        {
+            e.push_attribute((format!("{word_prefix}:{name}").as_str(), value));
         }
-        if let Some(space) = self.space {
-            e.push_attribute(("w:space", buf.format(space)));
+    }
+
+    fn write_guarded_attrs(
+        &self,
+        e: &mut crate::text::FieldXmlStart<'_, '_>,
+        prefix: &str,
+        include_retained: bool,
+    ) -> Result<()> {
+        for (name, value) in self.extra_attributes.iter().filter(|_| include_retained) {
+            e.push_raw(name, value)?;
         }
-        if let Some(ref color) = self.color {
-            e.push_attribute(("w:color", color.as_str()));
+        let (mut size, mut space) = (itoa::Buffer::new(), itoa::Buffer::new());
+        for (name, value) in self
+            .modeled_xml_attributes(&mut size, &mut space)
+            .into_iter()
+            .flatten()
+        {
+            e.push_word(prefix, name, value)?;
+        }
+        Ok(())
+    }
+
+    fn write_snapshot<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        name: &str,
+        local: bool,
+        include_retained: bool,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let mut root = if local {
+            crate::text::FieldXmlStart::word("w", name, emission)?
+        } else {
+            crate::text::FieldXmlStart::new(name, emission)?
+        };
+        self.write_guarded_attrs(&mut root, "w", include_retained)?;
+        root.write(writer, true)
+    }
+
+    fn snapshot(
+        &self,
+        name: &str,
+        local: bool,
+        include_retained: bool,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<Vec<u8>> {
+        if let Some(emission) = emission {
+            let (output, _outer) = emission.new_source_record_output();
+            let mut writer = Writer::new(output);
+            self.write_snapshot(&mut writer, name, local, include_retained, Some(emission))?;
+            Ok(writer.into_inner().into_mapped_parts().0)
+        } else {
+            let mut writer = Writer::new(Vec::new());
+            self.write_snapshot(&mut writer, name, local, include_retained, None)?;
+            Ok(writer.into_inner())
         }
     }
 
     /// Write this border edge as an empty element with the given tag name.
-    pub fn to_xml<W: std::io::Write>(
+    pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
+        self.write_xml_in(
+            writer,
+            tag,
+            crate::text::XmlWriteRole::Publication,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn write_xml_in<W: std::io::Write>(
         &self,
         writer: &mut Writer<W>,
-        tag: &str,
-    ) -> crate::error::Result<()> {
-        let mut e = BytesStart::new(tag);
-        self.write_xml_attrs(&mut e);
+        name: &str,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let source = role == crate::text::XmlWriteRole::Source;
         if let Some(raw) = &self.source_xml {
             let mut reader = Reader::from_reader(raw.as_slice());
             let Event::Start(start) = reader.read_event()? else {
@@ -177,25 +308,42 @@ impl CT_BorderEdge {
             };
             let scope = crate::numbering::word_prefixes_at(&start, &[])?;
             let before = Self::from_xml_attrs_with_prefixes(&start, &scope)?;
-            let mut old = Writer::new(Vec::new());
-            let mut old_start = BytesStart::new(tag);
-            before.write_xml_attrs(&mut old_start);
-            old.write_event(Event::Empty(old_start))?;
-            let mut generated = Writer::new(Vec::new());
-            generated.write_event(Event::Empty(e))?;
-            writer
-                .get_mut()
-                .write_all(&crate::styles::merge_defaults_scalar_attributes(
-                    raw,
-                    Some(old.get_ref()),
-                    Some(generated.get_ref()),
-                    &scope,
-                    true,
-                )?)?;
-        } else {
-            writer.write_event(Event::Empty(e))?;
+            // These are the same canonical snapshots consumed by the surgical
+            // merger. Each is a distinct generated record, never input credit.
+            let old = before.snapshot(name, source, !source, emission)?;
+            let generated = self.snapshot(name, source, !source, emission)?;
+            let result = crate::styles::merge_defaults_scalar_attributes_in(
+                raw,
+                Some(&old),
+                Some(&generated),
+                &scope,
+                true,
+                emission,
+            )?;
+            let _transport = emission
+                .map(|emission| emission.prepaid_xml_transport(&result))
+                .transpose()?;
+            writer.get_mut().write_all(&result)?;
+            return Ok(());
         }
-        Ok(())
+        let mut root = if source {
+            crate::text::FieldXmlStart::word("w", name, emission)?
+        } else {
+            crate::text::FieldXmlStart::new(name, emission)?
+        };
+        let prefix = if source {
+            for (name, value) in &self.extra_attributes {
+                root.push_raw(name, value)?;
+            }
+            Cow::Owned(root.qualify(&[], role, source_context)?)
+        } else {
+            Cow::Borrowed("w")
+        };
+        self.write_guarded_attrs(&mut root, &prefix, !source)?;
+        #[cfg(test)]
+        crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS
+            .set(crate::text::WORD_COMPOUND_EVENT_MATERIALIZATIONS.get() + 1);
+        root.write(writer, true)
     }
 }
 
@@ -346,53 +494,102 @@ impl CT_PBdr {
         selected: Option<&Self>,
         selected_owner: bool,
     ) -> Result<Vec<u8>> {
+        Self::merge_source_in(raw, original_selected, selected, selected_owner, None)
+    }
+
+    pub(crate) fn merge_source_in(
+        raw: &[u8],
+        original_selected: &[u8],
+        selected: Option<&Self>,
+        selected_owner: bool,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<Vec<u8>> {
         let before = Self::from_source_xml(if selected.is_none() {
             raw
         } else {
             original_selected
         })?;
         if selected.is_some_and(|selected| selected == &before) {
+            if let Some(emission) = emission {
+                emission.reserve_inner_xml(raw.len())?;
+            }
             return Ok(raw.to_vec());
         }
-        let mut before_writer = Writer::new(Vec::new());
-        before.to_xml(&mut before_writer)?;
-        let mut after_writer = Writer::new(Vec::new());
-        selected
-            .cloned()
-            .unwrap_or_default()
-            .to_xml(&mut after_writer)?;
-        crate::styles::merge_style_border_source(
+        let before_xml = before.snapshot(emission)?;
+        let empty = Self::default();
+        let after_xml = selected.unwrap_or(&empty).snapshot(emission)?;
+        crate::styles::merge_style_border_source_in(
             raw,
-            Some(before_writer.get_ref()),
-            after_writer.get_ref(),
+            Some(&before_xml),
+            &after_xml,
             &[],
             selected_owner,
+            emission,
         )
     }
 
+    fn snapshot(&self, emission: Option<&crate::text::FieldXmlEmission>) -> Result<Vec<u8>> {
+        if let Some(emission) = emission {
+            let (output, _outer) = emission.new_source_record_output();
+            let mut writer = Writer::new(output);
+            self.write_xml_role_in(
+                &mut writer,
+                crate::text::XmlWriteRole::Publication,
+                None,
+                Some(emission),
+            )?;
+            Ok(writer.into_inner().into_mapped_parts().0)
+        } else {
+            let mut writer = Writer::new(Vec::new());
+            self.to_xml(&mut writer)?;
+            Ok(writer.into_inner())
+        }
+    }
+
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_event(Event::Start(BytesStart::new("w:pBdr")))?;
+        self.write_xml_role_in(writer, crate::text::XmlWriteRole::Publication, None, None)
+    }
 
-        if let Some(ref edge) = self.top {
-            edge.to_xml(writer, "w:top")?;
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
+        let source = role == crate::text::XmlWriteRole::Source;
+        let mut root = crate::text::FieldXmlStart::new("w:pBdr", emission)?;
+        let prefix = if source {
+            Cow::Owned(root.qualify(&[], role, source_context)?)
+        } else {
+            Cow::Borrowed("w")
+        };
+        root.write(writer, false)?;
+        for (local, tag, edge) in [
+            ("top", "w:top", &self.top),
+            ("left", "w:left", &self.left),
+            ("bottom", "w:bottom", &self.bottom),
+            ("right", "w:right", &self.right),
+            ("between", "w:between", &self.between),
+            ("bar", "w:bar", &self.bar),
+        ] {
+            if let Some(edge) = edge {
+                edge.write_xml_in(
+                    writer,
+                    if source { local } else { tag },
+                    role,
+                    source_context,
+                    emission,
+                )?;
+            }
         }
-        if let Some(ref edge) = self.left {
-            edge.to_xml(writer, "w:left")?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "pBdr")?;
+        } else if source {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:pBdr"))))?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new("w:pBdr")))?;
         }
-        if let Some(ref edge) = self.bottom {
-            edge.to_xml(writer, "w:bottom")?;
-        }
-        if let Some(ref edge) = self.right {
-            edge.to_xml(writer, "w:right")?;
-        }
-        if let Some(ref edge) = self.between {
-            edge.to_xml(writer, "w:between")?;
-        }
-        if let Some(ref edge) = self.bar {
-            edge.to_xml(writer, "w:bar")?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("w:pBdr")))?;
         Ok(())
     }
 
@@ -455,8 +652,16 @@ impl CT_TabStop {
             let v = std::str::from_utf8(&attr.value)?;
             if is_word_attribute(key, b"val", &prefixes) {
                 val = ST_TabJc::from_str(v).unwrap_or(val);
-            } else if is_word_attribute(key, b"pos", &prefixes) {
-                pos = Twips(parse_integer_measurement(e.name().as_ref(), key, v)?);
+            } else if let Some(measurement) =
+                BorderMeasurement::tab_attribute(attr.key.local_name().as_ref())
+                    .filter(|_| is_word_attribute(key, attr.key.local_name().as_ref(), &prefixes))
+            {
+                let BorderMeasurement::TabPosition(value) =
+                    measurement.decode(e.name().as_ref(), key, v)?
+                else {
+                    unreachable!("tab selector")
+                };
+                pos = Twips(value);
             } else if is_word_attribute(key, b"leader", &prefixes) {
                 leader = ST_TabLeader::from_str(v).ok();
             }
@@ -536,7 +741,7 @@ impl CT_Tabs {
                         tab.source_occurrence = Some(tabs.len());
                         tabs.push(tab);
                     }
-                    scopes.push(prefixes);
+                    scopes.push(prefixes.into_owned());
                 }
                 Ok(Event::End(ref e)) => {
                     if scopes.len() == 1 && is_word_element(e.name().as_ref(), b"tabs", &scopes[0])
@@ -599,24 +804,47 @@ impl CT_Tabs {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_xml_role_in(writer, crate::text::XmlWriteRole::Publication, None, None)
+    }
+    pub(crate) fn write_xml_role_in<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        role: crate::text::XmlWriteRole,
+        source_context: Option<&[(&str, &str)]>,
+        emission: Option<&crate::text::FieldXmlEmission>,
+    ) -> Result<()> {
         if self.tabs.is_empty() {
             return Ok(());
         }
-
-        writer.write_event(Event::Start(BytesStart::new("w:tabs")))?;
-
+        let source = role == crate::text::XmlWriteRole::Source;
+        let mut root = crate::text::FieldXmlStart::new("w:tabs", emission)?;
+        let prefix = if source {
+            Cow::Owned(root.qualify(&[], role, source_context)?)
+        } else {
+            Cow::Borrowed("w")
+        };
+        root.write(writer, false)?;
         let mut buf = itoa::Buffer::new();
         for tab in &self.tabs {
-            let mut e = BytesStart::new("w:tab");
-            e.push_attribute(("w:val", tab.val.to_str()));
-            e.push_attribute(("w:pos", buf.format(tab.pos.0)));
+            let mut start = if source {
+                crate::text::FieldXmlStart::word(&prefix, "tab", emission)?
+            } else {
+                crate::text::FieldXmlStart::new("w:tab", emission)?
+            };
+            start.push_word(&prefix, "val", tab.val.to_str())?;
+            start.push_word(&prefix, "pos", buf.format(tab.pos.0))?;
             if let Some(leader) = tab.leader {
-                e.push_attribute(("w:leader", leader.to_str()));
+                start.push_word(&prefix, "leader", leader.to_str())?;
             }
-            writer.write_event(Event::Empty(e))?;
+            start.write(writer, true)?;
         }
-
-        writer.write_event(Event::End(BytesEnd::new("w:tabs")))?;
+        if let Some(emission) = emission {
+            emission.write_word_end(writer, &prefix, "tabs")?;
+        } else if source {
+            writer.write_event(Event::End(BytesEnd::new(format!("{prefix}:tabs"))))?;
+        } else {
+            writer.write_event(Event::End(BytesEnd::new("w:tabs")))?;
+        }
         Ok(())
     }
 }

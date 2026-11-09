@@ -64,17 +64,23 @@ that layout directly to
 `oxml_pdf::render_to_pdf_checked`, which gives the golden-PNG gate
 deterministic PDF input and refuses failed selected-font preparation before
 output. The legacy vector operation retains its signature and returns no
-partial bytes on preparation failure. Existing constructors and rendering
-methods still load system fonts for library users.
+partial bytes on preparation failure.
 
-The hash harness, golden-PNG gate and SSIM harness use the deterministic path.
-The normal rendering API still discovers system fonts, but now captures the
-bundled plus system face table once per process. Installing, removing, or
-replacing system fonts requires a process restart. File-backed font bytes use a
-separate bounded process cache keyed by canonical file identity, so faces at
-different TTC indices share one byte buffer. Both process caches are compiled
-only with `system-fonts`, and poisoned file-cache locks recover by rebuilding
-the requested entry.
+Deterministic constructors and the hash harness, golden PNG gate, and SSIM
+harness use the bundled path. Existing omission constructors and rendering
+methods also use bundled fonts. `RenderOptions.use_system_fonts` true is the
+explicit system request. That request loads system fonts when the feature is on
+and returns the documented error when the feature is off. Deterministic methods
+ignore the field. Installing or removing system fonts cannot change a bundled
+omission result.
+
+The normal rendering API captures the bundled plus system face table once per
+process. Installing, removing, or replacing system fonts requires a process
+restart for the system opt-in. File-backed font bytes use a separate bounded
+process cache keyed by canonical file identity, so faces at different TTC
+indices share one byte buffer. Both process caches are compiled only with
+`system-fonts`, and poisoned file-cache locks recover by rebuilding the
+requested entry.
 
 Font sources enabled by Cargo dependency feature unification, including
 `fontdb/memmap` shared files, use `Database::with_face_data` to retain owned
@@ -91,7 +97,27 @@ The M23 authoring gate is owned by
 `scripts/docx_authoring_conformance.py`. CI invokes its public mode before the
 workspace test suite. That mode builds an offline temporary consumer with only
 the public `rdocx` dependency and uses the same deterministic 150 DPI render
-path twice. Its local private mode uses exact LibreOffice 26.2.5.2 build
+path twice. The same validated temporary project is first compiled with
+`cargo build --quiet --offline`, using the ordinary job build budget. Build
+failure stops the gate before execution and retains its exact child diagnostics.
+The following public Cargo run keeps its300second timeout, original argv,
+working directory, environment and target fallback. A timeout or nonzero exit
+retains the call-site phase, exact command and typed stdout/stderr in the deciding
+failure before temporary source cleanup. Bytes use reconstructable escapes,
+including non-UTF8 bytes. Empty bytes, empty text and absent streams remain
+distinct. Only allowlisted inherited target, toolchain and dev-profile settings
+are reported, with unspecified values explicit. The diagnostic identifies the
+Python host platform without inferring an unobserved compiler version.
+
+The generated public client emits stderr checkpoints at main entry and before
+each of its two deterministic renders. Missing entry output establishes only
+that entry was not observed. It does not prove compilation or a Cargo lock wait.
+Checkpoint output narrows observed progress without diagnosing its wait cause.
+Synthetic harness checks qualify diagnostic retention only. Actual source-bound
+MSRV public conformance and clean final CI remain required to qualify the child
+execution. Private diagnostics and artifact non-disclosure remain unchanged.
+
+Its local private mode uses exact LibreOffice 26.2.5.2 build
 `cd7284b4cbbfeb507e630c1aac019f4157393acb` and pdftoppm 26.01.0 identities.
 Private source packages, digests, thresholds, and rendered evidence remain in
 the ignored local corpus directory and are never fetched by CI.
@@ -654,10 +680,10 @@ that inherit `[workspace.package].version`, including the unpublished
 `rdocx-wasm`, `rdocx-py`, and `oxml-py-support` packages, use cargo-release's
 effective `workspace` shared-version group and the `v{{version}}` tag template.
 That shared-version group, the `rdocx` Python project, and rdocx WASM
-contract literals are prepared at0.16.4, together with the exact seven-package
-stable family and its `v0.16.4` release notes. The prepared stable packages
-require shared OOXML0.14.4. The previous complete unified stable release is
-immutable `v0.16.3` ata57be36578b1b419b87986b1accbcfca481277ce. The historical
+contract literals are prepared at0.17.0, together with the exact seven-package
+stable family and its `v0.17.0` release notes. The prepared stable packages
+require shared OOXML0.15.0. The previous complete unified stable release is
+immutable `v0.16.4` at24af95d3d94c25e95f61a75e7e21f18fa95b6363. The historical
 S73 family retains its immutable annotated `v0.14.0` tag at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`. Its published archives
 require shared 0.12.1. The unpublished 0.13.2 crates.io train is superseded
@@ -675,11 +701,11 @@ immutable registry releases, including the complete 0.12.0 family, remain
 available. No binding, WASM, Python, npm, or
 incubating package gained publication authority from the stable release.
 The 15 publishable `oxml-*` and `rpptx*` package manifests and the unpublished
-`rpptx-py` binding crate use explicit version0.14.4, the named `incubating`
+`rpptx-py` binding crate use explicit version0.15.0, the named `incubating`
 group, and the `rpptx-v{{version}}` template. The unpublished `rpptx-wasm`
 crate remains at 0.12.1 with its separate npm boundary. The crates.io
 allowlist remains exactly15 packages. The previous complete unified family is
-immutable `rpptx-v0.14.3` ata57be36578b1b419b87986b1accbcfca481277ce. The
+immutable `rpptx-v0.14.4` at24af95d3d94c25e95f61a75e7e21f18fa95b6363. The
 historical S73 family retains the immutable `rpptx-v0.12.1` release at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`, and earlier registry releases
 remain available. The stable 0.10.1 historical graph proof authenticates the
@@ -700,9 +726,55 @@ and source distributions for both families run clean Python3.9/3.12 runtime and
 Python3.12 typing checks. Both WASM bindings and current npm carrier contracts
 retain their existing separate authority. Final integrated full verification,
 sprint review and SHA-bound hosted build-only rehearsal remain mandatory before
-close. The shared0.14.3 family publishes before Word0.16.3 where the verified
+close. The shared0.15.0 family publishes before Word0.17.0 where the verified
 internal pins require it, each with its own approval at reviewed main.
 External release actions remain owned by `/release`.
+
+Strict SemVer runs in three fixed native jobs on Linux x86_64, Mac arm64 and
+Windows x86_64 with Rust1.97.1 and official archive/executable pins. The
+native producers execute in that order, including after a predecessor failure,
+to serialize their registry clients. The acquisition and publication-verification
+clients wait1.05seconds before every crates.io API request, including redirects.
+Static archive, GitHub and PyPI requests retain their existing behavior. A release
+successor starts only after every preceding attempt is terminal. HTTP refusal
+remains a failed required acquisition, never a compatibility success.
+Existing CI signing uses only fixed completed producer artifacts, binding target, job
+ID and native wrapper digest in the signed subject name. Certificate source,
+workflow, immutable repository IDs and run attempt are independently checked.
+OIDC and attestation write permissions belong only to the signing job. The
+existing owner-only corpus dispatch remains separate and nonqualifying.
+
+Fresh owned SemVer checkouts enforce `core.autocrlf=false` through checkout-step
+Git environment configuration. Measured bytes must equal canonical Git blobs.
+Local differing bytes are refused without normalization or global Git changes.
+Generated current and baseline projects, locks, library JSON, effective features
+and original Cargo cwd are retained separately. Canonical Rustup proxies are
+qualified by their actual Cargo-home paths, current and explicit pinned-toolchain
+selection and observed bare-tool agreement with the concrete native sysroot.
+Proxy byte identity is not assumed. An external Rustup manager is admitted only
+when it resolves to the canonical proxy's concrete backend and its retained SHA
+and byte count agree. Canonical managers may retain distinct proxy bytes. Manager
+invocation keeps the lexical rustup alias for multicall dispatch. Arbitrary PATH
+tools and copied managers at a different backend remain refused.
+Compiler witnesses retain their actual check lock, then acquire all locked target
+dependencies through bounded successful fetch before unchanged offline metadata.
+The lock, configuration, command and raw fetch observations remain bound through
+portable evidence consumption. Optional reuse acquisition failure is retained
+and reacquires fresh rows, while mandatory deciding collectors still refuse.
+ A failed tool or compiler row
+retains available diagnostic bytes and cannot be silently omitted.
+
+Deciding CI, build-only wheels, full verification and release callers acquire
+complete paginated API catalogs into the canonical current sprint state outside
+supplied evidence. They preserve existing runstate and bind exact source,
+policy, artifacts and cutoff. Frozen validation uses only local pinned gh,
+unchanged bundles and embedded approved roots, with no hidden network fetch.
+The running gate requires completed native/sign jobs without requiring its own
+future completion. External consumers require actual successful final-source
+CI and reject newer relevant failures. SemVer proof artifacts stay outside all
+product distribution directories and checksum globs. The twenty-six build-only
+payloads and four skipped publication jobs keep their existing contract.
+
 
 `/release {vX.Y.Z | rpptx-vX.Y.Z}` is the only command allowed to create or
 push a new family release tag or start crates.io or PyPI publication. It
@@ -839,6 +911,65 @@ change-detector failure paths. A documentation-only change runs prose while
 the filtered product jobs skip, yet the same stable aggregate gate reports.
 The scheduled path skips change detection and requires supply-chain success.
 Unfiltered jobs retain their ordinary triggers.
+
+**Original Linux font entry points.** The Ubuntu Test job runs the original
+Issue433 DejaVu Sans fixture through a freshly built release CLI and installed
+release wheel. The same60paragraph document is compared across CLI convert,
+Python PDF, page count and layout for omitted, empty and one-font folders.
+Explicit system opt-in is a separate control. The job requires installed
+DejaVu Sans, checks installed wheel members and RECORD hashes, retains the
+artifact/font/input identities and six finite outcomes, and preserves the
+actual output on failure. This is functional agreement, not a performance or
+native Word layout baseline. Ordinary complete binding suites remain separate.
+
+**Optional final Linux performance gates.** The registered CI workflow can add
+one F283 benchmark job to an ordinary manual final CI invocation. Its native
+Ubuntu24.04 x86_64 host uses CPython3.12.13 and read-only repository content and
+Actions permissions. Existing push, PR, schedule, normal manual and owner-only
+job selectors remain unchanged. There is no benchmark-only CI path or normal
+SemVer authority exclusion.
+
+The unconditional `CI gate` depends on the benchmark job. A requested benchmark
+must succeed, and an unrequested one must be skipped. Failure, cancellation,
+unexpected skip and missing result fail the required aggregate. Owner-only mode
+cannot request the benchmark, with refusal both at artifact admission and in
+the aggregate. Successful benchmark results do not bypass the existing normal,
+owner, selected-job, native or signer checks.
+
+The benchmark reuses an existing same-source release wheel and CLI from a
+separately authenticated producer run. A Root-approved transfer pins source,
+artifact, interpreter, build receipt and configuration identities. Release mode
+is not inferred from artifact names or a future producer assertion. Missing
+proof or transfer admission remains pending. The job builds, signs, publishes
+and tags nothing.
+
+The same-source manual rdocx Linux GNU CLI rehearsal logs the identically
+pinned CPython3.12.13 interpreter identity after its tests, supplying the
+ordinary observation used by the later reviewed transfer. The benchmark
+independently verifies its actual interpreter digest.
+
+An offline `--prepare-dispatch` mode of the local benchmark runner packages an
+already Root-approved transfer into a GitHub workflow dispatch request file. It
+authenticates the transfer bytes against a supplied lowercase SHA-256,
+validates the existing CI transfer contract without approving anything, and
+requires a nonempty `refs/heads/` source ref and a lowercase 40-character
+workflow SHA. The complete request carries the branch ref and exactly the eight
+existing CI inputs, with `owner_compatibility=false` and `f283_benchmark=true`
+as JSON booleans, the proof's source commit, the transfer digest and the
+original transfer text preserved exactly. The request is serialized as ASCII
+JSON of at most 65535 bytes including formatting and the final newline before
+any output is created. Overwrites are refused, failed validation leaves no
+output, and the only printed matter is the output path, byte count and digest.
+The mode never performs a network operation, imports the product, contacts a
+service or starts a benchmark, and a prepared file still awaits separate
+authorized dispatch.
+
+The two Issue445 workloads retain their original builders, setter order, held
+handles, sampling and thresholds. Independent untimed package inspection checks
+the replacement input's paragraph, run, text and style geometry before timing.
+The runner retains timed blocks, paired trials, correctness outputs and child
+exits. An authenticated complete result qualifies only its exact final Linux
+release performance gates, without replacing normal CI or release approval.
 
 Repository ruleset `21823007` is active for repository `tensorbee/rdocx`,
 targets branches, and includes `~DEFAULT_BRANCH`. Its only rule requires exact
@@ -979,7 +1110,11 @@ optimized-size gates remain local.
 **A dedicated Python artifact workflow.** Its product matrix is the Cartesian
 product of `rdocx` and `rpptx` with manylinux_2_28 x86_64 and aarch64,
 musllinux_1_2 x86_64, macOS x86_64 and arm64, and Windows x86_64. A second
-two-package job builds the source distributions. Native cells install wheels
+two-package job builds the source distributions. Both macOS ARM64 wheel and
+CLI routes use macos-26 with the existing aarch64-apple-darwin target. GitHub
+retired macos-14 on2026-11-02, as its [runner retirement notice](https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/) records. The runner change does not change the required
+macosx_11_0_arm64 wheel platform or remove native install, runtime, typing,
+archive and attestation checks. Native cells install wheels
 into fresh environments and run the exact positive family priority and
 compatibility inventory, followed by exact mypy and stubtest gates. Each
 musllinux cell performs a fresh Alpine install and runs the same family
@@ -1082,7 +1217,15 @@ product runtime behavior or the separate WASM runtime.
 The same two clean Ubuntu 24.04 jobs plus the Presentation and Word fidelity
 jobs install
 LibreOffice 26.2.5.2 from the official Linux x86-64 Debian archive before the
-oracle-dependent command. The archive SHA-256 is
+oracle-dependent command. Retrieval uses the exact old-release route at
+`https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/`,
+with the full four-component release in the archive filename. The macOS arm64
+Python job uses the corresponding old-release DMG, bounds its download at
+320 MiB before readonly mounting, and checks SHA-256
+`c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad`.
+Both platforms require the same exact executable build identity. Archive
+authentication does not substitute for supported-target installation or actual
+source-qualified oracle jobs. The archive SHA-256 is
 `2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e`.
 The installer streams under fixed download, member, and expanded-byte bounds,
 rejects unsafe entries and any populated `/opt/libreoffice26.2` prefix, then
@@ -1104,6 +1247,22 @@ adapter drift fails before integration.
 condition, successful fallback or `continue-on-error`. The complete module is
 the pull-request gate for release-family version carriers and their workflow
 contracts.
+
+The pinned PresentationML corpus fetcher retains all50manifest paths, HTTPS
+URLs and exact digests for Test, MSRV and Presentation fidelity. A missing or
+stale subject gets at most3attempts after classified transient GET/open/read
+failures, with1and2second retry delays. HTTP429/500/502/503/504, temporary
+connection or DNS failures and raised incomplete reads qualify. Certificate,
+generic SSL, permanent HTTP/DNS, string-valued reasons and unknown errors are
+terminal. Exception-valued URLError reasons are unwrapped with a cycle guard.
+The60second timeout applies to individual operations, not a total subject deadline.
+Local file open/write/close, digest, replace and cleanup failures are terminal,
+even when they resemble a transport timeout. Partial bytes are discarded and
+failed responses close before retry. Silent EOF with a wrong digest is terminal.
+Exclusive owned temporary files protect colliding foreign downloads and existing
+destinations. Atomic publication requires complete checksum-matching bytes, and
+final whole-directory verification still rejects missing or unmanifested files.
+No endpoint fallback, source replacement, broad cleanup or fidelity waiver exists.
 
 **A dedicated Presentation fidelity job** runs on Ubuntu 24.04, primes locked
 Cargo dependencies, fetches the pinned 50-deck corpus, installs LibreOffice and
@@ -1137,8 +1296,16 @@ JSON and TSV evidence. The harness rejects corpus or tool drift, renderer or
 oracle failure, zero output, and a missing or empty evidence artifact. It
 records page-count and dimension differences through union-index SSIM scoring
 and does not fail solely because the five-document 0.95 on 80 percent trend is
-missed. The four source-built complex-script pages separately require raw SSIM
-of at least 0.95 on at least 80 percent of pages. The aggregate CI gate requires
+missed. The five source-built script pages separately require raw SSIM of at
+least0.95on at least80percent of pages, with every bidirectional page reaching
+0.95in its separate evidence check. All36runs explicitly request qualified
+kern1at24pt, the shared enabled-kerning intersection of Word and pinned Writer.
+Text, four font slots, language, nominal and complex size, direction, paragraph
+geometry and deterministic ZIP ownership stay fixed. This oracle domain does
+not qualify absent, zero, above-size or inherited Word kerning, whose native K1
+controls remain independently deciding. The final source-qualified hosted gate
+must execute all five fixtures and the complete existing harness. Diagnostic
+fixture scores do not substitute for that run. The aggregate CI gate requires
 success when the path filter selects the job.
 The harness prepares each Writer input through a locked, offline helper that
 calls the existing `rdocx::Document::accept_all` API. It reopens the resulting
@@ -1219,7 +1386,15 @@ an `rdocx` development dependency for the 150 dpi SSIM oracle only. It receives
 explicit layout fonts, never system fonts, and does not enter the runtime graph
 or generated `rdocx` archive.
 
-`pulldown-cmark` is pinned to `=0.13.4` in the existing `rdocx` facade.
+The normal CI Test job retains only the seven named deterministic sample
+DOCX, PDF and PNG files as diagnostic artifacts, including on failure when
+those outputs exist. Final baseline reviewers consume these exact hosted
+outputs alongside the actual source, rasterizer and comparison logs. Missing
+files are not acceptance, and uploading diagnostics does not change a failed
+job or qualify a baseline. No arbitrary workspace, credentials or user documents
+are included.
+
+`pulldown-cmark` is pinned to `=0.13.6` in the existing `rdocx` facade.
 Default features are disabled and only the HTML renderer feature is enabled.
 Runtime parser options enable tables and strikethrough. Its optional pinned
 `pulldown-cmark-escape` renderer edge stays inside that facade graph. Python and

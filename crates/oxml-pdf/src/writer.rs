@@ -1250,118 +1250,6 @@ struct EmitState<'a> {
     next_mcid: i32,
 }
 
-struct LogicalLineSpan {
-    start: usize,
-    end: usize,
-    actual_text: String,
-}
-
-fn logical_line_run(
-    element: &PositionedElement,
-) -> Option<(
-    &oxml_layout::output::MultilingualGlyphRun,
-    Option<oxml_layout::StructureId>,
-)> {
-    match element {
-        PositionedElement::MultilingualText(run) => Some((run, None)),
-        PositionedElement::MarkedContent {
-            structure,
-            children,
-        } if children.len() == 1 => match &children[0] {
-            PositionedElement::MultilingualText(run) => Some((run, *structure)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn logical_line_spans(elements: &[PositionedElement]) -> Vec<LogicalLineSpan> {
-    let mut spans = Vec::new();
-    let mut start = 0;
-    while start < elements.len() {
-        let Some((first, first_owner)) = logical_line_run(&elements[start]) else {
-            start += 1;
-            continue;
-        };
-        if !first.is_valid() {
-            start += 1;
-            continue;
-        }
-        let first_source = first.source;
-
-        let mut runs = vec![(start, first)];
-        let mut cursor = start + 1;
-        while cursor < elements.len() {
-            match logical_line_run(&elements[cursor]) {
-                Some((run, owner))
-                    if run.is_valid()
-                        && first_owner == owner
-                        && match (first_source, run.source) {
-                            (Some(first), Some(current)) => current.node == first.node,
-                            (None, None) => match (first_owner, owner) {
-                                (Some(first), Some(current)) => first == current,
-                                (None, None) => true,
-                                _ => false,
-                            },
-                            _ => false,
-                        }
-                        && run.origin.y.to_bits() == first.origin.y.to_bits() =>
-                {
-                    if runs
-                        .iter()
-                        .any(|(_, existing)| existing.logical_index == run.logical_index)
-                    {
-                        break;
-                    }
-                    runs.push((cursor, run));
-                }
-                None if matches!(
-                    elements[cursor],
-                    PositionedElement::Line { .. } | PositionedElement::FilledRect { .. }
-                ) => {}
-                Some(_) | None => break,
-            }
-            cursor += 1;
-        }
-
-        if runs.len() > 1 {
-            let mut logical = runs.clone();
-            logical.sort_by_key(|(_, run)| run.logical_index);
-            let unique_indices = logical
-                .windows(2)
-                .all(|pair| pair[0].1.logical_index < pair[1].1.logical_index);
-            let contiguous_source =
-                logical
-                    .windows(2)
-                    .all(|pair| match (pair[0].1.source, pair[1].1.source) {
-                        (Some(left), Some(right)) => left.char_end == right.char_start,
-                        (None, None) => {
-                            pair[0].1.logical_index.checked_add(1) == Some(pair[1].1.logical_index)
-                        }
-                        _ => false,
-                    });
-            if unique_indices && contiguous_source {
-                let Some((end, _)) = runs.last() else {
-                    start += 1;
-                    continue;
-                };
-                spans.push(LogicalLineSpan {
-                    start,
-                    end: *end,
-                    actual_text: logical
-                        .into_iter()
-                        .map(|(_, run)| run.logical_text.as_str())
-                        .collect(),
-                });
-                start = *end + 1;
-                continue;
-            }
-        }
-        start += 1;
-    }
-    spans
-}
-
 fn emit_elements(
     content: &mut Content,
     elements: &[PositionedElement],
@@ -1369,27 +1257,20 @@ fn emit_elements(
     accumulated_transform: Transform,
     inherited_actual_text: Option<&str>,
 ) {
-    let line_spans = if inherited_actual_text.is_some() {
-        Vec::new()
-    } else {
-        logical_line_spans(elements)
-    };
-    for (element_index, element) in elements.iter().enumerate() {
-        let planned_actual_text = line_spans
-            .iter()
-            .find(|span| {
-                span.start <= element_index
-                    && element_index <= span.end
-                    && logical_line_run(element).is_some()
-            })
-            .map(|span| {
-                if span.start == element_index {
-                    span.actual_text.as_str()
-                } else {
-                    ""
+    for element in elements {
+        let actual_text = inherited_actual_text.or_else(|| {
+            let run = match element {
+                PositionedElement::MultilingualText(run) => Some(run),
+                PositionedElement::MarkedContent { children, .. } if children.len() == 1 => {
+                    match &children[0] {
+                        PositionedElement::MultilingualText(run) => Some(run),
+                        _ => None,
+                    }
                 }
-            });
-        let actual_text = inherited_actual_text.or(planned_actual_text);
+                _ => None,
+            }?;
+            run.is_valid().then_some(run.logical_text.as_str())
+        });
         if let PositionedElement::MarkedContent {
             structure,
             children,
@@ -2397,8 +2278,8 @@ mod tests {
         ]);
 
         assert_eq!(content.matches("/ActualText").count(), 2, "{content}");
-        assert!(content.contains("/ActualText (left right)"), "{content}");
-        assert!(content.contains("/ActualText ()"), "{content}");
+        assert!(content.contains("/ActualText (right)"), "{content}");
+        assert!(content.contains("/ActualText (left )"), "{content}");
         let right_matrix = content.find("1 0 0 -1 70 20 Tm").unwrap();
         let underline = content.find("70 22 m").unwrap();
         let left_matrix = content.find("1 0 0 -1 10 20 Tm").unwrap();
@@ -2454,7 +2335,22 @@ mod tests {
         ]);
 
         assert_eq!(content.matches("/ActualText").count(), 8, "{content}");
-        assert!(content.contains("/ActualText (one two)"), "{content}");
+        for own in [
+            "one ",
+            "two",
+            "owner",
+            "baseline",
+            "ambiguous",
+            "gap",
+            "owned ",
+            "boundary",
+        ] {
+            assert!(
+                content.contains(&format!("/ActualText ({own})")),
+                "{content}"
+            );
+        }
+        assert!(!content.contains("/ActualText ()"));
         assert!(
             !content.contains("/ActualText (owned boundary)"),
             "{content}"
@@ -3998,5 +3894,38 @@ mod tests {
             vec![],
         );
         assert!(crate::conformance::preflight(&scene).is_err());
+    }
+    #[test]
+    fn fx281_ltr_spans_keep_own_actual_text_and_text_matrices() {
+        let content = content_for_multilingual_runs(vec![
+            PositionedElement::MultilingualText(multilingual_run(
+                "Alpha",
+                0,
+                Point { x: 10.0, y: 20.0 },
+                None,
+            )),
+            PositionedElement::MultilingualText(multilingual_run(
+                " ",
+                1,
+                Point { x: 50.0, y: 20.0 },
+                None,
+            )),
+            PositionedElement::MultilingualText(multilingual_run(
+                "beta",
+                2,
+                Point { x: 60.0, y: 20.0 },
+                None,
+            )),
+        ]);
+        for text in ["Alpha", " ", "beta"] {
+            assert!(
+                content.contains(&format!("/ActualText ({text})")),
+                "{content}"
+            );
+        }
+        assert!(!content.contains("/ActualText ()"));
+        for x in [10, 50, 60] {
+            assert!(content.contains(&format!("1 0 0 -1 {x} 20 Tm")));
+        }
     }
 }

@@ -194,7 +194,7 @@ impl From<&rpptx::ValidationIssue> for PyValidationIssue {
         };
         Self {
             kind,
-            message: format!("{issue:?}"),
+            message: issue.to_string(),
         }
     }
 }
