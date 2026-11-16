@@ -13290,6 +13290,21 @@ impl<'a> EmittedOwner<'a> {
         }
     }
 
+    fn of_cell(
+        original: &'a CellContent,
+        edited: &'a CellContent,
+        marked_kind: Option<&'static str>,
+        metadata: &Metadata<'_>,
+    ) -> Result<Self> {
+        match (original, edited, marked_kind) {
+            (CellContent::Paragraph(original), CellContent::Paragraph(edited), _) => {
+                Self::paragraph(original, edited, metadata)
+            }
+            (_, CellContent::Table(_), Some(kind)) => Ok(Self::MarkedTable(kind)),
+            _ => Ok(Self::Other),
+        }
+    }
+
     fn paragraph(original: &'a CT_P, edited: &'a CT_P, metadata: &Metadata<'_>) -> Result<Self> {
         let (accepted, rejected) = PropertySide::matched(original, edited, metadata)?;
         Ok(Self::Paragraph { accepted, rejected })
@@ -18291,7 +18306,31 @@ fn compare_cell_from_xml(
 ) -> Result<String> {
     let leaf_mark = metadata.leaf_publications.len();
     let output = (|| -> Result<String> {
-        if original.content.len() != edited.content.len() || original.extra_xml != edited.extra_xml
+        // Children compared index by index unless a pair there would refuse:
+        // the counts differ, the kinds differ, or a paragraph pair needs a
+        // whole replacement that the pair alone cannot hold.
+        let last = original.content.len().saturating_sub(1);
+        let aligned_children = original.extra_xml.is_empty()
+            && edited.extra_xml.is_empty()
+            && (original.content.len() != edited.content.len()
+                || original
+                    .content
+                    .iter()
+                    .zip(&edited.content)
+                    .enumerate()
+                    .any(|(index, pair)| match pair {
+                        (CellContent::Paragraph(left), CellContent::Paragraph(right)) => {
+                            paragraph_boundaries_differ(left, right, metadata.options)
+                                && (left.bookmark_markers != right.bookmark_markers
+                                    || index == last)
+                        }
+                        (CellContent::Table(_), CellContent::Table(_))
+                        | (CellContent::ContentControl(_), CellContent::ContentControl(_)) => false,
+                        _ => true,
+                    }));
+        if !aligned_children
+            && (original.content.len() != edited.content.len()
+                || original.extra_xml != edited.extra_xml)
         {
             return Err(Error::Other(format!(
                 "comparison cannot revise cell boundary structures at {location}"
@@ -18299,6 +18338,16 @@ fn compare_cell_from_xml(
         }
         if !metadata.options.ignore_formatting && original.properties != edited.properties {
             formatting_diagnostic(diagnostics, location.to_owned());
+        }
+        if aligned_children {
+            return compare_aligned_cell_children(
+                original,
+                edited,
+                location,
+                metadata,
+                diagnostics,
+                original_xml,
+            );
         }
         let children = cell_child_spans(original, original_xml, location)?;
         let mut child_leaves = Vec::new();
@@ -18319,39 +18368,14 @@ fn compare_cell_from_xml(
             let source = sources.next().expect("one source per cell child span")?;
             let source = source.as_str();
             let child_mark = metadata.leaf_publications.len();
-            replacements.push(match (left, right) {
-                (CellContent::Paragraph(left), CellContent::Paragraph(right)) => compare_paragraph(
-                    left,
-                    right,
-                    Some(source),
-                    &child_location,
-                    metadata,
-                    diagnostics,
-                )?,
-                (CellContent::Table(left), CellContent::Table(right)) => compare_table(
-                    left,
-                    right,
-                    Some(source),
-                    &child_location,
-                    metadata,
-                    diagnostics,
-                )?,
-                (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
-                    compare_control_from_xml(
-                        left,
-                        right,
-                        &child_location,
-                        metadata,
-                        diagnostics,
-                        source,
-                    )?
-                }
-                _ => {
-                    return Err(Error::Other(format!(
-                        "comparison cannot revise incompatible cell children at {child_location}"
-                    )));
-                }
-            });
+            replacements.push(compare_cell_child(
+                left,
+                right,
+                source,
+                &child_location,
+                metadata,
+                diagnostics,
+            )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
         splice_leaf_publications(
@@ -18373,6 +18397,294 @@ fn compare_cell_from_xml(
         element_opening(&output)?.0 as isize - old_open as isize,
     )?;
     Ok(output)
+}
+
+fn compare_cell_child(
+    original: &CellContent,
+    edited: &CellContent,
+    source: &str,
+    location: &str,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
+) -> Result<String> {
+    match (original, edited) {
+        (CellContent::Paragraph(left), CellContent::Paragraph(right)) => {
+            compare_paragraph(left, right, Some(source), location, metadata, diagnostics)
+        }
+        (CellContent::Table(left), CellContent::Table(right)) => {
+            compare_table(left, right, Some(source), location, metadata, diagnostics)
+        }
+        (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
+            compare_control_from_xml(left, right, location, metadata, diagnostics, source)
+        }
+        _ => Err(Error::Other(format!(
+            "comparison cannot revise incompatible cell children at {location}"
+        ))),
+    }
+}
+
+/// Compare a cell whose number of children changed, aligning them as a block
+/// content control aligns its own. A paragraph that one side inserts,
+/// deletes, merges into another or splits off becomes a whole tracked
+/// paragraph with its mark, and a pair whose inline boundaries differ is
+/// replaced by the run of changed paragraphs around it. The last paragraph
+/// mark stays the cell terminator: a final inserted or deleted paragraph
+/// marks the paragraph mark before it instead, as [`final_paragraph`] does
+/// in a story.
+fn compare_aligned_cell_children(
+    original: &CT_Tc,
+    edited: &CT_Tc,
+    location: &str,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
+    original_xml: &str,
+) -> Result<String> {
+    let options = metadata.options;
+    let signatures = |content: &[CellContent]| {
+        content
+            .iter()
+            .map(|child| match child {
+                CellContent::Paragraph(paragraph) => {
+                    format!("p:{}", paragraph_signature_with_options(paragraph, options))
+                }
+                CellContent::Table(table) => {
+                    format!("t:{}", table_signature_with_options(table, options))
+                }
+                CellContent::ContentControl(control) => {
+                    format!("s:{}", control_signature_with_options(control, options))
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    fn paragraphs(content: &[CellContent]) -> Vec<Option<&CT_P>> {
+        content
+            .iter()
+            .map(|child| match child {
+                CellContent::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .collect()
+    }
+    let original_signatures = signatures(&original.content);
+    let edited_signatures = signatures(&edited.content);
+    let original_paragraphs = paragraphs(&original.content);
+    let edited_paragraphs = paragraphs(&edited.content);
+    let (aligned, carried) = replace_changed_paragraph_runs(
+        pair_gaps_by_kind(
+            align(&original_signatures, &edited_signatures),
+            &original_signatures,
+            &edited_signatures,
+        ),
+        &original_paragraphs,
+        &edited_paragraphs,
+        &original_signatures,
+        &edited_signatures,
+        options,
+    )?;
+    refuse_uncarried_field_owners(
+        &aligned,
+        &original_paragraphs,
+        &edited_paragraphs,
+        &carried,
+        location,
+    )?;
+    let is_paragraph =
+        |child: Option<&CellContent>| matches!(child, Some(CellContent::Paragraph(_)));
+    let trailing_paragraph_insert_start = aligned
+        .iter()
+        .enumerate()
+        .rev()
+        .take_while(|(_, (left, right))| {
+            left.is_none() && is_paragraph(right.and_then(|index| edited.content.get(index)))
+        })
+        .map(|(position, _)| position)
+        .last();
+    let trailing_paragraph_delete_start = aligned
+        .iter()
+        .enumerate()
+        .rev()
+        .take_while(|(_, (left, right))| {
+            right.is_none() && is_paragraph(left.and_then(|index| original.content.get(index)))
+        })
+        .map(|(position, _)| position)
+        .last();
+    let children = cell_child_spans(original, original_xml, location)?;
+    let (Some((_, first)), Some((_, last))) = (children.first(), children.last()) else {
+        return Err(Error::Other(format!(
+            "comparison cannot revise cell boundary structures at {location}"
+        )));
+    };
+    let (first, last) = (first.clone(), last.clone());
+    // Source text between two children, which only whitespace can be when the
+    // cell holds no unmodeled child. It stays before the original child it
+    // preceded.
+    let mut whitespace_slots = vec![String::new(); children.len()];
+    for (index, pair) in children.windows(2).enumerate() {
+        let between = &original_xml[pair[0].1.end..pair[1].1.start];
+        if !between.bytes().all(|byte| byte.is_ascii_whitespace()) {
+            return Err(Error::Other(format!(
+                "comparison cannot revise cell boundary structures at {location}"
+            )));
+        }
+        whitespace_slots[index + 1] = between.to_owned();
+    }
+    let child_spans = children
+        .iter()
+        .map(|(_, span)| span.clone())
+        .collect::<Vec<_>>();
+    let sources = source_children(original_xml, &child_spans)
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let bindings = root_namespace_bindings(original_xml, "tc", &[])?;
+    let mut content: Vec<(EmittedOwner, String)> = Vec::new();
+    let mut content_leaves: Vec<Vec<LeafPublication>> = Vec::new();
+    let mut trailing_merged = PropertySide::default();
+    let mut whitespace_emitted = vec![false; whitespace_slots.len()];
+    for (position, (left, right)) in aligned.iter().copied().enumerate() {
+        let whitespace_boundary = left.or_else(|| {
+            let right = right?;
+            let (Some(next_left), None) = aligned.get(position + 1).copied()? else {
+                return None;
+            };
+            (matches!(original.content[next_left], CellContent::Paragraph(_))
+                && matches!(edited.content[right], CellContent::Table(_)))
+            .then_some(next_left)
+        });
+        if let Some(index) = whitespace_boundary
+            && !whitespace_emitted[index]
+            && !whitespace_slots[index].is_empty()
+        {
+            content.push((EmittedOwner::Whitespace, whitespace_slots[index].clone()));
+            content_leaves.push(Vec::new());
+            whitespace_emitted[index] = true;
+        }
+        let item = |(left, right): (Option<usize>, Option<usize>)| {
+            right
+                .and_then(|index| edited.content.get(index))
+                .or_else(|| left.and_then(|index| original.content.get(index)))
+        };
+        let next_takes_mark = next_kept_owner(&aligned, position, |pair| {
+            matches!(item(pair), Some(CellContent::Table(_)))
+        })
+        .is_some_and(|pair| {
+            matches!(
+                item(pair),
+                Some(CellContent::Paragraph(_) | CellContent::Table(_))
+            )
+        });
+        let child_mark = metadata.leaf_publications.len();
+        let child_location = format!("{location}/content[{position}]");
+        match (left, right) {
+            (Some(i), Some(j)) => content.push((
+                EmittedOwner::of_cell(&original.content[i], &edited.content[j], None, metadata)?,
+                compare_cell_child(
+                    &original.content[i],
+                    &edited.content[j],
+                    &sources[i],
+                    &child_location,
+                    metadata,
+                    diagnostics,
+                )?,
+            )),
+            (Some(i), None) => {
+                let child = &original.content[i];
+                if let CellContent::Paragraph(paragraph) = child
+                    && trailing_paragraph_delete_start.is_some_and(|start| position >= start)
+                {
+                    if trailing_paragraph_delete_start == Some(position) {
+                        trailing_merged =
+                            mark_previous_paragraph(&mut content, "del", &bindings, metadata)?;
+                    }
+                    if next_takes_mark {
+                        content.push((
+                            EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
+                            marked_cell_child(child, "del", metadata)?,
+                        ));
+                    } else {
+                        content.push(final_paragraph(
+                            paragraph,
+                            "del",
+                            None,
+                            trailing_merged.clone(),
+                            metadata,
+                        )?);
+                    }
+                } else if let CellContent::Paragraph(paragraph) = child
+                    && !next_takes_mark
+                {
+                    let merged = mark_previous_paragraph(&mut content, "del", &bindings, metadata)?;
+                    content.push(final_paragraph(paragraph, "del", None, merged, metadata)?);
+                } else {
+                    content.push((
+                        EmittedOwner::of_cell(child, child, Some("del"), metadata)?,
+                        marked_cell_child(child, "del", metadata)?,
+                    ));
+                }
+            }
+            (None, Some(j)) => {
+                let child = &edited.content[j];
+                if let CellContent::Paragraph(paragraph) = child
+                    && trailing_paragraph_insert_start.is_some_and(|start| position >= start)
+                {
+                    if trailing_paragraph_insert_start == Some(position) {
+                        trailing_merged =
+                            mark_previous_paragraph(&mut content, "ins", &bindings, metadata)?;
+                    }
+                    if next_takes_mark {
+                        content.push((
+                            EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
+                            marked_cell_child(child, "ins", metadata)?,
+                        ));
+                    } else {
+                        content.push(final_paragraph(
+                            paragraph,
+                            "ins",
+                            None,
+                            trailing_merged.clone(),
+                            metadata,
+                        )?);
+                    }
+                } else if let CellContent::Paragraph(paragraph) = child
+                    && !next_takes_mark
+                {
+                    let merged = mark_previous_paragraph(&mut content, "ins", &bindings, metadata)?;
+                    content.push(final_paragraph(paragraph, "ins", None, merged, metadata)?);
+                } else {
+                    content.push((
+                        EmittedOwner::of_cell(child, child, Some("ins"), metadata)?,
+                        marked_cell_child(child, "ins", metadata)?,
+                    ));
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+        content_leaves.push(metadata.leaf_publications.split_off(child_mark));
+    }
+    let mut output = original_xml[..first.start].to_owned();
+    for ((_, xml), mut leaves) in content.into_iter().zip(content_leaves) {
+        shift_leaf_publications(&mut leaves, output.len() as isize)?;
+        metadata.leaf_publications.extend(leaves);
+        output.push_str(&xml);
+    }
+    output.push_str(&original_xml[last.end..]);
+    Ok(output)
+}
+
+fn marked_cell_child(
+    child: &CellContent,
+    kind: &str,
+    metadata: &mut Metadata<'_>,
+) -> Result<String> {
+    match child {
+        CellContent::Paragraph(paragraph) if kind == "del" => {
+            deleted_paragraph(paragraph, metadata)
+        }
+        CellContent::Paragraph(paragraph) => inserted_paragraph(paragraph, metadata),
+        CellContent::Table(table) => marked_table(table, kind, metadata),
+        CellContent::ContentControl(_) => Err(Error::Other(
+            "comparison cannot add or remove an unmatched content control in a cell".to_owned(),
+        )),
+    }
 }
 
 fn compare_control(
@@ -21433,11 +21745,51 @@ fn replace_changed_paragraph_runs(
     }
     let mut replaced = Vec::with_capacity(aligned.len());
     let mut carried = CarriedParagraphs::default();
+    // A pair that revising in place cannot express, and that the in-place
+    // replacement of `compare_paragraph` cannot take either: its bookmarks
+    // differ, or it is the last owner, whose inserted paragraph mark no
+    // rejection can remove. It becomes a deleted and an inserted paragraph,
+    // which the trailing-paragraph rule then closes on the mark before them.
+    // A bookmark or comment range of either side that the other input also
+    // holds would then be held twice, as when a producer renumbers its
+    // bookmarks, so such a pair keeps its refusal.
+    let all_original = markers(original.iter().flatten().copied());
+    let all_edited = markers(edited.iter().flatten().copied());
+    let unpaired = |position: usize, i: usize, j: usize| -> Result<bool> {
+        let (Some(left), Some(right)) = (original[i], edited[j]) else {
+            return Ok(false);
+        };
+        if original_signatures[i] == edited_signatures[j]
+            || !paragraph_boundaries_differ(left, right, options)
+            || (left.bookmark_markers == right.bookmark_markers && position + 1 != aligned.len())
+            || !markers([left].into_iter()).is_disjoint(&all_edited)
+            || !markers([right].into_iter()).is_disjoint(&all_original)
+        {
+            return Ok(false);
+        }
+        for paragraph in [left, right] {
+            if paragraph_field_events(paragraph)?
+                .iter()
+                .any(|event| matches!(event, FieldEvent::Begin | FieldEvent::End))
+                || paragraph_wraps_simple_field(paragraph)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
     let mut ranges = accepted.into_iter().peekable();
     let mut index = 0;
     while index < aligned.len() {
         let Some(range) = ranges.next_if(|range| range.start == index) else {
-            replaced.push(aligned[index]);
+            if let (Some(i), Some(j)) = aligned[index]
+                && unpaired(index, i, j)?
+            {
+                replaced.push((Some(i), None));
+                replaced.push((None, Some(j)));
+            } else {
+                replaced.push(aligned[index]);
+            }
             index += 1;
             continue;
         };

@@ -24979,6 +24979,182 @@ fn comparison_revises_an_empty_header_paragraph() {
 }
 
 #[test]
+fn comparison_tracks_paragraph_count_changes_in_cells_and_boundary_changes_at_story_ends() {
+    // A cell whose paragraphs merged, split, or were inserted or deleted was
+    // refused as a cell boundary change. A paragraph pair whose bookmarks
+    // differ beside a hyperlink, and a final paragraph that gains or loses a
+    // hyperlink, in a cell, a story or a content control, were refused too.
+    // Each now becomes whole tracked paragraphs, marks included, and both
+    // resolutions give back their input.
+    let paragraph =
+        |text: &str| format!(r#"<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#);
+    let linked = |before: &str, link: &str| {
+        format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">{before}</w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>{link}</w:t></w:r></w:hyperlink></w:p>"#
+        )
+    };
+    let heading = |text: &str, id: u32, name: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="{id}" w:name="{name}"/><w:r><w:t>{text}</w:t></w:r><w:bookmarkEnd w:id="{id}"/></w:p>"#
+        )
+    };
+    let cell = |content: &[String]| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            content.concat()
+        )
+    };
+    let table = |cells: &[String]| {
+        format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid>{}</w:tblGrid><w:tr>{}</w:tr></w:tbl>"#,
+            r#"<w:gridCol w:w="3000"/>"#.repeat(cells.len()),
+            cells.concat()
+        )
+    };
+    let around = |middle: String| [paragraph("Lead."), middle, paragraph("Tail.")].concat();
+    let in_cell = |content: &[String]| around(table(&[cell(content), cell(&[paragraph("x")])]));
+    let control = |content: &[String]| {
+        around(format!(
+            "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>",
+            content.concat()
+        ))
+    };
+    let nested = table(&[cell(&[paragraph("inner")])]);
+    let (one, two, three) = (
+        paragraph("Open the window,"),
+        paragraph("then wait a while."),
+        paragraph("Close the door."),
+    );
+    let merged = paragraph("Open the window.");
+    let cases = [
+        // Cells: merge, split, a deleted or inserted first, middle or final
+        // paragraph, a cell left with one paragraph, a nested table between.
+        (
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+            in_cell(&[merged.clone(), three.clone()]),
+        ),
+        (
+            in_cell(&[merged.clone(), three.clone()]),
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+        ),
+        (
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+            in_cell(&[two.clone(), three.clone()]),
+        ),
+        (
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+            in_cell(&[one.clone(), two.clone()]),
+        ),
+        (
+            in_cell(&[one.clone(), two.clone()]),
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+        ),
+        (
+            in_cell(&[one.clone(), two.clone(), three.clone()]),
+            in_cell(std::slice::from_ref(&merged)),
+        ),
+        (
+            in_cell(&[one.clone(), nested.clone(), two.clone(), three.clone()]),
+            in_cell(&[merged.clone(), nested.clone(), three.clone()]),
+        ),
+        // A final paragraph that gains or loses a hyperlink.
+        (
+            in_cell(&[paragraph("Call the desk.")]),
+            in_cell(&[linked("Write to ", "the desk")]),
+        ),
+        (
+            in_cell(&[linked("Write to ", "the desk")]),
+            in_cell(&[paragraph("Call the desk.")]),
+        ),
+        (
+            [paragraph("Lead."), paragraph("Call the desk.")].concat(),
+            [paragraph("Lead."), linked("Write to ", "the desk")].concat(),
+        ),
+        (
+            control(&[paragraph("One."), paragraph("Call the desk.")]),
+            control(&[paragraph("One."), linked("Write to ", "the desk")]),
+        ),
+        // A paragraph that becomes, or stops being, a bookmarked heading in
+        // a changed run that holds a hyperlink.
+        (
+            around([linked("See ", "the site"), paragraph("Old text.")].concat()),
+            around(
+                [
+                    linked("Look at ", "the site"),
+                    heading("New heading", 1, "_Toc1"),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            around(
+                [
+                    linked("See ", "the site"),
+                    heading("Old heading", 1, "_Toc1"),
+                ]
+                .concat(),
+            ),
+            around([linked("Look at ", "the site"), paragraph("New text.")].concat()),
+        ),
+    ];
+    let bytes = |body: &str| {
+        document_with_content_controls(&wrap_word_body(body))
+            .to_bytes()
+            .unwrap()
+    };
+    for (original, edited) in &cases {
+        for options in [
+            rdocx::ComparisonOptions::default(),
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ignore_fields: true,
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        ] {
+            compare_and_resolve(&bytes(original), &bytes(edited), &options);
+        }
+    }
+
+    // A pair whose two sides share a bookmark cannot become a deleted and an
+    // inserted paragraph, which would hold that bookmark twice: it keeps its
+    // refusal.
+    let original = bytes(&around(
+        [
+            linked("See ", "the site"),
+            heading("Old heading", 1, "_Toc1"),
+        ]
+        .concat(),
+    ));
+    let edited = bytes(&around(
+        [
+            linked("Look at ", "the site"),
+            r#"<w:p><w:bookmarkStart w:id="1" w:name="_Toc1"/><w:r><w:t>Text</w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>link</w:t></w:r></w:hyperlink><w:bookmarkEnd w:id="1"/></w:p>"#
+                .to_owned(),
+        ]
+        .concat(),
+    ));
+    let mut compared = Document::from_bytes(&original).unwrap();
+    let error = compared
+        .compare_with_options(
+            &Document::from_bytes(&edited).unwrap(),
+            "Ada",
+            "2026-09-30T09:30:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot revise paragraph boundary structures"),
+        "{error}"
+    );
+}
+
+#[test]
 fn comparison_deletes_several_final_paragraphs() {
     // The last deleted paragraph of a story keeps its mark, and the mark of
     // the paragraph before the deleted ones carries the deletion. That mark

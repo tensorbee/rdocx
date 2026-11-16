@@ -1787,6 +1787,17 @@ paragraph mark as the story or control terminator. A self-closing original
 final paragraph expands around its marker without creating a raw sibling. This
 ownership lets acceptance retain every appended paragraph and rejection
 reconstruct the original without an empty terminal residue.
+A table cell whose number of children changes aligns them the same way, so a
+merged, split, inserted or deleted cell paragraph becomes a whole tracked
+paragraph and the last cell paragraph mark stays the cell terminator. A cell
+with as many children on both sides keeps its pairing by position unless one
+pair could not be compared there. A paragraph pair whose inline boundaries
+differ and that cannot be replaced in place, because its bookmarks differ or
+because it is the last owner of its story, cell or control, becomes a deleted
+and an inserted paragraph. It keeps its refusal when either side holds a
+complex field boundary or a simple field, or a bookmark or comment range that
+the other input also holds, since the redline would then hold it twice, as
+when a producer renumbers generated `_Toc` bookmarks.
 When an inserted or deleted table stands between that boundary and a final
 inserted or deleted paragraph, the paragraph mark before the table carries the
 boundary, because resolving that change removes every row of the table.
