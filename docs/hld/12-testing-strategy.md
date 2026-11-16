@@ -4378,10 +4378,15 @@ Word, or full verify gate. Issue 289 is covered by block-control paragraph endpo
 
 Existing native entrypoints pin thread and companion continuity, same-paragraph
 accepted-boundary rebasing, cross-story placement, block-control destinations
-and exact mixed-reference source retention. Google marker wrappers prune only
-when their raw skeleton contains no unrelated payload. Namespace aliases and
-foreign lookalikes remain distinct. Incomplete, duplicate, reversed, point,
-orphan, reply, unknown and stale sources refuse without publication. Oxml
+and exact mixed-reference source retention. One operation table checks that
+every reply keeps its own range and reference on its root's text through
+moves, removals, text edits, clones, comparison and import, and that a root
+move onto its own range gathers replies a 0.17.0 move split. Google marker
+wrappers prune only when their raw skeleton contains no unrelated payload.
+Namespace aliases and foreign lookalikes remain distinct. Incomplete,
+duplicate, reversed, point, orphan, reply, unknown and stale sources refuse
+without publication, and so does a reply anchor that cannot travel with its
+thread. Oxml
 carrier tests cover paired and empty references, qualified attributes, multiple
 references, property insertion, typed replacement, removal, splitting and
 segment serialization. Python runtime and typing cover revision invalidation

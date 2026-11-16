@@ -2447,8 +2447,12 @@ views and document revisions remain unchanged on refusal, while a successful
 add or reply publishes once. Untouched imported comment parts remain unchanged.
 
 Native `move_comment(id, StoryRunRange)` and `move_comment_to_text(id, anchor,
-occurrence)` move an existing root thread without changing its numeric id or
-metadata. Python exposes `move_comment(id, range)` and
+occurrence)` move an existing root thread without changing its numeric ids or
+metadata. Replies with their own range and reference move with the root and
+cross its new range as `reply_to` writes them. Replies with no marker at all
+follow through the thread metadata. Any other reply anchor, such as a
+reference without a range, refuses the move. Moving a root onto its own range
+brings back replies left elsewhere. Python exposes `move_comment(id, range)` and
 `move_comment_to_text(id, anchor, *, occurrence=0)`, advancing the document
 revision exactly once after successful package publication. Refusals retain
 bytes and revisions. `rdocx comment move <file> <id> --text <anchor>

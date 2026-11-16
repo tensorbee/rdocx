@@ -5233,10 +5233,25 @@ fn comment_move_outputs_reopen_with_unchanged_thread() {
             Some("2026-10-08T12:00:00Z"),
         )
         .unwrap();
-    document.reply_to(id, "Ben", "Reply").unwrap();
+    let reply = document.reply_to(id, "Ben", "Reply").unwrap();
     document.resolve_comment(id, true).unwrap();
     document.save(&input).unwrap();
     let before = fs::read(&input).unwrap();
+    let refused = cli(&[
+        "comment",
+        "move",
+        path_text(&input),
+        &reply.to_string(),
+        "--text",
+        "TARGET",
+        "-o",
+        path_text(&output),
+    ]);
+    assert!(
+        !refused.status.success(),
+        "a reply moves with its root only"
+    );
+    assert!(!output.exists());
     let result = cli(&[
         "comment",
         "move",
@@ -5252,10 +5267,12 @@ fn comment_move_outputs_reopen_with_unchanged_thread() {
     ]);
     assert_success(&result, "move root comment");
     let reopened = Document::open(&output).unwrap();
-    assert_eq!(
-        reopened.comment_anchor_text(id).unwrap().as_deref(),
-        Some("TARGET")
-    );
+    for moved in [id, reply] {
+        assert_eq!(
+            reopened.comment_anchor_text(moved).unwrap().as_deref(),
+            Some("TARGET")
+        );
+    }
     assert_eq!(reopened.comments().len(), 2);
     assert_eq!(reopened.comments()[0].id(), id);
     assert_eq!(reopened.comments()[0].resolved(), Some(true));

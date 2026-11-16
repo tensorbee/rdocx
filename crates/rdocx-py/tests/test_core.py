@@ -5214,6 +5214,31 @@ def test_comment_moves_refuse_unknown_reply_and_invalid_ranges_atomically():
     assert reopened.comments[0].anchor_text == "TARGET"
 
 
+def test_issue446_moving_a_thread_carries_its_replies():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Keep the bearing positions here.")
+    document.add_paragraph("The bearing at pier 2 moved about 12 mm.")
+    root = document.add_comment_on_text("about 12 mm", author="R", text="Which reference?")
+    reply = document.reply_to(root, author="A", text="The 2019 survey marks.")
+    child = document.reply_to(reply, author="C", text="Which marks?")
+    document.move_comment_to_text(root, "bearing positions")
+    assert [(c.id, c.anchor_text) for c in document.comments] == [
+        (root, "bearing positions"),
+        (reply, "bearing positions"),
+        (child, "bearing positions"),
+    ]
+    assert document.remove_content(document.find_content_index(document.paragraphs[1]))
+    assert [c.id for c in document.comments] == [root, reply, child]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match=f"thread root {root}"):
+        document.move_comment_to_text(reply, "bearing")
+    assert document.to_bytes() == before
+    reopened = rdocx.Document.from_bytes(before)
+    assert {c.anchor_text for c in reopened.comments} == {"bearing positions"}
+
+
 def test_scoped_replacement_count_guards_are_atomic():
     import pickle
     import rdocx

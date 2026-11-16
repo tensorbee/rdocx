@@ -541,7 +541,7 @@ enum CommentCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Move an existing root comment onto literal main-story text
+    /// Move an existing root comment and its replies onto literal main-story text
     Move {
         /// Path to the DOCX file
         file: PathBuf,

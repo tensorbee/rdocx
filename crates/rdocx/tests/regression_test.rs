@@ -61751,6 +61751,491 @@ fn comment_removal_dangling_reference_comparison_keeps_existing_lifecycle() {
     assert!(!xml.contains(r#"commentReference w:id="8""#));
 }
 
+/// A root on "about 12 mm" with a reply, a sibling reply and a reply to the
+/// reply, each authored with its own crossing range and reference.
+fn issue446_thread() -> (Document, i32, i32) {
+    let mut document = Document::new();
+    document.add_paragraph("Keep the bearing positions here.");
+    document.add_paragraph("The bearing at pier 2 moved about 12 mm.");
+    document.add_paragraph("Tail paragraph.");
+    let root = document
+        .add_comment_on_text("about 12 mm", 0, "R", None, "Which reference?", None)
+        .unwrap();
+    let reply = document
+        .reply_to(root, "A", "The 2019 survey marks.")
+        .unwrap();
+    document.reply_to(root, "S", "Sibling").unwrap();
+    document.reply_to(reply, "C", "Child").unwrap();
+    (document, root, reply)
+}
+
+/// Every listed comment keeps one range start, one range end and one
+/// reference of its own in the saved package, and each reply shows its
+/// thread root's text. No marker outlives its comment. Returns the number of
+/// listed comments.
+fn issue446_threads_whole(document: &mut Document, label: &str) -> usize {
+    let bytes = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let parts = package
+        .parts
+        .values()
+        .map(|xml| String::from_utf8_lossy(xml).into_owned())
+        .collect::<Vec<_>>();
+    let comments = document.comments();
+    let parents = comments
+        .iter()
+        .map(|comment| (comment.id(), comment.parent_id()))
+        .collect::<HashMap<_, _>>();
+    for comment in &comments {
+        let id = comment.id();
+        for marker in ["commentRangeStart", "commentRangeEnd", "commentReference"] {
+            let tag = format!("<w:{marker} w:id=\"{id}\"/>");
+            let count = parts
+                .iter()
+                .map(|xml| xml.matches(&tag).count())
+                .sum::<usize>();
+            assert_eq!(count, 1, "{label}: comment {id} has {count} {marker}");
+        }
+        let mut root = id;
+        while let Some(parent) = parents[&root] {
+            assert!(
+                parents.contains_key(&parent),
+                "{label}: comment {root} lost its parent {parent}"
+            );
+            root = parent;
+        }
+        assert_eq!(
+            document.comment_anchor_text(id).unwrap(),
+            document.comment_anchor_text(root).unwrap(),
+            "{label}: comment {id} left its thread root {root}"
+        );
+    }
+    for marker in ["commentRangeStart", "commentRangeEnd", "commentReference"] {
+        let count = parts
+            .iter()
+            .map(|xml| xml.matches(&format!("<w:{marker} ")).count())
+            .sum::<usize>();
+        assert_eq!(count, comments.len(), "{label}: orphan {marker}");
+    }
+    comments.len()
+}
+
+/// Issue 446: a comment thread acts as one unit. Every operation keeps each
+/// reply's own range and reference on its root's text, removes the whole
+/// thread with that text, or refuses without changing the document.
+#[test]
+fn comment_thread_operations_keep_every_reply_on_its_root_text() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Expected {
+        Kept(&'static str),
+        Removed,
+        Refused,
+    }
+    type Operation = fn(&mut Document, i32) -> rdocx::Result<()>;
+    fn body_location(document: &Document, index: usize) -> ContentLocation {
+        let body = f254_story(document, StoryKind::Body);
+        document.story_items(&body).unwrap()[index]
+            .location()
+            .clone()
+    }
+    let operations: [(&str, Operation, Expected); 15] = [
+        (
+            "move_comment_to_text",
+            |document, root| document.move_comment_to_text(root, "bearing positions", 0),
+            Expected::Kept("bearing positions"),
+        ),
+        (
+            "move_comment_to_text in the same paragraph",
+            |document, root| document.move_comment_to_text(root, "The bearing", 0),
+            Expected::Kept("The bearing"),
+        ),
+        (
+            "move_comment",
+            |document, root| {
+                let location = document.paragraph_story_location(0)?.unwrap();
+                document.move_comment(
+                    root,
+                    StoryRunRange {
+                        start: StoryRunPosition {
+                            location: location.clone(),
+                            run_index: 0,
+                        },
+                        end: StoryRunPosition {
+                            location,
+                            run_index: 1,
+                        },
+                    },
+                )
+            },
+            Expected::Kept("Keep the bearing positions here."),
+        ),
+        (
+            "move, then remove the old text",
+            |document, root| {
+                document.move_comment_to_text(root, "Tail", 0)?;
+                document.try_remove_content(1).map(|_| ())
+            },
+            Expected::Kept("Tail"),
+        ),
+        (
+            "remove_content",
+            |document, _| document.try_remove_content(1).map(|_| ()),
+            Expected::Removed,
+        ),
+        (
+            "remove_content_range",
+            |document, _| document.remove_content_range(1, 3).map(|_| ()),
+            Expected::Removed,
+        ),
+        (
+            "remove_content_at",
+            |document, _| {
+                let location = body_location(document, 1);
+                document.remove_content_at(&location).map(|_| ())
+            },
+            Expected::Refused,
+        ),
+        (
+            "Paragraph::set_text",
+            |document, _| document.paragraph_mut(1).unwrap().set_text("Replaced."),
+            Expected::Kept("Replaced."),
+        ),
+        (
+            "try_replace_text over the anchor",
+            |document, _| {
+                document
+                    .try_replace_text("about 12 mm", "fifteen")
+                    .map(|_| ())
+            },
+            Expected::Kept("fifteen"),
+        ),
+        (
+            "clone_content",
+            |document, _| {
+                let (source, destination) =
+                    (body_location(document, 1), body_location(document, 2));
+                document.clone_content(&source, &destination)
+            },
+            Expected::Kept("about 12 mm"),
+        ),
+        (
+            "move_content",
+            |document, _| {
+                let (source, destination) =
+                    (body_location(document, 1), body_location(document, 0));
+                document.move_content(&source, &destination)
+            },
+            Expected::Kept("about 12 mm"),
+        ),
+        (
+            "compare, then accept the deletion",
+            |document, _| {
+                let mut edited = Document::new();
+                edited.add_paragraph("Keep the bearing positions here.");
+                edited.add_paragraph("Tail paragraph.");
+                document.compare(&edited, "X", "2026-11-09T00:00:00Z")?;
+                document.accept_all().map(|_| ())
+            },
+            Expected::Removed,
+        ),
+        (
+            "compare, then reject the deletion",
+            |document, _| {
+                let mut edited = Document::new();
+                edited.add_paragraph("Keep the bearing positions here.");
+                edited.add_paragraph("Tail paragraph.");
+                document.compare(&edited, "X", "2026-11-09T00:00:00Z")?;
+                document.reject_all().map(|_| ())
+            },
+            Expected::Kept("about 12 mm"),
+        ),
+        (
+            "import_fragment of the whole body, as Python insert_document does",
+            |document, _| {
+                let mut host = Document::new();
+                host.add_paragraph("Host.");
+                let start = document.direct_body_item_location(0)?.unwrap();
+                let end = ContentLocation::end(start.story().clone());
+                let fragment = DocumentFragment::from_range(document, &start, &end, false)?;
+                let destination = ContentLocation::end(f254_story(&host, StoryKind::Body));
+                host.import_fragment(
+                    &destination,
+                    &fragment,
+                    FragmentConflictPolicy::for_insert_document(None),
+                )?;
+                *document = host;
+                Ok(())
+            },
+            Expected::Kept("about 12 mm"),
+        ),
+        (
+            "save and reopen",
+            |document, _| {
+                *document = Document::from_bytes(&document.to_bytes()?)?;
+                Ok(())
+            },
+            Expected::Kept("about 12 mm"),
+        ),
+    ];
+    for (label, operation, expected) in operations {
+        let (mut document, root, _) = issue446_thread();
+        let before = document.to_bytes().unwrap();
+        let result = operation(&mut document, root);
+        match expected {
+            Expected::Refused => {
+                assert!(result.is_err(), "{label}: refusal expected");
+                assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+                continue;
+            }
+            _ => result.unwrap_or_else(|error| panic!("{label}: {error}")),
+        }
+        let count = issue446_threads_whole(&mut document, label);
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            issue446_threads_whole(&mut reopened, label),
+            count,
+            "{label}"
+        );
+        match expected {
+            Expected::Kept(text) => {
+                assert_eq!(count, 4, "{label}: a reply was lost");
+                let root = document
+                    .comments()
+                    .iter()
+                    .find(|comment| comment.parent_id().is_none())
+                    .unwrap()
+                    .id();
+                assert_eq!(
+                    document.comment_anchor_text(root).unwrap().as_deref(),
+                    Some(text),
+                    "{label}"
+                );
+            }
+            _ => assert_eq!(count, 0, "{label}: a reply outlived its thread"),
+        }
+    }
+}
+
+/// Issue 446: a root move carries its replies out of, and back into, every
+/// supported story owner.
+#[test]
+fn comment_thread_moves_carry_replies_across_story_owners() {
+    for kind in [
+        StoryKind::TableCell,
+        StoryKind::Header,
+        StoryKind::Footer,
+        StoryKind::Footnote,
+        StoryKind::TextBox,
+    ] {
+        let mut document = Document::new();
+        document.add_paragraph("body target");
+        let zero = Length::pt(0.0);
+        document
+            .add_text_box_to_story(
+                &f254_story(&document, rdocx::StoryKind::Body),
+                "box anchor",
+                rdocx::TextBoxOptions {
+                    width: Length::pt(144.0),
+                    height: Length::pt(54.0),
+                    anchor: rdocx::PictureAnchor {
+                        horizontal_relative_from: rdocx::DrawingHorizontalRelativeFrom::Column,
+                        horizontal_offset: zero,
+                        horizontal_alignment: None,
+                        vertical_relative_from: rdocx::DrawingVerticalRelativeFrom::Paragraph,
+                        vertical_offset: zero,
+                        vertical_alignment: None,
+                        wrap: rdocx::DrawingWrap::TopAndBottom,
+                        distance_top: zero,
+                        distance_bottom: zero,
+                        distance_left: zero,
+                        distance_right: zero,
+                        relative_height: 1,
+                        behind_text: false,
+                    },
+                    rotation_degrees: 0.0,
+                    text_direction: rdocx::TextBoxDirection::Horizontal,
+                    fill_color: None,
+                },
+            )
+            .unwrap();
+        document
+            .add_table(1, 1)
+            .cell(0, 0)
+            .unwrap()
+            .set_text("cell anchor");
+        document.set_header("header anchor");
+        document.set_footer("footer anchor");
+        document.add_footnote("note anchor");
+        let paragraph = |document: &Document, kind| {
+            let story = f254_story(document, kind);
+            let location = document
+                .story_items(&story)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind() == StoryItemKind::Paragraph)
+                .unwrap()
+                .location()
+                .clone();
+            StoryRunRange {
+                start: StoryRunPosition {
+                    location: location.clone(),
+                    run_index: 0,
+                },
+                end: StoryRunPosition {
+                    location,
+                    run_index: 1,
+                },
+            }
+        };
+        let root = document
+            .add_story_comment(paragraph(&document, kind), "Ada", None, "root")
+            .unwrap();
+        let reply = document.reply_to(root, "Ben", "reply").unwrap();
+        document.reply_to(reply, "Cyd", "child").unwrap();
+        let label = format!("{kind:?}");
+        let source = document.comment_anchor_text(root).unwrap();
+        assert_eq!(issue446_threads_whole(&mut document, &label), 3);
+        let target = paragraph(&document, StoryKind::Body);
+        document.move_comment(root, target).unwrap();
+        assert_eq!(issue446_threads_whole(&mut document, &label), 3);
+        assert_eq!(
+            document.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("body target"),
+            "{label}"
+        );
+        let back = paragraph(&document, kind);
+        document.move_comment(root, back).unwrap();
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(issue446_threads_whole(&mut reopened, &label), 3);
+        assert_eq!(
+            reopened.comment_anchor_text(reply).unwrap(),
+            source,
+            "{label}"
+        );
+        reopened.validate_comment_ownership().unwrap();
+    }
+}
+
+/// Rewrite the saved main part of a fresh `issue446_thread`.
+fn issue446_edited_thread(edit: impl Fn(String, i32, i32) -> String) -> (Document, i32, i32) {
+    let (mut document, root, reply) = issue446_thread();
+    let bytes = document.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let edited = edit(xml.clone(), root, reply);
+    assert_ne!(edited, xml, "the fixture edit must apply");
+    package.set_part("/word/document.xml", edited.into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    (Document::from_bytes(output.get_ref()).unwrap(), root, reply)
+}
+
+/// Issue 446: 0.17.0 moved roots without their replies. Moving the root
+/// onto its own range brings them back, so removing the text they were left
+/// on keeps them, and a second such move publishes nothing. A reply without
+/// any marker follows through thread metadata. A reference-only reply
+/// refuses the move before any edit, and a reply that fails once the root
+/// has moved in the candidate refuses it with the document unchanged.
+#[test]
+fn comment_thread_moves_heal_split_threads_and_refuse_untravelable_replies() {
+    let (mut diverged, root, reply) = issue446_edited_thread(|xml, root, _| {
+        let reference = format!("<w:r><w:commentReference w:id=\"{root}\"/></w:r>");
+        let start = format!("<w:commentRangeStart w:id=\"{root}\"/>");
+        let end = format!("<w:commentRangeEnd w:id=\"{root}\"/>");
+        xml.replace(&reference, "")
+            .replace(&start, "")
+            .replace(&end, "")
+            .replacen(
+                "<w:r><w:t>Keep the bearing positions here.</w:t></w:r>",
+                &format!(
+                    "{start}<w:r><w:t>Keep the bearing positions here.</w:t></w:r>{end}{reference}"
+                ),
+                1,
+            )
+    });
+    assert_eq!(
+        diverged.comment_anchor_text(reply).unwrap().as_deref(),
+        Some("about 12 mm")
+    );
+    let own = diverged.comment_anchor(root).unwrap().unwrap();
+    diverged.move_comment(root, own).unwrap();
+    assert_eq!(
+        diverged.comment_anchor_text(root).unwrap().as_deref(),
+        Some("Keep the bearing positions here.")
+    );
+    assert_eq!(issue446_threads_whole(&mut diverged, "healed"), 4);
+    let healed = diverged.to_bytes().unwrap();
+    let own = diverged.comment_anchor(root).unwrap().unwrap();
+    diverged.move_comment(root, own).unwrap();
+    assert_eq!(
+        diverged.to_bytes().unwrap(),
+        healed,
+        "a second move is a no-op"
+    );
+    assert!(diverged.try_remove_content(1).unwrap());
+    assert_eq!(issue446_threads_whole(&mut diverged, "healed"), 4);
+    assert_eq!(
+        diverged.comment_anchor_text(reply).unwrap().as_deref(),
+        Some("Keep the bearing positions here.")
+    );
+
+    let (mut legacy, root, reply) = issue446_edited_thread(|xml, _, reply| {
+        xml.replace(&format!("<w:commentRangeStart w:id=\"{reply}\"/>"), "")
+            .replace(&format!("<w:commentRangeEnd w:id=\"{reply}\"/>"), "")
+            .replace(
+                &format!("<w:r><w:commentReference w:id=\"{reply}\"/></w:r>"),
+                "",
+            )
+    });
+    legacy.move_comment_to_text(root, "Tail", 0).unwrap();
+    assert_eq!(
+        legacy.comment_anchor_text(root).unwrap().as_deref(),
+        Some("Tail")
+    );
+    assert_eq!(legacy.comment_anchor_text(reply).unwrap(), None);
+    assert_eq!(legacy.comments().len(), 4);
+    assert!(legacy.try_remove_content(1).unwrap());
+    assert_eq!(legacy.comments().len(), 4);
+
+    let (mut point, root, reply) = issue446_edited_thread(|xml, _, reply| {
+        xml.replace(&format!("<w:commentRangeStart w:id=\"{reply}\"/>"), "")
+            .replace(&format!("<w:commentRangeEnd w:id=\"{reply}\"/>"), "")
+    });
+    let before = point.to_bytes().unwrap();
+    let error = point
+        .move_comment_to_text(root, "Tail", 0)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&format!("reply {reply}")), "{error}");
+    assert_eq!(point.to_bytes().unwrap(), before);
+    let error = point
+        .move_comment_to_text(reply, "Tail", 0)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&format!("thread root {root}")), "{error}");
+    assert_eq!(point.to_bytes().unwrap(), before);
+
+    let (mut tracked, root, reply) = issue446_edited_thread(|xml, _, reply| {
+        let reference = format!("<w:r><w:commentReference w:id=\"{reply}\"/></w:r>");
+        xml.replace(
+            &reference,
+            &format!(
+                "<w:del w:id=\"90\" w:author=\"T\" w:date=\"2026-01-01T00:00:00Z\">{reference}</w:del>"
+            ),
+        )
+    });
+    let before = tracked.to_bytes().unwrap();
+    let error = tracked
+        .move_comment_to_text(root, "Tail", 0)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with(&format!("comment {root} cannot move: reply {reply}: ")),
+        "{error}"
+    );
+    assert_eq!(tracked.to_bytes().unwrap(), before);
+}
+
 #[test]
 fn comment_anchor_helper_matches_accepted_story_spans() {
     // Existing helper fallback must not substitute deleted/foreign text for accepted display.

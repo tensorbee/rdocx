@@ -16702,7 +16702,8 @@ impl PyDocument {
         Ok(id)
     }
 
-    /// Move a root comment to a checked current story range atomically.
+    /// Move a root comment and its replies to a checked current story range
+    /// atomically.
     fn move_comment(
         &mut self,
         id: i32,
@@ -16731,7 +16732,8 @@ impl PyDocument {
         Ok(())
     }
 
-    /// Move a root comment onto the selected literal main-story occurrence.
+    /// Move a root comment and its replies onto the selected literal
+    /// main-story occurrence.
     #[pyo3(signature = (id, anchor, *, occurrence = 0))]
     fn move_comment_to_text(
         &mut self,
