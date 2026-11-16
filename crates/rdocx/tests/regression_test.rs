@@ -413255,6 +413255,57 @@ fn issue446_comparison_splits_text_that_holds_references() {
 }
 
 #[test]
+fn issue446_comparison_reads_a_resplit_inline_control_as_equal() {
+    // Runs that only split the same text differently read as equal inside an
+    // inline control as they do in a paragraph, so accepting a granular
+    // redline there and comparing again gives no revision.
+    let control = |runs: &str| {
+        issue434_paragraph_document(&format!(
+            r#"<w:r><w:t xml:space="preserve">Before </w:t></w:r><w:sdt><w:sdtPr/><w:sdtContent>{runs}</w:sdtContent></w:sdt>"#
+        ))
+    };
+    let run = |text: &str| {
+        format!(r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+    };
+    let one = run("alpha beta gamma delta");
+    let three = [run("alpha beta "), run("gamma"), run(" delta")].concat();
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let options = rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        let mut original = control(&one);
+        let before = document_xml(&mut original);
+        original
+            .compare_with_options(&control(&three), "Ada", "2026-11-16T09:00:00Z", &options)
+            .unwrap();
+        assert!(
+            original.story_revisions().unwrap().is_empty(),
+            "{granularity:?}"
+        );
+        assert_eq!(document_xml(&mut original), before, "{granularity:?}");
+        // A real change inside the control is still revised.
+        let mut original = control(&one);
+        original
+            .compare_with_options(
+                &control(&[run("alpha beta "), run("gamma"), run(" epsilon")].concat()),
+                "Ada",
+                "2026-11-16T09:00:00Z",
+                &options,
+            )
+            .unwrap();
+        assert!(
+            !original.story_revisions().unwrap().is_empty(),
+            "{granularity:?}"
+        );
+    }
+}
+
+#[test]
 fn issue434_comparison_crossing_reply_composition() {
     let mut original = Document::new();
     original.add_paragraph("thirty days");

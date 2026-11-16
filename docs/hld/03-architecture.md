@@ -1523,7 +1523,9 @@ whatever the unit, in every story, with two exceptions. Under
 `ignore_whitespace` an ignored whitespace unit ends a stretch, so unchanged text
 is written one run per word and per space. A tab, a break or other run content
 ends a stretch as it ends a text element. Text that holds a character or entity
-reference, such as `&amp;`, splits like any other text.
+reference, such as `&amp;`, splits like any other text. An inline control whose
+runs only split the same text differently keeps its original source, as an
+equal paragraph does.
 
 The cost of a comparison follows its changes, not its units or the size of the
 parents that hold them, with one exception. A comparison reads the source of a

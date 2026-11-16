@@ -18418,6 +18418,40 @@ fn compare_control_from_xml(
         control_metadata_diagnostics(original, edited, location, diagnostics)?;
         let original_content = modeled_control_content(original);
         let edited_content = modeled_control_content(edited);
+        // Runs that only split the same text differently read as equal, as
+        // they do in a paragraph, and keep the original source. Equal runs
+        // keep the path below.
+        let only_runs = |content: &[&SdtContent]| {
+            !content.is_empty()
+                && content
+                    .iter()
+                    .all(|child| matches!(child, SdtContent::Run(_)))
+        };
+        if !metadata.leaf_capture
+            && only_runs(&original_content)
+            && only_runs(&edited_content)
+            && original_content != edited_content
+        {
+            let runs_of = |content: &[&SdtContent]| {
+                let mut paragraph = CT_P::new();
+                paragraph.runs = content
+                    .iter()
+                    .filter_map(|child| match child {
+                        SdtContent::Run(run) => Some(run.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                paragraph
+            };
+            if coalesced_paragraphs_equal(
+                &runs_of(&original_content),
+                &runs_of(&edited_content),
+                metadata.options,
+                metadata,
+            ) {
+                return Ok(original_xml.to_owned());
+            }
+        }
         let direct_run_or_raw =
             |content: &&SdtContent| matches!(content, SdtContent::Run(_) | SdtContent::RawXml(_));
         if uses_attributed_run_path(metadata.options)
