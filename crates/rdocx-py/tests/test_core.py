@@ -17028,6 +17028,60 @@ def test_issue430_word_saved_merged_body_pair_and_lost_note_pair_settle():
     assert _issue430_markers(document) == []
 
 
+def test_issue430_word_saved_lost_note_pairs_resolve_in_both_author_orders():
+    import rdocx
+
+    # Author A added a footnote with a body change, author B compared on top
+    # of it and added another, and Word saved the result, dropping both note
+    # pairs. Each note is still wholly tracked with its one reference.
+    body = (
+        '<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+        f'<w:p><w:del w:id="0" w:author="A" {ISSUE430_DATE}><w:r><w:delText>Payment was due in thirty days</w:delText></w:r></w:del>'
+        f'<w:ins w:id="1" w:author="A" {ISSUE430_DATE}><w:r><w:t>The seller wrote twice to ask for payment</w:t></w:r></w:ins>'
+        '<w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF8P11B"/><w:bookmarkEnd w:id="2"/>'
+        f'<w:ins w:id="3" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteReference w:id="2"/></w:r></w:ins></w:p>'
+        '<w:p><w:r><w:t xml:space="preserve">The parties met in </w:t></w:r>'
+        '<w:del w:id="8" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:delText>September</w:delText></w:r></w:del>'
+        '<w:ins w:id="9" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:t>October</w:t></w:r></w:ins>'
+        '<w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="10" w:name="_rdocxCmpNoteF18P11B"/><w:bookmarkEnd w:id="10"/>'
+        '<w:ins w:id="11" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:footnoteReference w:id="3"/></w:r></w:ins></w:p>'
+    )
+    notes = (
+        f'{ISSUE430_DELIVERY}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="4" w:author="A" {ISSUE430_DATE}/></w:rPr></w:pPr>'
+        f'<w:ins w:id="5" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote>'
+        '<w:footnote w:id="3"><w:p><w:pPr><w:rPr><w:ins w:id="12" w:author="B" w:date="2026-10-31T12:00:00Z"/></w:rPr></w:pPr>'
+        '<w:ins w:id="13" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> Minutes of the meeting, p.4.</w:t></w:r></w:ins></w:p></w:footnote>'
+    )
+    pending = _issue430_word_saved(body, notes)
+    pairs = ["_rdocxCmpNoteF18P11B", "_rdocxCmpNoteF8P11B"]
+    for first, second in (("A", "B"), ("B", "A")):
+        for accept_first in (False, True):
+            for accept_second in (False, True):
+                document = rdocx.Document.from_bytes(pending)
+                for author, accept in ((first, accept_first), (second, accept_second)):
+                    if accept:
+                        document.accept_revisions_by_author(author)
+                    else:
+                        document.reject_revisions_by_author(author)
+                    document = rdocx.Document.from_bytes(document.to_bytes())
+                    if author == first:
+                        assert _issue430_markers(document) == pairs
+                        assert {revision.author for revision in document.revisions} == {second}
+                keep_a = accept_first if first == "A" else accept_second
+                keep_b = accept_first if first == "B" else accept_second
+                expected = [1] + [2] * keep_a + [3] * keep_b
+                assert _issue430_note_ids(document) == expected
+                texts = [paragraph.text for paragraph in document.paragraphs]
+                assert texts[1] == ("The seller wrote twice to ask for payment." if keep_a
+                                    else "Payment was due in thirty days.")
+                assert texts[-1] == ("The parties met in October." if keep_b
+                                     else "The parties met in September.")
+                assert document.revisions == ()
+                assert _issue430_markers(document) == []
+
+
 @pytest.mark.parametrize("family", ("footnote", "endnote"))
 @pytest.mark.parametrize("text", ("", "Source note", " text"))
 def test_issue432_note_defaults_and_space(family, text):

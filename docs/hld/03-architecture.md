@@ -1632,6 +1632,22 @@ Within the positively admitted custody grammar, resolved units retain zero-width
 A valid body pair without a note pair has no surviving note-owner identity.
 It stays a tombstone in an open part or completed imported metadata in a settled
 part. A following reference or revision wrapper cannot identify its former owner.
+A normal owner that no pair binds is still a unit, a tracked note, when its own
+bytes prove that the whole definition is tracked as one insertion or one
+deletion: every paragraph carries a paragraph-mark revision of that kind, every
+other paragraph child is a wrapper of that kind or a zero-width range marker,
+and its reference, when it has one, bound by footnote id, is wrapped the same
+way. A tracked note left without a reference is removed by a whole selection of
+its own elements. The proof reads no marker, so an unmatched body pair stays
+unassociated. An unmatched body pair inside its reference's insertion is
+admitted only when that reference's note is a tracked note, and only keeps its
+place there. A tracked note has no token or bits and does not vote on part
+presence, but it is pending for the open lifetime, so pairs stay while it is
+pending. When a tracked note settles while a note owner outside every unit still
+holds a revision, the pairs also stay. Selecting all its elements resolves it as
+one and removes the owner when the resolution removes its content. A partial
+selection keeps the ordinary element rules. An owner with two or more references
+keeps the shared-reference rules.
 Collision reconciliation preserves a completed body pair when its token, bits,
 pair id, part and exact source paragraph boundary agree between inputs. This
 does not reconstruct a missing note owner. An unrelated paragraph edit keeps
@@ -1659,7 +1675,7 @@ for example after Word dropped a note pair, and retires the pairs left in it. Ig
 retain original bytes and cannot supply a dangling new body reference. Endnote
 topology retains its existing refusal while ordinary text edits remain supported.
 
-Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair into its own reference's merged insertion, which is admitted while the note pair remains, and Word for Mac 16.115 can drop the note counterpart. Without the note pair, such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically when the body pair sits inside the merged insertion, and rejecting an added note or accepting a removed one refuses atomically otherwise. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
+Word-save interoperability is qualified on reconstructed Word for Mac 16.115 saves, not on the retained RC3 packets. Word 16.115 can drop a note pair placed before the reference mark of a note that is not the first of its part, merge the body pair into its reference's insertion, and renumber notes, bookmarks and revisions. The note pair follows the reference mark, a body pair inside its own reference's insertion is admitted with its note pair, or without it before a tracked note's reference, and a note whose pair Word dropped resolves as a tracked note. A note outside the tracked-note grammar, for example one that holds a hyperlink, keeps the earlier limits once Word drops its pair: rejecting it refuses atomically, and when Word kept the other author's pair, resolving that author first retires the outside note's body pair while its revisions remain pending, as on v0.17.0. A footnote inserted in Word 16.115 with Track Changes on is not a tracked note, because Word tracks its reference and content but not its paragraph mark, so rejecting it keeps an empty unreferenced footnote where Word's own Reject All removes the note, as on v0.17.0. A completed body pair that an earlier Word resolution left in a part still votes when a later tracked note settles that part, so such a stale creation bit can remove a part that held only special records. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Native qualification of these families on the RC3 packets remains with F-X287. Issue430 remains open and Q-A430-28 remains independently unproved.
 
 Inputs may hold existing modeled revisions, such as the redline of an
 earlier comparison. A story owner that holds one, a paragraph, table, or

@@ -39944,6 +39944,478 @@ fn issue430_word_saved_mixed_authors_keep_pairs_until_the_last_note_settles() {
 }
 
 #[test]
+fn issue430_word_saved_lost_note_pair_resolves_as_a_tracked_note() {
+    // rdocx comparisons that Word saved, and in which Word dropped the note
+    // pair (placed before the reference mark, as v0.17.0 wrote it). Each note
+    // is still wholly tracked, with its one reference tracked the same way.
+    let buyer = "The buyer took delivery on 12 June.";
+    // A footnote added to an existing paragraph.
+    let notes = issue430_word_note_only_notes();
+    let texts = [
+        buyer,
+        "Payment was due in thirty days.",
+        "The parties met in September.",
+    ];
+    issue430_word_save_destinations(
+        issue430_word_note_only_body(),
+        &notes,
+        (&[1, 2], &texts),
+        (&[1], &texts),
+    );
+    issue430_word_save_unrelated_comparison(
+        issue430_word_note_only_body(),
+        &notes,
+        ("met in September", "met in October"),
+        &[1, 2],
+        &[1],
+    );
+    // A footnote added with a body text change and a new paragraph.
+    let middle = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:del w:id="0" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:delText>Payment was due in thirty days</w:delText></w:r></w:del><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>The seller wrote twice to ask for payment</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF8P11B"/><w:bookmarkEnd w:id="2"/><w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:pPr><w:rPr><w:ins w:id="6" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="7" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>Payment was due in sixty days.</w:t></w:r></w:ins></w:p><w:p><w:r><w:t>The parties met in September.</w:t></w:r></w:p>"#;
+    let middle_notes = format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="4" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="5" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    );
+    issue430_word_save_destinations(
+        middle,
+        &middle_notes,
+        (
+            &[1, 2],
+            &[
+                buyer,
+                "The seller wrote twice to ask for payment.",
+                "Payment was due in sixty days.",
+                "The parties met in September.",
+            ],
+        ),
+        (
+            &[1],
+            &[
+                buyer,
+                "Payment was due in thirty days.",
+                "The parties met in September.",
+            ],
+        ),
+    );
+    issue430_word_save_unrelated_comparison(
+        middle,
+        &middle_notes,
+        ("met in September", "met in October"),
+        &[1, 2],
+        &[1],
+    );
+    // The issue's "a footnote added" result: Word also merged the body pair
+    // into the inserted paragraph's insertion.
+    let merged = format!(
+        r#"<w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>The seller wrote twice to ask for payment.</w:t></w:r>{ISSUE430_WORD_PAIR}{ISSUE430_WORD_REFERENCE}</w:ins>"#
+    );
+    let added = issue430_word_added_paragraph(&merged);
+    let added_notes = issue430_word_added_paragraph_notes().replace(
+        r#"<w:bookmarkStart w:id="5" w:name="_rdocxCmpNoteF6P11N"/><w:bookmarkEnd w:id="5"/>"#,
+        "",
+    );
+    issue430_word_save_destinations(
+        &added,
+        &added_notes,
+        (
+            &[1, 2],
+            &[
+                buyer,
+                "The seller wrote twice to ask for payment.",
+                "Payment was due in thirty days.",
+            ],
+        ),
+        (&[1], &[buyer, "Payment was due in thirty days."]),
+    );
+    issue430_word_save_unrelated_comparison(
+        &added,
+        &added_notes,
+        ("due in thirty days", "due in forty days"),
+        &[1, 2],
+        &[1],
+    );
+    // A second footnote removed while the last paragraph changed: the deletion
+    // direction, where accepting removes the note.
+    let removed = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r><w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF6P11B"/><w:bookmarkEnd w:id="0"/><w:del w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:del></w:p><w:p><w:r><w:t xml:space="preserve">The parties met in </w:t></w:r><w:del w:id="4" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:delText>September</w:delText></w:r></w:del><w:ins w:id="5" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>October</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r></w:p>"#;
+    let removed_notes = format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:del w:id="2" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:del w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:delText xml:space="preserve"> Contract, clause 7.</w:delText></w:r></w:del></w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    );
+    issue430_word_save_destinations(
+        removed,
+        &removed_notes,
+        (
+            &[1],
+            &[
+                buyer,
+                "Payment was due in thirty days.",
+                "The parties met in October.",
+            ],
+        ),
+        (
+            &[1, 2],
+            &[
+                buyer,
+                "Payment was due in thirty days.",
+                "The parties met in September.",
+            ],
+        ),
+    );
+}
+
+fn issue430_word_mixed_choices(body: &str, notes: &str) {
+    let buyer = "The buyer took delivery on 12 June.";
+    let mut source = issue430_fixture(body, Some(notes));
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        for accept_first in [false, true] {
+            for accept_second in [false, true] {
+                let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+                for (step, (author, accept)) in [(first, accept_first), (second, accept_second)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let before = document.to_bytes().unwrap();
+                    let result = if accept {
+                        document.accept_revisions_by_author(author)
+                    } else {
+                        document.reject_revisions_by_author(author)
+                    };
+                    assert!(
+                        result.is_ok(),
+                        "{first}{accept_first}{second}{accept_second} {result:?}"
+                    );
+                    assert_ne!(document.to_bytes().unwrap(), before);
+                    document = issue430_roundtrip(&mut document);
+                    if step == 0 {
+                        // The other author is still pending, so both body
+                        // pairs are retained tombstones or open custody.
+                        let markers = issue430_markers(&mut document);
+                        for pair in ["_rdocxCmpNoteF8P11B", "_rdocxCmpNoteF18P11B"] {
+                            assert!(markers.contains(&pair.to_owned()), "{markers:?}");
+                        }
+                        let revisions = document.story_revisions().unwrap();
+                        assert!(!revisions.is_empty());
+                        assert!(revisions.iter().all(|revision| revision.author() == second));
+                    }
+                }
+                let keep_a = if first == "A" {
+                    accept_first
+                } else {
+                    accept_second
+                };
+                let keep_b = if first == "B" {
+                    accept_first
+                } else {
+                    accept_second
+                };
+                let mut texts = vec![buyer];
+                if keep_a {
+                    texts.extend([
+                        "The seller wrote twice to ask for payment.",
+                        "Payment was due in sixty days.",
+                    ]);
+                } else {
+                    texts.push("Payment was due in thirty days.");
+                }
+                texts.push(if keep_b {
+                    "The parties met in October."
+                } else {
+                    "The parties met in September."
+                });
+                let ids = [(1, true), (2, keep_a), (3, keep_b)]
+                    .into_iter()
+                    .filter_map(|(id, keep)| keep.then_some(id))
+                    .collect::<Vec<_>>();
+                assert_eq!(issue430_texts(&document), texts);
+                issue430_assert_settled(&mut document, &ids, true);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_word_saved_mixed_authors_resolve_in_both_orders_and_choices() {
+    // Author A's result (a footnote added with a body text change), then
+    // author B compared on top of it (a footnote and a text change in the
+    // last paragraph), then Word saved it and dropped both note pairs.
+    issue430_word_mixed_choices(issue430_word_mixed_body(), &issue430_word_mixed_notes());
+    // The same result with A's note pair moved after its reference mark before
+    // the save (the placement of the first commit), then saved by Word 16.115:
+    // Word kept A's note pair and dropped B's. A is a marked unit and B a
+    // tracked note, so resolving A first must not retire B's body pair.
+    let keep_a_body = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:del w:id="0" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:delText>Payment was due in thirty days</w:delText></w:r></w:del><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>The seller wrote twice to ask for payment</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF8P11B"/><w:bookmarkEnd w:id="2"/><w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:pPr><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="8" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>Payment was due in sixty days.</w:t></w:r></w:ins></w:p><w:p><w:r><w:t xml:space="preserve">The parties met in </w:t></w:r><w:del w:id="9" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:delText>September</w:delText></w:r></w:del><w:ins w:id="10" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:t>October</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="11" w:name="_rdocxCmpNoteF18P11B"/><w:bookmarkEnd w:id="11"/><w:ins w:id="12" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="3"/></w:r></w:ins></w:p>"#;
+    let keep_a_notes = format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="4" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="5" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:bookmarkStart w:id="6" w:name="_rdocxCmpNoteF8P11N"/><w:bookmarkEnd w:id="6"/><w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote><w:footnote w:id="3"><w:p><w:pPr><w:rPr><w:ins w:id="13" w:author="B" w:date="2026-10-31T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="14" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Minutes of the meeting, p.4.</w:t></w:r></w:ins></w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    );
+    issue430_word_mixed_choices(keep_a_body, &keep_a_notes);
+}
+
+#[test]
+fn issue430_word_saved_mixed_note_outside_the_grammar_keeps_both_pairs() {
+    // From review B. The mixed Word save with both note pairs lost, where one
+    // author's note also holds an internal hyperlink, so it is not a tracked
+    // note. Resolving the other author's tracked note, either way, keeps both
+    // body pairs while that note's revisions are pending, as v0.17.0 does.
+    let link = |author: &str, date: &str| {
+        format!(
+            r#"<w:hyperlink w:anchor="m"><w:ins w:id="40" w:author="{author}" w:date="{date}"><w:r><w:t>minutes</w:t></w:r></w:ins></w:hyperlink>"#
+        )
+    };
+    let both = [
+        "_rdocxCmpNoteF18P11B".to_owned(),
+        "_rdocxCmpNoteF8P11B".to_owned(),
+    ];
+    let b_linked = issue430_word_mixed_notes().replace(
+        " Minutes of the meeting, p.4.</w:t></w:r></w:ins>",
+        &format!(
+            " Minutes of the meeting, p.4.</w:t></w:r></w:ins>{}",
+            link("B", "2026-10-31T12:00:00Z")
+        ),
+    );
+    let a_linked = issue430_word_mixed_notes().replace(
+        " Letter of 1 July, p.2.</w:t></w:r></w:ins>",
+        &format!(
+            " Letter of 1 July, p.2.</w:t></w:r></w:ins>{}",
+            link("A", "2026-10-30T12:00:00Z")
+        ),
+    );
+    for (notes, first) in [(&b_linked, "A"), (&a_linked, "B")] {
+        assert_ne!(notes, &issue430_word_mixed_notes());
+        for accept in [true, false] {
+            let mut document = issue430_fixture(issue430_word_mixed_body(), Some(notes));
+            if accept {
+                document.accept_revisions_by_author(first).unwrap();
+            } else {
+                document.reject_revisions_by_author(first).unwrap();
+            }
+            let mut document = issue430_roundtrip(&mut document);
+            assert!(!document.story_revisions().unwrap().is_empty());
+            assert_eq!(
+                issue430_markers(&mut document),
+                both,
+                "first {first} accept {accept}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue430_comparison_over_a_word_saved_tracked_note_keeps_both_lifetimes() {
+    // Author B compares on top of A's Word-saved result whose note pair Word
+    // dropped (A's note is a pending tracked note), adding a referenced note to
+    // the last paragraph. The comparison keeps A's unmatched body pair and
+    // emits B's custody. Every order and choice reaches its destination and
+    // keeps every pair until the last note settles.
+    let mut original = issue430_fixture(
+        issue430_word_note_only_body(),
+        Some(&issue430_word_note_only_notes()),
+    );
+    let package = issue430_package(&mut original);
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let notes =
+        String::from_utf8(package.get_part("/word/footnotes.xml").unwrap().to_vec()).unwrap();
+    let edited = issue430_replace_parts(
+        &mut original,
+        Some(body.replace(
+            "<w:t>The parties met in September.</w:t></w:r>",
+            r#"<w:t>The parties met in September.</w:t></w:r><w:r><w:footnoteReference w:id="3"/></w:r>"#,
+        )),
+        Some(notes.replace(
+            "</w:footnotes>",
+            r#"<w:footnote w:id="3"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Minutes.</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+        )),
+    );
+    original.compare(&edited, "B", ISSUE430_DATE).unwrap();
+    let mut pending = issue430_roundtrip(&mut original);
+    let markers = issue430_markers(&mut pending);
+    assert!(
+        markers.contains(&"_rdocxCmpNoteF4P11B".to_owned()),
+        "{markers:?}"
+    );
+    assert_eq!(markers.iter().filter(|name| name.ends_with('B')).count(), 2);
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        for accept_first in [false, true] {
+            for accept_second in [false, true] {
+                let mut document = issue430_roundtrip(&mut pending);
+                for (author, accept) in [(first, accept_first), (second, accept_second)] {
+                    if accept {
+                        document.accept_revisions_by_author(author).unwrap();
+                    } else {
+                        document.reject_revisions_by_author(author).unwrap();
+                    }
+                    document = issue430_roundtrip(&mut document);
+                    if author == first {
+                        let left = issue430_markers(&mut document);
+                        assert!(left.contains(&"_rdocxCmpNoteF4P11B".to_owned()), "{left:?}");
+                        assert_eq!(left.iter().filter(|name| name.ends_with('B')).count(), 2);
+                    }
+                }
+                let keep_a = if first == "A" {
+                    accept_first
+                } else {
+                    accept_second
+                };
+                let keep_b = if first == "B" {
+                    accept_first
+                } else {
+                    accept_second
+                };
+                let retained = [(1, true), (2, keep_a), (3, keep_b)]
+                    .into_iter()
+                    .filter_map(|(id, keep)| keep.then_some(id))
+                    .collect::<Vec<_>>();
+                issue430_assert_settled(&mut document, &retained, true);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_word_saved_created_part_with_a_lost_note_pair_settles_to_its_destination() {
+    // One comparison created the footnotes part (bits 01) with two notes, the
+    // second re-authored Y, and Word saved it. Word kept the first note's pair
+    // and dropped the second's. Every path must end at its input's part
+    // presence: absent when both notes are rejected, whatever the order.
+    let body = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF7P01B"/><w:bookmarkEnd w:id="0"/><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:footnoteReference w:id="1"/></w:r></w:ins></w:p><w:p><w:r><w:t xml:space="preserve">Payment was due in </w:t></w:r><w:del w:id="5" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:delText>thirty</w:delText></w:r></w:del><w:ins w:id="6" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>sixty</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> days.</w:t></w:r><w:bookmarkStart w:id="7" w:name="_rdocxCmpNoteF15P01B"/><w:bookmarkEnd w:id="7"/><w:ins w:id="8" w:author="Y" w:date="2026-10-30T12:00:00Z"><w:r><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:r><w:t>The parties met in September.</w:t></w:r></w:p>"#;
+    let notes = format!(
+        r#"{}<w:footnote w:id="1"><w:p><w:pPr><w:rPr><w:ins w:id="2" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:bookmarkStart w:id="3" w:name="_rdocxCmpNoteF7P01N"/><w:bookmarkEnd w:id="3"/><w:ins w:id="4" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Delivery note, p.1.</w:t></w:r></w:ins></w:p></w:footnote><w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="9" w:author="Y" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="10" w:author="Y" w:date="2026-10-30T12:00:00Z"><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Contract, clause 7.</w:t></w:r></w:ins></w:p></w:footnote>"#,
+        issue430_word_separators()
+    );
+    let mut source = issue430_fixture(body, Some(&notes));
+    let pairs = ["_rdocxCmpNoteF15P01B", "_rdocxCmpNoteF7P01B"];
+    for (steps, retained) in [
+        (vec![(false, "A"), (false, "Y")], vec![]),
+        (vec![(false, "Y"), (false, "A")], vec![]),
+        (vec![(true, "A"), (false, "Y")], vec![1]),
+        (vec![(false, "A"), (true, "Y")], vec![2]),
+        (vec![(true, "Y"), (true, "A")], vec![1, 2]),
+    ] {
+        let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+        for (step, (accept, author)) in steps.iter().enumerate() {
+            if *accept {
+                document.accept_revisions_by_author(author).unwrap();
+            } else {
+                document.reject_revisions_by_author(author).unwrap();
+            }
+            document = issue430_roundtrip(&mut document);
+            if step == 0 {
+                let markers = issue430_markers(&mut document);
+                for pair in pairs {
+                    assert!(markers.contains(&pair.to_owned()), "{steps:?} {markers:?}");
+                }
+            }
+        }
+        issue430_assert_settled(&mut document, &retained, !retained.is_empty());
+    }
+    let mut rejected = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[], false);
+    // Without any custody pair, nothing records that the part was created:
+    // rejecting both tracked notes keeps the separator-only part, as Word does.
+    let mut plain_body = body.to_owned();
+    let mut plain_notes = notes.clone();
+    for (id, name) in [
+        (0, "_rdocxCmpNoteF7P01B"),
+        (7, "_rdocxCmpNoteF15P01B"),
+        (3, "_rdocxCmpNoteF7P01N"),
+    ] {
+        let pair = format!(
+            r#"<w:bookmarkStart w:id="{id}" w:name="{name}"/><w:bookmarkEnd w:id="{id}"/>"#
+        );
+        plain_body = plain_body.replace(&pair, "");
+        plain_notes = plain_notes.replace(&pair, "");
+    }
+    let mut native = issue430_fixture(&plain_body, Some(&plain_notes));
+    native.reject_all().unwrap();
+    issue430_assert_settled(&mut native, &[], true);
+}
+
+#[test]
+fn issue430_tracked_note_needs_its_whole_owner_and_its_only_reference_tracked_one_way() {
+    let body = issue430_word_note_only_body();
+    let notes = issue430_word_note_only_notes();
+    let reference_ins = r#"<w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z">"#;
+    let note_end = "</w:ins></w:p></w:footnote>";
+    assert_eq!(notes.matches(note_end).count(), 1);
+    let variants = [
+        // an untracked run in the owner
+        (
+            body.to_owned(),
+            notes.replace(note_end, "</w:ins><w:r><w:t>plain</w:t></w:r></w:p></w:footnote>"),
+        ),
+        // the reference is not tracked
+        (body.replace(reference_ins, "").replace("</w:ins>", ""), notes.clone()),
+        // the content is deleted while the paragraph mark is inserted
+        (
+            body.to_owned(),
+            notes
+                .replace(
+                    r#"<w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z">"#,
+                    r#"<w:del w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z">"#,
+                )
+                .replace(" Contract, clause 7.</w:t>", " Contract, clause 7.</w:delText>")
+                .replace(r#"<w:t xml:space="preserve"> Contract"#, r#"<w:delText xml:space="preserve"> Contract"#)
+                .replace(note_end, "</w:del></w:p></w:footnote>"),
+        ),
+        // two tracked references to the note stay with the shared-reference rules
+        (
+            body.replace(
+                "<w:t>The parties met in September.</w:t></w:r>",
+                r#"<w:t>The parties met in September.</w:t></w:r><w:ins w:id="90" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:footnoteReference w:id="2"/></w:r></w:ins>"#,
+            ),
+            notes.clone(),
+        ),
+    ];
+    for (body, notes) in variants {
+        assert!(body != issue430_word_note_only_body() || notes != issue430_word_note_only_notes());
+        let mut document = issue430_fixture(&body, Some(&notes));
+        let before = document.to_bytes().unwrap();
+        let error = document.reject_all().unwrap_err();
+        assert!(
+            error.to_string().contains("final paragraph mark"),
+            "{error}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+    // A partial selection keeps the ordinary element rules. Rejecting only the
+    // reference leaves an unreferenced tracked note, which a later whole
+    // selection removes. Rejecting only the note's own elements still refuses.
+    let mut document = issue430_fixture(body, Some(&notes));
+    assert_eq!(document.reject_revision_id(1).unwrap(), 1);
+    let mut document = issue430_roundtrip(&mut document);
+    assert_eq!(
+        document
+            .footnotes()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(document.story_revisions().unwrap().len(), 2);
+    document.reject_all().unwrap();
+    issue430_assert_settled(&mut document, &[1], true);
+    let referenced = body.replace(
+        reference_ins,
+        r#"<w:ins w:id="1" w:author="Ref" w:date="2026-10-30T12:00:00Z">"#,
+    );
+    let mut document = issue430_fixture(&referenced, Some(&notes));
+    let before = document.to_bytes().unwrap();
+    let error = document.reject_revisions_by_author("A").unwrap_err();
+    assert!(
+        error.to_string().contains("final paragraph mark"),
+        "{error}"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    document.reject_revisions_by_author("Ref").unwrap();
+    let mut document = issue430_roundtrip(&mut document);
+    document.reject_revisions_by_author("A").unwrap();
+    issue430_assert_settled(&mut document, &[1], true);
+}
+
+#[test]
 fn issue432_note_mark_order_separators_and_space() {
     let mut doc = Document::new();
     doc.add_paragraph("body");
