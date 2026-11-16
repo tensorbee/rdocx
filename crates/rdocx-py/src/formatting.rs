@@ -1266,8 +1266,8 @@ pub(crate) fn apply_paragraph_update(
         ParagraphLocation::Related(related.clone())
             .edit(&mut candidate, |paragraph| update.apply(paragraph))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        let native = location
-            .native(&document.inner)
+        let native = document
+            .paragraph_route(&location, None)
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         return document.publish_owner_candidate(
             py,

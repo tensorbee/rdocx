@@ -5049,6 +5049,44 @@ physical table for local publication. Nested neighboring cells use checked
 publication so equal row/cell ordinals cannot exchange held authority. Signed width truncation and wrap, border
 validation and atomic nonnegative margin validation remain field-specific.
 
+These publications take their selected route from the current owner inventory,
+the record the checked reader prepared, without a story walk: Paragraph.add_run,
+add_hyperlink and add_equation, Run.text, Table.add_row and remove_row, the
+checked fallback of Cell.text, Document.set_chart_legend and a text box
+ParagraphFormat. They read it through paragraph_route, table_route and
+run_route. Debug builds also resolve a body paragraph or body table route by
+the checked story walk and assert that both agree, story fingerprints aside.
+For a run they assert that the paragraph at the route holds the run path. A
+handle with no inventory record keeps the story walk. A call whose native edit
+takes a checked story address still walks for that address:
+Paragraph.add_internal_hyperlink, Run.add_picture, Run.replace_xml,
+Table.replace_xml, Cell.merge, the note calls and a text box paragraph edit.
+
+Run.text of a run in a direct body paragraph decides whether its typed edit
+changed anything from that block alone. Equal paragraph models publish
+nothing. Two plain paragraphs whose checked reader text or run paths differ
+publish without a staged save comparison. Text holding a character XML 1.0
+cannot carry, a paragraph that is not plain, a body with a known save failure
+and facts that do not tell keep the staged comparison and its error. Every
+other publisher keeps the staged comparison. The block answer does not save
+the rest of the document. Content elsewhere that no save accepts therefore
+does not refuse Run.text, and save reports it, as after Paragraph.text. Debug
+builds assert the block answer against the staged comparison whenever that
+comparison answers.
+
+Core, application and custom property setters do not stage the document. Their
+only fallible step reserves the properties part in the package graph and the
+identifier registry, so those two are saved first and put back on refusal.
+Success drops the derived layout and records a signed package mutation, as the
+staged commit does. Debug builds compare the package graph, the property models
+and their part names with the staged edit.
+
+Debug builds count document staging clones, story walks that resolve a route,
+staged save comparisons and full owner inventory publications in
+_word_publication_work, outside the guards. _word_force_checked_route restores
+the story walk, the staged comparison and the staged properties edit, so a
+test can compare both routes of one call.
+
 Current paragraph, table and cell capture uses derived exact-route indexes. Direct body paragraph slot lookup borrows its existing complete ContentLocation key, including fingerprint and end marker. Control-contained lookup retains its constructed key. This changes no retained owner, map insertion or publication policy.
 Body and cell-paragraph aliases are prepared from the native batch location
 projections when the owner inventory is prepared, including before candidate

@@ -27,6 +27,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+oxml-core = { workspace = true }
 oxml-pdf = { workspace = true }
 oxml-layout = { workspace = true }
 oxml-py-support = { workspace = true }

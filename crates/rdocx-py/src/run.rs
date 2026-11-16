@@ -296,20 +296,31 @@ impl PyRun {
         let mut document = self.document.borrow_mut(py);
         let publication = match &self.owner {
             Some(owner) => {
-                let (location, path) = document.current_run_owner(owner)?;
+                let (location, path) = document.run_route(owner)?;
                 crate::document::WordPublication::RunText(crate::document::WordOwnerLocation::Run(
                     location, path,
                 ))
             }
             None => crate::document::WordPublication::Conservative,
         };
+        // The typed edit below changes the paragraph of this run and nothing
+        // else, so a run of a direct body paragraph compares that block.
+        let slot = self
+            .owner
+            .as_ref()
+            .and_then(|owner| document.typed_run_edit_slot(&location, owner));
         let mut candidate = document.inner.clone_for_staging();
         location
             .edit(&mut candidate, |paragraph| {
                 paragraph.edit_run(&self.run_path, |run| run.set_text(text))
             })
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        document.publish_owner_candidate(py, candidate, "Run.text", publication)
+        match slot {
+            Some(slot) => {
+                document.publish_block_candidate(py, candidate, "Run.text", publication, slot)
+            }
+            None => document.publish_owner_candidate(py, candidate, "Run.text", publication),
+        }
     }
 
     #[pyo3(signature = (data, filename=None, width=None, height=None, *, options=None))]

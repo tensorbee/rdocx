@@ -139,6 +139,13 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::word_whole_body_work, module)?)?;
     #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_publication_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(
+        document::word_force_checked_route,
+        module
+    )?)?;
+    #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::word_splice_work, module)?)?;
     #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::word_transaction_work, module)?)?;
