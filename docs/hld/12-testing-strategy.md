@@ -1296,6 +1296,24 @@ reconstruction controls remain active.
 A bounded unit matrix checks coverage, deterministic output and retained segment
 identity without timing thresholds or an additional alignment algorithm.
 
+The Issue446 regressions state the written shape as invariants at word and
+character granularity in the body, a table cell, an inline control, a hyperlink,
+a header and a footnote. No run holds two text elements, no run repeats the
+properties of the sibling run it follows, each revision is one run with its
+whole text, and the run count is bounded by the revision count. The run count
+and the size a redline adds over its original do not depend on the length of
+the unchanged text. Unit controls check that merged fragments rejoin one text
+element with one source selection, that a character-granularity signature holds
+one token per stretch and reads the same for every run split, and that run
+sources and parent scopes read together equal those read alone, errors
+included. A count of the source bytes a comparison reads shows that it reads a
+paragraph, a hyperlink, a table and an inserted paragraph or table a fixed
+number of times whatever their children, at every granularity. Further
+regressions pin the v0.17.0 refusal of a drawing that shares its run with a
+field begin mark, compare text holding references in the body and a header,
+and compare a resplit inline control as equal. None of these uses a timing
+threshold.
+
 Chart comparison regressions cover chart-only Word and Run granularity, adjacent
 text edits and an unchanged-chart control. Saved and reopened resolutions follow
 the surviving drawing relationships and independently check exact ChartML,

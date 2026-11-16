@@ -17328,6 +17328,40 @@ def test_issue434_compare_equal_split_and_one_word_public(granularity):
         assert [(r.kind, r.text) for r in original.revisions] == [("deletion", "thirty"), ("insertion", "sixty")]
 
 
+@pytest.mark.parametrize("granularity", ["word", "character"])
+def test_issue446_compare_keeps_unchanged_text_in_whole_runs(granularity):
+    import rdocx
+
+    def document(word):
+        document = rdocx.Document()
+        for index in range(12):
+            document.add_paragraph(f"Paragraph {index}: the bearing moved about {word} millimetres since the survey.")
+        return rdocx.Document.from_bytes(document.to_bytes())
+
+    original = document("twelve")
+    assert original.compare(document("fifteen"), "R", "2026-11-09T00:00:00Z", granularity=granularity) == ()
+    xml = _document_xml(original)
+    # One text element a run: a revision is never cut into its compared units.
+    assert b"</w:t><w:t" not in xml and b"</w:delText><w:delText" not in xml
+    # Runs with the same formatting never follow each other.
+    assert b"</w:r><w:r>" not in xml
+    revisions = original.revisions
+    for index, paragraph in enumerate(original.paragraphs):
+        runs = [run.text for run in paragraph.runs]
+        assert runs[0] == f"Paragraph {index}: the bearing moved about "
+        assert runs[-1].endswith(" millimetres since the survey.")
+        assert "".join(runs) == f"Paragraph {index}: the bearing moved about fifteen millimetres since the survey."
+    # One run a revision, and one for the text before, between and after them.
+    assert xml.count(b"<w:r>") <= 12 + 2 * len(revisions)
+    if granularity == "word":
+        assert [(r.kind, r.text) for r in revisions] == [("deletion", "twelve"), ("insertion", "fifteen")] * 12
+        assert [run.text for run in original.paragraphs[3].runs] == [
+            "Paragraph 3: the bearing moved about ",
+            "fifteen",
+            " millimetres since the survey.",
+        ]
+        assert xml.count(b"<w:r>") == 12 * 4
+
 @pytest.mark.parametrize("normal", [False, True, "distinct"])
 def test_issue434_insert_effective_font_and_saved_body(normal):
     import rdocx

@@ -1513,7 +1513,31 @@ Fields, drawings, ignored units, opaque children, bookmark and comment markers,
 hyperlinks, controls and formatting transitions stop grouping. Formatting-only
 changes and replacements using ignored formatting also stop it. Different runs
 retain their own formatting and coalescing ownership. Run granularity retains
-its existing alignment and revision output. Supported inline controls retain raw
+its existing alignment and revision output. The granularity sets the compared
+unit, never the written run. Unchanged units that continue one original and one
+edited text element are written as one run, and the fragments of one text
+element inside a written run rejoin as one text element with one source
+selection, whole again when every fragment is there. A redline therefore holds
+one run for each revision and for each stretch of text between two of them,
+whatever the unit, in every story, with two exceptions. Under
+`ignore_whitespace` an ignored whitespace unit ends a stretch, so unchanged text
+is written one run per word and per space. A tab, a break or other run content
+ends a stretch as it ends a text element. Text that holds a character or entity
+reference, such as `&amp;`, splits like any other text. An inline control whose
+runs only split the same text differently keeps its original source, as an
+equal paragraph does.
+
+The cost of a comparison follows its changes, not its units or the size of the
+parents that hold them, with one exception. A comparison reads the source of a
+paragraph, table, row, cell or control a fixed number of times whatever
+children it holds: one read answers all its children, every answer, an error
+included, being the one a read for that child alone gives. A
+character-granularity signature holds one token per stretch of plain text, and
+each postcondition direction resolves the candidate once for both the package
+guard and the footnote destination check. The package guard still reads each
+cleaned story a second time, which keeps its refusals. The exception is the
+alignment of one shell segment, a full longest-common-subsequence table,
+quadratic in the units it compares. Supported inline controls retain raw
 child run cuts before extraction, align Word and Character units within those
 shell segments and copy each shell before its first inserted unit.
 Non-text content remains atomic. Unmatched identical owners become move pairs
