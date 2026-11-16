@@ -67,7 +67,11 @@ pub use content_control::{
     FormFieldTarget, FormFieldValue, FormResetValue, FormValidationIssue,
 };
 #[cfg(debug_assertions)]
+pub use document::force_staged_properties;
+#[cfg(debug_assertions)]
 pub use document::take_reopen_work;
+#[cfg(debug_assertions)]
+pub use document::take_staging_clones;
 #[cfg(debug_assertions)]
 pub use document::take_staging_work;
 pub use document::{

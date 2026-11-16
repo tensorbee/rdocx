@@ -7436,6 +7436,40 @@ impl Drop for TransactionReadPhase {
     }
 }
 
+#[cfg(debug_assertions)]
+thread_local! {
+    static STAGING_CLONES: Cell<usize> = const { Cell::new(0) };
+    static STAGED_PROPERTIES_FORCED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whole-document staging clones made on this thread since the last read.
+/// Debug builds only. Reading resets the count.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn take_staging_clones() -> usize {
+    STAGING_CLONES.with(|count| count.replace(0))
+}
+
+/// Make the properties setters stage a whole document, the reference their
+/// direct route is compared with. Debug builds only. Returns the previous
+/// choice.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn force_staged_properties(force: bool) -> bool {
+    STAGED_PROPERTIES_FORCED.with(|forced| forced.replace(force))
+}
+
+fn staged_properties_forced() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        STAGED_PROPERTIES_FORCED.with(Cell::get)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 fn note_transaction_clone() {
     #[cfg(debug_assertions)]
     TRANSACTION_WORK.with(|work| {
@@ -8735,10 +8769,13 @@ fn assert_kept_main_document_without_initializing(
 #[allow(dead_code)]
 fn without_staging_work<T>(run: impl FnOnce() -> T) -> T {
     let paused = STAGING_WORK_PAUSED.with(|cell| cell.replace(true));
+    // A debug reference stages clones of its own, which are not the call's.
+    let clones = STAGING_CLONES.with(Cell::get);
     #[cfg(test)]
     let result = a9_without_lookup_work(run);
     #[cfg(not(test))]
     let result = run();
+    STAGING_CLONES.with(|count| count.set(clones));
     STAGING_WORK_PAUSED.with(|cell| cell.set(paused));
     result
 }
@@ -25128,6 +25165,8 @@ impl Document {
 
     /// Clone all package and typed state while discarding derived layout caches.
     pub fn clone_for_staging(&self) -> Self {
+        #[cfg(debug_assertions)]
+        STAGING_CLONES.with(|count| count.set(count.get() + 1));
         Self {
             package: self.package.clone(),
             document: self.document.clone(),
@@ -25201,7 +25240,7 @@ impl Document {
     /// Independent cold reference state for debug agreement oracles only.
     #[cfg(debug_assertions)]
     fn clone_for_debug_reference(&self) -> Self {
-        let mut copy = self.clone_for_staging();
+        let mut copy = without_staging_work(|| self.clone_for_staging());
         copy.parsed = None;
         copy.main_part_blocks = None;
         copy.main_body_scans = Arc::new(Mutex::new(MainBodyScans::default()));
@@ -27123,6 +27162,106 @@ impl Document {
             &mut candidate.bundled_fallback_layout_engine,
         );
         candidate
+    }
+
+    /// Apply `edit`, a properties edit, without staging the whole document.
+    ///
+    /// `edit` first reserves the properties part in the package graph and the
+    /// identifier registry, which can fail, then writes the properties model
+    /// and its part name, which cannot. The package graph, whose part bytes
+    /// are shared, and the registry are saved first and put back on refusal,
+    /// so a refused edit leaves no reserved name or relationship id. A
+    /// success leaves what [`Self::commit_staged_mutation`] leaves for a
+    /// staged clone: the derived layout is dropped and a signed package
+    /// records a package mutation. Debug builds run the staged edit on a
+    /// clone and compare. `edit` is `Fn` for that second run.
+    fn edit_properties(&mut self, edit: impl Fn(&mut Self) -> Result<()>) -> Result<()> {
+        if staged_properties_forced() {
+            let mut candidate = self.clone_for_staging();
+            edit(&mut candidate)?;
+            self.commit_staged_mutation(candidate);
+            return Ok(());
+        }
+        #[cfg(debug_assertions)]
+        let staged = without_staging_work(|| self.clone_for_staging());
+        let package = self.package.clone();
+        let identifiers = self.identifiers.clone();
+        let result = edit(self);
+        match &result {
+            Ok(()) => {
+                self.package_signatures_invalidated |=
+                    self.package.package_rels.items.iter().any(|relationship| {
+                        relationship.rel_type == rel_types::DIGITAL_SIGNATURE_ORIGIN
+                    }) && (self.package_signatures_invalidated
+                        || crate::embedded::synchronized_package_mutation_invalidates_signature(
+                            &package,
+                            &self.package,
+                        ));
+                self.layout_cache
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                self.deterministic_layout_cache
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+            }
+            Err(_) => {
+                self.package = package;
+                self.identifiers = identifiers;
+            }
+        }
+        #[cfg(debug_assertions)]
+        self.assert_properties_edit_matches_staged(staged, &edit, &result);
+        result
+    }
+
+    /// Debug proof that a direct properties edit left the package graph, the
+    /// properties models and their part names of the staged edit, or
+    /// refused with its error.
+    #[cfg(debug_assertions)]
+    fn assert_properties_edit_matches_staged(
+        &self,
+        mut staged: Self,
+        edit: &impl Fn(&mut Self) -> Result<()>,
+        result: &Result<()>,
+    ) {
+        match (result, edit(&mut staged)) {
+            (Ok(()), Ok(())) => {
+                assert!(
+                    staged.package.same_package_as(&self.package),
+                    "direct properties edit changed another package graph"
+                );
+                assert_eq!(
+                    staged.identifiers, self.identifiers,
+                    "direct properties edit left another identifier registry"
+                );
+                assert_eq!(staged.core_properties, self.core_properties);
+                assert_eq!(
+                    format!("{:?}", staged.application_properties),
+                    format!("{:?}", self.application_properties)
+                );
+                assert_eq!(staged.custom_properties, self.custom_properties);
+                assert_eq!(
+                    (
+                        &staged.core_properties_part_name,
+                        &staged.application_properties_part_name,
+                        &staged.custom_properties_part_name,
+                        staged.custom_properties_owned,
+                    ),
+                    (
+                        &self.core_properties_part_name,
+                        &self.application_properties_part_name,
+                        &self.custom_properties_part_name,
+                        self.custom_properties_owned,
+                    ),
+                    "direct properties edit named another part"
+                );
+            }
+            (Err(direct), Err(staged)) => assert_eq!(direct.to_string(), staged.to_string()),
+            (Ok(()), Err(staged)) => panic!("direct properties edit hid the staged error {staged}"),
+            (Err(direct), Ok(())) => panic!("direct properties edit refused with {direct}"),
+        }
     }
 
     pub(crate) fn commit_staged_mutation(&mut self, candidate: Self) {
@@ -47904,11 +48043,11 @@ impl Document {
 
     /// Replace the complete core-properties model.
     pub fn set_core_properties(&mut self, properties: CoreProperties) -> Result<()> {
-        let mut candidate = self.clone_for_staging();
-        candidate.reserve_core_properties_bundle()?;
-        candidate.core_properties = Some(Box::new(properties));
-        self.commit_staged_mutation(candidate);
-        Ok(())
+        self.edit_properties(|document| {
+            document.reserve_core_properties_bundle()?;
+            document.core_properties = Some(Box::new(properties.clone()));
+            Ok(())
+        })
     }
 
     /// Remove the complete core-properties part and its package relationship.
@@ -47943,11 +48082,11 @@ impl Document {
                  (two digits, a dot, four digits), which Word requires to open the file"
             )));
         }
-        let mut candidate = self.clone_for_staging();
-        candidate.reserve_application_properties_bundle()?;
-        candidate.application_properties = Some(properties);
-        self.commit_staged_mutation(candidate);
-        Ok(())
+        self.edit_properties(|document| {
+            document.reserve_application_properties_bundle()?;
+            document.application_properties = Some(properties.clone());
+            Ok(())
+        })
     }
 
     /// Remove the complete application-properties part and package relationship.
@@ -48002,27 +48141,27 @@ impl Document {
             )));
         }
 
-        let mut candidate = self.clone_for_staging();
-        let created = candidate.custom_properties_part_name.is_none();
-        candidate.reserve_custom_properties_bundle()?;
-        let properties = candidate
-            .custom_properties
-            .get_or_insert_with(CustomProperties::default);
-        if let Some(index) = properties
-            .properties
-            .iter()
-            .position(|existing| existing.name.as_deref() == Some(name))
-        {
-            properties
+        self.edit_properties(|document| {
+            let created = document.custom_properties_part_name.is_none();
+            document.reserve_custom_properties_bundle()?;
+            let properties = document
+                .custom_properties
+                .get_or_insert_with(CustomProperties::default);
+            if let Some(index) = properties
                 .properties
-                .retain(|existing| existing.name.as_deref() != Some(name));
-            properties.properties.insert(index, property);
-        } else {
-            properties.properties.push(property);
-        }
-        candidate.custom_properties_owned |= created;
-        self.commit_staged_mutation(candidate);
-        Ok(())
+                .iter()
+                .position(|existing| existing.name.as_deref() == Some(name))
+            {
+                properties
+                    .properties
+                    .retain(|existing| existing.name.as_deref() != Some(name));
+                properties.properties.insert(index, property.clone());
+            } else {
+                properties.properties.push(property.clone());
+            }
+            document.custom_properties_owned |= created;
+            Ok(())
+        })
     }
 
     /// Remove one named custom property.
@@ -48035,23 +48174,24 @@ impl Document {
         else {
             return Ok(None);
         };
-        let mut candidate = self.clone_for_staging();
-        let properties = candidate
-            .custom_properties
-            .as_mut()
-            .expect("custom property lookup proved the model exists");
-        properties
-            .properties
-            .retain(|property| property.name.as_deref() != Some(name));
-        if properties.properties.is_empty() && candidate.custom_properties_owned {
-            if let Some(part_name) = candidate.custom_properties_part_name.take() {
-                candidate
-                    .remove_package_properties_bundle(&part_name, rel_types::CUSTOM_PROPERTIES);
+        self.edit_properties(|document| {
+            let properties = document
+                .custom_properties
+                .as_mut()
+                .expect("custom property lookup proved the model exists");
+            properties
+                .properties
+                .retain(|property| property.name.as_deref() != Some(name));
+            if properties.properties.is_empty() && document.custom_properties_owned {
+                if let Some(part_name) = document.custom_properties_part_name.take() {
+                    document
+                        .remove_package_properties_bundle(&part_name, rel_types::CUSTOM_PROPERTIES);
+                }
+                document.custom_properties = None;
+                document.custom_properties_owned = false;
             }
-            candidate.custom_properties = None;
-            candidate.custom_properties_owned = false;
-        }
-        self.commit_staged_mutation(candidate);
+            Ok(())
+        })?;
         Ok(Some(removed))
     }
 
@@ -94631,4 +94771,85 @@ fn issue434_insert_document_keeps_effective_font() {
             }))
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn issue445_properties_edits_stage_no_document_and_refuse_without_a_trace() {
+    let custom = |value: &str| CustomProperty {
+        fmtid: "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned(),
+        pid: 2,
+        name: Some("Client".to_owned()),
+        value: crate::CustomPropertyValue::Lpwstr(value.to_owned()),
+    };
+    let titled = |title: &str| CoreProperties {
+        title: Some(title.to_owned()),
+        ..CoreProperties::default()
+    };
+    let mut document = Document::new();
+    document.add_paragraph("body");
+    #[cfg(debug_assertions)]
+    let _ = take_staging_clones();
+    document.set_core_properties(titled("kept")).unwrap();
+    let mut application = AppProperties::default();
+    application.company = Some("kept".to_owned());
+    document.set_application_properties(application).unwrap();
+    document.set_custom_property(custom("first")).unwrap();
+    assert_eq!(
+        document.remove_custom_property("Client").unwrap(),
+        Some(custom("first"))
+    );
+    document.set_custom_property(custom("kept")).unwrap();
+    #[cfg(debug_assertions)]
+    assert_eq!(take_staging_clones(), 0);
+
+    // A relationship id range without a free id refuses after the part name
+    // of a new bundle is reserved.
+    let mut exhausted = Document::new();
+    exhausted.package.package_rels.items[0].id = "rId4294967295".to_owned();
+    let before = exhausted.clone_for_staging();
+    let refusal = exhausted
+        .set_custom_property(custom("refused"))
+        .unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .contains("relationship id range is exhausted"),
+        "{refusal}"
+    );
+    assert_eq!(exhausted.identifiers, before.identifiers);
+    assert!(before.package.same_package_as(&exhausted.package));
+    assert_eq!(exhausted.custom_properties, None);
+    assert_eq!(exhausted.custom_properties_part_name, None);
+
+    // A repeated package relationship id makes every reservation refuse
+    // before it reserves anything.
+    let repeated = document.package.package_rels.items[0].clone();
+    document.package.package_rels.items.push(repeated);
+    let before = document.clone_for_staging();
+    let refusals = [
+        document.set_core_properties(titled("refused")).unwrap_err(),
+        document
+            .set_application_properties(AppProperties::default())
+            .unwrap_err(),
+        document.set_custom_property(custom("refused")).unwrap_err(),
+    ];
+    for refusal in refusals {
+        assert!(
+            refusal.to_string().contains("duplicate relationship id"),
+            "{refusal}"
+        );
+    }
+    assert!(before.package.same_package_as(&document.package));
+    assert_eq!(document.identifiers, before.identifiers);
+    assert_eq!(document.core_properties, before.core_properties);
+    assert_eq!(document.custom_properties, before.custom_properties);
+    assert_eq!(
+        document
+            .application_properties
+            .as_ref()
+            .and_then(|properties| properties.company.as_deref()),
+        Some("kept")
+    );
+    assert!(before.saves_as(&document).is_err());
 }
