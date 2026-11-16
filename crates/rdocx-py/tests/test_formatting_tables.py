@@ -570,6 +570,35 @@ def test_cells_merge_through_the_checked_table_operations():
     assert reopened.cell(1, -1).vertical_merge is None
 
 
+def test_issue446_grid_span_and_merge_consume_the_same_cells():
+    from rdocx import WD_ALIGN_PARAGRAPH, Document, RdocxError
+
+    for operation in ("grid span", "merge"):
+        document = Document()
+        table = document.add_table(1, 3, style="Table Grid")
+        table.cell(0, 0).text = "Total"
+        table.cell(0, 1).paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        if operation == "grid span":
+            document.tables[0].set_cell_grid_span(0, 0, 2)
+        else:
+            document.tables[0].cell(0, 0).merge(document.tables[0].cell(0, 1))
+        table = document.tables[0]
+        assert [cell.text for cell in table.rows[0].cells] == ["Total", ""], operation
+        assert [cell.grid_span for cell in table.rows[0].cells] == [2, 1], operation
+        assert len(table.cell(0, 0).paragraphs) == 1, operation
+
+    document = Document()
+    table = document.add_table(1, 2)
+    table.cell(0, 0).text = "Total"
+    table.cell(0, 1).text = "kept"
+    before = document.to_bytes()
+    with pytest.raises(RdocxError, match="nonempty cell"):
+        document.tables[0].set_cell_grid_span(0, 0, 2)
+    assert document.to_bytes() == before
+    document.tables[0].cell(0, 0).merge(document.tables[0].cell(0, 1))
+    assert [p.text for p in document.tables[0].cell(0, 0).paragraphs] == ["Total", "kept"]
+
+
 def test_table_acceptance_workflow_writes_the_native_body():
     # table_acceptance_workflow_writes_the_body_the_python_binding_pins in
     # crates/rdocx/tests/integration_test.rs pins the same body for the native

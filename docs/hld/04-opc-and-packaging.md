@@ -1574,8 +1574,9 @@ split toggles including explicit false and removal, alignment, conditional
 regions, and leading or trailing grid omissions. Checked cell authoring covers
 width, borders, margins, shading, vertical alignment, text direction,
 conditional regions, wrapping, horizontal spans, vertical merges, and nested
-tables. Topology-changing operations clone the complete table, reconcile only
-untouched empty cells, validate positive grid widths, exact row coverage, and
+tables. Topology-changing operations clone the complete table, consume only
+cells that the shared consumable-cell rule admits, validate positive grid
+widths, exact row coverage, and
 immediately adjacent vertical merge ranges, then replace the live table.
 
 Existing direct table rows clone and remove through a staged `Document`

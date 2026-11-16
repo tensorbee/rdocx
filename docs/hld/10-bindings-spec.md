@@ -630,7 +630,8 @@ document order, including those inside block content controls, so the handle
 is resolved from the inserted body position rather than assumed. Cells merge
 through the checked table operations, never through the unchecked cell span
 setter. `Table.set_cell_grid_span(row, col, span)` spans columns and absorbs
-or restores untouched empty cells, and `None` or `1` removes the span.
+the cells `Cell.merge` would drop or restores empty cells, and `None` or `1`
+removes the span.
 `Table.set_cell_vertical_merge(row, col, merge)` writes `restart`, `continue`
 or `None` after validating the whole merge topology. Both take the possibly
 negative indexes `Table.cell` takes. A grid span that absorbs or restores
@@ -2400,13 +2401,21 @@ lookalikes retain exact opaque XML and remain unmodeled. Typed serialization
 keeps the existing cell-property schema order and unsupported sibling slots.
 
 Operations whose validity depends on neighbouring cells live on `Table` and
-take checked row and cell indexes. Grid omissions reconcile only untouched
-empty edge cells. Horizontal spans consume or restore only untouched empty
-cells. Vertical continuations require an equal grid range in the immediately
-preceding row. Each operation validates a cloned complete table before
-publication. These are additive pre-1.0 native APIs. WASM and CLI gain no row
-or cell methods. Python binds the checked row and cell setters and the span
-and vertical merge operations, as described under the Python API shape.
+take checked row and cell indexes. Grid omissions, horizontal spans and
+`Cell.merge` share one rule for a consumed cell: its content is one paragraph
+that only paragraph properties or identity attributes distinguish from an
+empty one, with no tracked mark, tracked property or numbering change and
+no section properties, and it carries no opaque cell XML and no vertical
+merge ownership. Its modeled formatting goes with it. Spans and omissions
+refuse any other cell, and also a legacy horizontal merge cell. A merge
+refuses a cell whose metadata cannot go and keeps any other content. Spans
+and omissions keep row-level markers at their cell boundaries, and restore
+empty cells. Vertical continuations require an equal grid range in the
+immediately preceding row.
+Each operation validates a cloned complete table before publication. These
+are additive pre-1.0 native APIs. WASM and CLI gain no row or cell methods.
+Python binds the checked row and cell setters and the span and vertical merge
+operations, as described under the Python API shape.
 
 Row cloning and removal depend on package-wide identities, so the additive
 native operations live on `Document` as `clone_table_row(table, source,

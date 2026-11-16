@@ -674,25 +674,67 @@ pub(crate) fn validate_table_topology(table: &CT_Tbl) -> Result<()> {
     Ok(())
 }
 
-fn cell_is_discardable_for_grid_edit(cell: &CT_Tc) -> bool {
-    let empty_content = matches!(
-        cell.content.as_slice(),
-        [CellContent::Paragraph(paragraph)] if paragraph == &CT_P::new()
-    );
-    let width_only = cell.properties.as_ref().is_none_or(|properties| {
-        properties.grid_span.is_none()
-            && properties.h_merge.is_none()
-            && properties.v_merge.is_none()
-            && properties.borders.is_none()
-            && properties.shading.is_none()
-            && properties.v_align.is_none()
-            && properties.no_wrap.is_none()
-            && properties.cell_margin.is_none()
-            && properties.text_direction.is_none()
-            && properties.cnf_style.is_none()
-            && properties.extra_xml.is_empty()
-    });
-    empty_content && cell.extra_xml.is_empty() && width_only
+/// Whether the cell holds one paragraph with nothing in it. Paragraph
+/// formatting, which includes the mark's run formatting, and root identity
+/// attributes such as `w14:paraId` or `w:rsidR` are not content. Review and
+/// section state in the paragraph properties is: a tracked paragraph mark, a
+/// tracked property or numbering change and section properties would vanish
+/// with the cell.
+fn cell_content_is_lone_empty(cell: &CT_Tc) -> bool {
+    match cell.content.as_slice() {
+        [CellContent::Paragraph(paragraph)] => {
+            if paragraph.properties.as_ref().is_some_and(|properties| {
+                properties.sect_pr.is_some()
+                    || properties.change.is_some()
+                    || !properties.revision_xml.is_empty()
+                    || properties.numbering_revision.is_some()
+                    || !properties.numbering_revision_xml.is_empty()
+                    || properties.rpr.as_ref().is_some_and(|mark| {
+                        !mark.revision_markers.is_empty() || mark.change.is_some()
+                    })
+            }) {
+                return false;
+            }
+            let mut payload = paragraph.clone();
+            payload.properties = None;
+            payload
+                .extra_xml
+                .retain(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw));
+            payload == CT_P::new()
+        }
+        _ => false,
+    }
+}
+
+/// Whether an edit may drop the cell's own metadata: no opaque cell,
+/// cell-property or border XML and no vertical merge ownership. Modeled
+/// formatting such as shading goes with the cell, as in Word's merge.
+fn cell_metadata_is_discardable(cell: &CT_Tc) -> bool {
+    cell.extra_xml.is_empty()
+        && cell.properties.as_ref().is_none_or(|properties| {
+            properties.extra_xml.is_empty()
+                && properties
+                    .borders
+                    .as_ref()
+                    .is_none_or(|borders| borders.extra_xml.is_empty())
+                && properties.v_merge.is_none()
+        })
+}
+
+/// The one rule for every edit that consumes a cell: merging it into a
+/// neighbour, spanning over it or omitting it from a row edge. A merge
+/// refuses a cell whose metadata cannot go and keeps the content of a cell
+/// whose content is not a lone empty paragraph. A span or an omission
+/// refuses either. They also refuse a legacy `w:hMerge` cell, whose partners
+/// would dangle, which a merge never reaches: its column-edit topology check
+/// refuses any table that holds one.
+fn cell_is_consumable(cell: &CT_Tc) -> bool {
+    cell_content_is_lone_empty(cell)
+        && cell_metadata_is_discardable(cell)
+        && cell
+            .properties
+            .as_ref()
+            .is_none_or(|properties| properties.h_merge.is_none())
 }
 
 fn empty_grid_cell(width: i32) -> CT_Tc {
@@ -869,6 +911,18 @@ fn check_column_edit_topology(table: &CT_Tbl) -> Result<usize> {
 fn insert_row_cell(row: &mut CT_Row, index: usize, cell: CT_Tc) {
     for (position, _) in &mut row.extra_xml {
         if *position != usize::MAX && *position > index {
+            *position += 1;
+        }
+    }
+    row.cells.insert(index, cell);
+}
+
+/// Insert `cell` at boundary `index` after the preserved row children there.
+/// A cell restored out of a span or at the row end goes before the children
+/// that followed the span or closed the row, so a removal round trips.
+fn insert_row_cell_after_children(row: &mut CT_Row, index: usize, cell: CT_Tc) {
+    for (position, _) in &mut row.extra_xml {
+        if *position != usize::MAX && *position >= index {
             *position += 1;
         }
     }
@@ -1189,18 +1243,21 @@ impl<'a> Table<'a> {
                 return Err(Error::Other("merge rectangle has no cells".into()));
             }
             for (offset, cell) in self.inner.rows[row].cells[first..=last].iter().enumerate() {
-                if !cell.extra_xml.is_empty()
-                    || (offset > 0
-                        && cell.properties.as_ref().is_some_and(|p| {
-                            !p.extra_xml.is_empty()
-                                || p.borders.as_ref().is_some_and(|b| !b.extra_xml.is_empty())
-                        }))
-                    || cell
-                        .properties
-                        .as_ref()
-                        .is_some_and(|p| p.v_merge.is_some())
-                {
-                    return Err(Error::Other("merge cannot discard opaque cell metadata or existing vertical merge ownership".into()));
+                // A row's first cell keeps its properties, the others go.
+                let refused = if offset > 0 {
+                    !cell_metadata_is_discardable(cell)
+                } else {
+                    !cell.extra_xml.is_empty()
+                        || cell
+                            .properties
+                            .as_ref()
+                            .is_some_and(|p| p.v_merge.is_some())
+                };
+                if refused {
+                    return Err(Error::Other(
+                        "merge cannot discard opaque cell metadata or existing merge ownership"
+                            .into(),
+                    ));
                 }
             }
             selected.push((first, last));
@@ -1210,18 +1267,8 @@ impl<'a> Table<'a> {
         let mut all_lone_empty = true;
         for (offset, (first, last)) in selected.iter().enumerate() {
             for cell in &candidate.rows[top + offset].cells[*first..=*last] {
-                let lone_empty = match cell.content.as_slice() {
-                    [CellContent::Paragraph(paragraph)] => {
-                        let mut payload = paragraph.clone();
-                        payload.properties = None;
-                        payload.extra_xml.retain(|(position, raw)| {
-                            !CT_P::raw_is_root_attributes(*position, raw)
-                        });
-                        payload == CT_P::new()
-                    }
-                    _ => false,
-                };
-                if !lone_empty {
+                // The metadata half of `cell_is_consumable` was checked above.
+                if !cell_content_is_lone_empty(cell) {
                     all_lone_empty = false;
                     content.extend(cell.content.clone());
                 }
@@ -1815,7 +1862,8 @@ impl<'a> Table<'a> {
 
     /// Set the leading and trailing grid omissions for one row.
     ///
-    /// Increasing an omission removes only untouched empty edge cells.
+    /// Increasing an omission removes only edge cells that
+    /// `cell_is_consumable` admits.
     /// Decreasing it inserts empty cells with the corresponding grid widths.
     /// The complete table is validated before the candidate replaces the live
     /// value.
@@ -1872,16 +1920,16 @@ impl<'a> Table<'a> {
                 let cell = row.cells.first().ok_or_else(|| {
                     Error::Other("table row has no leading cell to omit".to_owned())
                 })?;
-                if !cell_is_discardable_for_grid_edit(cell) {
+                if !cell_is_consumable(cell) {
                     return Err(Error::Other(
                         "table row cannot omit a nonempty leading cell".to_owned(),
                     ));
                 }
-                row.cells.remove(0);
+                remove_row_cell(row, 0);
             }
         } else {
             for column in (target_before..current_before).rev() {
-                row.cells.insert(0, empty_grid_cell(grid_widths[column]));
+                insert_row_cell(row, 0, empty_grid_cell(grid_widths[column]));
             }
         }
 
@@ -1890,18 +1938,18 @@ impl<'a> Table<'a> {
                 let cell = row.cells.last().ok_or_else(|| {
                     Error::Other("table row has no trailing cell to omit".to_owned())
                 })?;
-                if !cell_is_discardable_for_grid_edit(cell) {
+                if !cell_is_consumable(cell) {
                     return Err(Error::Other(
                         "table row cannot omit a nonempty trailing cell".to_owned(),
                     ));
                 }
-                row.cells.pop();
+                remove_row_cell(row, row.cells.len() - 1);
             }
         } else {
             let first_column = grid_widths.len() - current_after;
             let last_column = grid_widths.len() - target_after;
             for width in &grid_widths[first_column..last_column] {
-                row.cells.push(empty_grid_cell(*width));
+                insert_row_cell_after_children(row, row.cells.len(), empty_grid_cell(*width));
             }
         }
 
@@ -1913,8 +1961,9 @@ impl<'a> Table<'a> {
         Ok(())
     }
 
-    /// Set one cell's horizontal grid span and reconcile untouched cells that
-    /// enter or leave the span.
+    /// Set one cell's horizontal grid span. A widening span consumes only
+    /// cells that `cell_is_consumable` admits, and a narrowing one restores
+    /// empty cells.
     pub fn set_cell_grid_span_checked(
         &mut self,
         row_index: usize,
@@ -1970,7 +2019,7 @@ impl<'a> Table<'a> {
                 let next = row.cells.get(cell_index + 1).ok_or_else(|| {
                     Error::Other("horizontal merge exceeds the row grid".to_owned())
                 })?;
-                if !cell_is_discardable_for_grid_edit(next) {
+                if !cell_is_consumable(next) {
                     return Err(Error::Other(
                         "horizontal merge cannot consume a nonempty cell".to_owned(),
                     ));
@@ -1988,12 +2037,15 @@ impl<'a> Table<'a> {
                         "horizontal merge cuts through an existing span".to_owned(),
                     ));
                 }
-                row.cells.remove(cell_index + 1);
+                remove_row_cell(row, cell_index + 1);
             }
         } else if desired < current {
             for (offset, width) in grid_widths[(start + desired)..end].iter().enumerate() {
-                row.cells
-                    .insert(cell_index + 1 + offset, empty_grid_cell(*width));
+                insert_row_cell_after_children(
+                    row,
+                    cell_index + 1 + offset,
+                    empty_grid_cell(*width),
+                );
             }
         }
         let properties = row.cells[cell_index]
@@ -3767,6 +3819,293 @@ mod tests {
             table.inner.rows[0].cells[0].content = content.clone();
             table.merge_cells((0, 0), (0, 1)).unwrap();
             assert_eq!(table.inner.rows[0].cells[0].content, content);
+        }
+    }
+
+    fn issue446_row(xml: &str) -> CT_Row {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>{xml}</w:tr></w:tbl></w:body></w:document>"#
+        );
+        let document = rdocx_oxml::CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let rdocx_oxml::document::BodyContent::Table(mut table) =
+            document.body.content.into_iter().next().unwrap()
+        else {
+            panic!("table fixture")
+        };
+        table.rows.remove(0)
+    }
+
+    fn issue446_cell(xml: &str) -> CT_Tc {
+        issue446_row(xml).cells.remove(0)
+    }
+
+    /// Row-level markers and cell texts in physical order.
+    fn issue446_row_order(row: &CT_Row) -> Vec<String> {
+        let mut order = Vec::new();
+        for index in 0..=row.cells.len() {
+            for (_, raw) in row.extra_xml.iter().filter(|(at, _)| *at == index) {
+                let raw = String::from_utf8_lossy(raw);
+                let name = raw.trim_start_matches('<').split([' ', '/', '>']).next();
+                order.push(name.unwrap_or_default().to_owned());
+            }
+            if let Some(cell) = row.cells.get(index) {
+                let mut text = String::new();
+                for content in &cell.content {
+                    if let CellContent::Paragraph(paragraph) = content {
+                        text.push_str(&paragraph.text());
+                    }
+                }
+                order.push(text);
+            }
+        }
+        order
+    }
+
+    /// Issue 446: every edit that consumes a cell applies one rule. A cell
+    /// that only paragraph properties, identity attributes or modeled cell
+    /// formatting distinguish from an empty one is consumed. Any other
+    /// content is never lost: a merge keeps it, a span or omission refuses.
+    /// Opaque cell XML refuses everywhere.
+    #[test]
+    fn issue446_every_cell_consuming_edit_shares_one_rule() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Expected {
+            Consumed,
+            Content,
+            Refused,
+        }
+        use Expected::*;
+        let rows = [
+            ("empty", "<w:tc><w:p/></w:tc>", Consumed),
+            (
+                "paragraph properties",
+                r#"<w:tc><w:p><w:pPr><w:jc w:val="right"/></w:pPr></w:p></w:tc>"#,
+                Consumed,
+            ),
+            (
+                "paragraph mark run properties",
+                "<w:tc><w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:p></w:tc>",
+                Consumed,
+            ),
+            (
+                "identity attributes",
+                r#"<w:tc><w:p w14:paraId="1A2B3C4D" w14:textId="77777777" w:rsidR="00112233"/></w:tc>"#,
+                Consumed,
+            ),
+            (
+                "modeled cell formatting",
+                r#"<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/><w:vAlign w:val="center"/></w:tcPr><w:p/></w:tc>"#,
+                Consumed,
+            ),
+            (
+                "empty run with properties",
+                "<w:tc><w:p><w:r><w:rPr><w:b/></w:rPr></w:r></w:p></w:tc>",
+                Content,
+            ),
+            (
+                "bookmark only",
+                r#"<w:tc><w:p><w:bookmarkStart w:id="7" w:name="kept"/><w:bookmarkEnd w:id="7"/></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "comment anchor",
+                r#"<w:tc><w:p><w:commentRangeStart w:id="7"/><w:commentRangeEnd w:id="7"/></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "text",
+                "<w:tc><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:tc>",
+                Content,
+            ),
+            ("two empty paragraphs", "<w:tc><w:p/><w:p/></w:tc>", Content),
+            (
+                "tracked inserted paragraph mark",
+                r#"<w:tc><w:p><w:pPr><w:rPr><w:ins w:id="90" w:author="T" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "tracked deleted paragraph mark",
+                r#"<w:tc><w:p><w:pPr><w:rPr><w:del w:id="90" w:author="T" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "tracked paragraph property change",
+                r#"<w:tc><w:p><w:pPr><w:jc w:val="right"/><w:pPrChange w:id="91" w:author="T" w:date="2026-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "section properties",
+                r#"<w:tc><w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p></w:tc>"#,
+                Content,
+            ),
+            (
+                "opaque cell XML",
+                r#"<w:tc><w:p/><x:keep xmlns:x="urn:opaque"/></w:tc>"#,
+                Refused,
+            ),
+        ];
+        let total = issue432_paragraph("<w:p><w:r><w:t>Total</w:t></w:r></w:p>");
+        let mut failures = Vec::new();
+        for (label, xml, expected) in rows {
+            let consumed = issue446_cell(xml);
+            for entry in [
+                "merge across",
+                "merge down",
+                "grid span",
+                "omit leading",
+                "omit trailing",
+            ] {
+                let vertical = entry == "merge down";
+                let mut document = crate::Document::new();
+                let mut table =
+                    document.add_table(if vertical { 2 } else { 1 }, if vertical { 1 } else { 2 });
+                let (kept, gone) = match entry {
+                    "merge down" => ((0, 0), (1, 0)),
+                    "omit leading" => ((0, 1), (0, 0)),
+                    _ => ((0, 0), (0, 1)),
+                };
+                table.inner.rows[kept.0].cells[kept.1].content =
+                    vec![CellContent::Paragraph(total.clone())];
+                table.inner.rows[gone.0].cells[gone.1] = consumed.clone();
+                let before = table.inner.clone();
+                let result = match entry {
+                    "merge across" | "merge down" => table.merge_cells(kept, gone).map(|_| ()),
+                    "grid span" => table.set_cell_grid_span_checked(0, 0, Some(2)),
+                    "omit leading" => table.set_row_grid_omissions(0, Some(1), None),
+                    _ => table.set_row_grid_omissions(0, None, Some(1)),
+                };
+                let merge = entry.starts_with("merge");
+                let survivor =
+                    &table.inner.rows[0].cells[if entry == "omit leading" { 0 } else { kept.1 }];
+                let outcome = match (&result, expected) {
+                    (Err(_), Refused) | (Err(_), Content) if !merge || expected == Refused => {
+                        *table.inner == before
+                    }
+                    (Ok(()), Consumed) => {
+                        survivor.content == vec![CellContent::Paragraph(total.clone())]
+                            && table
+                                .inner
+                                .rows
+                                .iter()
+                                .map(|row| row.cells.len())
+                                .sum::<usize>()
+                                == if vertical { 2 } else { 1 }
+                    }
+                    (Ok(()), Content) if merge => {
+                        survivor.content
+                            == [
+                                vec![CellContent::Paragraph(total.clone())],
+                                consumed.content.clone(),
+                            ]
+                            .concat()
+                    }
+                    _ => false,
+                };
+                if !outcome {
+                    failures.push(format!("{label} / {entry}: {expected:?} got {result:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        // A span or an omission never drops a legacy horizontal merge cell,
+        // whose partners would dangle. A merge refuses any table holding one
+        // in its column-edit topology check, before any cell rule.
+        let legacy =
+            issue446_cell(r#"<w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p/></w:tc>"#);
+        for entry in ["merge across", "grid span", "omit trailing"] {
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 2);
+            table.inner.rows[0].cells[1] = legacy.clone();
+            let before = table.inner.clone();
+            let result = match entry {
+                "merge across" => table.merge_cells((0, 0), (0, 1)).map(|_| ()),
+                "grid span" => table.set_cell_grid_span_checked(0, 0, Some(2)),
+                _ => table.set_row_grid_omissions(0, None, Some(1)),
+            };
+            assert!(result.is_err(), "{entry}");
+            assert_eq!(*table.inner, before, "{entry}");
+        }
+        // Row-level range markers keep their cell boundaries when a span or
+        // an omission removes a Word-shaped empty cell or restores one.
+        let text = |value: &str| format!("<w:tc><w:p><w:r><w:t>{value}</w:t></w:r></w:p></w:tc>");
+        let empty = r#"<w:tc><w:p w14:paraId="1A2B3C4D" w14:textId="77777777"/></w:tc>"#;
+        let start = r#"<w:permStart w:id="5" w:edGrp="everyone"/>"#;
+        let mark = r#"<w:bookmarkStart w:id="7" w:name="kept"/>"#;
+        let end = r#"<w:permEnd w:id="5"/>"#;
+        for (entry, cells, expected) in [
+            (
+                "grid span",
+                format!("{start}{}{empty}{mark}{}{end}", text("Total"), text("end")),
+                vec![
+                    "w:permStart",
+                    "Total",
+                    "w:bookmarkStart",
+                    "end",
+                    "w:permEnd",
+                ],
+            ),
+            (
+                "omit trailing",
+                format!("{start}{}{}{empty}{end}", text("Total"), text("end")),
+                vec!["w:permStart", "Total", "end", "w:permEnd"],
+            ),
+            (
+                "omit leading",
+                format!("{start}{empty}{mark}{}{}{end}", text("Total"), text("end")),
+                vec![
+                    "w:permStart",
+                    "w:bookmarkStart",
+                    "Total",
+                    "end",
+                    "w:permEnd",
+                ],
+            ),
+        ] {
+            let mut document = crate::Document::new();
+            let mut table = document.add_table(1, 3);
+            table.inner.rows[0] = issue446_row(&cells);
+            match entry {
+                "grid span" => table.set_cell_grid_span_checked(0, 0, Some(2)).unwrap(),
+                "omit trailing" => table.set_row_grid_omissions(0, None, Some(1)).unwrap(),
+                _ => table.set_row_grid_omissions(0, Some(1), None).unwrap(),
+            }
+            assert_eq!(
+                issue446_row_order(&table.inner.rows[0]),
+                expected,
+                "{entry}"
+            );
+            // Restoring the cell round trips, except that markers at the row
+            // start stay leading.
+            match entry {
+                "grid span" => table.set_cell_grid_span_checked(0, 0, None).unwrap(),
+                _ => table.set_row_grid_omissions(0, None, None).unwrap(),
+            }
+            let restored = match entry {
+                "grid span" => {
+                    vec![
+                        "w:permStart",
+                        "Total",
+                        "",
+                        "w:bookmarkStart",
+                        "end",
+                        "w:permEnd",
+                    ]
+                }
+                "omit trailing" => vec!["w:permStart", "Total", "end", "", "w:permEnd"],
+                _ => vec![
+                    "w:permStart",
+                    "w:bookmarkStart",
+                    "",
+                    "Total",
+                    "end",
+                    "w:permEnd",
+                ],
+            };
+            assert_eq!(
+                issue446_row_order(&table.inner.rows[0]),
+                restored,
+                "{entry} restore"
+            );
         }
     }
 
