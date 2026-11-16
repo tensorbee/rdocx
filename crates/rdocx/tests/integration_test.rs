@@ -39614,6 +39614,79 @@ fn issue430_body_pair_in_any_other_revision_position_still_refuses() {
 }
 
 #[test]
+fn issue430_comparison_refuses_a_note_reference_that_moves_to_another_site() {
+    // Review A's "a new note before an existing one". The edited input adds a
+    // note to the first paragraph, which takes id 2, and the existing note
+    // moves to id 3. Pairing by id would leave the deleted original reference
+    // and the inserted edited reference both naming note 2, a shared pending
+    // reference that Word for Mac 16.115 cannot open, with note 2's text
+    // change pairing two different notes. The comparison refuses atomically.
+    let note = |id: i32, text: &str| {
+        format!(
+            r#"<w:footnote w:id="{id}"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> {text}</w:t></w:r></w:p></w:footnote>"#
+        )
+    };
+    let mut original = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("The buyer took delivery.", None),
+            issue430_p("Payment was due.", Some(2))
+        ),
+        Some(&note(2, "Contract, clause 7.")),
+    );
+    let edited = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("The buyer took delivery.", Some(2)),
+            issue430_p("Payment was due.", Some(3))
+        ),
+        Some(&format!(
+            "{}{}",
+            note(2, "Delivery note, p.1."),
+            note(3, "Contract, clause 7.")
+        )),
+    );
+    let before = original.to_bytes().unwrap();
+    let error = original
+        .compare(&edited, "A", ISSUE430_DATE)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("footnote 2") && error.contains("moved to another site"),
+        "{error}"
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    // The same edit with the new note after the existing one keeps the ids
+    // apart and still compares, both destinations exact.
+    let mut original = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("Payment was due.", Some(2)),
+            issue430_p("The buyer took delivery.", None)
+        ),
+        Some(&note(2, "Contract, clause 7.")),
+    );
+    let edited = issue430_fixture(
+        &format!(
+            "{}{}",
+            issue430_p("Payment was due.", Some(2)),
+            issue430_p("The buyer took delivery.", Some(3))
+        ),
+        Some(&format!(
+            "{}{}",
+            note(2, "Contract, clause 7."),
+            note(3, "Delivery note, p.1.")
+        )),
+    );
+    original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+    let mut rejected = issue430_roundtrip(&mut original);
+    rejected.reject_all().unwrap();
+    issue430_assert_settled(&mut rejected, &[2], true);
+    original.accept_all().unwrap();
+    issue430_assert_settled(&mut original, &[2, 3], true);
+}
+
+#[test]
 fn issue430_body_pair_lifted_out_of_a_rejected_insertion_keeps_its_vote() {
     // Hand-built, not a Word save: it combines two observed Word shapes so that
     // the only creation bits sit on a merged pair. Note 1 was created with the

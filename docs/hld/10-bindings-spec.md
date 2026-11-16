@@ -3065,7 +3065,10 @@ removal of a comparison-owned footnotes part also retires its settings
 references while preserving other note policy. Completed markers retire before
 an affected comparison edits their owner or part or adds custody. Ignored
 footnote stories retain original parts and refuse body changes that would leave
-a missing note target. Endnote text comparison remains supported, while new
+a missing note target. A comparison whose pending result would give a
+referenced footnote more physical references than either input, because its
+reference moved to another site, refuses atomically. Endnote text comparison
+remains supported, while new
 endnote topology remains refused. These operations use existing held-handle
 invalidation and leave all live state unchanged on refusal.
 

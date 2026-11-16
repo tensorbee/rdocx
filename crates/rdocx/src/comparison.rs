@@ -5727,6 +5727,45 @@ fn note_fragment_envelope(xml: &str, bindings: &NamespaceBindings, note: bool) -
     String::from_utf8(writer.into_inner()).map_err(utf8_error)
 }
 
+/// A footnote that both inputs reference must not reach the pending result
+/// with more physical references than either input gives it. That happens
+/// when its reference moves to another site, for example a new note inserted
+/// before it takes its id in the edited input: the deleted original reference
+/// and the inserted edited one then name one owner, a shared reference that
+/// Word for Mac 16.115 cannot open, and the owner's text change pairs two
+/// different notes. Refuse before any note custody is written.
+fn refuse_shared_pending_references(
+    candidate: &Document,
+    left_refs: &[FootnoteReferenceSite],
+    right_refs: &[FootnoteReferenceSite],
+    left_normal: &BTreeMap<i32, &FootnoteOwner>,
+    right_normal: &BTreeMap<i32, &FootnoteOwner>,
+) -> Result<()> {
+    let count = |sites: &[FootnoteReferenceSite], id: i32| {
+        sites.iter().filter(|site| site.id == id).count()
+    };
+    let common = left_normal
+        .keys()
+        .filter(|id| right_normal.contains_key(id))
+        .filter(|&&id| count(left_refs, id) > 0 && count(right_refs, id) > 0)
+        .copied()
+        .collect::<Vec<_>>();
+    if common.is_empty() {
+        return Ok(());
+    }
+    let pending = footnote_reference_sites(candidate)?;
+    for id in common {
+        let most = count(left_refs, id).max(count(right_refs, id));
+        let actual = count(&pending, id);
+        if actual > most {
+            return Err(Error::Other(format!(
+                "comparison would give footnote {id} {actual} physical references where each input has at most {most}: its reference moved to another site"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn compare_footnote_parts(
     original: &Document,
     edited: &Document,
@@ -5766,6 +5805,13 @@ fn compare_footnote_parts(
         .unwrap_or_else(|| empty.clone());
     let left_refs = footnote_reference_sites(original)?;
     let right_refs = footnote_reference_sites(edited)?;
+    refuse_shared_pending_references(
+        candidate,
+        &left_refs,
+        &right_refs,
+        &left_normal,
+        &right_normal,
+    )?;
     let added = right
         .as_ref()
         .map(|part| {

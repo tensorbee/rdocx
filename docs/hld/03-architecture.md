@@ -1595,12 +1595,17 @@ with differing story shells are rejected unless their story category is
 ignored or the change is a supported normal-footnote topology change.
 Footnote comparison binds physical reference occurrences to their actual note
 ids. It aligns the body owners and run boundaries, preserves repeated references
-without synthesizing another site, and preserves original unused definitions.
-A new unreferenced definition is refused. Omitted type and explicit `normal`
-identify normal notes at every signed id. The three explicit separator types
-remain special. Empty and unknown types keep their legacy read projection, but
-their owner bytes and reference identity must remain unchanged. Classification
-uses each attribute's effective Word namespace, including local prefix shadows.
+without synthesizing another site, and preserves original unused definitions. A
+footnote that both inputs reference refuses atomically when its pending result
+would hold more physical references than either input gives it, which happens
+when its reference moves to another site, for example when a new note inserted
+before it takes its id. Such a pending result would name one owner from a
+deleted and an inserted reference. A new unreferenced definition is refused.
+Omitted type and explicit `normal` identify normal notes at every signed id. The
+three explicit separator types remain special. Empty and unknown types keep
+their legacy read projection, but their owner bytes and reference identity must
+remain unchanged. Classification uses each attribute's effective Word namespace,
+including local prefix shadows.
 
 Added and removed definitions use paired hidden standard bookmarks in the body
 and first note paragraph. Names carry a persistent token and the emitting
