@@ -5033,20 +5033,41 @@ and serialization retain their existing native errors and binding serial
 without keeping dormant facts. External stream failure does not reverse native
 normalization already performed by serialization.
 
-Whole-cell text and the five cell property setters use selected-table candidates
-when their physical owner is a qualified direct-body cell. Cell paragraph text
-resolves through paragraph_route and joins direct paragraph ordinals rather than
-raw story-item positions. First serialized tcPr relocates held paragraph and run
-routes for both absent and empty properties. Properties retain scopes. Text
-keeps the cell owner, advances its content and retires the existing CellText
-descendant scopes, including retained later paragraphs. Paragraph text retains
-its own existing policy: selected owner/properties and other cell paragraph
-scopes survive while selected content and descendants receive successors. Every fallible candidate,
-index, scope and piece preparation precedes revision commit. Exactly one aligned
-active piece is replaced after commit. Unsupported or disappearing-owner cases
-use the established checked fallback. Cached facts must contain only the root
-physical table for local publication. Nested neighboring cells use checked
-publication so equal row/cell ordinals cannot exchange held authority. Signed width truncation and wrap, border
+Whole-cell text, cell paragraph text and the five cell property setters use a
+selected-cell candidate when their physical owner is a qualified direct-body
+cell. The candidate is the edited cell alone in a frame of its table: the table
+properties and grid, and one row with the row properties and that cell. It is
+validated as a body holding the frame alone. The model limits bound nesting
+along each path, and the paths through the cell are the same in the frame and in
+the table. The checked reader reads the frame for the facts of the cell. The
+other cells keep the facts it read for the aligned piece, as the edit reaches no
+other cell model. The publication replaces the owner records of that cell, its
+paragraphs and their runs, the paragraph count of the cell in the table read
+facts and the cell paragraph routes of the cell, so its cost does not depend on
+the body, and depends on the table only through the comparison that aligns the
+piece with the table and the search of the cell owner among the table's cells.
+Cell paragraph text resolves through paragraph_route and joins direct paragraph
+ordinals rather than raw story-item positions. First serialized tcPr relocates
+held paragraph and run routes for both absent and empty properties. Properties
+retain scopes. Text keeps the cell owner, advances its content and retires the
+existing CellText descendant scopes, including retained later paragraphs.
+Paragraph text retains its own existing policy: selected owner/properties and
+other cell paragraph scopes survive while selected content and descendants
+receive successors. Every fallible candidate, index, scope and piece preparation
+precedes revision commit. Exactly one aligned active piece is updated in place
+after commit: the cell of its block, the paragraph facts and story of the cell,
+and the table read facts. Its items keep the table's own item, which is what the
+inventory reads there. A field flag already set stays set until the next full
+read of the table. Debug builds read the whole table again after each such
+publication and assert that the piece facts the inventory reads, body story
+fingerprints aside, the owner records of the table and its cell paragraph routes
+are those of that read. They also count the bytes of each block whose owners the
+checked reader reads again, which for these setters is the frame. The debug
+checked route switch sends these setters to the whole-document route.
+Unsupported or disappearing-owner cases use the established checked fallback.
+Cached facts must contain only the root physical table for local publication.
+Nested neighboring cells use checked publication so equal row/cell ordinals
+cannot exchange held authority. Signed width truncation and wrap, border
 validation and atomic nonnegative margin validation remain field-specific.
 
 These publications take their selected route from the current owner inventory,

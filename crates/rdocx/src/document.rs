@@ -40006,6 +40006,12 @@ impl Document {
     }
 
     /// Prepare one owner-free direct-body cell edit without changing this document.
+    ///
+    /// Returns the edited cell alone in a frame of its table: the table's
+    /// properties and grid, and one row with the row's properties and this
+    /// cell. The frame is validated as a body holding it alone. The model
+    /// limits bound the nesting along each path, and the paths through this
+    /// cell are the same in the frame and in the table.
     #[doc(hidden)]
     pub fn direct_body_table_cell_candidate(
         &self,
@@ -40031,18 +40037,38 @@ impl Document {
         {
             return Ok(None);
         }
-        let Some(selected) = source.rows.get(row).and_then(|row| row.cells.get(cell)) else {
+        let Some(source_row) = source.rows.get(row) else {
+            return Ok(None);
+        };
+        let Some(selected) = source_row.cells.get(cell) else {
             return Ok(None);
         };
         if selected.content.iter().any(|item| !matches!(item, rdocx_oxml::table::CellContent::Paragraph(paragraph) if paragraph.content_controls.is_empty())) {
             return Ok(None);
         }
-        let mut table = (**source).clone();
-        edit(&mut crate::table::Cell {
-            inner: &mut table.rows[row].cells[cell],
-        })?;
+        let mut edited = selected.clone();
+        edit(&mut crate::table::Cell { inner: &mut edited })?;
+        let frame = CT_Tbl {
+            properties: source.properties.clone(),
+            grid: source.grid.clone(),
+            rows: vec![rdocx_oxml::table::CT_Row {
+                table_property_exception: source_row.table_property_exception.clone(),
+                properties: source_row.properties.clone(),
+                cells: vec![edited],
+                // The start tag attributes, not the raw children between cells.
+                extra_xml: source_row
+                    .extra_xml
+                    .iter()
+                    .filter(|(at, _)| *at == usize::MAX)
+                    .cloned()
+                    .collect(),
+                content_controls: Vec::new(),
+            }],
+            extra_xml: Vec::new(),
+            content_controls: Vec::new(),
+        };
         let mut body = CT_Body {
-            content: vec![BodyContent::Table(Box::new(table))],
+            content: vec![BodyContent::Table(Box::new(frame))],
             sect_pr: None,
         };
         body.validate_resource_limits()?;
@@ -40052,9 +40078,16 @@ impl Document {
         Ok(Some(*table))
     }
 
-    /// Install the prepared table under the same exclusive source qualification.
+    /// Install the cell of a prepared frame at `row` and `cell` of the table,
+    /// under the same exclusive source qualification.
     #[doc(hidden)]
-    pub fn commit_direct_body_table(&mut self, body_slot: usize, table: CT_Tbl) {
+    pub fn commit_direct_body_table_cell(
+        &mut self,
+        body_slot: usize,
+        row: usize,
+        cell: usize,
+        frame: CT_Tbl,
+    ) {
         assert!(
             self.local_cell_source
                 .as_ref()
@@ -40063,7 +40096,13 @@ impl Document {
         let BodyContent::Table(existing) = &mut self.document.body.content[body_slot] else {
             panic!("qualified direct table changed kind")
         };
-        **existing = table;
+        let edited = frame
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.cells.into_iter().next())
+            .expect("a prepared cell frame");
+        existing.rows[row].cells[cell] = edited;
         self.invalidate_layout();
         self.unsavable_body_edit_cache = OnceLock::from(None);
     }
@@ -93066,7 +93105,7 @@ fn fx283_local_cell_width_keeps_signed_truncation_and_wrap() {
             })
             .unwrap()
             .unwrap();
-        local.commit_direct_body_table(0, candidate);
+        local.commit_direct_body_table_cell(0, 0, 0, candidate);
         let expected = reference
             .table(0)
             .unwrap()
@@ -93167,7 +93206,7 @@ fn fx283_local_text_matches_checked_fallback_for_anchors_and_opaque_xml() {
         .direct_body_table_cell_candidate(0, 0, 0, |cell| cell.try_set_text("after\tline\nend"))
         .unwrap()
         .unwrap();
-    local.commit_direct_body_table(0, table);
+    local.commit_direct_body_table_cell(0, 0, 0, table);
     assert_eq!(local.to_bytes().unwrap(), fallback.to_bytes().unwrap());
     assert_eq!(
         local.table(0).unwrap().cell(0, 0).unwrap().text(),
