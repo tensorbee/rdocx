@@ -293,6 +293,9 @@ struct RenderState<'a> {
     leaf_ranges: Vec<Option<Range<usize>>>,
     leaf_updates: Vec<usize>,
     retiring_simple_fields: HashSet<usize>,
+    /// Source spans of custody pairs that sit inside a revision wrapper. A
+    /// wrapper whose content the resolution removes keeps them in its place.
+    custody_pairs: Vec<Range<usize>>,
 }
 
 impl RenderState<'_> {
@@ -526,6 +529,10 @@ impl Document {
             leaf_ranges: Vec::new(),
             leaf_updates: Vec::new(),
             retiring_simple_fields: HashSet::new(),
+            custody_pairs: footnote_custody
+                .iter()
+                .filter_map(|unit| unit.wrapped_body.clone())
+                .collect(),
         };
         state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
         let mut output = Vec::with_capacity(source.len());
@@ -993,6 +1000,7 @@ fn render_with_source_ranges(
         leaf_elements: selected,
         leaf_updates: Vec::new(),
         retiring_simple_fields: HashSet::new(),
+        custody_pairs: Vec::new(),
     };
     state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
     let mut output = Vec::with_capacity(tree.source.len());
@@ -2567,7 +2575,18 @@ impl<'a> XmlTree<'a> {
             )
         } else {
             self.validate_selected_descendants(index, state)?;
-            Ok(Vec::new())
+            let mut kept = Vec::new();
+            for &child in &self.elements[index].children {
+                let node = &self.elements[child];
+                if state
+                    .custody_pairs
+                    .iter()
+                    .any(|pair| pair.start <= node.start && node.end <= pair.end)
+                {
+                    kept.extend(self.render_with_namespaces(child, state, false, destination)?);
+                }
+            }
+            Ok(kept)
         }
     }
 

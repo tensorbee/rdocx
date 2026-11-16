@@ -4621,6 +4621,8 @@ struct NoteMarker {
     pair_id: i32,
     owner: Option<i32>,
     reference: Option<i32>,
+    /// A body pair that Word moved into its own reference's revision wrapper.
+    wrapped: bool,
 }
 
 #[derive(Clone)]
@@ -4632,6 +4634,10 @@ pub(crate) struct FootnoteCustody {
     addition: Option<bool>,
     selected: bool,
     revisions: Vec<crate::revision::RevisionMetadata>,
+    /// The main-story span of a body pair that sits inside its reference's
+    /// insertion. Resolving that insertion keeps the pair, so the unit's
+    /// lifetime and bits do not depend on Word's wrapper merging.
+    pub(crate) wrapped_body: Option<Range<usize>>,
 }
 
 fn note_marker_name(name: &str) -> Option<(i32, bool, bool, char)> {
@@ -4779,10 +4785,35 @@ fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
                     "custody pair has no direct paragraph owner".into(),
                 ));
             };
-            if family == 'B' && paragraph != parent {
-                return Err(Error::Other(
-                    "body custody pair is inside a revision".into(),
-                ));
+            // Word for Mac 16.115 merges adjacent insertions of one author and
+            // date, which can move the body pair into its own reference's
+            // insertion. Admit only that position: an insertion directly in a
+            // main-story paragraph whose next child after the pair is the
+            // reference run, the same next-sibling proof as for a direct pair.
+            // validate_footnote_custody also requires the note pair there.
+            let wrapped = family == 'B' && paragraph != parent;
+            if wrapped {
+                let wrapper = &tree.elements[parent];
+                let own_reference = part == document.doc_part_name
+                    && wrapper.word
+                    && wrapper.local == "ins"
+                    && wrapper.revision.as_ref().is_some_and(|metadata| {
+                        metadata.kind == crate::revision::RevisionKind::Insertion
+                    })
+                    && siblings.get(position + 2).is_some_and(|&next| {
+                        let run = &tree.elements[next];
+                        run.word
+                            && run.local == "r"
+                            && run.children.iter().any(|&leaf| {
+                                tree.elements[leaf].word
+                                    && tree.elements[leaf].local == "footnoteReference"
+                            })
+                    });
+                if !own_reference {
+                    return Err(Error::Other(
+                        "body custody pair is inside a revision".into(),
+                    ));
+                }
             }
             let mut owner = None;
             let mut owner_index = None;
@@ -4862,6 +4893,7 @@ fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
                 pair_id,
                 owner,
                 reference,
+                wrapped,
             });
         }
     }
@@ -4884,6 +4916,12 @@ pub(crate) fn validate_footnote_custody(
         if markers.iter().any(|marker| marker.family == 'N') {
             return Err(Error::Other("custody marker has no footnotes part".into()));
         }
+        // Without its note pair, a body pair inside a revision has no proof.
+        if markers.iter().any(|marker| marker.wrapped) {
+            return Err(Error::Other(
+                "body custody pair is inside a revision".into(),
+            ));
+        }
         // Physical reference coherence is independent of the orphan bookmark.
         validate_footnote_reference_owners(None, &footnote_reference_sites(document)?)?;
         return Ok(markers
@@ -4897,6 +4935,7 @@ pub(crate) fn validate_footnote_custody(
                 addition: None,
                 selected: false,
                 revisions: Vec::new(),
+                wrapped_body: marker.wrapped.then(|| marker.span.clone()),
             })
             .collect());
     };
@@ -4918,6 +4957,14 @@ pub(crate) fn validate_footnote_custody(
             ));
         }
         let note = notes.first().copied();
+        // The next-sibling proof inside a revision holds only with the note
+        // pair, which binds the owner. An unmatched pair stays where Word left
+        // it only at the direct position.
+        if note.is_none() && body.wrapped {
+            return Err(Error::Other(
+                "body custody pair is inside a revision".into(),
+            ));
+        }
         if let Some(note) = note {
             if note.owner.is_none() {
                 return Err(Error::Other(
@@ -5034,6 +5081,7 @@ pub(crate) fn validate_footnote_custody(
             addition,
             selected: selected > 0,
             revisions,
+            wrapped_body: body.wrapped.then(|| body.span.clone()),
         });
     }
     if markers

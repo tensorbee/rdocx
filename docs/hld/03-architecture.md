@@ -1605,8 +1605,15 @@ uses each attribute's effective Word namespace, including local prefix shadows.
 Added and removed definitions use paired hidden standard bookmarks in the body
 and first note paragraph. Names carry a persistent token and the emitting
 transaction's original and edited part-presence bits. The body pair precedes the
-first actual reference outside its revision wrapper. The note pair follows the
-note's reference-mark run inside its content insertion or deletion, because
+first actual reference outside its revision wrapper. Word for Mac 16.115 merges
+adjacent insertions of one author and date, which can move the pair inside the
+reference's own insertion. A body pair is admitted there only in the main story,
+only with its note pair, and only as a direct child of the one insertion whose
+next child is the reference run, the same next-sibling proof as outside it.
+Resolving that insertion keeps the pair in its place, so its lifetime and
+part-presence vote do not depend on Word's merging. Any other position inside a
+revision refuses, as does an unmatched pair inside one. The note pair follows
+the note's reference-mark run inside its content insertion or deletion, because
 Word 16.115 drops a pair that precedes the reference mark of a note that is not
 the first of its part. A note without a reference-mark run keeps the pair at the
 start of its insertion, or outside its deletion.
@@ -1644,7 +1651,7 @@ before editing its owner or part or emitting new custody there. Ignored notes
 retain original bytes and cannot supply a dangling new body reference. Endnote
 topology retains its existing refusal while ordinary text edits remain supported.
 
-Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair inside a revision and drop its note counterpart. Such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
+Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair into its own reference's merged insertion, which is admitted while the note pair remains, and Word for Mac 16.115 can drop the note counterpart. Without the note pair, such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically when the body pair sits inside the merged insertion, and rejecting an added note or accepting a removed one refuses atomically otherwise. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
 
 Inputs may hold existing modeled revisions, such as the redline of an
 earlier comparison. A story owner that holds one, a paragraph, table, or
