@@ -615,6 +615,10 @@ pub(crate) fn apply_comment_snapshot(
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_COMPARISON_STAGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The bytes of the parents [`RunSource::capture_all`],
+    /// [`publication_parents_at`] and [`source_children`] have read, which the
+    /// tests of the cost of a comparison count instead of timing it.
+    static SOURCE_READ_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 type ControlPropertySignature<'a> = Option<(
@@ -1611,14 +1615,13 @@ impl Document {
                 &new_ids,
             )?;
         }
-        let mut accepted_body = resolved_package(
+        let accepted = resolved_candidate(
             &candidate,
             |document| document.accept_revision_ids(&new_ids),
-            &original_stories,
-            options,
-            &text_box_markers,
             Some(&new_ids),
         )?;
+        let mut accepted_body =
+            normalized_package(&accepted, &original_stories, options, &text_box_markers)?;
         let mut edited_package =
             normalized_package(&edited, &edited_stories, options, &text_box_markers)?;
         let main_ignored = story_ignored(options, ComparisonStoryKind::Main);
@@ -1688,7 +1691,7 @@ impl Document {
             1,
             &new_ids,
         )?;
-        verify_footnote_destination(&candidate, &edited, &new_ids, true, options)?;
+        verify_footnote_destination(&accepted, &edited, true, options)?;
         if accepted_body != edited_package {
             return Err(comparison_postcondition_error(
                 "acceptance",
@@ -1706,14 +1709,13 @@ impl Document {
                 ));
             }
         }
-        let mut rejected_package = resolved_package(
+        let rejected = resolved_candidate(
             &candidate,
             |document| document.reject_revision_ids(&new_ids),
-            &original_stories,
-            options,
-            &text_box_markers,
             Some(&new_ids),
         )?;
+        let mut rejected_package =
+            normalized_package(&rejected, &original_stories, options, &text_box_markers)?;
         let mut original_package =
             normalized_package(&original, &original_stories, options, &text_box_markers)?;
         if main_ignored {
@@ -1728,7 +1730,7 @@ impl Document {
             0,
             &new_ids,
         )?;
-        verify_footnote_destination(&candidate, &original, &new_ids, false, options)?;
+        verify_footnote_destination(&rejected, &original, false, options)?;
         if rejected_package != original_package {
             return Err(comparison_postcondition_error(
                 "rejection",
@@ -3726,79 +3728,217 @@ fn source_fragment(xml: &str, bindings: &[(String, String)]) -> Result<String> {
 }
 
 fn publication_parent_at(parent: &str, at: usize) -> Result<NamespaceBindings> {
+    publication_parents_at(parent, &[at])
+        .pop()
+        .expect("one result per position")
+}
+
+/// The scope of the element that holds each position of `parent`, as
+/// [`publication_parent_at`] gives it for that position alone.
+///
+/// One read of `parent` answers every position, so a parent of many children
+/// is read once, not once per child. Each result, an error included, is the
+/// one a read for that position alone gives, and is only met when a caller
+/// takes it.
+fn publication_parents_at(parent: &str, positions: &[usize]) -> Vec<Result<NamespaceBindings>> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
     let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
     let wrapped = format!("{opening}{parent}</scope>");
     let mut reader = NsReader::from_str(&wrapped);
-    let mut scopes = Vec::new();
-    loop {
+    let mut scopes = Vec::<NamespaceBindings>::new();
+    let mut results = positions.iter().map(|_| None).collect::<Vec<_>>();
+    // The positions still to reach, the nearest last.
+    let mut pending = (0..positions.len()).collect::<Vec<_>>();
+    pending.sort_by_key(|index| std::cmp::Reverse(positions[*index]));
+    // A position the read passed holds no event. Its read goes on to the end.
+    let mut passed = Vec::new();
+    let failure = loop {
+        if pending.is_empty() && passed.is_empty() {
+            break None;
+        }
         let before = reader.buffer_position() as usize;
-        let (_, event) = reader
-            .read_resolved_event()
-            .map_err(|error| Error::Other(error.to_string()))?;
-        if before == opening.len() + at {
-            return scopes
-                .last()
-                .cloned()
-                .ok_or_else(|| Error::Other("publication boundary has no actual parent".into()));
+        let event = match reader.read_resolved_event() {
+            Ok((_, event)) => event,
+            Err(error) => break Some(error.to_string()),
+        };
+        while let Some(&index) = pending.last()
+            && opening.len() + positions[index] <= before
+        {
+            pending.pop();
+            if opening.len() + positions[index] == before {
+                results[index] = Some(scopes.last().cloned().ok_or_else(|| {
+                    Error::Other("publication boundary has no actual parent".into())
+                }));
+            } else {
+                passed.push(index);
+            }
         }
         match event {
-            Event::Start(_) => scopes.push(resolved_source_bindings(&reader)?),
+            Event::Start(_) => match resolved_source_bindings(&reader) {
+                Ok(bindings) => scopes.push(bindings),
+                Err(error) => break Some(error.to_string()),
+            },
             Event::End(_) => {
                 scopes.pop();
             }
             Event::Eof => {
-                return Err(Error::Other(
-                    "publication boundary is absent from its actual shell".into(),
-                ));
+                break Some("publication boundary is absent from its actual shell".into());
             }
             _ => {}
+        }
+    };
+    if let Some(message) = failure {
+        for index in pending.into_iter().chain(passed) {
+            results[index] = Some(Err(Error::Other(message.clone())));
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every position is answered"))
+        .collect()
+}
+
+/// The scopes [`publication_parent_at`] gives for the positions of one
+/// parent that a caller may ask, read in one pass on the first question.
+/// A position outside that set is read alone.
+struct ParentScopes<'a> {
+    parent: &'a str,
+    positions: Vec<usize>,
+    scopes: std::cell::OnceCell<HashMap<usize, Result<NamespaceBindings>>>,
+}
+
+impl<'a> ParentScopes<'a> {
+    fn new(parent: &'a str, positions: Vec<usize>) -> Self {
+        Self {
+            parent,
+            positions,
+            scopes: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn at(&self, position: usize) -> Result<NamespaceBindings> {
+        let scopes = self.scopes.get_or_init(|| {
+            self.positions
+                .iter()
+                .copied()
+                .zip(publication_parents_at(self.parent, &self.positions))
+                .collect()
+        });
+        match scopes.get(&position) {
+            Some(Ok(scope)) => Ok(scope.clone()),
+            // Every error of that read is `Error::Other`, so this is that error.
+            Some(Err(error)) => Err(Error::Other(error.to_string())),
+            None => publication_parent_at(self.parent, position),
         }
     }
 }
 
 fn source_child(parent: &str, span: Range<usize>) -> Result<String> {
+    source_children(parent, &[span])
+        .pop()
+        .expect("one result per span")
+}
+
+/// The child of `parent` at each span with the namespaces in scope declared
+/// on its root, as [`source_child`] gives it for that span alone.
+///
+/// One read of `parent` answers every span. Each result, an error included,
+/// is the one a read for that span alone gives.
+fn source_children(parent: &str, spans: &[Range<usize>]) -> Vec<Result<String>> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
     let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
     let wrapped = format!("{opening}{parent}</scope>");
     let mut reader = NsReader::from_str(&wrapped);
-    loop {
+    let mut results = spans.iter().map(|_| None).collect::<Vec<_>>();
+    // The spans still to reach, the nearest last.
+    let mut pending = (0..spans.len()).collect::<Vec<_>>();
+    pending.sort_by_key(|index| std::cmp::Reverse(spans[*index].start));
+    // A span the read passed opens no element. Its read goes on to the end.
+    let mut passed = Vec::new();
+    let failure = loop {
+        if pending.is_empty() && passed.is_empty() {
+            break None;
+        }
         let before = reader.buffer_position() as usize;
-        let (_, event) = reader
-            .read_resolved_event()
-            .map_err(|error| Error::Other(format!("source namespace scan failed: {error}")))?;
-        if before == opening.len() + span.start
-            && matches!(event, Event::Start(_) | Event::Empty(_))
-        {
-            let bindings = reader
-                .resolver()
-                .bindings()
-                .map(|(prefix, uri)| {
-                    let prefix = match prefix {
-                        quick_xml::name::PrefixDeclaration::Default => String::new(),
-                        quick_xml::name::PrefixDeclaration::Named(prefix) => {
-                            String::from_utf8(prefix.to_vec()).map_err(utf8_error)?
-                        }
-                    };
-                    let uri = std::str::from_utf8(uri.as_ref()).map_err(utf8_error)?;
-                    Ok((
-                        if prefix.is_empty() {
-                            "xmlns".to_owned()
-                        } else {
-                            format!("xmlns:{prefix}")
-                        },
-                        quick_xml::escape::unescape(uri)
-                            .map_err(|error| Error::Other(error.to_string()))?
-                            .into_owned(),
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return source_fragment(&parent[span], &bindings);
+        let event = match reader.read_resolved_event() {
+            Ok((_, event)) => event,
+            Err(error) => break Some(format!("source namespace scan failed: {error}")),
+        };
+        let opens = matches!(event, Event::Start(_) | Event::Empty(_));
+        while let Some(&index) = pending.last() {
+            let start = opening.len() + spans[index].start;
+            if start < before {
+                pending.pop();
+                passed.push(index);
+            } else if start == before && opens {
+                pending.pop();
+                results[index] = Some(source_child_at(&reader, parent, spans[index].clone()));
+            } else {
+                break;
+            }
         }
         if matches!(event, Event::Eof) {
-            return Err(Error::Other(
-                "source child has no opening at its span".into(),
-            ));
+            break Some("source child has no opening at its span".into());
+        }
+    };
+    if let Some(message) = failure {
+        for index in pending.into_iter().chain(passed) {
+            results[index] = Some(Err(Error::Other(message.clone())));
         }
     }
+    results
+        .into_iter()
+        .map(|result| result.expect("every span is answered"))
+        .collect()
+}
+
+/// The parent scope and the scoped source of the child of `parent` at each
+/// span, from one read of `parent` for each, in the order of `spans`.
+fn child_scopes(
+    parent: &str,
+    spans: &[Range<usize>],
+) -> std::iter::Zip<std::vec::IntoIter<Result<NamespaceBindings>>, std::vec::IntoIter<Result<String>>>
+{
+    let starts = spans.iter().map(|span| span.start).collect::<Vec<_>>();
+    publication_parents_at(parent, &starts)
+        .into_iter()
+        .zip(source_children(parent, spans))
+}
+
+/// The child at `span` with the bindings `reader` holds at its opening.
+fn source_child_at(reader: &NsReader<&[u8]>, parent: &str, span: Range<usize>) -> Result<String> {
+    let bindings = reader
+        .resolver()
+        .bindings()
+        .map(|(prefix, uri)| {
+            let prefix = match prefix {
+                quick_xml::name::PrefixDeclaration::Default => String::new(),
+                quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                    String::from_utf8(prefix.to_vec()).map_err(utf8_error)?
+                }
+            };
+            let uri = std::str::from_utf8(uri.as_ref()).map_err(utf8_error)?;
+            Ok((
+                if prefix.is_empty() {
+                    "xmlns".to_owned()
+                } else {
+                    format!("xmlns:{prefix}")
+                },
+                quick_xml::escape::unescape(uri)
+                    .map_err(|error| Error::Other(error.to_string()))?
+                    .into_owned(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    source_fragment(&parent[span], &bindings)
 }
 
 fn root_namespace_bindings(
@@ -5987,25 +6127,18 @@ fn bind_note_reference_revisions(
     Ok(())
 }
 
+/// Check the footnote part of `actual`, a [`resolved_candidate`], against the
+/// input that resolution must reproduce.
 fn verify_footnote_destination(
-    candidate: &Document,
+    actual: &Document,
     wanted: &Document,
-    ids: &HashSet<i32>,
     accept: bool,
     options: &ComparisonOptions,
 ) -> Result<()> {
     if story_ignored(options, ComparisonStoryKind::Footnote) {
         return Ok(());
     }
-    let mut actual = candidate.clone_for_staging();
-    if accept {
-        actual.accept_revision_ids(ids)?;
-    } else {
-        actual.reject_revision_ids(ids)?;
-    }
-    let units = validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids))?;
-    project_resolved_note_tombstones(candidate, &mut actual, &units)?;
-    let left = FootnotePart::of(&actual)?;
+    let left = FootnotePart::of(actual)?;
     let right = FootnotePart::of(wanted)?;
     match (&left, &right) {
         (None, None) => Ok(()),
@@ -6269,6 +6402,7 @@ fn refuse_changed_existing_revisions(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolved_package(
     candidate: &Document,
     resolve: impl FnOnce(&mut Document) -> Result<usize>,
@@ -6277,6 +6411,18 @@ fn resolved_package(
     text_box_markers: &TextBoxMarkers,
     custody_ids: Option<&HashSet<i32>>,
 ) -> Result<NormalizedPackage> {
+    let resolved = resolved_candidate(candidate, resolve, custody_ids)?;
+    normalized_package(&resolved, stories, options, text_box_markers)
+}
+
+/// The candidate with its revisions resolved one way and the transient note
+/// pairs of fully resolved units projected out. Every postcondition of that
+/// resolution reads this one document, so the package is resolved once.
+fn resolved_candidate(
+    candidate: &Document,
+    resolve: impl FnOnce(&mut Document) -> Result<usize>,
+    custody_ids: Option<&HashSet<i32>>,
+) -> Result<Document> {
     let mut resolved = candidate.clone_for_staging();
     let units = custody_ids
         .map(|ids| validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids)))
@@ -6285,7 +6431,7 @@ fn resolved_package(
     if let Some(units) = units {
         project_resolved_note_tombstones(candidate, &mut resolved, &units)?;
     }
-    normalized_package(&resolved, stories, options, text_box_markers)
+    Ok(resolved)
 }
 
 /// Comparison guards may omit only the current fully resolved units' transient
@@ -8626,42 +8772,82 @@ struct RunSource {
 }
 
 impl RunSource {
-    fn capture(run: Option<&CT_R>, parent: &str, span: Range<usize>) -> Result<Self> {
+    /// The source of the run at each span of `parent`, in the order given.
+    ///
+    /// One read of `parent` serves every run. A read per run reads the parent
+    /// again up to that run, which is quadratic in the runs it holds. Each
+    /// result, an error included, is the one a read for that run alone gives.
+    fn capture_all(runs: &[(Option<&CT_R>, Range<usize>)], parent: &str) -> Vec<Result<Self>> {
+        if runs.is_empty() {
+            return Vec::new();
+        }
         #[cfg(test)]
         if destination_diagnostic_enabled() {
-            policy_diagnostic(
-                "destination_actual_parent",
-                serde_json::json!({"parent_source":parent,"run_span":[span.start,span.end]}),
-            );
+            for (_, span) in runs {
+                policy_diagnostic(
+                    "destination_actual_parent",
+                    serde_json::json!({"parent_source":parent,"run_span":[span.start,span.end]}),
+                );
+            }
         }
+        #[cfg(test)]
+        SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
         let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
         let wrapped = format!("{opening}{parent}</scope>");
         let mut reader = NsReader::from_str(&wrapped);
-        let mut scopes = Vec::new();
-        loop {
+        let mut scopes = Vec::<NamespaceBindings>::new();
+        let mut results = runs.iter().map(|_| None).collect::<Vec<_>>();
+        // The runs still to reach, the nearest last.
+        let mut pending = (0..runs.len()).collect::<Vec<_>>();
+        pending.sort_by_key(|index| std::cmp::Reverse(runs[*index].1.start));
+        // A run the read passed opens no element. Its read goes on to the end.
+        let mut passed = Vec::new();
+        let capture = |(run, span): &(Option<&CT_R>, Range<usize>),
+                       bindings: &NamespaceBindings,
+                       parent_scope: Option<&NamespaceBindings>|
+         -> Result<Self> {
+            let raw = parent[span.clone()].to_owned();
+            let mut source = Self {
+                owner: run.map_or(0, |run| run as *const CT_R as usize),
+                scoped: source_fragment(&raw, bindings)?,
+                raw,
+                parent: parent_scope.cloned().unwrap_or_default(),
+                raw_slots: Vec::new(),
+                typed_slots: Vec::new(),
+                projected_raw_slots: HashSet::new(),
+                projected_typed_slots: HashSet::new(),
+            };
+            if let Some(run) = run {
+                source.capture_children(run)?;
+            }
+            Ok(source)
+        };
+        let failure = loop {
+            if pending.is_empty() && passed.is_empty() {
+                break None;
+            }
             let before = reader.buffer_position() as usize;
-            let (_, event) = reader
-                .read_resolved_event()
-                .map_err(|error| Error::Other(error.to_string()))?;
+            let event = match reader.read_resolved_event() {
+                Ok((_, event)) => event,
+                Err(error) => break Some(error.to_string()),
+            };
+            while let Some(&index) = pending.last()
+                && opening.len() + runs[index].1.start < before
+            {
+                pending.pop();
+                passed.push(index);
+            }
             match event {
                 Event::Start(_) | Event::Empty(_) => {
-                    let bindings = resolved_source_bindings(&reader)?;
-                    if before == opening.len() + span.start {
-                        let raw = parent[span].to_owned();
-                        let mut source = Self {
-                            owner: run.map_or(0, |run| run as *const CT_R as usize),
-                            scoped: source_fragment(&raw, &bindings)?,
-                            raw,
-                            parent: scopes.last().cloned().unwrap_or_default(),
-                            raw_slots: Vec::new(),
-                            typed_slots: Vec::new(),
-                            projected_raw_slots: HashSet::new(),
-                            projected_typed_slots: HashSet::new(),
-                        };
-                        if let Some(run) = run {
-                            source.capture_children(run)?;
-                        }
-                        return Ok(source);
+                    let bindings = match resolved_source_bindings(&reader) {
+                        Ok(bindings) => bindings,
+                        Err(error) => break Some(error.to_string()),
+                    };
+                    while let Some(&index) = pending.last()
+                        && opening.len() + runs[index].1.start == before
+                    {
+                        pending.pop();
+                        results[index] = Some(capture(&runs[index], &bindings, scopes.last()));
                     }
                     if matches!(event, Event::Start(_)) {
                         scopes.push(bindings);
@@ -8670,10 +8856,19 @@ impl RunSource {
                 Event::End(_) => {
                     scopes.pop();
                 }
-                Event::Eof => return Err(Error::Other("run source has no actual opening".into())),
+                Event::Eof => break Some("run source has no actual opening".into()),
                 _ => {}
             }
+        };
+        if let Some(message) = failure {
+            for index in pending.into_iter().chain(passed) {
+                results[index] = Some(Err(Error::Other(message.clone())));
+            }
         }
+        results
+            .into_iter()
+            .map(|result| result.expect("every run is answered"))
+            .collect()
     }
 }
 
@@ -9798,7 +9993,8 @@ impl SourceSnapshots {
         let mut parent_writer = Writer::new(Vec::new());
         parent_writer.write_event(Event::Start(root))?;
         let opening = String::from_utf8(parent_writer.into_inner()).map_err(utf8_error)?;
-        let mut field_spans = modeled_paragraph_run_spans(paragraph, xml)?;
+        let spans = modeled_paragraph_run_spans(paragraph, xml)?;
+        let mut field_spans = spans.clone();
         // Legacy rendering keeps zero-length continuation placeholders. A source
         // witness instead retains the proven whole physical span at every actual
         // logical slot of that same shared group.
@@ -9843,6 +10039,20 @@ impl SourceSnapshots {
             .ok_or_else(|| {
                 Error::Other("field owner namespace closure changed its source boundary".into())
             })?;
+        // One read of the paragraph answers the scope of every field.
+        let field_starts = paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .flat_map(|(run_index, run)| {
+                run.content
+                    .iter()
+                    .filter(|content| matches!(content, RunContent::Field(_)))
+                    .map(move |_| run_index)
+            })
+            .map_while(|run_index| field_spans.get(run_index).map(|span| span.start))
+            .collect::<Vec<_>>();
+        let mut field_parents = publication_parents_at(xml, &field_starts).into_iter();
         let mut field_slot = 0usize;
         for (run_index, run) in paragraph.runs.iter().enumerate() {
             for content in &run.content {
@@ -9861,7 +10071,7 @@ impl SourceSnapshots {
                     let actual_field_source = &physical_owner[physical_span.clone()];
                     let actual_scope = actual_root_bindings(
                         actual_field_source,
-                        &publication_parent_at(xml, span.start)?,
+                        &field_parents.next().expect("one scope per field")?,
                     )?;
                     self.capture_field_occurrence(
                         std::ptr::from_ref(paragraph) as usize,
@@ -9900,28 +10110,42 @@ impl SourceSnapshots {
         }
 
         if !self.properties_only {
-            let spans = modeled_paragraph_run_spans(paragraph, xml)?;
             let (opening, closing) = paragraph_shell(Some(xml))?;
+            // The runs the paragraph source holds as they are are captured in
+            // one read after this walk. Each was read in turn before, so an
+            // error capturing one still comes before any later error.
+            let mut plain = Vec::new();
+            let mut failure = None;
             let mut index = 0;
-            while index < paragraph.runs.len() {
-                if let Some((coverage, fragments)) =
-                    paragraph.field_source_run_fragments_at(index)?
-                {
+            'runs: while index < paragraph.runs.len() {
+                let fragments = match paragraph.field_source_run_fragments_at(index) {
+                    Ok(fragments) => fragments,
+                    Err(error) => {
+                        failure = Some(Error::from(error));
+                        break;
+                    }
+                };
+                if let Some((coverage, fragments)) = fragments {
                     for (run, fragment) in paragraph.runs[index..index + coverage]
                         .iter()
                         .zip(fragments)
                     {
                         if let Some(raw) = fragment {
-                            let raw = String::from_utf8(raw).map_err(utf8_error)?;
-                            let wrapped = format!("{opening}{raw}{closing}");
-                            self.runs.insert(
-                                run as *const CT_R as usize,
-                                RunSource::capture(
-                                    Some(run),
-                                    &wrapped,
-                                    opening.len()..opening.len() + raw.len(),
-                                )?,
-                            );
+                            let source =
+                                String::from_utf8(raw).map_err(utf8_error).and_then(|raw| {
+                                    let wrapped = format!("{opening}{raw}{closing}");
+                                    let span = opening.len()..opening.len() + raw.len();
+                                    RunSource::capture_all(&[(Some(run), span)], &wrapped).remove(0)
+                                });
+                            match source {
+                                Ok(source) => {
+                                    self.runs.insert(run as *const CT_R as usize, source);
+                                }
+                                Err(error) => {
+                                    failure = Some(error);
+                                    break 'runs;
+                                }
+                            }
                         }
                     }
                     index += coverage;
@@ -9929,18 +10153,25 @@ impl SourceSnapshots {
                 }
                 let run = &paragraph.runs[index];
                 if !run_is_field(run) {
-                    self.runs.insert(
-                        run as *const CT_R as usize,
-                        RunSource::capture(Some(run), xml, spans[index].clone())?,
-                    );
+                    plain.push((Some(run), spans[index].clone()));
                 }
                 index += 1;
             }
+            for ((run, _), source) in plain.iter().zip(RunSource::capture_all(&plain, xml)) {
+                if let Some(run) = run {
+                    self.runs.insert(*run as *const CT_R as usize, source?);
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
         }
         let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
         for (index, ((_, _, _, control), span)) in
             paragraph.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(paragraph) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -9966,6 +10197,7 @@ impl SourceSnapshots {
                 .ok_or_else(|| {
                     Error::Other("control budget interval precedes physical owner".into())
                 })?;
+            let parent = parent?;
             self.budget_holes
                 .entry(std::ptr::from_ref(paragraph) as usize)
                 .or_default()
@@ -9973,19 +10205,13 @@ impl SourceSnapshots {
                     path,
                     1,
                     hole,
-                    actual_root_bindings(
-                        &xml[span.clone()],
-                        &publication_parent_at(xml, span.start)?,
-                    )?,
+                    actual_root_bindings(&xml[span.clone()], &parent)?,
                 ));
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span.clone()].to_owned(), parent),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         for (ordinal, (at, raw_before, revision)) in paragraph.revisions.iter().enumerate() {
             let raw = paragraph
@@ -10018,12 +10244,10 @@ impl SourceSnapshots {
         }
         self.tables
             .insert(table as *const CT_Tbl as usize, xml.to_owned());
-        for (index, (row, span)) in table
-            .rows
-            .iter()
-            .zip(direct_word_element_spans(xml, "tr")?)
-            .enumerate()
-        {
+        let rows = direct_word_element_spans(xml, "tr")?;
+        let mut scopes = child_scopes(xml, &rows);
+        for (index, (row, span)) in table.rows.iter().zip(rows).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per row span");
             self.inherit_owner_path(
                 std::ptr::from_ref(table) as usize,
                 std::ptr::from_ref(row) as usize,
@@ -10038,19 +10262,16 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 row as *const CT_Row as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.row(row, &source_child(xml, span)?)?;
+            self.row(row, &source?)?;
         }
-        for (index, ((_, _, control), span)) in table
-            .content_controls
-            .iter()
-            .zip(direct_word_element_spans(xml, "sdt")?)
-            .enumerate()
+        let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
+        for (index, ((_, _, control), span)) in
+            table.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(table) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -10065,12 +10286,9 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         Ok(())
     }
@@ -10085,12 +10303,10 @@ impl SourceSnapshots {
         }
         self.rows
             .insert(row as *const CT_Row as usize, xml.to_owned());
-        for (index, (cell, span)) in row
-            .cells
-            .iter()
-            .zip(direct_word_element_spans(xml, "tc")?)
-            .enumerate()
-        {
+        let cells = direct_word_element_spans(xml, "tc")?;
+        let mut scopes = child_scopes(xml, &cells);
+        for (index, (cell, span)) in row.cells.iter().zip(cells).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per cell span");
             self.inherit_owner_path(
                 std::ptr::from_ref(row) as usize,
                 std::ptr::from_ref(cell) as usize,
@@ -10105,19 +10321,16 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 cell as *const CT_Tc as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.cell(cell, &source_child(xml, span)?)?;
+            self.cell(cell, &source?)?;
         }
-        for (index, ((_, _, control), span)) in row
-            .content_controls
-            .iter()
-            .zip(direct_word_element_spans(xml, "sdt")?)
-            .enumerate()
+        let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
+        for (index, ((_, _, control), span)) in
+            row.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(row) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -10132,12 +10345,9 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         Ok(())
     }
@@ -10152,12 +10362,13 @@ impl SourceSnapshots {
         }
         self.cells
             .insert(cell as *const CT_Tc as usize, xml.to_owned());
-        for (index, (child, (_, span))) in cell
-            .content
-            .iter()
-            .zip(cell_child_spans(cell, xml, "source snapshot")?)
-            .enumerate()
-        {
+        let children = cell_child_spans(cell, xml, "source snapshot")?
+            .into_iter()
+            .map(|(_, span)| span)
+            .collect::<Vec<_>>();
+        let mut scopes = child_scopes(xml, &children);
+        for (index, (child, span)) in cell.content.iter().zip(children).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per cell child span");
             let child_key = match child {
                 CellContent::Paragraph(p) => std::ptr::from_ref(p) as usize,
                 CellContent::Table(t) => std::ptr::from_ref(t) as usize,
@@ -10170,36 +10381,21 @@ impl SourceSnapshots {
                 xml,
                 span.start,
             )?;
-            let source = source_child(xml, span.clone())?;
+            let source = source?;
             match child {
                 CellContent::Paragraph(p) => {
-                    self.roots.insert(
-                        p as *const CT_P as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(p as *const CT_P as usize, (xml[span].to_owned(), parent?));
                     self.paragraph(p, &source)?
                 }
                 CellContent::Table(t) => {
-                    self.roots.insert(
-                        t as *const CT_Tbl as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(t as *const CT_Tbl as usize, (xml[span].to_owned(), parent?));
                     self.table(t, &source)?
                 }
                 CellContent::ContentControl(c) => {
-                    self.roots.insert(
-                        c as *const CT_Sdt as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(c as *const CT_Sdt as usize, (xml[span].to_owned(), parent?));
                     self.control(c, &source)?
                 }
             }
@@ -10265,6 +10461,56 @@ impl SourceSnapshots {
             ));
         }
         let spans = modeled_control_source_spans(&content, &payload)?;
+        // One read of the content answers every child. Each answer, an error
+        // included, is met where a read for that child alone was made.
+        let elements = content
+            .iter()
+            .zip(&spans)
+            .enumerate()
+            .filter(|(_, (child, _))| !matches!(child, SdtContent::RawXml(_)))
+            .map(|(index, (_, span))| (index, span.clone()))
+            .collect::<Vec<_>>();
+        let element_spans = elements
+            .iter()
+            .map(|(_, span)| span.clone())
+            .collect::<Vec<_>>();
+        let element_starts = element_spans
+            .iter()
+            .map(|span| span.start)
+            .collect::<Vec<_>>();
+        let mut child_sources = content.iter().map(|_| None).collect::<Vec<_>>();
+        let mut child_parents = content.iter().map(|_| None).collect::<Vec<_>>();
+        for (((index, _), source), parent) in elements
+            .iter()
+            .zip(source_children(&payload, &element_spans))
+            .zip(publication_parents_at(&payload, &element_starts))
+        {
+            child_sources[*index] = Some(source);
+            child_parents[*index] = Some(parent);
+        }
+        let mut captured = content.iter().map(|_| None).collect::<Vec<_>>();
+        if !self.properties_only {
+            let plain = content
+                .iter()
+                .zip(&spans)
+                .enumerate()
+                .filter_map(|(index, (child, span))| match child {
+                    SdtContent::Run(run)
+                        if !run
+                            .content
+                            .iter()
+                            .any(|content| matches!(content, RunContent::Field(_))) =>
+                    {
+                        Some((index, (Some(run), span.clone())))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let runs = plain.iter().map(|(_, run)| run.clone()).collect::<Vec<_>>();
+            for ((index, _), source) in plain.iter().zip(RunSource::capture_all(&runs, &payload)) {
+                captured[*index] = Some(source);
+            }
+        }
         let mut field_slot = 0usize;
         for (index, (child, span)) in content.into_iter().zip(spans).enumerate() {
             let child_key = match child {
@@ -10296,45 +10542,40 @@ impl SourceSnapshots {
             if matches!(child, SdtContent::RawXml(_)) {
                 continue;
             }
-            let source = source_child(&payload, span.clone())?;
+            let source = child_sources[index]
+                .take()
+                .expect("an element child has its source")?;
+            let mut parent = || {
+                child_parents[index]
+                    .take()
+                    .expect("an element child has its parent scope")
+            };
             match child {
                 SdtContent::Paragraph(p) => {
                     self.roots.insert(
                         p as *const CT_P as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.paragraph(p, &source)?;
                 }
                 SdtContent::Table(t) => {
                     self.roots.insert(
                         t as *const CT_Tbl as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.table(t, &source)?;
                 }
                 SdtContent::Row(r) => {
                     self.roots.insert(
                         r as *const CT_Row as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.row(r, &source)?;
                 }
                 SdtContent::Cell(c) => {
                     self.roots.insert(
                         c as *const CT_Tc as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.cell(c, &source)?;
                 }
@@ -10358,24 +10599,14 @@ impl SourceSnapshots {
                         .ok_or_else(|| {
                             Error::Other("nested control source-budget interval overflow".into())
                         })?;
+                    let scope = parent()?;
                     self.budget_holes
                         .entry(std::ptr::from_ref(control) as usize)
                         .or_default()
-                        .push((
-                            path,
-                            6,
-                            hole,
-                            actual_root_bindings(
-                                &source,
-                                &publication_parent_at(&payload, span.start)?,
-                            )?,
-                        ));
+                        .push((path, 6, hole, actual_root_bindings(&source, &scope)?));
                     self.roots.insert(
                         c as *const CT_Sdt as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), scope),
                     );
                     self.control(c, &source)?;
                 }
@@ -10388,44 +10619,46 @@ impl SourceSnapshots {
                             _ => None,
                         })
                         .collect::<Vec<_>>();
-                    if fields.is_empty() {
-                        if !self.properties_only {
-                            self.runs.insert(
-                                r as *const CT_R as usize,
-                                RunSource::capture(Some(r), &payload, span)?,
-                            );
-                        }
-                    } else {
-                        for field in fields {
-                            let scope = actual_root_bindings(
-                                &source,
-                                &actual_root_bindings(&payload, &Vec::new())?,
-                            )?;
-                            self.capture_field_occurrence(
-                                std::ptr::from_ref(control) as usize,
-                                field,
-                                field_slot,
-                                raw_payload,
-                                span.start.checked_sub(closure_growth)
-                                    .zip(span.end.checked_sub(closure_growth))
-                                    .map(|(start, end)| start..end)
-                                    .ok_or_else(|| Error::Other("control field source precedes its actual content owner".into()))?,
-                                scope.clone(),
-                            )?;
-                            field_slot += 1;
-                            self.field_scopes
-                                .insert(std::ptr::from_ref(field) as usize, scope.clone());
-                            self.fields.insert(
-                                std::ptr::from_ref(field) as usize,
-                                field_source_metadata(
-                                    &source_without_text_properties(
-                                        &field_result_source_paragraph(&source, &scope)?,
-                                        &Vec::new(),
-                                    )?,
-                                    field.is_complex(),
+                    if fields.is_empty()
+                        && let Some(source) = captured[index].take()
+                    {
+                        self.runs.insert(r as *const CT_R as usize, source?);
+                    }
+                    for field in fields {
+                        let scope = actual_root_bindings(
+                            &source,
+                            &actual_root_bindings(&payload, &Vec::new())?,
+                        )?;
+                        self.capture_field_occurrence(
+                            std::ptr::from_ref(control) as usize,
+                            field,
+                            field_slot,
+                            raw_payload,
+                            span.start
+                                .checked_sub(closure_growth)
+                                .zip(span.end.checked_sub(closure_growth))
+                                .map(|(start, end)| start..end)
+                                .ok_or_else(|| {
+                                    Error::Other(
+                                        "control field source precedes its actual content owner"
+                                            .into(),
+                                    )
+                                })?,
+                            scope.clone(),
+                        )?;
+                        field_slot += 1;
+                        self.field_scopes
+                            .insert(std::ptr::from_ref(field) as usize, scope.clone());
+                        self.fields.insert(
+                            std::ptr::from_ref(field) as usize,
+                            field_source_metadata(
+                                &source_without_text_properties(
+                                    &field_result_source_paragraph(&source, &scope)?,
+                                    &Vec::new(),
                                 )?,
-                            );
-                        }
+                                field.is_complex(),
+                            )?,
+                        );
                     }
                 }
                 SdtContent::RawXml(_) => {}
@@ -13963,11 +14196,21 @@ fn compare_granular_paragraph(
         .map(str::to_owned)
         .map_or_else(|| paragraph_xml(original), Ok)?;
     let actual_spans = modeled_paragraph_run_spans(original, &actual_source)?;
+    // One read of the paragraph answers the scope of every run, on first use.
+    // Reading it again for each written piece is quadratic in its runs.
+    let run_parents = ParentScopes::new(
+        &actual_source,
+        actual_spans
+            .iter()
+            .map(|span| span.start)
+            .chain(element_opening(&actual_source).ok().map(|(end, ..)| end))
+            .collect(),
+    );
     let parent_for = |owner: usize| {
         let at = actual_spans
             .get(owner)
             .map_or(element_opening(&actual_source)?.0, |span| span.start);
-        publication_parent_at(&actual_source, at)
+        run_parents.at(at)
     };
     let boundary_error = || {
         Error::Other(format!(
@@ -16151,6 +16394,7 @@ fn compare_granular_controls(
     }
     let mut child_leaves = Vec::new();
     let mut control_replacements = Vec::with_capacity(control_spans.len());
+    let mut sources = source_children(output, &control_spans).into_iter();
     for (index, ((_, _, _, left), (_, _, _, right))) in original
         .content_controls
         .iter()
@@ -16158,13 +16402,14 @@ fn compare_granular_controls(
         .enumerate()
     {
         let child_mark = metadata.leaf_publications.len();
+        let source = sources.next().expect("one source per control span");
         control_replacements.push(compare_control_from_xml(
             left,
             right,
             &format!("{location}/content-control[{index}]"),
             metadata,
             diagnostics,
-            &source_child(output, control_spans[index].clone())?,
+            &source?,
         )?);
         child_leaves.push(metadata.leaf_publications.split_off(child_mark));
     }
@@ -16753,11 +16998,18 @@ fn compare_complex_paragraph(
             location,
         )?;
     }
+    // One read of the paragraph answers the scope at every run edge.
+    let parents = ParentScopes::new(
+        &source,
+        std::iter::once(0)
+            .chain(run_spans.iter().flat_map(|span| [span.start, span.end]))
+            .collect(),
+    );
     let mut output = String::new();
     let mut cursor = 0usize;
     for (left, right) in aligned {
         let at = left.map_or(cursor, |index| run_spans[index].start);
-        let destination_parent = publication_parent_at(&source, at)?;
+        let destination_parent = parents.at(at)?;
         let revision_parent = metadata.ids.revision_parent_scope(&destination_parent);
         if let Some(index) = left {
             let span = &run_spans[index];
@@ -16846,19 +17098,21 @@ fn compare_complex_paragraph(
         )));
     }
     let mut replacements = Vec::with_capacity(spans.len());
+    let mut sources = source_children(&output, &spans).into_iter();
     for (index, ((_, _, _, left), (_, _, _, right))) in original
         .content_controls
         .iter()
         .zip(&edited.content_controls)
         .enumerate()
     {
+        let source = sources.next().expect("one source per control span");
         replacements.push(compare_control_from_xml(
             left,
             right,
             &format!("{location}/content-control[{index}]"),
             metadata,
             diagnostics,
-            &source_child(&output, spans[index].clone())?,
+            &source?,
         )?);
     }
     replace_direct_word_elements(&output, "sdt", &replacements)
@@ -17370,6 +17624,8 @@ fn paragraph_children_xml(
     }
     let mut xml = paragraph_xml(&children)?;
     let spans = modeled_paragraph_run_spans(&children, &xml)?;
+    // One read of the paragraph answers the scope of every run.
+    let parents = ParentScopes::new(&xml, spans.iter().map(|span| span.start).collect());
     let mut replacements = Vec::new();
     let mut index = 0;
     while index < children.runs.len() {
@@ -17389,9 +17645,7 @@ fn paragraph_children_xml(
                     &children.runs[index],
                     &raw,
                     &typed,
-                    &metadata
-                        .ids
-                        .revision_parent_scope(&publication_parent_at(&xml, span.start)?),
+                    &metadata.ids.revision_parent_scope(&parents.at(span.start)?),
                     &metadata.ids,
                 )
             }?));
@@ -17521,6 +17775,11 @@ fn compare_table(
             )));
         }
         let aligned = align(&original_signatures, &edited_signatures);
+        // One read of the table answers the source of every row.
+        let mut row_sources = source_children(&source, &row_spans)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         let mut output = String::new();
         let mut cursor = 0usize;
         for (alignment_index, &(left, right)) in aligned.iter().enumerate() {
@@ -17543,7 +17802,7 @@ fn compare_table(
                     output.push_str(&compare_row(
                         &original.rows[i],
                         &edited.rows[j],
-                        Some(&source_child(&source, row_spans[i].clone())?),
+                        Some(&row_sources[i].take().expect("a row is compared once")?),
                         &format!("{location}/row[{j}]"),
                         metadata,
                         diagnostics,
@@ -17569,6 +17828,7 @@ fn compare_table(
         }
         let mut child_leaves = Vec::new();
         let mut replacements = Vec::with_capacity(spans.len());
+        let mut sources = source_children(&output, &spans).into_iter();
         for (index, ((_, _, left), (_, _, right))) in original
             .content_controls
             .iter()
@@ -17576,13 +17836,14 @@ fn compare_table(
             .enumerate()
         {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per control span");
             replacements.push(compare_control_from_xml(
                 left,
                 right,
                 &format!("{location}/content-control[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -17795,9 +18056,10 @@ fn marked_row_xml(row: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<
             xml = insert_first_child(&xml, &properties)?;
         }
     }
-    let cells = direct_word_element_spans(&xml, "tc")?
+    let cell_spans = direct_word_element_spans(&xml, "tc")?;
+    let cells = source_children(&xml, &cell_spans)
         .into_iter()
-        .map(|span| marked_cell_xml(&source_child(&xml, span)?, kind, metadata))
+        .map(|source| marked_cell_xml(&source?, kind, metadata))
         .collect::<Result<Vec<_>>>()?;
     metadata
         .ids
@@ -17808,19 +18070,23 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
     #[cfg(test)]
     let _destination_diagnostic_scope =
         PolicyDiagnosticScope::enter("destination:marked_cell_xml", cell);
-    let paragraphs = direct_word_element_spans(cell, "p")?
+    let paragraph_spans = direct_word_element_spans(cell, "p")?;
+    let paragraphs = source_children(cell, &paragraph_spans)
         .into_iter()
-        .map(|span| {
+        .map(|source| {
             let marker = metadata
                 .ids
                 .marker(kind, metadata.author, metadata.timestamp)?;
-            let source = source_child(cell, span)?;
+            let source = source?;
             let paragraph = marked_paragraph_xml(&source, &marker, &metadata.ids)?;
             let paragraph = marked_direct_runs_xml(&paragraph, kind, metadata)?;
-            let hyperlinks = direct_word_element_spans(&paragraph, "hyperlink")?
-                .into_iter()
-                .map(|span| {
-                    let scoped = source_child(&paragraph, span.clone())?;
+            let hyperlink_spans = direct_word_element_spans(&paragraph, "hyperlink")?;
+            let hyperlinks = hyperlink_spans
+                .iter()
+                .cloned()
+                .zip(source_children(&paragraph, &hyperlink_spans))
+                .map(|(span, scoped)| {
+                    let scoped = scoped?;
                     let marked = marked_direct_runs_xml(&scoped, kind, metadata)?;
                     let destination = root_namespace_bindings(&paragraph, "p", &[])?;
                     retain_source_root_namespaces(&marked, &paragraph[span], &destination)
@@ -17830,14 +18096,16 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
         })
         .collect::<Result<Vec<_>>>()?;
     let cell = replace_direct_word_elements(cell, "p", &paragraphs)?;
-    let tables = direct_word_element_spans(&cell, "tbl")?
+    let table_spans = direct_word_element_spans(&cell, "tbl")?;
+    let tables = source_children(&cell, &table_spans)
         .into_iter()
-        .map(|span| {
-            let scoped_table = source_child(&cell, span)?;
+        .map(|scoped_table| {
+            let scoped_table = scoped_table?;
             let table = scoped_table.as_str();
-            let rows = direct_word_element_spans(table, "tr")?
+            let row_spans = direct_word_element_spans(table, "tr")?;
+            let rows = source_children(table, &row_spans)
                 .into_iter()
-                .map(|span| marked_row_xml(&source_child(table, span)?, kind, metadata))
+                .map(|source| marked_row_xml(&source?, kind, metadata))
                 .collect::<Result<Vec<_>>>()?;
             replace_direct_word_elements(table, "tr", &rows)
         })
@@ -17853,10 +18121,14 @@ fn marked_direct_runs_xml(owner: &str, kind: &str, metadata: &mut Metadata<'_>) 
     #[cfg(test)]
     let _destination_diagnostic_scope =
         PolicyDiagnosticScope::enter("destination:marked_direct_runs_xml", owner);
-    let runs = direct_word_element_spans(owner, "r")?
+    let spans = direct_word_element_spans(owner, "r")?
         .into_iter()
-        .map(|span| {
-            let source = RunSource::capture(None, owner, span)?;
+        .map(|span| (None, span))
+        .collect::<Vec<_>>();
+    let runs = RunSource::capture_all(&spans, owner)
+        .into_iter()
+        .map(|source| {
+            let source = source?;
             let mut run = source.scoped.clone();
             if kind == "del" {
                 for (local, deleted_local) in [("t", "delText"), ("instrText", "delInstrText")] {
@@ -17926,15 +18198,17 @@ fn compare_row(
         }
         let mut child_leaves = Vec::new();
         let mut cell_replacements = Vec::with_capacity(cell_spans.len());
+        let mut sources = source_children(&output, &cell_spans).into_iter();
         for (index, (left, right)) in original.cells.iter().zip(&edited.cells).enumerate() {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per cell span");
             cell_replacements.push(compare_cell_from_xml(
                 left,
                 right,
                 &format!("{location}/cell[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, cell_spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -17955,6 +18229,7 @@ fn compare_row(
         }
         let mut child_leaves = Vec::new();
         let mut control_replacements = Vec::with_capacity(control_spans.len());
+        let mut sources = source_children(&output, &control_spans).into_iter();
         for (index, ((_, _, left), (_, _, right))) in original
             .content_controls
             .iter()
@@ -17962,13 +18237,14 @@ fn compare_row(
             .enumerate()
         {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per control span");
             control_replacements.push(compare_control_from_xml(
                 left,
                 right,
                 &format!("{location}/content-control[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, control_spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -18028,7 +18304,12 @@ fn compare_cell_from_xml(
         let children = cell_child_spans(original, original_xml, location)?;
         let mut child_leaves = Vec::new();
         let mut replacements = Vec::with_capacity(children.len());
-        for (index, ((left, right), (_, span))) in original
+        let child_spans = children
+            .iter()
+            .map(|(_, span)| span.clone())
+            .collect::<Vec<_>>();
+        let mut sources = source_children(original_xml, &child_spans).into_iter();
+        for (index, ((left, right), _)) in original
             .content
             .iter()
             .zip(&edited.content)
@@ -18036,7 +18317,7 @@ fn compare_cell_from_xml(
             .enumerate()
         {
             let child_location = format!("{location}/content[{index}]");
-            let source = source_child(original_xml, span.clone())?;
+            let source = sources.next().expect("one source per cell child span")?;
             let source = source.as_str();
             let child_mark = metadata.leaf_publications.len();
             replacements.push(match (left, right) {
@@ -21717,6 +21998,10 @@ fn paragraph_signature_with_options(paragraph: &CT_P, options: &ComparisonOption
 enum ParagraphToken {
     /// A compared unit, or a whole run on the whole-run path.
     Unit(String),
+    /// Consecutive plain characters at character granularity. One token
+    /// holds the whole stretch, so the signature costs one token per stretch
+    /// of text and still reads the same however the runs split it.
+    Scalars(String),
     /// A unit the options ignore, such as whitespace, a field or a comment
     /// reference.
     Ignored(String),
@@ -21734,12 +22019,6 @@ enum ParagraphToken {
 /// marker on either side of ignored content still differs.
 fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String> {
     let attributed = uses_attributed_run_path(options);
-    let units = if attributed {
-        attributed_run_units(&paragraph.runs, options)
-    } else {
-        Vec::new()
-    };
-    let mut next_unit = 0;
     let mut tokens = Vec::new();
     let mut open_hyperlink = None;
     for boundary in 0..=paragraph.runs.len() {
@@ -21777,13 +22056,20 @@ fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String
             }
             continue;
         }
-        while let Some(unit) = units.get(next_unit).filter(|unit| unit.owner == boundary) {
-            next_unit += 1;
-            if unit_is_empty(unit) {
+        for unit in signature_run_units(run, options) {
+            if unit_is_empty(&unit) {
                 continue;
             }
-            let signature = attributed_unit_signature(unit);
-            tokens.push(if unit_is_ignorable(unit) {
+            if let Some(text) = signature_scalars(&unit, options) {
+                if let Some(ParagraphToken::Scalars(stretch)) = tokens.last_mut() {
+                    stretch.push_str(text);
+                } else {
+                    tokens.push(ParagraphToken::Scalars(text.to_owned()));
+                }
+                continue;
+            }
+            let signature = attributed_unit_signature(&unit);
+            tokens.push(if unit_is_ignorable(&unit) {
                 ParagraphToken::Ignored(signature)
             } else {
                 ParagraphToken::Unit(signature)
@@ -21808,15 +22094,63 @@ fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String
         keep[start..end].fill(touches_boundary);
         start = end;
     }
-    tokens
-        .into_iter()
-        .zip(keep)
-        .filter(|(_, keep)| *keep)
-        .map(|(token, _)| match token {
+    let mut kept = Vec::<ParagraphToken>::new();
+    for (token, _) in tokens.into_iter().zip(keep).filter(|(_, keep)| *keep) {
+        // A stretch continues over ignored units that left no token.
+        if let (ParagraphToken::Scalars(text), Some(ParagraphToken::Scalars(stretch))) =
+            (&token, kept.last_mut())
+        {
+            stretch.push_str(text);
+        } else {
+            kept.push(token);
+        }
+    }
+    kept.into_iter()
+        .map(|token| match token {
             ParagraphToken::Unit(signature) => format!("unit:{signature}"),
+            ParagraphToken::Scalars(text) => format!("scalars:{text:?}"),
             ParagraphToken::Ignored(signature) | ParagraphToken::Boundary(signature) => signature,
         })
         .collect()
+}
+
+/// The units a signature reads `run` as.
+///
+/// At character granularity a run of plain content is read one stretch at a
+/// time, which gives the tokens its characters would give once
+/// [`signature_scalars`] joins them. A raw child and deleted text belong to
+/// single characters, so a run that holds one is read character by character.
+fn signature_run_units(run: &CT_R, options: &ComparisonOptions) -> Vec<AttributedRunUnit> {
+    let stretches = options.granularity == ComparisonGranularity::Character
+        && run.extra_xml.is_empty()
+        && run.alt_drawings.is_empty()
+        && !run
+            .content
+            .iter()
+            .any(|content| matches!(content, RunContent::DeletedText(_)));
+    if stretches {
+        attributed_run_units(
+            std::slice::from_ref(run),
+            &ComparisonOptions {
+                granularity: ComparisonGranularity::Run,
+                ..options.clone()
+            },
+        )
+    } else {
+        attributed_run_units(std::slice::from_ref(run), options)
+    }
+}
+
+/// The plain characters of a unit, which a character-granularity signature
+/// holds with those before and after them as one token.
+fn signature_scalars<'a>(
+    unit: &'a AttributedRunUnit,
+    options: &ComparisonOptions,
+) -> Option<&'a str> {
+    (options.granularity == ComparisonGranularity::Character)
+        .then(|| unit_plain_text(unit))
+        .flatten()
+        .filter(|text| !text.is_empty())
 }
 
 /// Push the raw children, comment markers and inline controls at one run
@@ -21985,20 +22319,36 @@ fn cell_signature_with_options(cell: &CT_Tc, options: &ComparisonOptions) -> Str
 
 fn control_signature_with_options(control: &CT_Sdt, options: &ComparisonOptions) -> String {
     let mut content = Vec::new();
+    // The plain characters since the last token, written as one token.
+    let mut scalars = String::new();
+    let close = |scalars: &mut String, content: &mut Vec<String>| {
+        if !scalars.is_empty() {
+            content.push(format!("u:scalars:{:?}", std::mem::take(scalars)));
+        }
+    };
     for child in &control.content {
         match child {
             SdtContent::RawXml(raw) if raw.iter().all(u8::is_ascii_whitespace) => {}
             SdtContent::Run(run) if uses_attributed_run_path(options) => {
-                content.extend(
-                    attributed_run_units(std::slice::from_ref(run), options)
-                        .into_iter()
-                        .filter(|unit| !unit_is_ignorable(unit) && !unit_is_empty(unit))
-                        .map(|unit| format!("u:{}", attributed_unit_signature(&unit))),
-                );
+                for unit in signature_run_units(run, options)
+                    .into_iter()
+                    .filter(|unit| !unit_is_ignorable(unit) && !unit_is_empty(unit))
+                {
+                    if let Some(text) = signature_scalars(&unit, options) {
+                        scalars.push_str(text);
+                    } else {
+                        close(&mut scalars, &mut content);
+                        content.push(format!("u:{}", attributed_unit_signature(&unit)));
+                    }
+                }
             }
-            child => content.push(control_content_signature_with_options(child, options)),
+            child => {
+                close(&mut scalars, &mut content);
+                content.push(control_content_signature_with_options(child, options));
+            }
         }
     }
+    close(&mut scalars, &mut content);
     format!("{:?}:{:?}", control_property_signature(control), content)
 }
 
@@ -23984,6 +24334,380 @@ mod tests {
     }
 
     #[test]
+    fn character_signatures_hold_one_token_per_text_stretch() {
+        let scalar = ComparisonOptions {
+            granularity: ComparisonGranularity::Character,
+            ..Default::default()
+        };
+        let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+        let tokens = |runs: &str, options: &ComparisonOptions| {
+            let model = story_document(&format!("<w:p>{runs}</w:p>"), &bindings).unwrap();
+            let BodyContent::Paragraph(paragraph) = &model.body.content[0] else {
+                unreachable!()
+            };
+            super::paragraph_tokens(paragraph, options)
+        };
+        let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+        // The cost of a signature follows its stretches, not its characters.
+        assert_eq!(tokens(&run("word"), &scalar).len(), 1);
+        assert_eq!(tokens(&run(&"word ".repeat(2000)), &scalar).len(), 1);
+        // The reading is the same however runs split the text.
+        let whole = tokens(&run("invoice thirty days"), &scalar);
+        assert_eq!(
+            whole,
+            tokens(
+                &[run("invoi"), run("ce thi"), run("rty days")].concat(),
+                &scalar
+            )
+        );
+        assert_ne!(whole, tokens(&run("invoice sixty days"), &scalar));
+        // A run read one character at a time, because it holds a raw child,
+        // continues the stretch of a run read whole.
+        let raw = r#"<x:kept xmlns:x="urn:producer"/>"#;
+        let with_raw = |text: &str| format!(r#"<w:r><w:t>{text}</w:t>{raw}</w:r>"#);
+        assert_eq!(
+            tokens(&[run("ab"), with_raw("cd")].concat(), &scalar),
+            tokens(&[run("abc"), with_raw("d")].concat(), &scalar)
+        );
+        assert_ne!(
+            tokens(&[run("ab"), with_raw("cd")].concat(), &scalar),
+            tokens(&[run("abcd"), with_raw("")].concat(), &scalar)
+        );
+        // Deleted text reads one character at a time, whatever holds it.
+        let deleted = |texts: &[&str]| {
+            texts
+                .iter()
+                .map(|text| format!("<w:r><w:delText>{text}</w:delText></w:r>"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            tokens(&deleted(&["abc"]), &scalar),
+            tokens(&deleted(&["a", "bc"]), &scalar)
+        );
+        assert_ne!(
+            tokens(&deleted(&["abc"]), &scalar),
+            tokens(&run("abc"), &scalar)
+        );
+        // Other content and empty text still stand between two stretches.
+        assert_eq!(
+            tokens("<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r>", &scalar).len(),
+            3
+        );
+        assert_ne!(
+            tokens(&run("ab"), &scalar),
+            tokens("<w:r><w:t>a</w:t><w:t/><w:t>b</w:t></w:r>", &scalar)
+        );
+        // The direct runs of an inline control follow the same rule.
+        let control = |runs: &str| {
+            let model = story_document(
+                &format!("<w:p><w:sdt><w:sdtPr/><w:sdtContent>{runs}</w:sdtContent></w:sdt></w:p>"),
+                &bindings,
+            )
+            .unwrap();
+            let BodyContent::Paragraph(paragraph) = &model.body.content[0] else {
+                unreachable!()
+            };
+            super::control_signature_with_options(&paragraph.content_controls[0].3, &scalar)
+        };
+        assert_eq!(
+            control(&run("invoice thirty days")),
+            control(&[run("invoi"), run("ce thi"), run("rty days")].concat())
+        );
+        assert_ne!(
+            control(&run("invoice thirty days")),
+            control(&run("invoice sixty days"))
+        );
+        assert_eq!(
+            control(&[run("ab"), with_raw("cd")].concat()),
+            control(&[run("abc"), with_raw("d")].concat())
+        );
+        // Ignored whitespace leaves no token and does not end a stretch.
+        let ignoring = ComparisonOptions {
+            ignore_whitespace: true,
+            ..scalar.clone()
+        };
+        assert_eq!(tokens(&run("a b  c"), &ignoring).len(), 1);
+        assert_eq!(
+            tokens(&run("a b  c"), &ignoring),
+            tokens(&[run("ab "), run(" c")].concat(), &ignoring)
+        );
+        assert_ne!(
+            tokens(&run("a b  c"), &scalar),
+            tokens(&[run("ab "), run(" c")].concat(), &scalar)
+        );
+    }
+
+    #[test]
+    fn run_sources_of_one_parent_are_captured_in_one_pass() {
+        let xml = format!(
+            r#"<w:p xmlns:w="{W_NS}"><w:r><w:t>a</w:t></w:r><w:hyperlink xmlns:x="urn:link" w:anchor="spot"><w:r x:kept="1"><w:t>b</w:t></w:r><w:r><w:t>c</w:t></w:r></w:hyperlink><w:r xmlns:y="urn:run"><w:t>d</w:t><y:kept/></w:r><w:r><w:t>e</w:t></w:r></w:p>"#
+        );
+        let paragraph = rdocx_oxml::text::CT_P::from_xml_fragment(xml.as_bytes()).unwrap();
+        let spans = super::modeled_paragraph_run_spans(&paragraph, &xml).unwrap();
+        assert_eq!(spans.len(), 5);
+        let runs = paragraph
+            .runs
+            .iter()
+            .map(Some)
+            .zip(spans)
+            .collect::<Vec<_>>();
+        // A span inside a run opens no element. It is answered among the
+        // others as it is alone, and leaves the other answers as they are.
+        let mut asked = runs.clone();
+        asked.insert(2, (None, runs[1].1.start + 3..runs[1].1.end));
+        super::SOURCE_READ_BYTES.set(0);
+        let together = super::RunSource::capture_all(&asked, &xml);
+        assert_eq!(super::SOURCE_READ_BYTES.get(), xml.len());
+        let facts = |source: &super::Result<super::RunSource>| {
+            source.as_ref().map_err(ToString::to_string).map(|source| {
+                (
+                    source.owner,
+                    source.scoped.clone(),
+                    source.raw.clone(),
+                    source.parent.clone(),
+                    source.raw_slots.clone(),
+                    source.typed_slots.clone(),
+                )
+            })
+        };
+        for (run, source) in asked.iter().zip(&together) {
+            let alone = super::RunSource::capture_all(std::slice::from_ref(run), &xml);
+            assert_eq!(facts(source), facts(&alone[0]));
+        }
+        assert_eq!(
+            facts(&together[2]),
+            Err("run source has no actual opening".to_owned())
+        );
+        let together = together
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(together.len(), 5);
+        // The scope of each run is the one its own ancestors declare.
+        let link = ("xmlns:x".to_owned(), "urn:link".to_owned());
+        assert_eq!(
+            together
+                .iter()
+                .map(|source| source.parent.contains(&link))
+                .collect::<Vec<_>>(),
+            [false, true, true, false, false]
+        );
+        assert!(
+            together
+                .iter()
+                .all(|source| !source.parent.iter().any(|(_, uri)| uri == "urn:run"))
+        );
+    }
+
+    #[test]
+    fn parent_scopes_of_many_children_are_read_in_one_pass() {
+        let xml = format!(
+            r#"<w:tbl xmlns:w="{W_NS}"><w:tblPr/><w:tr xmlns:x="urn:row"><w:tc><w:p/></w:tc></w:tr><w:sdt><w:sdtContent><w:tr><w:tc><w:p/></w:tc></w:tr></w:sdtContent></w:sdt><w:tr><w:tc x:ns="unbound"/></w:tr></w:tbl>"#
+        );
+        let rows = super::direct_word_element_spans(&xml, "tr").unwrap();
+        let control = super::direct_word_element_spans(&xml, "sdt").unwrap()[0].clone();
+        // Rows, a control between them, a span inside a tag, the end of the
+        // table and a span past it.
+        let mut spans = rows.clone();
+        spans.insert(1, control.clone());
+        spans.push(control.start + 2..control.end);
+        spans.push(xml.len() - "</w:tbl>".len()..xml.len());
+        spans.push(xml.len() + 5..xml.len() + 9);
+        let starts = spans.iter().map(|span| span.start).collect::<Vec<_>>();
+        fn text<T: Clone>(result: &super::Result<T>) -> Result<T, String> {
+            result.as_ref().map_err(ToString::to_string).cloned()
+        }
+        super::SOURCE_READ_BYTES.set(0);
+        let parents = super::publication_parents_at(&xml, &starts);
+        let children = super::source_children(&xml, &spans);
+        assert_eq!(super::SOURCE_READ_BYTES.get(), 2 * xml.len());
+        // Each answer, an error included, is the one a read for that
+        // position alone gives.
+        for ((start, span), (parent, child)) in
+            starts.iter().zip(&spans).zip(parents.iter().zip(&children))
+        {
+            assert_eq!(
+                text(parent),
+                text(&super::publication_parents_at(&xml, &[*start])[0])
+            );
+            assert_eq!(
+                text(child),
+                text(&super::source_children(&xml, std::slice::from_ref(span))[0])
+            );
+        }
+        // The rows and the control open elements, and the end of the table
+        // is the start of an event, so all have a scope. The others are
+        // refused.
+        let absent = Err("publication boundary is absent from its actual shell".to_owned());
+        assert!(parents[..3].iter().all(Result::is_ok) && parents[4].is_ok());
+        assert_eq!(
+            [text(&parents[3]), text(&parents[5])],
+            [absent.clone(), absent]
+        );
+        assert!(children[..3].iter().all(Result::is_ok));
+        assert!(children[3..].iter().all(|child| {
+            text(child) == Err("source child has no opening at its span".to_owned())
+        }));
+        // A row declares its own namespace for its source, not its scope.
+        assert!(
+            children[0]
+                .as_ref()
+                .unwrap()
+                .contains(r#"xmlns:x="urn:row""#)
+                && !parents[0]
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, uri)| uri == "urn:row")
+        );
+        // The same request in another order gets the same answers.
+        let reversed = starts.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(
+            super::publication_parents_at(&xml, &reversed)
+                .iter()
+                .rev()
+                .map(text)
+                .collect::<Vec<_>>(),
+            parents.iter().map(text).collect::<Vec<_>>()
+        );
+    }
+
+    /// The source bytes one comparison of the documents `body` makes for the
+    /// original and the edited text reads.
+    fn comparison_reads(body: &dyn Fn(&str) -> String, options: &ComparisonOptions) -> usize {
+        let document = |text: &str| {
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}"><w:body>{}</w:body></w:document>"#,
+                body(text)
+            );
+            let mut document = Document::new();
+            document
+                .package
+                .set_part(&document.doc_part_name, xml.into_bytes());
+            Document::from_package(document.package).unwrap()
+        };
+        let mut original = document("thirty days");
+        let edited = document("sixty days");
+        super::SOURCE_READ_BYTES.set(0);
+        original
+            .compare_with_options(&edited, "Ada", "2026-11-15T09:00:00Z", options)
+            .unwrap();
+        assert!(!original.story_revisions().unwrap().is_empty());
+        super::SOURCE_READ_BYTES.get()
+    }
+
+    #[test]
+    fn comparison_reads_a_parent_once_per_snapshot_whatever_its_children() {
+        // Reading a paragraph or a table again for each run, row or cell made
+        // the cost quadratic in its children. The count of reads is the same
+        // for few and for many children.
+        let runs = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    format!(
+                        r#"<w:r>{}<w:t xml:space="preserve">word{index} </w:t></w:r>"#,
+                        if index % 2 == 0 {
+                            "<w:rPr><w:b/></w:rPr>"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<String>()
+        };
+        let paragraph = |count: usize| {
+            move |text: &str| format!("<w:p>{}<w:r><w:t>{text}</w:t></w:r></w:p>", runs(count))
+        };
+        let linked = |count: usize| {
+            move |text: &str| {
+                format!(
+                    r#"<w:p><w:hyperlink w:anchor="spot">{}</w:hyperlink><w:r><w:t>{text}</w:t></w:r></w:p>"#,
+                    runs(count)
+                )
+            }
+        };
+        let added = |count: usize| {
+            move |text: &str| {
+                let extra = if text.starts_with("sixty") {
+                    format!("<w:p>{}</w:p>", runs(count))
+                } else {
+                    String::new()
+                };
+                format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>{extra}")
+            }
+        };
+        let table = |count: usize| {
+            move |text: &str| {
+                let rows = (0..count)
+                    .map(|index| {
+                        format!(
+                            r#"<w:tr><w:tc><w:p><w:r><w:t>row {index}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:tc></w:tr>"#,
+                            if index == count / 2 { text } else { "kept" }
+                        )
+                    })
+                    .collect::<String>();
+                format!(
+                    r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl><w:p/>"#
+                )
+            }
+        };
+        let added_table = |count: usize| {
+            move |text: &str| {
+                let paragraph = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+                if text.starts_with("sixty") {
+                    format!("{paragraph}{}", table(count)("kept"))
+                } else {
+                    paragraph
+                }
+            }
+        };
+        for granularity in [
+            ComparisonGranularity::Run,
+            ComparisonGranularity::Word,
+            ComparisonGranularity::Character,
+        ] {
+            let options = ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            // 16 times the children read at most 32 times the bytes, where a
+            // read of the parent for each child reads about 256 times more.
+            for (name, few, many) in [
+                (
+                    "paragraph",
+                    comparison_reads(&paragraph(3), &options),
+                    comparison_reads(&paragraph(48), &options),
+                ),
+                (
+                    "hyperlink",
+                    comparison_reads(&linked(3), &options),
+                    comparison_reads(&linked(48), &options),
+                ),
+                (
+                    "added paragraph",
+                    comparison_reads(&added(3), &options),
+                    comparison_reads(&added(48), &options),
+                ),
+                (
+                    "table",
+                    comparison_reads(&table(3), &options),
+                    comparison_reads(&table(48), &options),
+                ),
+                (
+                    "added table",
+                    comparison_reads(&added_table(3), &options),
+                    comparison_reads(&added_table(48), &options),
+                ),
+            ] {
+                assert!(
+                    many <= 32 * few,
+                    "{name} {granularity:?}: {few} then {many} bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mixed_owner_gap_pairing_is_deterministic_and_preserves_every_owner() {
         let original = (0..48)
             .map(|index| format!("{}:old-{index}", ["p", "tbl", "sdt"][index % 3]))
@@ -25500,7 +26224,9 @@ mod tests {
                 let spans = story_content_spans(body, &bindings).unwrap();
                 let xml = &body[spans[0].clone()];
                 let spans = modeled_paragraph_run_spans(p, xml).unwrap();
-                RunSource::capture(Some(&p.runs[0]), xml, spans[0].clone()).unwrap()
+                RunSource::capture_all(&[(Some(&p.runs[0]), spans[0].clone())], xml)
+                    .remove(0)
+                    .unwrap()
             };
             let left_source = source(original_body, &left);
             let right_source = source(edited_body, &right);
@@ -26414,7 +27140,8 @@ mod tests {
                             let pspan = story_content_spans(body, bindings)?[0].clone();
                             let closed = source_fragment(&body[pspan], bindings)?;
                             let spans = modeled_paragraph_run_spans(p, &closed)?;
-                            RunSource::capture(Some(&p.runs[0]), &closed, spans[0].clone())
+                            RunSource::capture_all(&[(Some(&p.runs[0]), spans[0].clone())], &closed)
+                                .remove(0)
                         };
                     let left_source = capture(left_body, left, &bindings_left)?;
                     let right_source = capture(right_body, right, &bindings_right)?;

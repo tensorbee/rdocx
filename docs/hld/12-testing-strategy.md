@@ -1303,7 +1303,14 @@ properties of the sibling run it follows, each revision is one run with its
 whole text, and the run count is bounded by the revision count. The run count
 and the size a redline adds over its original do not depend on the length of
 the unchanged text. Unit controls check that merged fragments rejoin one text
-element with one source selection. None of these uses a timing threshold.
+element with one source selection, that a character-granularity signature holds
+one token per stretch and reads the same for every run split, and that run
+sources and parent scopes read together equal those read alone, errors
+included. A count of the source bytes a comparison reads shows that it reads a
+paragraph, a hyperlink, a table and an inserted paragraph or table a fixed
+number of times whatever their children, at every granularity. A further
+regression pins the v0.17.0 refusal of a drawing that shares its run with a
+field begin mark. None of these uses a timing threshold.
 
 Chart comparison regressions cover chart-only Word and Run granularity, adjacent
 text edits and an unchanged-chart control. Saved and reopened resolutions follow

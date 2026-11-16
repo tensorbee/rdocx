@@ -1522,7 +1522,19 @@ one run for each revision and for each stretch of text between two of them,
 whatever the unit, in every story, with two exceptions. Under
 `ignore_whitespace` an ignored whitespace unit ends a stretch, so unchanged text
 is written one run per word and per space. A tab, a break or other run content
-ends a stretch as it ends a text element. Supported inline controls retain raw
+ends a stretch as it ends a text element.
+
+The cost of a comparison follows its changes, not its units or the size of the
+parents that hold them, with one exception. A comparison reads the source of a
+paragraph, table, row, cell or control a fixed number of times whatever
+children it holds: one read answers all its children, every answer, an error
+included, being the one a read for that child alone gives. A
+character-granularity signature holds one token per stretch of plain text, and
+each postcondition direction resolves the candidate once for both the package
+guard and the footnote destination check. The package guard still reads each
+cleaned story a second time, which keeps its refusals. The exception is the
+alignment of one shell segment, a full longest-common-subsequence table,
+quadratic in the units it compares. Supported inline controls retain raw
 child run cuts before extraction, align Word and Character units within those
 shell segments and copy each shell before its first inserted unit.
 Non-text content remains atomic. Unmatched identical owners become move pairs

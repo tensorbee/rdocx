@@ -413115,6 +413115,76 @@ fn issue446_comparison_cost_follows_the_changes_not_the_unchanged_text() {
 }
 
 #[test]
+fn issue446_comparison_keeps_refusing_a_drawing_in_a_field_begin_run() {
+    // The source guard reads the cleaned clone of each story again, as
+    // v0.17.0 does. That read refuses a drawing that shares its run with
+    // the begin mark of a complex field, whatever else changes. Speeding the
+    // comparison up must not change which inputs it refuses.
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let mut seed = Document::new();
+    seed.add_picture(png, "a.png", Length::emu(914400), Length::emu(914400));
+    let seed = seed.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let drawing = &xml[xml.find("<w:drawing>").unwrap()
+        ..xml.find("</w:drawing>").unwrap() + "</w:drawing>".len()];
+    let head = &xml[..xml.find("<w:body>").unwrap() + "<w:body>".len()];
+    let tail = &xml[xml.find("<w:sectPr").unwrap()..];
+    let document = |text: &str| {
+        let body = format!(
+            concat!(
+                r#"<w:p><w:r><w:t>{text}</w:t></w:r>"#,
+                r#"<w:r>{drawing}<w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+            ),
+            text = text,
+            drawing = drawing,
+        );
+        let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+        package.set_part(
+            "/word/document.xml",
+            format!("{head}{body}{tail}").into_bytes(),
+        );
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        Document::from_bytes(bytes.get_ref()).unwrap()
+    };
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut original = document("alpha beta");
+        let before = original.to_bytes().unwrap();
+        let error = original
+            .compare_with_options(
+                &document("alpha gamma"),
+                "Ada",
+                "2026-11-16T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "comparison could not correlate split field run 2",
+            "{granularity:?}"
+        );
+        assert_eq!(original.to_bytes().unwrap(), before, "{granularity:?}");
+    }
+}
+
+#[test]
 fn issue434_comparison_crossing_reply_composition() {
     let mut original = Document::new();
     original.add_paragraph("thirty days");
