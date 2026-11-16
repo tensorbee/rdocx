@@ -1647,7 +1647,10 @@ Creating a part carries the actual edited special inventory, including none.
 Accept restores the edited identities and inventory, and reject restores the
 original. Settlement physically retires library custody pairs. A marker left
 by Word in an already completed part is preserved when untouched and retired
-before editing its owner or part or emitting new custody there. Ignored notes
+before editing its owner or part or emitting new custody there. A resolution
+that edits the note part or resolves a note reference, and leaves no note owner
+or reference revision pending, also settles the part when no unit is recognized,
+for example after Word dropped a note pair, and retires the pairs left in it. Ignored notes
 retain original bytes and cannot supply a dangling new body reference. Endnote
 topology retains its existing refusal while ordinary text edits remain supported.
 

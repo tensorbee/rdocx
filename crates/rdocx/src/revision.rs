@@ -539,6 +539,16 @@ impl Document {
         output.extend_from_slice(&source[..tree.elements[tree.root].start]);
         output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
         output.extend_from_slice(&source[tree.elements[tree.root].end..]);
+        // Resolving a note reference settles the note side of a custody unit as
+        // much as resolving the note itself, so it counts for settlement. Read
+        // from this render, only when the document holds custody pairs.
+        let reference_resolved = !footnote_custody.is_empty()
+            && tree.elements.iter().enumerate().any(|(index, node)| {
+                node.word
+                    && node.local == "footnoteReference"
+                    && std::iter::successors(Some(index), |&at| tree.elements[at].parent)
+                        .any(|at| state.resolved.contains(&at))
+            });
 
         let mut resolved = state.resolved.len();
         if resolved > 0 {
@@ -557,8 +567,9 @@ impl Document {
         resolved = resolved
             .checked_add(removed_note_revisions)
             .ok_or_else(|| Error::Other("resolved revision count overflowed".into()))?;
+        let mut note_part_resolved = removed_note_revisions > 0 || reference_resolved;
         let story_parts = crate::comparison::revision_story_parts(&candidate)?;
-        for (_, part_name) in story_parts {
+        for (kind, part_name) in story_parts {
             let part = candidate
                 .package
                 .get_part(&part_name)
@@ -604,6 +615,7 @@ impl Document {
                 resolve_story_xml(&part, resolution, scope.clone())?
             };
             if count > 0 {
+                note_part_resolved |= matches!(kind, crate::StoryKind::Footnote);
                 candidate.package.set_part(&part_name, updated);
                 resolved = resolved
                     .checked_add(count)
@@ -665,6 +677,7 @@ impl Document {
             &mut candidate,
             &footnote_custody,
             matches!(resolution, Resolution::Accept),
+            note_part_resolved,
             publication.as_deref_mut(),
         )?;
         candidate.reconcile_comment_removal(self)?;

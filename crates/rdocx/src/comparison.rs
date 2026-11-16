@@ -5162,9 +5162,18 @@ pub(crate) fn settle_footnote_custody(
     document: &mut Document,
     units: &[FootnoteCustody],
     accept: bool,
+    note_part_resolved: bool,
     mut publication: Option<&mut crate::revision::NotePublication>,
 ) -> Result<()> {
     if !units.iter().any(|unit| !unit.revisions.is_empty()) {
+        // No unit is recognized as pending, for example after Word dropped a
+        // note pair. A resolution that edits the note part or resolves a note
+        // reference, and leaves no note revision pending, still settles the
+        // part, and settlement retires its remaining custody pairs. A pair in
+        // an untouched part stays.
+        if note_part_resolved && !units.is_empty() && !note_revisions_pending(document)? {
+            retire_note_markers(document, units, publication)?;
+        }
         return Ok(());
     }
     let Some(mut part) = FootnotePart::of(document)? else {
@@ -5215,6 +5224,28 @@ pub(crate) fn settle_footnote_custody(
         }
     }
     Ok(())
+}
+
+/// Whether a normal note owner or a note reference still carries a revision.
+fn note_revisions_pending(document: &Document) -> Result<bool> {
+    if footnote_reference_sites(document)?
+        .iter()
+        .any(|site| site.revision.is_some())
+    {
+        return Ok(true);
+    }
+    let Some(part) = FootnotePart::of(document)? else {
+        return Ok(false);
+    };
+    let mut tree = crate::revision::XmlTree::parse(part.xml.as_bytes())?;
+    tree.qualify_note_revisions()?;
+    let owners = part.normal();
+    Ok(tree.elements.iter().any(|node| {
+        node.revision.is_some()
+            && owners
+                .values()
+                .any(|owner| node.start >= owner.inner.start && node.end <= owner.inner.end)
+    }))
 }
 
 fn retire_note_markers(

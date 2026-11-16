@@ -3042,30 +3042,32 @@ refuses atomically, including when a token happens to equal an unrelated id.
 No selector treats the token as a request to select the unit.
 
 For positively admitted custody states, accept restores edited note identities,
-reference inventory, special records and part presence. Reject restores the original destination. Creating a part
-carries the actual edited special inventory, including none. An open creation
-unwinds to absence after its final owned note is rejected unless retained
-unowned content requires the part. Resolved units keep tombstones while another
-unit is pending, and settlement physically retires library markers. An unmatched
-body pair has no surviving note-owner identity and cannot group or select an
-adjacent reference, even inside a revision wrapper. Its ordinary revisions keep
-their ordinary selectors. Exact note-present owner, reference, token, bits and
-pair checks remain mandatory, and a note pair without its body pair refuses.
-Missing note-pair corruption cannot always be distinguished from identical valid
+reference inventory, special records and part presence. Reject restores the
+original destination. Creating a part carries the actual edited special
+inventory, including none. An open creation unwinds to absence after its final
+owned note is rejected unless retained unowned content requires the part.
+Resolved units keep tombstones while another unit is pending, and settlement
+physically retires library markers. A resolution that edits the note part or
+resolves a note reference, and leaves no note revision pending, settles it even
+when no unit is recognized, and retires its remaining pairs. An unmatched body
+pair has no surviving note-owner identity and cannot group or select an adjacent
+reference, even inside a revision wrapper. Its ordinary revisions keep their
+ordinary selectors. Exact note-present owner, reference, token, bits and pair
+checks remain mandatory, and a note pair without its body pair refuses. Missing
+note-pair corruption cannot always be distinguished from identical valid
 removed-note histories. Opaque revision-shaped payload does not add listing or
 resolution counts. Genuine admitted textbox and structural revisions still do.
-Reopen
-reads the same persisted units and part-presence votes without chronology or
-process-local history. Imported Word-completed markers stay exact when untouched
-through an unrelated scoped paragraph replacement and comparison, including a
-terminal body pair with no surviving note counterpart. Complete removal of a
-comparison-owned footnotes part also retires its settings references while
-preserving other note policy. Completed markers retire before an affected
-comparison edits their owner or part or adds
-custody. Ignored footnote stories retain original parts and refuse body changes
-that would leave a missing note target. Endnote text comparison remains
-supported, while new endnote topology remains refused. These operations use
-existing held-handle invalidation and leave all live state unchanged on refusal.
+Reopen reads the same persisted units and part-presence votes without chronology
+or process-local history. Imported Word-completed markers stay exact when
+untouched through an unrelated scoped paragraph replacement and comparison,
+including a terminal body pair with no surviving note counterpart. Complete
+removal of a comparison-owned footnotes part also retires its settings
+references while preserving other note policy. Completed markers retire before
+an affected comparison edits their owner or part or adds custody. Ignored
+footnote stories retain original parts and refuse body changes that would leave
+a missing note target. Endnote text comparison remains supported, while new
+endnote topology remains refused. These operations use existing held-handle
+invalidation and leave all live state unchanged on refusal.
 
 Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair into its own reference's merged insertion, which is admitted while the note pair remains, and Word for Mac 16.115 can drop the note counterpart. Without the note pair, such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically when the body pair sits inside the merged insertion, and rejecting an added note or accepting a removed one refuses atomically otherwise. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
 

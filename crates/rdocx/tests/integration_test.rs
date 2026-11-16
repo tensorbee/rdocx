@@ -39705,6 +39705,171 @@ fn issue430_body_pair_lifted_out_of_a_rejected_insertion_keeps_its_vote() {
     }
 }
 
+fn issue430_word_note_only_body() -> &'static str {
+    r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r><w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF4P11B"/><w:bookmarkEnd w:id="0"/><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:r><w:t>The parties met in September.</w:t></w:r></w:p>"#
+}
+fn issue430_word_note_only_notes() -> String {
+    format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="2" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Contract, clause 7.</w:t></w:r></w:ins></w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    )
+}
+fn issue430_word_mixed_body() -> &'static str {
+    r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:del w:id="0" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:delText>Payment was due in thirty days</w:delText></w:r></w:del><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>The seller wrote twice to ask for payment</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF8P11B"/><w:bookmarkEnd w:id="2"/><w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:pPr><w:rPr><w:ins w:id="6" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="7" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:t>Payment was due in sixty days.</w:t></w:r></w:ins></w:p><w:p><w:r><w:t xml:space="preserve">The parties met in </w:t></w:r><w:del w:id="8" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:delText>September</w:delText></w:r></w:del><w:ins w:id="9" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:t>October</w:t></w:r></w:ins><w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="10" w:name="_rdocxCmpNoteF18P11B"/><w:bookmarkEnd w:id="10"/><w:ins w:id="11" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="3"/></w:r></w:ins></w:p>"#
+}
+fn issue430_word_mixed_notes() -> String {
+    format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="4" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="5" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote><w:footnote w:id="3"><w:p><w:pPr><w:rPr><w:ins w:id="12" w:author="B" w:date="2026-10-31T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="13" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Minutes of the meeting, p.4.</w:t></w:r></w:ins></w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    )
+}
+
+#[test]
+fn issue430_word_saved_unmatched_body_pair_retires_when_its_part_settles() {
+    // rdocx compared the three-paragraph original with an edit that adds a
+    // second footnote to its second paragraph (the pair before the reference
+    // mark, as v0.17.0 wrote it), and Word saved it. Word dropped the note
+    // pair, so the body pair has no note counterpart. Accepting settles every
+    // note revision, and settlement retires the leftover pair.
+    let accepted = [
+        "The buyer took delivery on 12 June.",
+        "Payment was due in thirty days.",
+        "The parties met in September.",
+    ];
+    let mut source = issue430_fixture(
+        issue430_word_note_only_body(),
+        Some(&issue430_word_note_only_notes()),
+    );
+    for all in [true, false] {
+        let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+        if all {
+            document.accept_all().unwrap();
+        } else {
+            document.accept_revisions_by_author("A").unwrap();
+        }
+        let mut document = issue430_roundtrip(&mut document);
+        assert_eq!(issue430_texts(&document), accepted);
+        issue430_assert_settled(&mut document, &[1, 2], true);
+    }
+    // Word's own Accept All of that file (Word 16.115, AppleScript `accept all
+    // revisions` then `save as`) keeps the body pair in a settled part. It stays
+    // while a resolution leaves the note part untouched, and retires once a
+    // resolution edits the part and leaves no note revision pending.
+    let settled_body = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r><w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF4P11B"/><w:bookmarkEnd w:id="0"/><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:p><w:p><w:r><w:t>The parties met in September.</w:t></w:r></w:p>"#;
+    // The control adds one unrelated tracked paragraph to Word's bytes, and in
+    // the second case one tracked run to the second note.
+    let unrelated = format!(
+        r#"{settled_body}<w:p><w:ins w:id="100" w:author="Other" w:date="{ISSUE430_DATE}"><w:r><w:t>Unrelated.</w:t></w:r></w:ins></w:p>"#
+    );
+    let settled_notes = format!(
+        r#"{}{}<w:footnote w:id="2"><w:p><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Contract, clause 7.</w:t></w:r>{{extra}}</w:p></w:footnote>"#,
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    );
+    let pair = vec!["_rdocxCmpNoteF4P11B".to_owned()];
+    let mut untouched = issue430_fixture(&unrelated, Some(&settled_notes.replace("{extra}", "")));
+    assert_eq!(untouched.accept_revision_id(100).unwrap(), 1);
+    assert_eq!(issue430_markers(&mut untouched), pair);
+    let edited_note = settled_notes.replace(
+        "{extra}",
+        &format!(
+            r#"<w:ins w:id="101" w:author="Other" w:date="{ISSUE430_DATE}"><w:r><w:t xml:space="preserve"> Also clause 8.</w:t></w:r></w:ins>"#
+        ),
+    );
+    for both in [false, true] {
+        let mut document = issue430_fixture(&unrelated, Some(&edited_note));
+        if both {
+            assert_eq!(document.accept_all().unwrap(), 2);
+            assert!(issue430_markers(&mut document).is_empty());
+        } else {
+            assert_eq!(document.accept_revision_id(100).unwrap(), 1);
+            assert_eq!(issue430_markers(&mut document), pair);
+            assert_eq!(document.reject_revision_id(101).unwrap(), 1);
+            assert!(issue430_markers(&mut document).is_empty());
+        }
+    }
+}
+
+#[test]
+fn issue430_settling_only_the_reference_retires_the_leftover_body_pair() {
+    // The Word-saved result whose note pair Word dropped. Accepting the note's
+    // own two elements first leaves only the reference pending, and the pair
+    // stays. Accepting the reference then settles the part, and its leftover
+    // pair retires, whichever side settles last.
+    let pair = vec!["_rdocxCmpNoteF4P11B".to_owned()];
+    let mut document = issue430_fixture(
+        issue430_word_note_only_body(),
+        Some(&issue430_word_note_only_notes()),
+    );
+    for id in [2, 3] {
+        document.accept_revision_id(id).unwrap();
+        document = issue430_roundtrip(&mut document);
+        assert_eq!(issue430_markers(&mut document), pair);
+    }
+    assert_eq!(document.story_revisions().unwrap().len(), 1);
+    assert_eq!(document.accept_revision_id(1).unwrap(), 1);
+    let mut document = issue430_roundtrip(&mut document);
+    issue430_assert_settled(&mut document, &[1, 2], true);
+    // The same state as Word leaves it after accepting only the note side:
+    // the note is settled and only the reference insertion is pending.
+    let settled_note = issue430_word_note_only_notes()
+        .replace(
+            r#"<w:pPr><w:rPr><w:ins w:id="2" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr>"#,
+            "",
+        )
+        .replace(
+            r#"<w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z">"#,
+            "",
+        )
+        .replace("</w:ins></w:p></w:footnote>", "</w:p></w:footnote>");
+    assert!(!settled_note.contains("<w:ins"));
+    for accept in [true, false] {
+        let mut document = issue430_fixture(issue430_word_note_only_body(), Some(&settled_note));
+        if accept {
+            assert_eq!(document.accept_all().unwrap(), 1);
+        } else {
+            assert_eq!(document.reject_all().unwrap(), 1);
+        }
+        let mut document = issue430_roundtrip(&mut document);
+        assert!(issue430_markers(&mut document).is_empty());
+        assert!(document.story_revisions().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn issue430_word_saved_mixed_authors_keep_pairs_until_the_last_note_settles() {
+    // Author A's result (a footnote added with a body text change), then
+    // author B compared on top of it (another footnote and a text change in
+    // the last paragraph), then Word saved it and dropped both note pairs.
+    // Accepting one author keeps both body pairs while the other author's
+    // note is pending, and the last acceptance retires them.
+    let accepted = [
+        "The buyer took delivery on 12 June.",
+        "The seller wrote twice to ask for payment.",
+        "Payment was due in sixty days.",
+        "The parties met in October.",
+    ];
+    let mut source = issue430_fixture(
+        issue430_word_mixed_body(),
+        Some(&issue430_word_mixed_notes()),
+    );
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+        document.accept_revisions_by_author(first).unwrap();
+        let mut document = issue430_roundtrip(&mut document);
+        assert_eq!(
+            issue430_markers(&mut document),
+            ["_rdocxCmpNoteF18P11B", "_rdocxCmpNoteF8P11B"]
+        );
+        document.accept_revisions_by_author(second).unwrap();
+        let mut document = issue430_roundtrip(&mut document);
+        assert_eq!(issue430_texts(&document), accepted);
+        issue430_assert_settled(&mut document, &[1, 2, 3], true);
+    }
+}
+
 #[test]
 fn issue432_note_mark_order_separators_and_space() {
     let mut doc = Document::new();
