@@ -859,13 +859,19 @@ impl Document {
         Ok(true)
     }
 
-    /// Move a checked pair to a new range in one story owner.
-    /// Move one existing root comment without changing its thread identity.
-    /// Unknown IDs, replies, incomplete anchors and unsupported destinations
-    /// are refused without publishing any change.
+    /// Move one existing root comment and its replies without changing their
+    /// thread identity.
+    ///
+    /// Each reply with its own range and reference crosses the root's new
+    /// range as [`Self::reply_to`] writes it. A reply without any marker
+    /// follows through the thread metadata. Unknown IDs, replies, incomplete
+    /// anchors, a reply anchor that cannot travel and unsupported
+    /// destinations are refused without publishing any change. Moving a root
+    /// onto its own range publishes nothing when every anchored reply already
+    /// crosses it, and otherwise brings the replies back onto it.
     pub fn move_comment(&mut self, id: i32, range: StoryRunRange) -> Result<()> {
         let selected = self.checked_movable_comment(id)?;
-        if self.comment_anchor(id)?.as_ref() == Some(&range) {
+        if self.thread_on_range(id, &range)? {
             self.story_range_paragraph_snapshot(&range.start.location)?;
             if range.end.location != range.start.location {
                 self.story_range_paragraph_snapshot(&range.end.location)?;
@@ -875,17 +881,20 @@ impl Document {
         self.move_story_range(&selected, range)
     }
 
-    /// Move an existing root comment onto a literal main-story occurrence.
-    /// Search and run splitting follow [`Self::add_comment_on_text`].
+    /// Move an existing root comment and its replies onto a literal
+    /// main-story occurrence, as [`Self::move_comment`] does. Search and run
+    /// splitting follow [`Self::add_comment_on_text`].
     pub fn move_comment_to_text(&mut self, id: i32, anchor: &str, occurrence: usize) -> Result<()> {
         let selected = self.checked_movable_comment(id)?;
         let mut candidate = self.clone_for_staging();
         // The move reads the main part as its source authority, which an
         // in-place edit such as `add_comment` leaves behind the typed body.
         candidate.flush_to_package()?;
+        let replies = candidate.anchored_thread_replies(id)?;
         let reference = candidate.remove_comment_source_for_move(&selected)?;
         candidate.anchor_existing_comment_on_text(id, anchor, occurrence)?;
         candidate.restore_comment_reference_run(id, reference)?;
+        candidate.move_replies_with_root(id, &replies)?;
         candidate.flush_to_package()?;
         candidate.comment_ownership_at(&candidate.doc_part_name)?;
         let reopened = candidate.prepare_and_reopen_staged()?;
@@ -893,18 +902,117 @@ impl Document {
         Ok(())
     }
 
-    pub(crate) fn checked_movable_comment(&self, id: i32) -> Result<StoryRangeRef> {
+    /// The anchored replies of `root`, parents first and siblings in id
+    /// order, each with the nearest anchored ancestor its range crosses.
+    /// Replying in that order writes the markers [`Self::reply_to`] writes.
+    /// A reply without any marker follows through thread metadata alone.
+    /// Any other reply anchor cannot travel with the thread and refuses
+    /// before an edit. `self` must be flushed.
+    fn anchored_thread_replies(&self, root: i32) -> Result<Vec<(i32, i32)>> {
+        let ownership = self.comment_ownership_at(&self.doc_part_name)?;
+        let counts = CommentOwnership::marker_counts(&ownership.markers);
+        let mut replies = Vec::new();
+        let mut parents = std::collections::VecDeque::from([(root, root)]);
+        while let Some((parent, anchored)) = parents.pop_front() {
+            for (&reply, _) in ownership
+                .parents
+                .iter()
+                .filter(|(_, found)| **found == Some(parent))
+            {
+                match counts.get(&reply).copied().unwrap_or_default() {
+                    [0, 0, 0] => parents.push_back((reply, anchored)),
+                    [1, 1, 1] => {
+                        replies.push((reply, anchored));
+                        parents.push_back((reply, reply));
+                    }
+                    _ => {
+                        return Err(Error::Other(format!(
+                            "comment {root} cannot move: reply {reply} has an incomplete anchor"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(replies)
+    }
+
+    /// Bring each anchored reply onto its ancestor's current range on this
+    /// staged candidate, after the root moved. The original reference run
+    /// travels as the root's does. A failure names the root and the reply.
+    fn move_replies_with_root(&mut self, root: i32, replies: &[(i32, i32)]) -> Result<()> {
+        for &(reply, anchored) in replies {
+            let mut moved = || -> Result<()> {
+                self.flush_to_package()?;
+                let selected = self.checked_flushed_comment_source(reply, false)?;
+                let reference = self.remove_comment_source_for_move(&selected)?;
+                let (_, written) = self.anchor_reply_crossing(anchored, Some(reply))?;
+                // Anchoring rewrote that owner, so take its current identity.
+                let story = self
+                    .stories()?
+                    .into_iter()
+                    .find(|story| {
+                        story.kind() == written.kind()
+                            && story.part_name() == written.part_name()
+                            && story.owner_index() == written.owner_index()
+                    })
+                    .ok_or_else(|| Error::Other("reply story disappeared".into()))?;
+                self.splice_comment_reference_run(&story, reply, reference)
+            };
+            moved().map_err(|error| {
+                Error::Other(format!(
+                    "comment {root} cannot move: reply {reply}: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Whether `root` already has `range` and every anchored reply crosses
+    /// its ancestor's range, as [`Self::reply_to`] writes it.
+    fn thread_on_range(&self, root: i32, range: &StoryRunRange) -> Result<bool> {
         let mut proof = self.clone_for_staging();
         proof.flush_to_package()?;
-        let ownership = proof.comment_ownership_at(&proof.doc_part_name)?;
+        let read = CommentAnchorRead::from_prepared(&proof, None)?;
+        if read.project(root)?.0.as_ref() != Some(range) {
+            return Ok(false);
+        }
+        for (reply, anchored) in proof.anchored_thread_replies(root)? {
+            let (Some(reply), Some(anchored)) = (read.project(reply)?.0, read.project(anchored)?.0)
+            else {
+                return Ok(false);
+            };
+            if reply.start != anchored.start || reply.end.location != anchored.end.location {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn checked_movable_comment(&self, id: i32) -> Result<StoryRangeRef> {
+        self.checked_comment_source(id, true)
+    }
+
+    /// Select one comment's complete paired range and reference. `root`
+    /// refuses a reply, which only moves with its thread.
+    pub(crate) fn checked_comment_source(&self, id: i32, root: bool) -> Result<StoryRangeRef> {
+        let mut proof = self.clone_for_staging();
+        proof.flush_to_package()?;
+        proof.checked_flushed_comment_source(id, root)
+    }
+
+    /// [`Self::checked_comment_source`] on a document whose package is
+    /// already flushed, such as a staged candidate.
+    fn checked_flushed_comment_source(&self, id: i32, root: bool) -> Result<StoryRangeRef> {
+        let ownership = self.comment_ownership_at(&self.doc_part_name)?;
         match ownership.parents.get(&id) {
             None => return Err(Error::Other(format!("unknown comment {id}"))),
-            Some(Some(_)) => {
+            Some(Some(_)) if root => {
                 return Err(Error::Other(format!(
-                    "comment {id} is a reply, not a movable root"
+                    "comment {id} is a reply, not a movable root: it moves with its thread root {}",
+                    ownership.thread_root(id)
                 )));
             }
-            Some(None) => {}
+            Some(_) => {}
         }
         let counts = CommentOwnership::marker_counts(&ownership.markers);
         if counts.get(&id) != Some(&[1, 1, 1]) {
@@ -915,15 +1023,16 @@ impl Document {
         // This exact accepted projection also rejects hidden, reversed,
         // cross-story or unrepresentable endpoints rather than inventing one.
         // A range across table cells is read but placing it takes one owner.
-        let anchor = self
-            .comment_anchor(id)?
+        let anchor = CommentAnchorRead::from_prepared(self, Some(id))?
+            .project(id)?
+            .0
             .ok_or_else(|| Error::Other(format!("comment {id} has no movable paired range")))?;
         if anchor.start.location.story() != anchor.end.location.story() {
             return Err(Error::Other(format!(
                 "comment {id} range runs across story owners and cannot be moved"
             )));
         }
-        let paragraphs = proof.story_range_located_paragraphs()?;
+        let paragraphs = self.story_range_located_paragraphs()?;
         let (mut located, identity_counts) = located_story_markers(&paragraphs)?;
         located.retain(|(_, _, _, marker)| {
             matches!(marker.kind, StoryRangeKind::Comment { id: found } if found == id)
@@ -959,7 +1068,9 @@ impl Document {
             let mut candidate = self.clone_for_staging();
             // As in `move_comment_to_text`, bring the main part up to date.
             candidate.flush_to_package()?;
+            let replies = candidate.anchored_thread_replies(*id)?;
             candidate.move_comment_story_range(selected, &range, *id)?;
+            candidate.move_replies_with_root(*id, &replies)?;
             candidate.flush_to_package()?;
             candidate.comment_ownership_at(&candidate.doc_part_name)?;
             candidate.checked_movable_comment(*id)?;
@@ -1953,7 +2064,7 @@ impl Document {
                     .position(|item| item.id == parent_id)
             })
             .ok_or_else(|| Error::Other(format!("comment id {parent_id} does not exist")))?;
-        let id = self.anchor_reply_to_parent(parent_id)?;
+        let (id, _) = self.anchor_reply_crossing(parent_id, None)?;
         self.prepare_comment_authoring()?;
         let existing_parent_para_id = last_para_id(
             &self
@@ -2023,7 +2134,14 @@ impl Document {
     /// Reuse checked story endpoints, extending the reply through the parent's
     /// reference run. Physical start adjacency is then enforced in that same
     /// owner without moving or rewriting any intervening producer payload.
-    fn anchor_reply_to_parent(&mut self, parent_id: i32) -> Result<i32> {
+    /// A new reply reserves its id once the parent proves projectable, while
+    /// a reply moving with its thread keeps `existing`. Returns the reply id
+    /// and the story that now holds its markers.
+    fn anchor_reply_crossing(
+        &mut self,
+        parent_id: i32,
+        existing: Option<i32>,
+    ) -> Result<(i32, crate::StoryId)> {
         let no_range = || Error::Other(format!("comment id {parent_id} has no range to reply to"));
         self.flush_to_package()?;
         #[cfg(test)]
@@ -2034,7 +2152,10 @@ impl Document {
         drop(read);
         #[cfg(test)]
         drop(parent_read_phase);
-        let id = self.identifiers.reserve_comment_id()?;
+        let id = match existing {
+            Some(id) => id,
+            None => self.identifiers.reserve_comment_id()?,
+        };
         self.anchor_story_range(
             &StoryRunRange {
                 start: parent.start,
@@ -2076,7 +2197,7 @@ impl Document {
             xml.splice(destination..destination, marker);
             self.write_story_part(story.part_name(), xml)?;
         }
-        Ok(id)
+        Ok((id, story))
     }
 
     /// Set or clear the resolved state for a comment.
@@ -3061,6 +3182,19 @@ impl CommentOwnership {
                 return ids;
             }
         }
+    }
+
+    /// The root of `id`'s thread, following defined parents. A malformed
+    /// parent cycle stops once every definition was visited.
+    fn thread_root(&self, id: i32) -> i32 {
+        let mut root = id;
+        for _ in 0..self.parents.len() {
+            match self.parents.get(&root) {
+                Some(Some(parent)) if self.parents.contains_key(parent) => root = *parent,
+                _ => break,
+            }
+        }
+        root
     }
 }
 
@@ -4829,8 +4963,10 @@ mod tests {
             .collect()
     }
 
+    /// Issue 446: a root move carries every reply range with it, in the
+    /// crossing order `reply_to` writes, as Word does when the text moves.
     #[test]
-    fn issue434_root_moves_keep_crossing_replies_and_generic_pairing_strict() {
+    fn issue446_root_moves_carry_crossing_replies_and_generic_pairing_strict() {
         for reply_count in [1, 3] {
             let mut document = Document::new();
             document.add_paragraph("SOURCE");
@@ -4848,6 +4984,8 @@ mod tests {
             }
             document.resolve_comment(root, true).unwrap();
             assert!(document.story_ranges().is_err());
+            let part = document.doc_part_name.clone();
+            let authored = issue434_reply_markers(&mut document, &part);
             document.flush_to_package().unwrap();
             let comments_part = document.comments_part_name.clone().unwrap();
             let extended_part = document.comments_extended_part_name.clone().unwrap();
@@ -4865,21 +5003,21 @@ mod tests {
                 },
             };
             document.move_comment(root, target.clone()).unwrap();
-            assert_eq!(
-                document.comment_anchor_text(root).unwrap().as_deref(),
-                Some("TARGET TARGET")
-            );
-            for reply in &replies {
+            for id in std::iter::once(root).chain(replies.iter().copied()) {
                 assert_eq!(
-                    document.comment_anchor_text(*reply).unwrap().as_deref(),
-                    Some("SOURCE")
+                    document.comment_anchor_text(id).unwrap().as_deref(),
+                    Some("TARGET TARGET")
                 );
             }
+            assert_eq!(issue434_reply_markers(&mut document, &part), authored);
             document.move_comment_to_text(root, "TARGET", 1).unwrap();
-            assert_eq!(
-                document.comment_anchor_text(root).unwrap().as_deref(),
-                Some("TARGET")
-            );
+            for id in std::iter::once(root).chain(replies.iter().copied()) {
+                assert_eq!(
+                    document.comment_anchor_text(id).unwrap().as_deref(),
+                    Some("TARGET")
+                );
+            }
+            assert_eq!(issue434_reply_markers(&mut document, &part), authored);
             let before = document.to_bytes().unwrap();
             assert_eq!(
                 document.package.get_part(&comments_part).unwrap(),
@@ -4899,18 +5037,12 @@ mod tests {
             invalid.end.run_index = usize::MAX;
             assert!(document.move_comment(root, invalid).is_err());
             assert_eq!(document.to_bytes().unwrap(), before);
-            if reply_count > 1 {
-                assert!(document.story_ranges().is_err());
-            }
+            assert!(document.story_ranges().is_err());
             let reopened = Document::from_bytes(&before).unwrap();
-            assert_eq!(
-                reopened.comment_anchor_text(root).unwrap().as_deref(),
-                Some("TARGET")
-            );
-            for reply in replies {
+            for id in std::iter::once(root).chain(replies) {
                 assert_eq!(
-                    reopened.comment_anchor_text(reply).unwrap().as_deref(),
-                    Some("SOURCE")
+                    reopened.comment_anchor_text(id).unwrap().as_deref(),
+                    Some("TARGET")
                 );
             }
         }

@@ -1468,10 +1468,21 @@ class Document:
         date: str | None = None,
     ) -> int: ...
     def move_comment(self, id: int, range: StoryRunRange) -> None:
-        """Move an existing root thread to a checked current story range."""
+        """Move an existing root thread to a checked current story range.
+
+        Replies with their own range and reference move with the root and
+        cross its new range as ``reply_to`` writes them. Replies with no
+        marker at all follow through the thread. Any other reply anchor, such
+        as a reference without a range, refuses the move. A reply id is
+        refused: move its thread root. Moving a root onto its own range
+        brings back replies that a 0.17.0 move left behind.
+        """
         ...
     def move_comment_to_text(self, id: int, anchor: str, *, occurrence: int = 0) -> None:
-        """Move an existing root thread onto a literal main-story occurrence."""
+        """Move an existing root thread onto a literal main-story occurrence.
+
+        Replies move with the root, as in ``move_comment``.
+        """
         ...
     def reply_to(
         self, parent_id: int, *, author: str, text: str, date: str | None = None, initials: str | None = None

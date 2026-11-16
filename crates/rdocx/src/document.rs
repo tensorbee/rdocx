@@ -31825,7 +31825,19 @@ impl Document {
         reference: Vec<u8>,
     ) -> Result<()> {
         let selected = self.checked_movable_comment(id)?;
-        let (source, owner) = self.story_source_and_owner(selected.range().end.location.story())?;
+        self.splice_comment_reference_run(selected.range().end.location.story(), id, reference)
+    }
+
+    /// Replace the reference run that anchoring synthesized for comment `id`
+    /// in `story` with the original one. A reply moving with its thread names
+    /// the story its reply authoring wrote, without another selection.
+    pub(crate) fn splice_comment_reference_run(
+        &mut self,
+        story: &crate::StoryId,
+        id: i32,
+        reference: Vec<u8>,
+    ) -> Result<()> {
+        let (source, owner) = self.story_source_and_owner(story)?;
         let part = source.part_name.clone();
         let span = comment_reference_run_span(source.xml.as_ref(), &owner.full, id)?;
         let mut xml = source.xml.into_owned();
