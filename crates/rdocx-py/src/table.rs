@@ -61,7 +61,7 @@ pub(crate) enum TableLocation {
     Related(rdocx::ContentLocation),
 }
 impl TableLocation {
-    fn new(index: usize, related: &Option<rdocx::ContentLocation>) -> Self {
+    pub(crate) fn new(index: usize, related: &Option<rdocx::ContentLocation>) -> Self {
         related.as_ref().map_or(Self::Body(index), |location| {
             Self::Related(location.clone())
         })
@@ -74,6 +74,7 @@ impl TableLocation {
         match self {
             Self::Related(location) => Self::refreshed(document, location),
             Self::Body(index) => {
+                crate::document::note_word_story_walk();
                 let slot = document.content_index_of_table(*index).ok_or_else(|| {
                     rdocx::Error::Other("table has no checked direct physical owner".into())
                 })?;
@@ -91,6 +92,7 @@ impl TableLocation {
         location: &rdocx::ContentLocation,
     ) -> rdocx::Result<rdocx::ContentLocation> {
         crate::document::note_fx260_word(document.content_count().max(1));
+        crate::document::note_word_story_walk();
         let owner = location.story();
         let story = document
             .stories()?
@@ -1202,8 +1204,8 @@ impl PyTable {
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
         let publication = crate::document::WordPublication::TableGrid(
-            TableLocation::new(index, &current_related)
-                .native(&document.inner)
+            document
+                .table_route(index, &current_related)
                 .map_err(|error| rdocx_to_pyerr(py, error))?,
         );
         let prepared =
@@ -1359,8 +1361,8 @@ impl PyTable {
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
         let publication = crate::document::WordPublication::TableGrid(
-            TableLocation::new(table_index, &current_related)
-                .native(&document.inner)
+            document
+                .table_route(table_index, &current_related)
                 .map_err(|error| rdocx_to_pyerr(py, error))?,
         );
         let prepared =
@@ -2585,8 +2587,8 @@ impl PyCell {
             None => candidate.try_set_cell_text(table, row, cell, value),
         }
         .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let publication = TableLocation::new(table, &current_related)
-            .native(&document.inner)
+        let publication = document
+            .table_route(table, &current_related)
             .map(|location| crate::document::WordPublication::CellText(location, row, cell))
             .unwrap_or(crate::document::WordPublication::Conservative);
         let prepared = document.prepare_word_revision(py, &candidate, "Cell.text", publication)?;

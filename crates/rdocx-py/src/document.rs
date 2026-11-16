@@ -64,10 +64,106 @@ fn guarded<T>(work: impl FnOnce() -> T) -> T {
     impl Drop for Restore {
         fn drop(&mut self) {
             WORD_GUARDING.with(|cell| cell.set(self.0));
+            if !self.0 {
+                // The guard's own document clones are not the call's.
+                let _ = rdocx::take_staging_clones();
+            }
         }
     }
-    let _restore = Restore(WORD_GUARDING.with(|cell| cell.replace(true)));
+    let outer = WORD_GUARDING.with(|cell| cell.replace(true));
+    if !outer {
+        WORD_DOCUMENT_CLONES.fetch_add(
+            rdocx::take_staging_clones(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let _restore = Restore(outer);
     work()
+}
+
+// Debug builds also count the whole-document passes a publication can
+// make besides the inventory rebuild: staging clones of the document, story
+// walks that resolve a route, save comparisons and full owner inventory
+// publications, outside the guards that check a direct route against them.
+// A test of the extension module then states which of them a call makes.
+#[cfg(debug_assertions)]
+static WORD_DOCUMENT_CLONES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+static WORD_STORY_WALKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+static WORD_SAVE_COMPARES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+static WORD_FULL_PUBLICATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+thread_local! {
+    static WORD_CHECKED_ROUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count one walk of a whole story that resolves a route.
+pub(crate) fn note_word_story_walk() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_STORY_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Count one comparison of two staged saves.
+fn note_word_save_compare() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_SAVE_COMPARES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Count one publication that matches the whole owner inventory again.
+fn note_word_full_publication() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_FULL_PUBLICATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Whether a test asked every publication for its checked whole-document
+/// route, in place of the routes that read the owner inventory or one
+/// block. Always false in a release build.
+fn checked_route_forced() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        WORD_CHECKED_ROUTE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// Document staging clones, story walks that resolve a route, save
+/// comparisons and full owner inventory publications since the last read.
+/// Debug builds only. Reading resets all four.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_publication_work")]
+pub(crate) fn word_publication_work() -> (usize, usize, usize, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        WORD_DOCUMENT_CLONES.swap(0, Relaxed) + rdocx::take_staging_clones(),
+        WORD_STORY_WALKS.swap(0, Relaxed),
+        WORD_SAVE_COMPARES.swap(0, Relaxed),
+        WORD_FULL_PUBLICATIONS.swap(0, Relaxed),
+    )
+}
+
+/// Take the checked whole-document route for every publication and stage the
+/// document for every properties edit, the references the direct routes are
+/// compared with. Debug builds only. Returns the previous choice.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_force_checked_route")]
+pub(crate) fn word_force_checked_route(force: bool) -> bool {
+    rdocx::force_staged_properties(force);
+    WORD_CHECKED_ROUTE.with(|cell| cell.replace(force))
 }
 
 /// The whole-body work counted so far: owner inventory rebuilds and
@@ -1875,6 +1971,7 @@ impl PySectionHandle {
             .ok_or_else(|| PyIndexError::new_err("section index out of range"))?
             .set_page_border(edge, style, width, space, color)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
+        note_word_save_compare();
         candidate
             .saves_as(&candidate)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
@@ -10486,7 +10583,12 @@ impl PyDocument {
         prepared: Option<(&PreparedWordRevision, &rdocx::Document)>,
     ) -> rdocx::Result<rdocx::ContentLocation> {
         let document = prepared.map_or(&self.inner, |(_, candidate)| candidate);
-        match self.indexed_paragraph_location(location, prepared.map(|(prepared, _)| prepared)) {
+        let indexed = (!checked_route_forced())
+            .then(|| {
+                self.indexed_paragraph_location(location, prepared.map(|(prepared, _)| prepared))
+            })
+            .flatten();
+        match indexed {
             Some(indexed) => {
                 #[cfg(debug_assertions)]
                 assert_indexed_route(&indexed, || location.native(document), "paragraph");
@@ -10494,6 +10596,85 @@ impl PyDocument {
             }
             None => location.native(document),
         }
+    }
+
+    /// The route of the physical owner of a table handle's location in the
+    /// current document: from the inventory, which holds the route the
+    /// document resolves, or as the document resolves it.
+    pub(crate) fn table_route(
+        &self,
+        index: usize,
+        related: &Option<rdocx::ContentLocation>,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        let native = || crate::table::TableLocation::new(index, related).native(&self.inner);
+        let indexed = (!checked_route_forced())
+            .then(|| self.indexed_table_location(index, related, None))
+            .flatten();
+        match indexed {
+            Some(indexed) => {
+                // The walk of a related table only reads its story again,
+                // so the walk checks a body table alone.
+                #[cfg(debug_assertions)]
+                if related.is_none() {
+                    assert_indexed_route(&indexed, native, "table");
+                }
+                Ok(indexed)
+            }
+            None => native(),
+        }
+    }
+
+    /// The route and run path of a run handle's physical owner: from the
+    /// inventory record of that owner, or as the document resolves it.
+    pub(crate) fn run_route(
+        &self,
+        state: &RevisionState,
+    ) -> PyResult<(rdocx::ContentLocation, rdocx_oxml::text::AcceptedRunPath)> {
+        if !checked_route_forced()
+            && let Some((_, owner)) = self.indexed_owner(state)
+            && let WordOwnerLocation::Run(location, path) = &owner.location
+        {
+            // The story walk of a recorded route only reads its story again,
+            // so the check is that the paragraph there holds this run path.
+            #[cfg(debug_assertions)]
+            assert!(
+                guarded(|| {
+                    let current =
+                        ParagraphLocation::Related(location.clone()).native(&self.inner)?;
+                    self.inner.read_story_paragraph(&current, |paragraph| {
+                        (0..paragraph.run_count())
+                            .any(|index| paragraph.run_path(index).as_ref() == Some(path))
+                    })
+                })
+                .expect("an indexed run route resolves in the document"),
+                "indexed run route holds its run path"
+            );
+            return Ok((location.clone(), path.clone()));
+        }
+        self.current_run_owner(state)
+    }
+
+    /// The direct body slot of the paragraph that a body `location` and the
+    /// run owner `state` both name, from the inventory. A typed edit made
+    /// through `location` then changes that block and no other.
+    pub(crate) fn typed_run_edit_slot(
+        &self,
+        location: &ParagraphLocation,
+        state: &RevisionState,
+    ) -> Option<usize> {
+        if !matches!(location, ParagraphLocation::Body(_)) {
+            return None;
+        }
+        let (_, run) = self.indexed_owner(state)?;
+        let paragraph = self.owners.get(run.parent?)?;
+        let WordOwnerLocation::Paragraph(route) = &paragraph.location else {
+            return None;
+        };
+        let indexed = self.indexed_paragraph_location(location, None)?;
+        (route.story().kind() == rdocx::StoryKind::Body
+            && route.index_path().len() == 1
+            && same_content_owner(route, &indexed))
+        .then_some(paragraph.body_slot?)
     }
 
     pub(crate) fn indexed_table_location(
@@ -11256,6 +11437,7 @@ impl PyDocument {
         operation: &'static str,
         publication: WordPublication,
     ) -> PyResult<PreparedWordRevision> {
+        note_word_full_publication();
         self.ensure_word_authority(py)?;
         let forms = matches!(
             publication,
@@ -11594,6 +11776,7 @@ impl PyDocument {
         operation: &'static str,
         publication: WordPublication,
     ) -> PyResult<()> {
+        note_word_save_compare();
         if self
             .inner
             .saves_as(&candidate)
@@ -11605,6 +11788,76 @@ impl PyDocument {
         self.commit_word_revision(prepared)?;
         self.install_inner(candidate);
         Ok(())
+    }
+
+    /// Publish `candidate`, this document after one typed edit of the
+    /// direct body paragraph at `slot`, unless the edit changed nothing. The
+    /// answer is read from that block when it tells, and from the staged
+    /// save comparison of [`Self::publish_owner_candidate`] when it does
+    /// not.
+    pub(crate) fn publish_block_candidate(
+        &mut self,
+        py: Python<'_>,
+        candidate: rdocx::Document,
+        operation: &'static str,
+        publication: WordPublication,
+        slot: usize,
+    ) -> PyResult<()> {
+        let Some(same) = self.direct_paragraph_saves_as(&candidate, slot) else {
+            return self.publish_owner_candidate(py, candidate, operation, publication);
+        };
+        // The staged comparison saves the whole candidate and refuses when
+        // content outside this block cannot be saved. It checks the block
+        // answer whenever it gives one.
+        #[cfg(debug_assertions)]
+        if let Ok(saved) = guarded(|| self.inner.saves_as(&candidate)) {
+            assert_eq!(saved, same, "direct body paragraph save comparison");
+        }
+        if same {
+            return Ok(());
+        }
+        let prepared = self.prepare_word_revision(py, &candidate, operation, publication)?;
+        self.commit_word_revision(prepared)?;
+        self.install_inner(candidate);
+        Ok(())
+    }
+
+    /// Whether `candidate`, this document after one typed edit of the
+    /// direct body paragraph at `slot`, saves as this document, read from
+    /// that block alone. Equal paragraph models save the same bytes. Two
+    /// plain paragraphs whose checked reader facts differ, the text and the
+    /// run paths of [`rdocx::Document::direct_body_paragraph_facts`], save
+    /// different bytes, as a plain paragraph holds nothing a save
+    /// renumbers. `None` leaves the answer to the staged save: another
+    /// paragraph shape, a body whose save is known to fail, text a save
+    /// refuses, or facts that do not tell. The block answer does not save
+    /// the rest of the document, so content elsewhere that no save accepts
+    /// is reported by the save itself, as after `Paragraph.text`.
+    fn direct_paragraph_saves_as(&self, candidate: &rdocx::Document, slot: usize) -> Option<bool> {
+        if checked_route_forced() || self.inner.unsavable_body_edit().is_some() {
+            return None;
+        }
+        let (
+            rdocx_oxml::BodyContent::Paragraph(current),
+            rdocx_oxml::BodyContent::Paragraph(edited),
+        ) = (
+            self.inner.body_children().get(slot)?,
+            candidate.body_children().get(slot)?,
+        )
+        else {
+            return None;
+        };
+        if current == edited {
+            return Some(true);
+        }
+        let before = self.inner.direct_body_paragraph_facts(current).ok()??;
+        let after = candidate.direct_body_paragraph_facts(edited).ok()??;
+        // A save refuses a character XML 1.0 cannot carry, with its place in
+        // the part. The block reader does not, so the staged save answers.
+        if !after.0.chars().all(oxml_core::xml::is_xml_1_0_character) {
+            return None;
+        }
+        (before != after).then_some(false)
     }
 
     pub(crate) fn local_cell_route(
@@ -12233,6 +12486,7 @@ impl PyDocument {
         candidate: rdocx::Document,
         operation: &'static str,
     ) -> PyResult<()> {
+        note_word_save_compare();
         if self
             .inner
             .saves_as(&candidate)
@@ -12257,6 +12511,7 @@ impl PyDocument {
         operation: &'static str,
         publication: WordPublication,
     ) -> PyResult<()> {
+        note_word_save_compare();
         if self
             .inner
             .saves_as(&candidate)
@@ -16024,10 +16279,10 @@ impl PyDocument {
                 "chart legend requires a direct body paragraph",
             ));
         };
-        let location = ParagraphLocation::Body(index)
-            .native(&slf.borrow(py).inner)
-            .map_err(|e| rdocx_to_pyerr(py, e))?;
         let mut document = slf.borrow_mut(py);
+        let location = document
+            .paragraph_route(&ParagraphLocation::Body(index), None)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
         let mut candidate = document.inner.clone_for_staging();
         candidate
             .set_chart_legend(index, visible, position, overlay)

@@ -177,6 +177,7 @@ impl ParagraphLocation {
         location: &rdocx::ContentLocation,
     ) -> rdocx::Result<rdocx::ContentLocation> {
         crate::document::note_fx260_word(document.content_count().max(1));
+        crate::document::note_word_story_walk();
         let owner = location.story();
         let story = document
             .stories()?
@@ -199,6 +200,9 @@ impl ParagraphLocation {
         document: &rdocx::Document,
     ) -> rdocx::Result<rdocx::ContentLocation> {
         crate::document::note_fx260_word(document.content_count().max(1));
+        if !matches!(self, Self::Related(_)) {
+            crate::document::note_word_story_walk();
+        }
         match self {
             Self::Body(index) => document.paragraph_story_location(*index)?.ok_or_else(|| {
                 rdocx::Error::Other("paragraph has no checked physical owner".to_owned())
@@ -546,8 +550,8 @@ impl PyParagraph {
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?
             .ok_or_else(|| PyIndexError::new_err("inserted link run was not found"))?;
         let publication = crate::document::WordPublication::ParagraphAppend(
-            location
-                .native(&document.inner)
+            document
+                .paragraph_route(&location, None)
                 .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
         );
         let prepared = document.prepare_word_revision(
@@ -640,8 +644,8 @@ impl PyParagraph {
                 "Paragraph.add_run"
             };
             let publication = crate::document::WordPublication::ParagraphAppend(
-                location
-                    .native(&document.inner)
+                document
+                    .paragraph_route(&location, None)
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
             );
             let prepared =
@@ -875,8 +879,8 @@ impl PyParagraph {
             .edit(&mut candidate, |p| p.add_equation(equation))
             .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
         let publication = crate::document::WordPublication::ParagraphAppend(
-            location
-                .native(&document.inner)
+            document
+                .paragraph_route(&location, None)
                 .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
         );
         let prepared = document.prepare_word_revision(
