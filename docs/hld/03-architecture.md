@@ -1513,7 +1513,31 @@ Fields, drawings, ignored units, opaque children, bookmark and comment markers,
 hyperlinks, controls and formatting transitions stop grouping. Formatting-only
 changes and replacements using ignored formatting also stop it. Different runs
 retain their own formatting and coalescing ownership. Run granularity retains
-its existing alignment and revision output. Supported inline controls retain raw
+its existing alignment and revision output. The granularity sets the compared
+unit, never the written run. Unchanged units that continue one original and one
+edited text element are written as one run, and the fragments of one text
+element inside a written run rejoin as one text element with one source
+selection, whole again when every fragment is there. A redline therefore holds
+one run for each revision and for each stretch of text between two of them,
+whatever the unit, in every story, with two exceptions. Under
+`ignore_whitespace` an ignored whitespace unit ends a stretch, so unchanged text
+is written one run per word and per space. A tab, a break or other run content
+ends a stretch as it ends a text element. Text that holds a character or entity
+reference, such as `&amp;`, splits like any other text. An inline control whose
+runs only split the same text differently keeps its original source, as an
+equal paragraph does.
+
+The cost of a comparison follows its changes, not its units or the size of the
+parents that hold them, with one exception. A comparison reads the source of a
+paragraph, table, row, cell or control a fixed number of times whatever
+children it holds: one read answers all its children, every answer, an error
+included, being the one a read for that child alone gives. A
+character-granularity signature holds one token per stretch of plain text, and
+each postcondition direction resolves the candidate once for both the package
+guard and the footnote destination check. The package guard still reads each
+cleaned story a second time, which keeps its refusals. The exception is the
+alignment of one shell segment, a full longest-common-subsequence table,
+quadratic in the units it compares. Supported inline controls retain raw
 child run cuts before extraction, align Word and Character units within those
 shell segments and copy each shell before its first inserted unit.
 Non-text content remains atomic. Unmatched identical owners become move pairs
@@ -1571,18 +1595,33 @@ with differing story shells are rejected unless their story category is
 ignored or the change is a supported normal-footnote topology change.
 Footnote comparison binds physical reference occurrences to their actual note
 ids. It aligns the body owners and run boundaries, preserves repeated references
-without synthesizing another site, and preserves original unused definitions.
-A new unreferenced definition is refused. Omitted type and explicit `normal`
-identify normal notes at every signed id. The three explicit separator types
-remain special. Empty and unknown types keep their legacy read projection, but
-their owner bytes and reference identity must remain unchanged. Classification
-uses each attribute's effective Word namespace, including local prefix shadows.
+without synthesizing another site, and preserves original unused definitions. A
+footnote that both inputs reference refuses atomically when its pending result
+would hold more physical references than either input gives it, which happens
+when its reference moves to another site, for example when a new note inserted
+before it takes its id. Such a pending result would name one owner from a
+deleted and an inserted reference. A new unreferenced definition is refused.
+Omitted type and explicit `normal` identify normal notes at every signed id. The
+three explicit separator types remain special. Empty and unknown types keep
+their legacy read projection, but their owner bytes and reference identity must
+remain unchanged. Classification uses each attribute's effective Word namespace,
+including local prefix shadows.
 
 Added and removed definitions use paired hidden standard bookmarks in the body
 and first note paragraph. Names carry a persistent token and the emitting
 transaction's original and edited part-presence bits. The body pair precedes the
-first actual reference outside its revision wrapper. An added note's pair is
-inside its content insertion. A deleted note's pair stays outside the deletion.
+first actual reference outside its revision wrapper. Word for Mac 16.115 merges
+adjacent insertions of one author and date, which can move the pair inside the
+reference's own insertion. A body pair is admitted there only in the main story,
+only with its note pair, and only as a direct child of the one insertion whose
+next child is the reference run, the same next-sibling proof as outside it.
+Resolving that insertion keeps the pair in its place, so its lifetime and
+part-presence vote do not depend on Word's merging. Any other position inside a
+revision refuses, as does an unmatched pair inside one. The note pair follows
+the note's reference-mark run inside its content insertion or deletion, because
+Word 16.115 drops a pair that precedes the reference mark of a note that is not
+the first of its part. A note without a reference-mark run keeps the pair at the
+start of its insertion, or outside its deletion.
 Tokens and bookmark ids are reserved before allocating new comparison ids.
 A token is identity, independent of every current revision id and token order.
 Listing and id, author and date scopes still operate on revision elements.
@@ -1593,6 +1632,22 @@ Within the positively admitted custody grammar, resolved units retain zero-width
 A valid body pair without a note pair has no surviving note-owner identity.
 It stays a tombstone in an open part or completed imported metadata in a settled
 part. A following reference or revision wrapper cannot identify its former owner.
+A normal owner that no pair binds is still a unit, a tracked note, when its own
+bytes prove that the whole definition is tracked as one insertion or one
+deletion: every paragraph carries a paragraph-mark revision of that kind, every
+other paragraph child is a wrapper of that kind or a zero-width range marker,
+and its reference, when it has one, bound by footnote id, is wrapped the same
+way. A tracked note left without a reference is removed by a whole selection of
+its own elements. The proof reads no marker, so an unmatched body pair stays
+unassociated. An unmatched body pair inside its reference's insertion is
+admitted only when that reference's note is a tracked note, and only keeps its
+place there. A tracked note has no token or bits and does not vote on part
+presence, but it is pending for the open lifetime, so pairs stay while it is
+pending. When a tracked note settles while a note owner outside every unit still
+holds a revision, the pairs also stay. Selecting all its elements resolves it as
+one and removes the owner when the resolution removes its content. A partial
+selection keeps the ordinary element rules. An owner with two or more references
+keeps the shared-reference rules.
 Collision reconciliation preserves a completed body pair when its token, bits,
 pair id, part and exact source paragraph boundary agree between inputs. This
 does not reconstruct a missing note owner. An unrelated paragraph edit keeps
@@ -1613,11 +1668,14 @@ Creating a part carries the actual edited special inventory, including none.
 Accept restores the edited identities and inventory, and reject restores the
 original. Settlement physically retires library custody pairs. A marker left
 by Word in an already completed part is preserved when untouched and retired
-before editing its owner or part or emitting new custody there. Ignored notes
+before editing its owner or part or emitting new custody there. A resolution
+that edits the note part or resolves a note reference, and leaves no note owner
+or reference revision pending, also settles the part when no unit is recognized,
+for example after Word dropped a note pair, and retires the pairs left in it. Ignored notes
 retain original bytes and cannot supply a dangling new body reference. Endnote
 topology retains its existing refusal while ordinary text edits remain supported.
 
-Word-save interoperability is qualified only for actual admitted marker layouts. A note-plus-body-text Word save can move the body custody pair inside a revision and drop its note counterpart. Such a package can open, list and no-op serialize while Accept All, Reject All and an unrelated comparison refuse atomically. Some mixed-author Word saves refuse rejection of a remaining author's revisions. On a fully pending mixed input, an earlier successful selective action can retire all custody markers while another author's revisions remain pending. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Successful return or reopen therefore does not prove the unresolved-marker lifetime for these two native families. These are current Word-save limitations carried to pending F-X287, not a blanket restriction on ordinary note authoring, reading or otherwise admitted comparison. Issue430 remains open and Q-A430-28 remains independently unproved.
+Word-save interoperability is qualified on reconstructed Word for Mac 16.115 saves, not on the retained RC3 packets. Word 16.115 can drop a note pair placed before the reference mark of a note that is not the first of its part, merge the body pair into its reference's insertion, and renumber notes, bookmarks and revisions. The note pair follows the reference mark, a body pair inside its own reference's insertion is admitted with its note pair, or without it before a tracked note's reference, and a note whose pair Word dropped resolves as a tracked note. A note outside the tracked-note grammar, for example one that holds a hyperlink, keeps the earlier limits once Word drops its pair: rejecting it refuses atomically, and when Word kept the other author's pair, resolving that author first retires the outside note's body pair while its revisions remain pending, as on v0.17.0. A footnote inserted in Word 16.115 with Track Changes on is not a tracked note, because Word tracks its reference and content but not its paragraph mark, so rejecting it keeps an empty unreferenced footnote where Word's own Reject All removes the note, as on v0.17.0. A completed body pair that an earlier Word resolution left in a part still votes when a later tracked note settles that part, so such a stale creation bit can remove a part that held only special records. A failing action preserves its immediate pre-action state, not the state before earlier successful calls. Native qualification of these families on the RC3 packets remains with F-X287. Issue430 remains open and Q-A430-28 remains independently unproved.
 
 Inputs may hold existing modeled revisions, such as the redline of an
 earlier comparison. A story owner that holds one, a paragraph, table, or

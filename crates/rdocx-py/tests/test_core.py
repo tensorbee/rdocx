@@ -16927,6 +16927,161 @@ def test_issue430_normalized_element_ids_require_complete_custody_selection():
         assert "word/footnotes.xml" not in archive.namelist()
 
 
+
+# F-X287 Word-save fixtures: the body content and footnote owners of rdocx
+# comparisons that Microsoft Word for Mac 16.115 (26110837) opened and saved
+# with "save as". rsid and w14 paragraph identities are removed, the rest is
+# what Word wrote, including its renumbering and merged insertions.
+ISSUE430_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ISSUE430_DATE = 'w:date="2026-10-30T12:00:00Z"'
+ISSUE430_DELIVERY = (
+    '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
+    '<w:r><w:t xml:space="preserve"> Delivery note, p.1.</w:t></w:r></w:p></w:footnote>'
+)
+
+
+def _issue430_word_saved(body, notes):
+    import rdocx
+
+    base = rdocx.Document()
+    base.add_footnote(base.add_paragraph("seed"), "seed")
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(base.to_bytes())) as source:
+        with zipfile.ZipFile(output, "w") as destination:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename == "word/document.xml":
+                    payload = (f'<w:document xmlns:w="{ISSUE430_W}"><w:body>{body}'
+                               "<w:sectPr/></w:body></w:document>").encode()
+                elif info.filename == "word/footnotes.xml":
+                    payload = f'<w:footnotes xmlns:w="{ISSUE430_W}">{notes}</w:footnotes>'.encode()
+                destination.writestr(info, payload)
+    return output.getvalue()
+
+
+def _issue430_markers(document):
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        return sorted(set(match.decode() for name in archive.namelist()
+                          for match in re.findall(rb"_rdocxCmpNoteF\w+", archive.read(name))))
+
+
+def _issue430_note_ids(document):
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        if "word/footnotes.xml" not in archive.namelist():
+            return None
+        notes = archive.read("word/footnotes.xml")
+    return [int(value) for value in re.findall(rb'<w:footnote w:id="(-?\d+)"', notes)]
+
+
+def test_issue430_word_saved_merged_body_pair_and_lost_note_pair_settle():
+    import rdocx
+
+    # The issue's "a footnote added" result: Word merged the body pair into
+    # the inserted paragraph's insertion and kept the note pair, which follows
+    # the reference mark.
+    added = (
+        f'<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+        f'<w:p><w:pPr><w:rPr><w:ins w:id="0" w:author="A" {ISSUE430_DATE}/></w:rPr></w:pPr>'
+        f'<w:ins w:id="1" w:author="A" {ISSUE430_DATE}><w:r><w:t>The seller wrote twice to ask for payment.</w:t></w:r>'
+        '<w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF6P11B"/><w:bookmarkEnd w:id="2"/>'
+        '<w:r><w:footnoteReference w:id="2"/></w:r></w:ins></w:p>'
+        '<w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r></w:p>'
+    )
+    added_notes = (
+        f'{ISSUE430_DELIVERY}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="3" w:author="A" {ISSUE430_DATE}/></w:rPr></w:pPr>'
+        f'<w:ins w:id="4" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteRef/></w:r>'
+        '<w:bookmarkStart w:id="5" w:name="_rdocxCmpNoteF6P11N"/><w:bookmarkEnd w:id="5"/>'
+        '<w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote>'
+    )
+    pending = _issue430_word_saved(added, added_notes)
+    for accept, notes, texts in (
+        (True, [1, 2], ["The buyer took delivery on 12 June.",
+                        "The seller wrote twice to ask for payment.",
+                        "Payment was due in thirty days."]),
+        (False, [1], ["The buyer took delivery on 12 June.", "Payment was due in thirty days."]),
+    ):
+        document = rdocx.Document.from_bytes(pending)
+        count = (document.accept_revisions_by_author("A") if accept
+                 else document.reject_revisions_by_author("A"))
+        assert count > 0
+        document = rdocx.Document.from_bytes(document.to_bytes())
+        assert [paragraph.text for paragraph in document.paragraphs] == texts
+        assert _issue430_note_ids(document) == notes
+        assert document.revisions == ()
+        assert _issue430_markers(document) == []
+    # A footnote added to an existing paragraph, saved by Word, which dropped
+    # the note pair. Accepting settles the note part and its leftover pair.
+    note_only = (
+        '<w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r>'
+        '<w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF4P11B"/><w:bookmarkEnd w:id="0"/>'
+        f'<w:ins w:id="1" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteReference w:id="2"/></w:r></w:ins></w:p>'
+    )
+    note_only_notes = (
+        f'{ISSUE430_DELIVERY}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="2" w:author="A" {ISSUE430_DATE}/></w:rPr></w:pPr>'
+        f'<w:ins w:id="3" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> Contract, clause 7.</w:t></w:r></w:ins></w:p></w:footnote>'
+    )
+    document = rdocx.Document.from_bytes(_issue430_word_saved(note_only, note_only_notes))
+    assert _issue430_markers(document) == ["_rdocxCmpNoteF4P11B"]
+    document.accept_all()
+    assert _issue430_note_ids(document) == [1, 2]
+    assert _issue430_markers(document) == []
+
+
+def test_issue430_word_saved_lost_note_pairs_resolve_in_both_author_orders():
+    import rdocx
+
+    # Author A added a footnote with a body change, author B compared on top
+    # of it and added another, and Word saved the result, dropping both note
+    # pairs. Each note is still wholly tracked with its one reference.
+    body = (
+        '<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+        f'<w:p><w:del w:id="0" w:author="A" {ISSUE430_DATE}><w:r><w:delText>Payment was due in thirty days</w:delText></w:r></w:del>'
+        f'<w:ins w:id="1" w:author="A" {ISSUE430_DATE}><w:r><w:t>The seller wrote twice to ask for payment</w:t></w:r></w:ins>'
+        '<w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="2" w:name="_rdocxCmpNoteF8P11B"/><w:bookmarkEnd w:id="2"/>'
+        f'<w:ins w:id="3" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteReference w:id="2"/></w:r></w:ins></w:p>'
+        '<w:p><w:r><w:t xml:space="preserve">The parties met in </w:t></w:r>'
+        '<w:del w:id="8" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:delText>September</w:delText></w:r></w:del>'
+        '<w:ins w:id="9" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:t>October</w:t></w:r></w:ins>'
+        '<w:r><w:t>.</w:t></w:r><w:bookmarkStart w:id="10" w:name="_rdocxCmpNoteF18P11B"/><w:bookmarkEnd w:id="10"/>'
+        '<w:ins w:id="11" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:footnoteReference w:id="3"/></w:r></w:ins></w:p>'
+    )
+    notes = (
+        f'{ISSUE430_DELIVERY}<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="4" w:author="A" {ISSUE430_DATE}/></w:rPr></w:pPr>'
+        f'<w:ins w:id="5" w:author="A" {ISSUE430_DATE}><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> Letter of 1 July, p.2.</w:t></w:r></w:ins></w:p></w:footnote>'
+        '<w:footnote w:id="3"><w:p><w:pPr><w:rPr><w:ins w:id="12" w:author="B" w:date="2026-10-31T12:00:00Z"/></w:rPr></w:pPr>'
+        '<w:ins w:id="13" w:author="B" w:date="2026-10-31T12:00:00Z"><w:r><w:footnoteRef/></w:r>'
+        '<w:r><w:t xml:space="preserve"> Minutes of the meeting, p.4.</w:t></w:r></w:ins></w:p></w:footnote>'
+    )
+    pending = _issue430_word_saved(body, notes)
+    pairs = ["_rdocxCmpNoteF18P11B", "_rdocxCmpNoteF8P11B"]
+    for first, second in (("A", "B"), ("B", "A")):
+        for accept_first in (False, True):
+            for accept_second in (False, True):
+                document = rdocx.Document.from_bytes(pending)
+                for author, accept in ((first, accept_first), (second, accept_second)):
+                    if accept:
+                        document.accept_revisions_by_author(author)
+                    else:
+                        document.reject_revisions_by_author(author)
+                    document = rdocx.Document.from_bytes(document.to_bytes())
+                    if author == first:
+                        assert _issue430_markers(document) == pairs
+                        assert {revision.author for revision in document.revisions} == {second}
+                keep_a = accept_first if first == "A" else accept_second
+                keep_b = accept_first if first == "B" else accept_second
+                expected = [1] + [2] * keep_a + [3] * keep_b
+                assert _issue430_note_ids(document) == expected
+                texts = [paragraph.text for paragraph in document.paragraphs]
+                assert texts[1] == ("The seller wrote twice to ask for payment." if keep_a
+                                    else "Payment was due in thirty days.")
+                assert texts[-1] == ("The parties met in October." if keep_b
+                                     else "The parties met in September.")
+                assert document.revisions == ()
+                assert _issue430_markers(document) == []
+
+
 @pytest.mark.parametrize("family", ("footnote", "endnote"))
 @pytest.mark.parametrize("text", ("", "Source note", " text"))
 def test_issue432_note_defaults_and_space(family, text):
@@ -17327,6 +17482,40 @@ def test_issue434_compare_equal_split_and_one_word_public(granularity):
         original.compare(edited, "B", "2026-11-06T10:00:00Z", granularity="word")
         assert [(r.kind, r.text) for r in original.revisions] == [("deletion", "thirty"), ("insertion", "sixty")]
 
+
+@pytest.mark.parametrize("granularity", ["word", "character"])
+def test_issue446_compare_keeps_unchanged_text_in_whole_runs(granularity):
+    import rdocx
+
+    def document(word):
+        document = rdocx.Document()
+        for index in range(12):
+            document.add_paragraph(f"Paragraph {index}: the bearing moved about {word} millimetres since the survey.")
+        return rdocx.Document.from_bytes(document.to_bytes())
+
+    original = document("twelve")
+    assert original.compare(document("fifteen"), "R", "2026-11-09T00:00:00Z", granularity=granularity) == ()
+    xml = _document_xml(original)
+    # One text element a run: a revision is never cut into its compared units.
+    assert b"</w:t><w:t" not in xml and b"</w:delText><w:delText" not in xml
+    # Runs with the same formatting never follow each other.
+    assert b"</w:r><w:r>" not in xml
+    revisions = original.revisions
+    for index, paragraph in enumerate(original.paragraphs):
+        runs = [run.text for run in paragraph.runs]
+        assert runs[0] == f"Paragraph {index}: the bearing moved about "
+        assert runs[-1].endswith(" millimetres since the survey.")
+        assert "".join(runs) == f"Paragraph {index}: the bearing moved about fifteen millimetres since the survey."
+    # One run a revision, and one for the text before, between and after them.
+    assert xml.count(b"<w:r>") <= 12 + 2 * len(revisions)
+    if granularity == "word":
+        assert [(r.kind, r.text) for r in revisions] == [("deletion", "twelve"), ("insertion", "fifteen")] * 12
+        assert [run.text for run in original.paragraphs[3].runs] == [
+            "Paragraph 3: the bearing moved about ",
+            "fifteen",
+            " millimetres since the survey.",
+        ]
+        assert xml.count(b"<w:r>") == 12 * 4
 
 @pytest.mark.parametrize("normal", [False, True, "distinct"])
 def test_issue434_insert_effective_font_and_saved_body(normal):

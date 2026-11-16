@@ -615,6 +615,10 @@ pub(crate) fn apply_comment_snapshot(
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_COMPARISON_STAGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The bytes of the parents [`RunSource::capture_all`],
+    /// [`publication_parents_at`] and [`source_children`] have read, which the
+    /// tests of the cost of a comparison count instead of timing it.
+    static SOURCE_READ_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 type ControlPropertySignature<'a> = Option<(
@@ -1611,14 +1615,13 @@ impl Document {
                 &new_ids,
             )?;
         }
-        let mut accepted_body = resolved_package(
+        let accepted = resolved_candidate(
             &candidate,
             |document| document.accept_revision_ids(&new_ids),
-            &original_stories,
-            options,
-            &text_box_markers,
             Some(&new_ids),
         )?;
+        let mut accepted_body =
+            normalized_package(&accepted, &original_stories, options, &text_box_markers)?;
         let mut edited_package =
             normalized_package(&edited, &edited_stories, options, &text_box_markers)?;
         let main_ignored = story_ignored(options, ComparisonStoryKind::Main);
@@ -1688,7 +1691,7 @@ impl Document {
             1,
             &new_ids,
         )?;
-        verify_footnote_destination(&candidate, &edited, &new_ids, true, options)?;
+        verify_footnote_destination(&accepted, &edited, true, options)?;
         if accepted_body != edited_package {
             return Err(comparison_postcondition_error(
                 "acceptance",
@@ -1706,14 +1709,13 @@ impl Document {
                 ));
             }
         }
-        let mut rejected_package = resolved_package(
+        let rejected = resolved_candidate(
             &candidate,
             |document| document.reject_revision_ids(&new_ids),
-            &original_stories,
-            options,
-            &text_box_markers,
             Some(&new_ids),
         )?;
+        let mut rejected_package =
+            normalized_package(&rejected, &original_stories, options, &text_box_markers)?;
         let mut original_package =
             normalized_package(&original, &original_stories, options, &text_box_markers)?;
         if main_ignored {
@@ -1728,7 +1730,7 @@ impl Document {
             0,
             &new_ids,
         )?;
-        verify_footnote_destination(&candidate, &original, &new_ids, false, options)?;
+        verify_footnote_destination(&rejected, &original, false, options)?;
         if rejected_package != original_package {
             return Err(comparison_postcondition_error(
                 "rejection",
@@ -3726,79 +3728,217 @@ fn source_fragment(xml: &str, bindings: &[(String, String)]) -> Result<String> {
 }
 
 fn publication_parent_at(parent: &str, at: usize) -> Result<NamespaceBindings> {
+    publication_parents_at(parent, &[at])
+        .pop()
+        .expect("one result per position")
+}
+
+/// The scope of the element that holds each position of `parent`, as
+/// [`publication_parent_at`] gives it for that position alone.
+///
+/// One read of `parent` answers every position, so a parent of many children
+/// is read once, not once per child. Each result, an error included, is the
+/// one a read for that position alone gives, and is only met when a caller
+/// takes it.
+fn publication_parents_at(parent: &str, positions: &[usize]) -> Vec<Result<NamespaceBindings>> {
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
     let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
     let wrapped = format!("{opening}{parent}</scope>");
     let mut reader = NsReader::from_str(&wrapped);
-    let mut scopes = Vec::new();
-    loop {
+    let mut scopes = Vec::<NamespaceBindings>::new();
+    let mut results = positions.iter().map(|_| None).collect::<Vec<_>>();
+    // The positions still to reach, the nearest last.
+    let mut pending = (0..positions.len()).collect::<Vec<_>>();
+    pending.sort_by_key(|index| std::cmp::Reverse(positions[*index]));
+    // A position the read passed holds no event. Its read goes on to the end.
+    let mut passed = Vec::new();
+    let failure = loop {
+        if pending.is_empty() && passed.is_empty() {
+            break None;
+        }
         let before = reader.buffer_position() as usize;
-        let (_, event) = reader
-            .read_resolved_event()
-            .map_err(|error| Error::Other(error.to_string()))?;
-        if before == opening.len() + at {
-            return scopes
-                .last()
-                .cloned()
-                .ok_or_else(|| Error::Other("publication boundary has no actual parent".into()));
+        let event = match reader.read_resolved_event() {
+            Ok((_, event)) => event,
+            Err(error) => break Some(error.to_string()),
+        };
+        while let Some(&index) = pending.last()
+            && opening.len() + positions[index] <= before
+        {
+            pending.pop();
+            if opening.len() + positions[index] == before {
+                results[index] = Some(scopes.last().cloned().ok_or_else(|| {
+                    Error::Other("publication boundary has no actual parent".into())
+                }));
+            } else {
+                passed.push(index);
+            }
         }
         match event {
-            Event::Start(_) => scopes.push(resolved_source_bindings(&reader)?),
+            Event::Start(_) => match resolved_source_bindings(&reader) {
+                Ok(bindings) => scopes.push(bindings),
+                Err(error) => break Some(error.to_string()),
+            },
             Event::End(_) => {
                 scopes.pop();
             }
             Event::Eof => {
-                return Err(Error::Other(
-                    "publication boundary is absent from its actual shell".into(),
-                ));
+                break Some("publication boundary is absent from its actual shell".into());
             }
             _ => {}
+        }
+    };
+    if let Some(message) = failure {
+        for index in pending.into_iter().chain(passed) {
+            results[index] = Some(Err(Error::Other(message.clone())));
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every position is answered"))
+        .collect()
+}
+
+/// The scopes [`publication_parent_at`] gives for the positions of one
+/// parent that a caller may ask, read in one pass on the first question.
+/// A position outside that set is read alone.
+struct ParentScopes<'a> {
+    parent: &'a str,
+    positions: Vec<usize>,
+    scopes: std::cell::OnceCell<HashMap<usize, Result<NamespaceBindings>>>,
+}
+
+impl<'a> ParentScopes<'a> {
+    fn new(parent: &'a str, positions: Vec<usize>) -> Self {
+        Self {
+            parent,
+            positions,
+            scopes: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn at(&self, position: usize) -> Result<NamespaceBindings> {
+        let scopes = self.scopes.get_or_init(|| {
+            self.positions
+                .iter()
+                .copied()
+                .zip(publication_parents_at(self.parent, &self.positions))
+                .collect()
+        });
+        match scopes.get(&position) {
+            Some(Ok(scope)) => Ok(scope.clone()),
+            // Every error of that read is `Error::Other`, so this is that error.
+            Some(Err(error)) => Err(Error::Other(error.to_string())),
+            None => publication_parent_at(self.parent, position),
         }
     }
 }
 
 fn source_child(parent: &str, span: Range<usize>) -> Result<String> {
+    source_children(parent, &[span])
+        .pop()
+        .expect("one result per span")
+}
+
+/// The child of `parent` at each span with the namespaces in scope declared
+/// on its root, as [`source_child`] gives it for that span alone.
+///
+/// One read of `parent` answers every span. Each result, an error included,
+/// is the one a read for that span alone gives.
+fn source_children(parent: &str, spans: &[Range<usize>]) -> Vec<Result<String>> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    #[cfg(test)]
+    SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
     let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
     let wrapped = format!("{opening}{parent}</scope>");
     let mut reader = NsReader::from_str(&wrapped);
-    loop {
+    let mut results = spans.iter().map(|_| None).collect::<Vec<_>>();
+    // The spans still to reach, the nearest last.
+    let mut pending = (0..spans.len()).collect::<Vec<_>>();
+    pending.sort_by_key(|index| std::cmp::Reverse(spans[*index].start));
+    // A span the read passed opens no element. Its read goes on to the end.
+    let mut passed = Vec::new();
+    let failure = loop {
+        if pending.is_empty() && passed.is_empty() {
+            break None;
+        }
         let before = reader.buffer_position() as usize;
-        let (_, event) = reader
-            .read_resolved_event()
-            .map_err(|error| Error::Other(format!("source namespace scan failed: {error}")))?;
-        if before == opening.len() + span.start
-            && matches!(event, Event::Start(_) | Event::Empty(_))
-        {
-            let bindings = reader
-                .resolver()
-                .bindings()
-                .map(|(prefix, uri)| {
-                    let prefix = match prefix {
-                        quick_xml::name::PrefixDeclaration::Default => String::new(),
-                        quick_xml::name::PrefixDeclaration::Named(prefix) => {
-                            String::from_utf8(prefix.to_vec()).map_err(utf8_error)?
-                        }
-                    };
-                    let uri = std::str::from_utf8(uri.as_ref()).map_err(utf8_error)?;
-                    Ok((
-                        if prefix.is_empty() {
-                            "xmlns".to_owned()
-                        } else {
-                            format!("xmlns:{prefix}")
-                        },
-                        quick_xml::escape::unescape(uri)
-                            .map_err(|error| Error::Other(error.to_string()))?
-                            .into_owned(),
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return source_fragment(&parent[span], &bindings);
+        let event = match reader.read_resolved_event() {
+            Ok((_, event)) => event,
+            Err(error) => break Some(format!("source namespace scan failed: {error}")),
+        };
+        let opens = matches!(event, Event::Start(_) | Event::Empty(_));
+        while let Some(&index) = pending.last() {
+            let start = opening.len() + spans[index].start;
+            if start < before {
+                pending.pop();
+                passed.push(index);
+            } else if start == before && opens {
+                pending.pop();
+                results[index] = Some(source_child_at(&reader, parent, spans[index].clone()));
+            } else {
+                break;
+            }
         }
         if matches!(event, Event::Eof) {
-            return Err(Error::Other(
-                "source child has no opening at its span".into(),
-            ));
+            break Some("source child has no opening at its span".into());
+        }
+    };
+    if let Some(message) = failure {
+        for index in pending.into_iter().chain(passed) {
+            results[index] = Some(Err(Error::Other(message.clone())));
         }
     }
+    results
+        .into_iter()
+        .map(|result| result.expect("every span is answered"))
+        .collect()
+}
+
+/// The parent scope and the scoped source of the child of `parent` at each
+/// span, from one read of `parent` for each, in the order of `spans`.
+fn child_scopes(
+    parent: &str,
+    spans: &[Range<usize>],
+) -> std::iter::Zip<std::vec::IntoIter<Result<NamespaceBindings>>, std::vec::IntoIter<Result<String>>>
+{
+    let starts = spans.iter().map(|span| span.start).collect::<Vec<_>>();
+    publication_parents_at(parent, &starts)
+        .into_iter()
+        .zip(source_children(parent, spans))
+}
+
+/// The child at `span` with the bindings `reader` holds at its opening.
+fn source_child_at(reader: &NsReader<&[u8]>, parent: &str, span: Range<usize>) -> Result<String> {
+    let bindings = reader
+        .resolver()
+        .bindings()
+        .map(|(prefix, uri)| {
+            let prefix = match prefix {
+                quick_xml::name::PrefixDeclaration::Default => String::new(),
+                quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                    String::from_utf8(prefix.to_vec()).map_err(utf8_error)?
+                }
+            };
+            let uri = std::str::from_utf8(uri.as_ref()).map_err(utf8_error)?;
+            Ok((
+                if prefix.is_empty() {
+                    "xmlns".to_owned()
+                } else {
+                    format!("xmlns:{prefix}")
+                },
+                quick_xml::escape::unescape(uri)
+                    .map_err(|error| Error::Other(error.to_string()))?
+                    .into_owned(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    source_fragment(&parent[span], &bindings)
 }
 
 fn root_namespace_bindings(
@@ -4054,6 +4194,23 @@ struct FootnotePart {
 
 impl FootnotePart {
     fn of(document: &Document) -> Result<Option<Self>> {
+        let Some(name) = Self::name_of(document)? else {
+            return Ok(None);
+        };
+        let xml = std::str::from_utf8(
+            document
+                .package
+                .get_part(&name)
+                .ok_or_else(|| Error::Other(format!("missing footnotes part {name}")))?,
+        )
+        .map_err(utf8_error)?
+        .to_owned();
+        Self::parse(name, xml).map(Some)
+    }
+
+    /// The footnotes part name, from the one internal relationship and its
+    /// content type, without reading the part.
+    fn name_of(document: &Document) -> Result<Option<String>> {
         let relationships = document.package.get_part_rels(&document.doc_part_name);
         let links = relationships
             .into_iter()
@@ -4074,15 +4231,10 @@ impl FootnotePart {
                 "footnotes content type is invalid in {name}"
             )));
         }
-        let xml = std::str::from_utf8(
-            document
-                .package
-                .get_part(&name)
-                .ok_or_else(|| Error::Other(format!("missing footnotes part {name}")))?,
-        )
-        .map_err(utf8_error)?
-        .to_owned();
-        Self::parse(name, xml).map(Some)
+        if !document.package.contains_part(&name) {
+            return Err(Error::Other(format!("missing footnotes part {name}")));
+        }
+        Ok(Some(name))
     }
 
     fn parse(name: String, xml: String) -> Result<Self> {
@@ -4214,6 +4366,8 @@ struct FootnoteReferenceSite {
     run: Range<usize>,
     paragraph: Range<usize>,
     revision: Option<Range<usize>>,
+    /// The metadata of that nearest revision wrapper, read with the site.
+    metadata: Option<crate::revision::RevisionMetadata>,
 }
 
 fn footnote_reference_sites(document: &Document) -> Result<Vec<FootnoteReferenceSite>> {
@@ -4246,10 +4400,12 @@ fn footnote_reference_sites(document: &Document) -> Result<Vec<FootnoteReference
             let mut parent = run.parent;
             let mut paragraph = None;
             let mut revision = None;
+            let mut metadata = None;
             while let Some(at) = parent {
                 let ancestor = &tree.elements[at];
                 if ancestor.revision.is_some() && revision.is_none() {
                     revision = Some(ancestor.start..ancestor.end);
+                    metadata = ancestor.revision.clone();
                 }
                 if ancestor.word && ancestor.local == "p" {
                     paragraph = Some(ancestor.start..ancestor.end);
@@ -4271,6 +4427,7 @@ fn footnote_reference_sites(document: &Document) -> Result<Vec<FootnoteReference
                 run: run.start..run.end,
                 paragraph,
                 revision,
+                metadata,
             });
         }
     }
@@ -4481,17 +4638,25 @@ struct NoteMarker {
     pair_id: i32,
     owner: Option<i32>,
     reference: Option<i32>,
+    /// A body pair that Word moved into its own reference's revision wrapper.
+    wrapped: bool,
 }
 
 #[derive(Clone)]
 pub(crate) struct FootnoteCustody {
-    token: i32,
+    /// The persistent token of a marked unit. A tracked-note unit has none:
+    /// it is proved from its own owner and reference, never from a marker.
+    token: Option<i32>,
     original: bool,
     edited: bool,
     owner: Option<i32>,
     addition: Option<bool>,
     selected: bool,
     revisions: Vec<crate::revision::RevisionMetadata>,
+    /// The main-story span of a body pair that sits inside its reference's
+    /// insertion. Resolving that insertion keeps the pair, so the unit's
+    /// lifetime and bits do not depend on Word's wrapper merging.
+    pub(crate) wrapped_body: Option<Range<usize>>,
 }
 
 fn note_marker_name(name: &str) -> Option<(i32, bool, bool, char)> {
@@ -4639,10 +4804,35 @@ fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
                     "custody pair has no direct paragraph owner".into(),
                 ));
             };
-            if family == 'B' && paragraph != parent {
-                return Err(Error::Other(
-                    "body custody pair is inside a revision".into(),
-                ));
+            // Word for Mac 16.115 merges adjacent insertions of one author and
+            // date, which can move the body pair into its own reference's
+            // insertion. Admit only that position: an insertion directly in a
+            // main-story paragraph whose next child after the pair is the
+            // reference run, the same next-sibling proof as for a direct pair.
+            // validate_footnote_custody also requires the note pair there.
+            let wrapped = family == 'B' && paragraph != parent;
+            if wrapped {
+                let wrapper = &tree.elements[parent];
+                let own_reference = part == document.doc_part_name
+                    && wrapper.word
+                    && wrapper.local == "ins"
+                    && wrapper.revision.as_ref().is_some_and(|metadata| {
+                        metadata.kind == crate::revision::RevisionKind::Insertion
+                    })
+                    && siblings.get(position + 2).is_some_and(|&next| {
+                        let run = &tree.elements[next];
+                        run.word
+                            && run.local == "r"
+                            && run.children.iter().any(|&leaf| {
+                                tree.elements[leaf].word
+                                    && tree.elements[leaf].local == "footnoteReference"
+                            })
+                    });
+                if !own_reference {
+                    return Err(Error::Other(
+                        "body custody pair is inside a revision".into(),
+                    ));
+                }
             }
             let mut owner = None;
             let mut owner_index = None;
@@ -4722,6 +4912,7 @@ fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
                 pair_id,
                 owner,
                 reference,
+                wrapped,
             });
         }
     }
@@ -4744,19 +4935,26 @@ pub(crate) fn validate_footnote_custody(
         if markers.iter().any(|marker| marker.family == 'N') {
             return Err(Error::Other("custody marker has no footnotes part".into()));
         }
+        // Without its note pair, a body pair inside a revision has no proof.
+        if markers.iter().any(|marker| marker.wrapped) {
+            return Err(Error::Other(
+                "body custody pair is inside a revision".into(),
+            ));
+        }
         // Physical reference coherence is independent of the orphan bookmark.
         validate_footnote_reference_owners(None, &footnote_reference_sites(document)?)?;
         return Ok(markers
             .iter()
             .filter(|marker| marker.family == 'B')
             .map(|marker| FootnoteCustody {
-                token: marker.token,
+                token: Some(marker.token),
                 original: marker.original,
                 edited: marker.edited,
                 owner: None,
                 addition: None,
                 selected: false,
                 revisions: Vec::new(),
+                wrapped_body: marker.wrapped.then(|| marker.span.clone()),
             })
             .collect());
     };
@@ -4767,6 +4965,7 @@ pub(crate) fn validate_footnote_custody(
     let mut units = Vec::new();
     let mut used_notes = HashSet::new();
     let mut owned_definitions = HashSet::new();
+    let mut wrapped_unmatched = Vec::new();
     for body in markers.iter().filter(|marker| marker.family == 'B') {
         let notes = markers
             .iter()
@@ -4778,6 +4977,12 @@ pub(crate) fn validate_footnote_custody(
             ));
         }
         let note = notes.first().copied();
+        // The next-sibling proof inside a revision holds only with the note
+        // pair, which binds the owner. An unmatched pair stays where Word left
+        // it only at the direct position, or before a tracked note's reference.
+        if note.is_none() && body.wrapped {
+            wrapped_unmatched.push(body.reference);
+        }
         if let Some(note) = note {
             if note.owner.is_none() {
                 return Err(Error::Other(
@@ -4838,21 +5043,7 @@ pub(crate) fn validate_footnote_custody(
                 }
             }
             for site in sites.iter().filter(|site| site.id == id) {
-                let bytes = document
-                    .package
-                    .get_part(&site.part)
-                    .expect("reference part");
-                let tree = crate::revision::XmlTree::parse(bytes)?;
-                let metadata = site
-                    .revision
-                    .as_ref()
-                    .and_then(|range| {
-                        tree.elements
-                            .iter()
-                            .find(|node| node.start == range.start && node.end == range.end)
-                    })
-                    .and_then(|node| node.revision.clone());
-                if let Some(metadata) = metadata {
+                if let Some(metadata) = site.metadata.clone() {
                     let add = match metadata.kind {
                         crate::revision::RevisionKind::Insertion => true,
                         crate::revision::RevisionKind::Deletion => false,
@@ -4887,13 +5078,14 @@ pub(crate) fn validate_footnote_custody(
             )));
         }
         units.push(FootnoteCustody {
-            token: body.token,
+            token: Some(body.token),
             original: body.original,
             edited: body.edited,
             owner,
             addition,
             selected: selected > 0,
             revisions,
+            wrapped_body: body.wrapped.then(|| body.span.clone()),
         });
     }
     if markers
@@ -4905,7 +5097,164 @@ pub(crate) fn validate_footnote_custody(
             "note custody marker is missing its body counterpart".into(),
         ));
     }
+    let tracked = tracked_note_units(&part, &note_tree, &sites, &owned_definitions, scope);
+    // An unmatched pair inside its reference's insertion stays only when that
+    // reference's note is a tracked note, proved from the note's own bytes.
+    // The pair is still not associated with it: it only keeps its place, and
+    // the insertion resolves with the tracked note.
+    if wrapped_unmatched.iter().any(|reference| {
+        !reference.is_some_and(|id| tracked.iter().any(|unit| unit.owner == Some(id)))
+    }) {
+        return Err(Error::Other(
+            "body custody pair is inside a revision".into(),
+        ));
+    }
+    units.extend(tracked);
     Ok(units)
+}
+
+/// Tracked-note units. Word can drop a note pair, which leaves its body pair
+/// without an owner (Q-A430-29). A normal owner that no marker binds is still
+/// a unit when its own bytes prove that the whole definition and its only
+/// reference are tracked as one insertion or one deletion. The proof reads the
+/// owner and binds the reference by its footnote id. It never reads a marker
+/// or an adjacent element, so an unmatched body pair stays unassociated.
+fn tracked_note_units(
+    part: &FootnotePart,
+    note_tree: &crate::revision::XmlTree<'_>,
+    sites: &[FootnoteReferenceSite],
+    owned: &HashSet<Option<i32>>,
+    scope: &crate::revision::RevisionScope<'_>,
+) -> Vec<FootnoteCustody> {
+    let mut references = BTreeMap::<i32, Vec<&FootnoteReferenceSite>>::new();
+    for site in sites {
+        references.entry(site.id).or_default().push(site);
+    }
+    let mut units = Vec::new();
+    for (&id, owner) in &part.normal() {
+        if owned.contains(&Some(id)) {
+            continue;
+        }
+        let sites = references.get(&id).map(Vec::as_slice).unwrap_or_default();
+        // Two or more references belong to the shared-reference rules.
+        if sites.len() > 1 {
+            continue;
+        }
+        let Some((kind, mut revisions)) = tracked_note_owner(note_tree, owner) else {
+            continue;
+        };
+        if let Some(site) = sites.first() {
+            match &site.metadata {
+                Some(metadata) if metadata.kind == kind => revisions.push(metadata.clone()),
+                _ => continue,
+            }
+        }
+        let selected = revisions
+            .iter()
+            .filter(|metadata| scope.matches(metadata))
+            .count();
+        units.push(FootnoteCustody {
+            token: None,
+            original: true,
+            edited: true,
+            owner: Some(id),
+            addition: Some(kind == crate::revision::RevisionKind::Insertion),
+            // Only a whole selection resolves the unit as one. A partial one
+            // keeps the ordinary element rules, and the final-paragraph rule.
+            selected: selected == revisions.len(),
+            revisions,
+            wrapped_body: None,
+        });
+    }
+    units
+}
+
+/// The revision kind and every revision of a note owner whose paragraphs all
+/// carry a paragraph-mark revision of one kind, and whose other paragraph
+/// children are all wrappers of that kind or zero-width range markers.
+fn tracked_note_owner(
+    tree: &crate::revision::XmlTree<'_>,
+    owner: &FootnoteOwner,
+) -> Option<(
+    crate::revision::RevisionKind,
+    Vec<crate::revision::RevisionMetadata>,
+)> {
+    use crate::revision::RevisionKind;
+    let first = tree
+        .elements
+        .partition_point(|node| node.start < owner.span.start);
+    let node = tree.elements.get(first)?;
+    if node.start != owner.span.start || !node.word || node.local != "footnote" {
+        return None;
+    }
+    let mut kind = None;
+    let mut agrees = |metadata: &crate::revision::RevisionMetadata| {
+        matches!(
+            metadata.kind,
+            RevisionKind::Insertion | RevisionKind::Deletion
+        ) && *kind.get_or_insert(metadata.kind) == metadata.kind
+    };
+    if node.children.is_empty() {
+        return None;
+    }
+    for &paragraph in &node.children {
+        let p = &tree.elements[paragraph];
+        if !p.word || p.local != "p" {
+            return None;
+        }
+        let mut mark = false;
+        for &child in &p.children {
+            let element = &tree.elements[child];
+            if element.word && element.local == "pPr" {
+                for &properties in &element.children {
+                    let run_properties = &tree.elements[properties];
+                    if !run_properties.word || run_properties.local != "rPr" {
+                        continue;
+                    }
+                    for &marker in &run_properties.children {
+                        if let Some(metadata) = &tree.elements[marker].revision {
+                            if !agrees(metadata) {
+                                return None;
+                            }
+                            mark = true;
+                        }
+                    }
+                }
+                continue;
+            }
+            match &element.revision {
+                Some(metadata)
+                    if element.word && matches!(element.local.as_str(), "ins" | "del") =>
+                {
+                    if !agrees(metadata) {
+                        return None;
+                    }
+                }
+                None if element.word
+                    && matches!(
+                        element.local.as_str(),
+                        "bookmarkStart" | "bookmarkEnd" | "proofErr"
+                    ) => {}
+                _ => return None,
+            }
+        }
+        if !mark {
+            return None;
+        }
+    }
+    let mut revisions = Vec::new();
+    for element in tree.elements[first..]
+        .iter()
+        .take_while(|element| element.start < owner.span.end)
+    {
+        if let Some(metadata) = &element.revision {
+            if !agrees(metadata) {
+                return None;
+            }
+            revisions.push(metadata.clone());
+        }
+    }
+    Some((kind?, revisions))
 }
 
 /// Selected definition retirement precedes the ordinary story renderer, whose
@@ -4974,31 +5323,63 @@ pub(crate) fn settle_footnote_custody(
     document: &mut Document,
     units: &[FootnoteCustody],
     accept: bool,
+    note_part_resolved: bool,
     mut publication: Option<&mut crate::revision::NotePublication>,
 ) -> Result<()> {
     if !units.iter().any(|unit| !unit.revisions.is_empty()) {
+        // No unit is recognized as pending, for example after Word dropped a
+        // note pair. A resolution that edits the note part or resolves a note
+        // reference, and leaves no note revision pending, still settles the
+        // part, and settlement retires its remaining custody pairs. A pair in
+        // an untouched part stays.
+        if note_part_resolved && !units.is_empty() && !note_revisions_pending(document, true)? {
+            retire_note_markers(document, units, publication)?;
+        }
         return Ok(());
+    }
+    let removed = units
+        .iter()
+        .filter(|unit| unit.selected && unit.addition.is_some_and(|addition| addition != accept))
+        .filter_map(|unit| unit.owner)
+        .collect::<Vec<_>>();
+    let unit_pending = units
+        .iter()
+        .any(|unit| !unit.revisions.is_empty() && !unit.selected);
+    // Nothing to remove, and either a unit still pending or no marked unit
+    // whose pairs or bits settlement would act on: nothing settles here, so
+    // the note part is not read again. A publication trace still checks its
+    // source.
+    if removed.is_empty()
+        && publication.is_none()
+        && (unit_pending || !units.iter().any(|unit| unit.token.is_some()))
+    {
+        return if FootnotePart::name_of(document)?.is_some() {
+            Ok(())
+        } else {
+            Err(Error::Other(
+                "footnotes part disappeared before custody settlement".into(),
+            ))
+        };
     }
     let Some(mut part) = FootnotePart::of(document)? else {
         return Err(Error::Other(
             "footnotes part disappeared before custody settlement".into(),
         ));
     };
-    let refs = footnote_reference_sites(document)?;
+    let refs = if removed.is_empty() {
+        Vec::new()
+    } else {
+        footnote_reference_sites(document)?
+    };
     let mut removals = Vec::new();
-    for unit in units
-        .iter()
-        .filter(|unit| unit.selected && unit.addition.is_some_and(|addition| addition != accept))
-    {
-        if let Some(id) = unit.owner {
-            if refs.iter().any(|site| site.id == id) {
-                return Err(Error::Other(
-                    "resolved note deletion retained a live reference".into(),
-                ));
-            }
-            if let Some(owner) = part.normal().get(&id) {
-                removals.push(owner.span.clone());
-            }
+    for id in removed {
+        if refs.iter().any(|site| site.id == id) {
+            return Err(Error::Other(
+                "resolved note deletion retained a live reference".into(),
+            ));
+        }
+        if let Some(owner) = part.normal().get(&id) {
+            removals.push(owner.span.clone());
         }
     }
     removals.sort_by_key(|range| range.start);
@@ -5006,27 +5387,60 @@ pub(crate) fn settle_footnote_custody(
     if let Some(trace) = publication.as_deref_mut() {
         trace.remove_ranges(&part.name, part.xml.as_bytes(), &removals)?;
     }
-    for range in removals.into_iter().rev() {
-        part.xml.replace_range(range, "");
+    if !removals.is_empty() || publication.is_some() {
+        for range in removals.into_iter().rev() {
+            part.xml.replace_range(range, "");
+        }
+        crate::document::set_story_source_xml(document, &part.name, part.xml.into_bytes())?;
+        part = FootnotePart::of(document)?.expect("installed notes");
     }
-    crate::document::set_story_source_xml(document, &part.name, part.xml.into_bytes())?;
-    let part = FootnotePart::of(document)?.expect("installed notes");
-    let pending = units
-        .iter()
-        .any(|unit| !unit.revisions.is_empty() && !unit.selected);
-    let unowned = part.unowned_record_count()?;
+    // A tracked note that settles here leaves the pairs in place while a note
+    // owner outside every recognized unit still holds a revision, the rule of
+    // a settlement that recognizes no unit. Only marked units carry pairs.
+    let pending = unit_pending
+        || (units
+            .iter()
+            .any(|unit| unit.token.is_none() && unit.selected)
+            && units.iter().any(|unit| unit.token.is_some())
+            && note_revisions_pending(document, false)?);
+    if pending {
+        return Ok(());
+    }
     let open = units.iter().any(|unit| !unit.revisions.is_empty());
+    let mut marked = units.iter().filter(|unit| unit.token.is_some());
     let absent = open
         && part.normal().is_empty()
-        && unowned == 0
-        && (units.iter().any(|unit| !unit.original) || units.iter().any(|unit| !unit.edited));
-    if !pending {
-        retire_note_markers(document, units, publication)?;
-        if absent {
-            remove_footnotes_part(document, &part.name)?;
-        }
+        && marked.any(|unit| !unit.original || !unit.edited)
+        && part.unowned_record_count()? == 0;
+    retire_note_markers(document, units, publication)?;
+    if absent {
+        remove_footnotes_part(document, &part.name)?;
     }
     Ok(())
+}
+
+/// Whether a normal note owner, or with `references` a note reference, still
+/// carries a revision.
+fn note_revisions_pending(document: &Document, references: bool) -> Result<bool> {
+    if references
+        && footnote_reference_sites(document)?
+            .iter()
+            .any(|site| site.revision.is_some())
+    {
+        return Ok(true);
+    }
+    let Some(part) = FootnotePart::of(document)? else {
+        return Ok(false);
+    };
+    let mut tree = crate::revision::XmlTree::parse(part.xml.as_bytes())?;
+    tree.qualify_note_revisions()?;
+    let owners = part.normal();
+    Ok(tree.elements.iter().any(|node| {
+        node.revision.is_some()
+            && owners
+                .values()
+                .any(|owner| node.start >= owner.inner.start && node.end <= owner.inner.end)
+    }))
 }
 
 fn retire_note_markers(
@@ -5034,7 +5448,13 @@ fn retire_note_markers(
     units: &[FootnoteCustody],
     mut publication: Option<&mut crate::revision::NotePublication>,
 ) -> Result<()> {
-    let tokens = units.iter().map(|unit| unit.token).collect::<HashSet<_>>();
+    let tokens = units
+        .iter()
+        .filter_map(|unit| unit.token)
+        .collect::<HashSet<_>>();
+    if tokens.is_empty() {
+        return Ok(());
+    }
     let mut by_part = BTreeMap::<String, Vec<Range<usize>>>::new();
     for marker in note_markers(document)?
         .into_iter()
@@ -5297,8 +5717,20 @@ fn rewrite_note_marker_pair(
 /// Input collisions change only the positively associated bookmark identities.
 /// Numeric footnote and current revision identities remain untouched.
 fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document) -> Result<()> {
-    let left = validate_footnote_custody(original, &crate::revision::RevisionScope::All)?;
-    let right = validate_footnote_custody(edited, &crate::revision::RevisionScope::All)?;
+    let marked = |units: Vec<FootnoteCustody>| {
+        units
+            .into_iter()
+            .filter(|unit| unit.token.is_some())
+            .collect::<Vec<_>>()
+    };
+    let left = marked(validate_footnote_custody(
+        original,
+        &crate::revision::RevisionScope::All,
+    )?);
+    let right = marked(validate_footnote_custody(
+        edited,
+        &crate::revision::RevisionScope::All,
+    )?);
     let left_markers = note_markers(original)?;
     if left_markers.is_empty() {
         return Ok(());
@@ -5338,7 +5770,7 @@ fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document)
         } else {
             let right_marker = note_markers(edited)?
                 .into_iter()
-                .find(|marker| marker.token == unit.token && marker.family == 'B');
+                .find(|marker| Some(marker.token) == unit.token && marker.family == 'B');
             left.iter().find(|other| {
                 other.owner.is_none()
                     && other.token == unit.token
@@ -5346,7 +5778,7 @@ fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document)
                     && other.edited == unit.edited
                     && right_marker.as_ref().is_some_and(|right| {
                         left_markers.iter().any(|left| {
-                            left.token == other.token
+                            Some(left.token) == other.token
                                 && left.family == 'B'
                                 && left.part == right.part
                                 && left.pair_id == right.pair_id
@@ -5373,18 +5805,18 @@ fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document)
             for family in ['B', 'N'] {
                 let left = left_markers
                     .iter()
-                    .find(|marker| marker.token == other.token && marker.family == family);
+                    .find(|marker| Some(marker.token) == other.token && marker.family == family);
                 let right = note_markers(edited)?
                     .into_iter()
-                    .find(|marker| marker.token == unit.token && marker.family == family);
+                    .find(|marker| Some(marker.token) == unit.token && marker.family == family);
                 if let (Some(left), Some(right)) = (left, right) {
-                    rewrite_note_marker_pair(edited, &right, other.token, left.pair_id)?;
+                    rewrite_note_marker_pair(edited, &right, left.token, left.pair_id)?;
                 }
             }
         } else {
             let markers = note_markers(edited)?
                 .into_iter()
-                .filter(|marker| marker.token == unit.token)
+                .filter(|marker| Some(marker.token) == unit.token)
                 .collect::<Vec<_>>();
             let collision = left.iter().any(|other| other.token == unit.token)
                 || markers.iter().any(|right| {
@@ -5508,6 +5940,45 @@ fn note_fragment_envelope(xml: &str, bindings: &NamespaceBindings, note: bool) -
     String::from_utf8(writer.into_inner()).map_err(utf8_error)
 }
 
+/// A footnote that both inputs reference must not reach the pending result
+/// with more physical references than either input gives it. That happens
+/// when its reference moves to another site, for example a new note inserted
+/// before it takes its id in the edited input: the deleted original reference
+/// and the inserted edited one then name one owner, a shared reference that
+/// Word for Mac 16.115 cannot open, and the owner's text change pairs two
+/// different notes. Refuse before any note custody is written.
+fn refuse_shared_pending_references(
+    candidate: &Document,
+    left_refs: &[FootnoteReferenceSite],
+    right_refs: &[FootnoteReferenceSite],
+    left_normal: &BTreeMap<i32, &FootnoteOwner>,
+    right_normal: &BTreeMap<i32, &FootnoteOwner>,
+) -> Result<()> {
+    let count = |sites: &[FootnoteReferenceSite], id: i32| {
+        sites.iter().filter(|site| site.id == id).count()
+    };
+    let common = left_normal
+        .keys()
+        .filter(|id| right_normal.contains_key(id))
+        .filter(|&&id| count(left_refs, id) > 0 && count(right_refs, id) > 0)
+        .copied()
+        .collect::<Vec<_>>();
+    if common.is_empty() {
+        return Ok(());
+    }
+    let pending = footnote_reference_sites(candidate)?;
+    for id in common {
+        let most = count(left_refs, id).max(count(right_refs, id));
+        let actual = count(&pending, id);
+        if actual > most {
+            return Err(Error::Other(format!(
+                "comparison would give footnote {id} {actual} physical references where each input has at most {most}: its reference moved to another site"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn compare_footnote_parts(
     original: &Document,
     edited: &Document,
@@ -5547,6 +6018,13 @@ fn compare_footnote_parts(
         .unwrap_or_else(|| empty.clone());
     let left_refs = footnote_reference_sites(original)?;
     let right_refs = footnote_reference_sites(edited)?;
+    refuse_shared_pending_references(
+        candidate,
+        &left_refs,
+        &right_refs,
+        &left_normal,
+        &right_normal,
+    )?;
     let added = right
         .as_ref()
         .map(|part| {
@@ -5835,9 +6313,26 @@ fn insert_note_marker(
             at = node.end;
             continue;
         }
-        if addition && node.word && node.local == "ins" {
-            at = node.open_end;
-            insertion = true;
+        let wrapper = if addition { "ins" } else { "del" };
+        if node.word && node.local == wrapper {
+            // Word 16.115 drops a zero-width pair that precedes the note's
+            // reference mark, and keeps one that follows it. Place the pair
+            // after the first reference-mark run of the content wrapper.
+            let mark = node.children.iter().copied().find(|&run| {
+                let run_node = &tree.elements[run];
+                run_node.word
+                    && run_node.local == "r"
+                    && run_node.children.iter().any(|&leaf| {
+                        tree.elements[leaf].word && tree.elements[leaf].local == "footnoteRef"
+                    })
+            });
+            if let Some(run) = mark {
+                at = tree.elements[run].end;
+                insertion = addition;
+            } else if addition {
+                at = node.open_end;
+                insertion = true;
+            }
         }
         break;
     }
@@ -5987,25 +6482,18 @@ fn bind_note_reference_revisions(
     Ok(())
 }
 
+/// Check the footnote part of `actual`, a [`resolved_candidate`], against the
+/// input that resolution must reproduce.
 fn verify_footnote_destination(
-    candidate: &Document,
+    actual: &Document,
     wanted: &Document,
-    ids: &HashSet<i32>,
     accept: bool,
     options: &ComparisonOptions,
 ) -> Result<()> {
     if story_ignored(options, ComparisonStoryKind::Footnote) {
         return Ok(());
     }
-    let mut actual = candidate.clone_for_staging();
-    if accept {
-        actual.accept_revision_ids(ids)?;
-    } else {
-        actual.reject_revision_ids(ids)?;
-    }
-    let units = validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids))?;
-    project_resolved_note_tombstones(candidate, &mut actual, &units)?;
-    let left = FootnotePart::of(&actual)?;
+    let left = FootnotePart::of(actual)?;
     let right = FootnotePart::of(wanted)?;
     match (&left, &right) {
         (None, None) => Ok(()),
@@ -6269,6 +6757,7 @@ fn refuse_changed_existing_revisions(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolved_package(
     candidate: &Document,
     resolve: impl FnOnce(&mut Document) -> Result<usize>,
@@ -6277,6 +6766,18 @@ fn resolved_package(
     text_box_markers: &TextBoxMarkers,
     custody_ids: Option<&HashSet<i32>>,
 ) -> Result<NormalizedPackage> {
+    let resolved = resolved_candidate(candidate, resolve, custody_ids)?;
+    normalized_package(&resolved, stories, options, text_box_markers)
+}
+
+/// The candidate with its revisions resolved one way and the transient note
+/// pairs of fully resolved units projected out. Every postcondition of that
+/// resolution reads this one document, so the package is resolved once.
+fn resolved_candidate(
+    candidate: &Document,
+    resolve: impl FnOnce(&mut Document) -> Result<usize>,
+    custody_ids: Option<&HashSet<i32>>,
+) -> Result<Document> {
     let mut resolved = candidate.clone_for_staging();
     let units = custody_ids
         .map(|ids| validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids)))
@@ -6285,7 +6786,7 @@ fn resolved_package(
     if let Some(units) = units {
         project_resolved_note_tombstones(candidate, &mut resolved, &units)?;
     }
-    normalized_package(&resolved, stories, options, text_box_markers)
+    Ok(resolved)
 }
 
 /// Comparison guards may omit only the current fully resolved units' transient
@@ -6302,8 +6803,17 @@ fn project_resolved_note_tombstones(
     let retained = units
         .iter()
         .filter(|unit| !unit.selected)
-        .map(|unit| unit.token)
+        .filter_map(|unit| unit.token)
         .collect::<HashSet<_>>();
+    // Only marked units carry pairs to project. A pending tracked note alone
+    // has none.
+    if retained.is_empty()
+        && !units
+            .iter()
+            .any(|unit| unit.selected && unit.token.is_some())
+    {
+        return Ok(());
+    }
     let prior = note_markers(before)?
         .into_iter()
         .filter(|marker| retained.contains(&marker.token))
@@ -6335,7 +6845,7 @@ fn project_resolved_note_tombstones(
     }
     let projected = units
         .iter()
-        .filter(|unit| unit.selected)
+        .filter(|unit| unit.selected && unit.token.is_some())
         .cloned()
         .collect::<Vec<_>>();
     for unit in &projected {
@@ -8626,42 +9136,82 @@ struct RunSource {
 }
 
 impl RunSource {
-    fn capture(run: Option<&CT_R>, parent: &str, span: Range<usize>) -> Result<Self> {
+    /// The source of the run at each span of `parent`, in the order given.
+    ///
+    /// One read of `parent` serves every run. A read per run reads the parent
+    /// again up to that run, which is quadratic in the runs it holds. Each
+    /// result, an error included, is the one a read for that run alone gives.
+    fn capture_all(runs: &[(Option<&CT_R>, Range<usize>)], parent: &str) -> Vec<Result<Self>> {
+        if runs.is_empty() {
+            return Vec::new();
+        }
         #[cfg(test)]
         if destination_diagnostic_enabled() {
-            policy_diagnostic(
-                "destination_actual_parent",
-                serde_json::json!({"parent_source":parent,"run_span":[span.start,span.end]}),
-            );
+            for (_, span) in runs {
+                policy_diagnostic(
+                    "destination_actual_parent",
+                    serde_json::json!({"parent_source":parent,"run_span":[span.start,span.end]}),
+                );
+            }
         }
+        #[cfg(test)]
+        SOURCE_READ_BYTES.with(|bytes| bytes.set(bytes.get() + parent.len()));
         let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
         let wrapped = format!("{opening}{parent}</scope>");
         let mut reader = NsReader::from_str(&wrapped);
-        let mut scopes = Vec::new();
-        loop {
+        let mut scopes = Vec::<NamespaceBindings>::new();
+        let mut results = runs.iter().map(|_| None).collect::<Vec<_>>();
+        // The runs still to reach, the nearest last.
+        let mut pending = (0..runs.len()).collect::<Vec<_>>();
+        pending.sort_by_key(|index| std::cmp::Reverse(runs[*index].1.start));
+        // A run the read passed opens no element. Its read goes on to the end.
+        let mut passed = Vec::new();
+        let capture = |(run, span): &(Option<&CT_R>, Range<usize>),
+                       bindings: &NamespaceBindings,
+                       parent_scope: Option<&NamespaceBindings>|
+         -> Result<Self> {
+            let raw = parent[span.clone()].to_owned();
+            let mut source = Self {
+                owner: run.map_or(0, |run| run as *const CT_R as usize),
+                scoped: source_fragment(&raw, bindings)?,
+                raw,
+                parent: parent_scope.cloned().unwrap_or_default(),
+                raw_slots: Vec::new(),
+                typed_slots: Vec::new(),
+                projected_raw_slots: HashSet::new(),
+                projected_typed_slots: HashSet::new(),
+            };
+            if let Some(run) = run {
+                source.capture_children(run)?;
+            }
+            Ok(source)
+        };
+        let failure = loop {
+            if pending.is_empty() && passed.is_empty() {
+                break None;
+            }
             let before = reader.buffer_position() as usize;
-            let (_, event) = reader
-                .read_resolved_event()
-                .map_err(|error| Error::Other(error.to_string()))?;
+            let event = match reader.read_resolved_event() {
+                Ok((_, event)) => event,
+                Err(error) => break Some(error.to_string()),
+            };
+            while let Some(&index) = pending.last()
+                && opening.len() + runs[index].1.start < before
+            {
+                pending.pop();
+                passed.push(index);
+            }
             match event {
                 Event::Start(_) | Event::Empty(_) => {
-                    let bindings = resolved_source_bindings(&reader)?;
-                    if before == opening.len() + span.start {
-                        let raw = parent[span].to_owned();
-                        let mut source = Self {
-                            owner: run.map_or(0, |run| run as *const CT_R as usize),
-                            scoped: source_fragment(&raw, &bindings)?,
-                            raw,
-                            parent: scopes.last().cloned().unwrap_or_default(),
-                            raw_slots: Vec::new(),
-                            typed_slots: Vec::new(),
-                            projected_raw_slots: HashSet::new(),
-                            projected_typed_slots: HashSet::new(),
-                        };
-                        if let Some(run) = run {
-                            source.capture_children(run)?;
-                        }
-                        return Ok(source);
+                    let bindings = match resolved_source_bindings(&reader) {
+                        Ok(bindings) => bindings,
+                        Err(error) => break Some(error.to_string()),
+                    };
+                    while let Some(&index) = pending.last()
+                        && opening.len() + runs[index].1.start == before
+                    {
+                        pending.pop();
+                        results[index] = Some(capture(&runs[index], &bindings, scopes.last()));
                     }
                     if matches!(event, Event::Start(_)) {
                         scopes.push(bindings);
@@ -8670,10 +9220,19 @@ impl RunSource {
                 Event::End(_) => {
                     scopes.pop();
                 }
-                Event::Eof => return Err(Error::Other("run source has no actual opening".into())),
+                Event::Eof => break Some("run source has no actual opening".into()),
                 _ => {}
             }
+        };
+        if let Some(message) = failure {
+            for index in pending.into_iter().chain(passed) {
+                results[index] = Some(Err(Error::Other(message.clone())));
+            }
         }
+        results
+            .into_iter()
+            .map(|result| result.expect("every run is answered"))
+            .collect()
     }
 }
 
@@ -9798,7 +10357,8 @@ impl SourceSnapshots {
         let mut parent_writer = Writer::new(Vec::new());
         parent_writer.write_event(Event::Start(root))?;
         let opening = String::from_utf8(parent_writer.into_inner()).map_err(utf8_error)?;
-        let mut field_spans = modeled_paragraph_run_spans(paragraph, xml)?;
+        let spans = modeled_paragraph_run_spans(paragraph, xml)?;
+        let mut field_spans = spans.clone();
         // Legacy rendering keeps zero-length continuation placeholders. A source
         // witness instead retains the proven whole physical span at every actual
         // logical slot of that same shared group.
@@ -9843,6 +10403,20 @@ impl SourceSnapshots {
             .ok_or_else(|| {
                 Error::Other("field owner namespace closure changed its source boundary".into())
             })?;
+        // One read of the paragraph answers the scope of every field.
+        let field_starts = paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .flat_map(|(run_index, run)| {
+                run.content
+                    .iter()
+                    .filter(|content| matches!(content, RunContent::Field(_)))
+                    .map(move |_| run_index)
+            })
+            .map_while(|run_index| field_spans.get(run_index).map(|span| span.start))
+            .collect::<Vec<_>>();
+        let mut field_parents = publication_parents_at(xml, &field_starts).into_iter();
         let mut field_slot = 0usize;
         for (run_index, run) in paragraph.runs.iter().enumerate() {
             for content in &run.content {
@@ -9861,7 +10435,7 @@ impl SourceSnapshots {
                     let actual_field_source = &physical_owner[physical_span.clone()];
                     let actual_scope = actual_root_bindings(
                         actual_field_source,
-                        &publication_parent_at(xml, span.start)?,
+                        &field_parents.next().expect("one scope per field")?,
                     )?;
                     self.capture_field_occurrence(
                         std::ptr::from_ref(paragraph) as usize,
@@ -9900,28 +10474,42 @@ impl SourceSnapshots {
         }
 
         if !self.properties_only {
-            let spans = modeled_paragraph_run_spans(paragraph, xml)?;
             let (opening, closing) = paragraph_shell(Some(xml))?;
+            // The runs the paragraph source holds as they are are captured in
+            // one read after this walk. Each was read in turn before, so an
+            // error capturing one still comes before any later error.
+            let mut plain = Vec::new();
+            let mut failure = None;
             let mut index = 0;
-            while index < paragraph.runs.len() {
-                if let Some((coverage, fragments)) =
-                    paragraph.field_source_run_fragments_at(index)?
-                {
+            'runs: while index < paragraph.runs.len() {
+                let fragments = match paragraph.field_source_run_fragments_at(index) {
+                    Ok(fragments) => fragments,
+                    Err(error) => {
+                        failure = Some(Error::from(error));
+                        break;
+                    }
+                };
+                if let Some((coverage, fragments)) = fragments {
                     for (run, fragment) in paragraph.runs[index..index + coverage]
                         .iter()
                         .zip(fragments)
                     {
                         if let Some(raw) = fragment {
-                            let raw = String::from_utf8(raw).map_err(utf8_error)?;
-                            let wrapped = format!("{opening}{raw}{closing}");
-                            self.runs.insert(
-                                run as *const CT_R as usize,
-                                RunSource::capture(
-                                    Some(run),
-                                    &wrapped,
-                                    opening.len()..opening.len() + raw.len(),
-                                )?,
-                            );
+                            let source =
+                                String::from_utf8(raw).map_err(utf8_error).and_then(|raw| {
+                                    let wrapped = format!("{opening}{raw}{closing}");
+                                    let span = opening.len()..opening.len() + raw.len();
+                                    RunSource::capture_all(&[(Some(run), span)], &wrapped).remove(0)
+                                });
+                            match source {
+                                Ok(source) => {
+                                    self.runs.insert(run as *const CT_R as usize, source);
+                                }
+                                Err(error) => {
+                                    failure = Some(error);
+                                    break 'runs;
+                                }
+                            }
                         }
                     }
                     index += coverage;
@@ -9929,18 +10517,25 @@ impl SourceSnapshots {
                 }
                 let run = &paragraph.runs[index];
                 if !run_is_field(run) {
-                    self.runs.insert(
-                        run as *const CT_R as usize,
-                        RunSource::capture(Some(run), xml, spans[index].clone())?,
-                    );
+                    plain.push((Some(run), spans[index].clone()));
                 }
                 index += 1;
             }
+            for ((run, _), source) in plain.iter().zip(RunSource::capture_all(&plain, xml)) {
+                if let Some(run) = run {
+                    self.runs.insert(*run as *const CT_R as usize, source?);
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
         }
         let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
         for (index, ((_, _, _, control), span)) in
             paragraph.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(paragraph) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -9966,6 +10561,7 @@ impl SourceSnapshots {
                 .ok_or_else(|| {
                     Error::Other("control budget interval precedes physical owner".into())
                 })?;
+            let parent = parent?;
             self.budget_holes
                 .entry(std::ptr::from_ref(paragraph) as usize)
                 .or_default()
@@ -9973,19 +10569,13 @@ impl SourceSnapshots {
                     path,
                     1,
                     hole,
-                    actual_root_bindings(
-                        &xml[span.clone()],
-                        &publication_parent_at(xml, span.start)?,
-                    )?,
+                    actual_root_bindings(&xml[span.clone()], &parent)?,
                 ));
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span.clone()].to_owned(), parent),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         for (ordinal, (at, raw_before, revision)) in paragraph.revisions.iter().enumerate() {
             let raw = paragraph
@@ -10018,12 +10608,10 @@ impl SourceSnapshots {
         }
         self.tables
             .insert(table as *const CT_Tbl as usize, xml.to_owned());
-        for (index, (row, span)) in table
-            .rows
-            .iter()
-            .zip(direct_word_element_spans(xml, "tr")?)
-            .enumerate()
-        {
+        let rows = direct_word_element_spans(xml, "tr")?;
+        let mut scopes = child_scopes(xml, &rows);
+        for (index, (row, span)) in table.rows.iter().zip(rows).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per row span");
             self.inherit_owner_path(
                 std::ptr::from_ref(table) as usize,
                 std::ptr::from_ref(row) as usize,
@@ -10038,19 +10626,16 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 row as *const CT_Row as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.row(row, &source_child(xml, span)?)?;
+            self.row(row, &source?)?;
         }
-        for (index, ((_, _, control), span)) in table
-            .content_controls
-            .iter()
-            .zip(direct_word_element_spans(xml, "sdt")?)
-            .enumerate()
+        let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
+        for (index, ((_, _, control), span)) in
+            table.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(table) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -10065,12 +10650,9 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         Ok(())
     }
@@ -10085,12 +10667,10 @@ impl SourceSnapshots {
         }
         self.rows
             .insert(row as *const CT_Row as usize, xml.to_owned());
-        for (index, (cell, span)) in row
-            .cells
-            .iter()
-            .zip(direct_word_element_spans(xml, "tc")?)
-            .enumerate()
-        {
+        let cells = direct_word_element_spans(xml, "tc")?;
+        let mut scopes = child_scopes(xml, &cells);
+        for (index, (cell, span)) in row.cells.iter().zip(cells).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per cell span");
             self.inherit_owner_path(
                 std::ptr::from_ref(row) as usize,
                 std::ptr::from_ref(cell) as usize,
@@ -10105,19 +10685,16 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 cell as *const CT_Tc as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.cell(cell, &source_child(xml, span)?)?;
+            self.cell(cell, &source?)?;
         }
-        for (index, ((_, _, control), span)) in row
-            .content_controls
-            .iter()
-            .zip(direct_word_element_spans(xml, "sdt")?)
-            .enumerate()
+        let controls = direct_word_element_spans(xml, "sdt")?;
+        let mut scopes = child_scopes(xml, &controls);
+        for (index, ((_, _, control), span)) in
+            row.content_controls.iter().zip(controls).enumerate()
         {
+            let (parent, source) = scopes.next().expect("one scope per control span");
             self.inherit_owner_path(
                 std::ptr::from_ref(row) as usize,
                 std::ptr::from_ref(control) as usize,
@@ -10132,12 +10709,9 @@ impl SourceSnapshots {
             )?;
             self.roots.insert(
                 control as *const CT_Sdt as usize,
-                (
-                    xml[span.clone()].to_owned(),
-                    publication_parent_at(xml, span.start)?,
-                ),
+                (xml[span].to_owned(), parent?),
             );
-            self.control(control, &source_child(xml, span)?)?;
+            self.control(control, &source?)?;
         }
         Ok(())
     }
@@ -10152,12 +10726,13 @@ impl SourceSnapshots {
         }
         self.cells
             .insert(cell as *const CT_Tc as usize, xml.to_owned());
-        for (index, (child, (_, span))) in cell
-            .content
-            .iter()
-            .zip(cell_child_spans(cell, xml, "source snapshot")?)
-            .enumerate()
-        {
+        let children = cell_child_spans(cell, xml, "source snapshot")?
+            .into_iter()
+            .map(|(_, span)| span)
+            .collect::<Vec<_>>();
+        let mut scopes = child_scopes(xml, &children);
+        for (index, (child, span)) in cell.content.iter().zip(children).enumerate() {
+            let (parent, source) = scopes.next().expect("one scope per cell child span");
             let child_key = match child {
                 CellContent::Paragraph(p) => std::ptr::from_ref(p) as usize,
                 CellContent::Table(t) => std::ptr::from_ref(t) as usize,
@@ -10170,36 +10745,21 @@ impl SourceSnapshots {
                 xml,
                 span.start,
             )?;
-            let source = source_child(xml, span.clone())?;
+            let source = source?;
             match child {
                 CellContent::Paragraph(p) => {
-                    self.roots.insert(
-                        p as *const CT_P as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(p as *const CT_P as usize, (xml[span].to_owned(), parent?));
                     self.paragraph(p, &source)?
                 }
                 CellContent::Table(t) => {
-                    self.roots.insert(
-                        t as *const CT_Tbl as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(t as *const CT_Tbl as usize, (xml[span].to_owned(), parent?));
                     self.table(t, &source)?
                 }
                 CellContent::ContentControl(c) => {
-                    self.roots.insert(
-                        c as *const CT_Sdt as usize,
-                        (
-                            xml[span.clone()].to_owned(),
-                            publication_parent_at(xml, span.start)?,
-                        ),
-                    );
+                    self.roots
+                        .insert(c as *const CT_Sdt as usize, (xml[span].to_owned(), parent?));
                     self.control(c, &source)?
                 }
             }
@@ -10265,6 +10825,56 @@ impl SourceSnapshots {
             ));
         }
         let spans = modeled_control_source_spans(&content, &payload)?;
+        // One read of the content answers every child. Each answer, an error
+        // included, is met where a read for that child alone was made.
+        let elements = content
+            .iter()
+            .zip(&spans)
+            .enumerate()
+            .filter(|(_, (child, _))| !matches!(child, SdtContent::RawXml(_)))
+            .map(|(index, (_, span))| (index, span.clone()))
+            .collect::<Vec<_>>();
+        let element_spans = elements
+            .iter()
+            .map(|(_, span)| span.clone())
+            .collect::<Vec<_>>();
+        let element_starts = element_spans
+            .iter()
+            .map(|span| span.start)
+            .collect::<Vec<_>>();
+        let mut child_sources = content.iter().map(|_| None).collect::<Vec<_>>();
+        let mut child_parents = content.iter().map(|_| None).collect::<Vec<_>>();
+        for (((index, _), source), parent) in elements
+            .iter()
+            .zip(source_children(&payload, &element_spans))
+            .zip(publication_parents_at(&payload, &element_starts))
+        {
+            child_sources[*index] = Some(source);
+            child_parents[*index] = Some(parent);
+        }
+        let mut captured = content.iter().map(|_| None).collect::<Vec<_>>();
+        if !self.properties_only {
+            let plain = content
+                .iter()
+                .zip(&spans)
+                .enumerate()
+                .filter_map(|(index, (child, span))| match child {
+                    SdtContent::Run(run)
+                        if !run
+                            .content
+                            .iter()
+                            .any(|content| matches!(content, RunContent::Field(_))) =>
+                    {
+                        Some((index, (Some(run), span.clone())))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let runs = plain.iter().map(|(_, run)| run.clone()).collect::<Vec<_>>();
+            for ((index, _), source) in plain.iter().zip(RunSource::capture_all(&runs, &payload)) {
+                captured[*index] = Some(source);
+            }
+        }
         let mut field_slot = 0usize;
         for (index, (child, span)) in content.into_iter().zip(spans).enumerate() {
             let child_key = match child {
@@ -10296,45 +10906,40 @@ impl SourceSnapshots {
             if matches!(child, SdtContent::RawXml(_)) {
                 continue;
             }
-            let source = source_child(&payload, span.clone())?;
+            let source = child_sources[index]
+                .take()
+                .expect("an element child has its source")?;
+            let mut parent = || {
+                child_parents[index]
+                    .take()
+                    .expect("an element child has its parent scope")
+            };
             match child {
                 SdtContent::Paragraph(p) => {
                     self.roots.insert(
                         p as *const CT_P as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.paragraph(p, &source)?;
                 }
                 SdtContent::Table(t) => {
                     self.roots.insert(
                         t as *const CT_Tbl as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.table(t, &source)?;
                 }
                 SdtContent::Row(r) => {
                     self.roots.insert(
                         r as *const CT_Row as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.row(r, &source)?;
                 }
                 SdtContent::Cell(c) => {
                     self.roots.insert(
                         c as *const CT_Tc as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), parent()?),
                     );
                     self.cell(c, &source)?;
                 }
@@ -10358,24 +10963,14 @@ impl SourceSnapshots {
                         .ok_or_else(|| {
                             Error::Other("nested control source-budget interval overflow".into())
                         })?;
+                    let scope = parent()?;
                     self.budget_holes
                         .entry(std::ptr::from_ref(control) as usize)
                         .or_default()
-                        .push((
-                            path,
-                            6,
-                            hole,
-                            actual_root_bindings(
-                                &source,
-                                &publication_parent_at(&payload, span.start)?,
-                            )?,
-                        ));
+                        .push((path, 6, hole, actual_root_bindings(&source, &scope)?));
                     self.roots.insert(
                         c as *const CT_Sdt as usize,
-                        (
-                            payload[span.clone()].to_owned(),
-                            publication_parent_at(&payload, span.start)?,
-                        ),
+                        (payload[span.clone()].to_owned(), scope),
                     );
                     self.control(c, &source)?;
                 }
@@ -10388,44 +10983,46 @@ impl SourceSnapshots {
                             _ => None,
                         })
                         .collect::<Vec<_>>();
-                    if fields.is_empty() {
-                        if !self.properties_only {
-                            self.runs.insert(
-                                r as *const CT_R as usize,
-                                RunSource::capture(Some(r), &payload, span)?,
-                            );
-                        }
-                    } else {
-                        for field in fields {
-                            let scope = actual_root_bindings(
-                                &source,
-                                &actual_root_bindings(&payload, &Vec::new())?,
-                            )?;
-                            self.capture_field_occurrence(
-                                std::ptr::from_ref(control) as usize,
-                                field,
-                                field_slot,
-                                raw_payload,
-                                span.start.checked_sub(closure_growth)
-                                    .zip(span.end.checked_sub(closure_growth))
-                                    .map(|(start, end)| start..end)
-                                    .ok_or_else(|| Error::Other("control field source precedes its actual content owner".into()))?,
-                                scope.clone(),
-                            )?;
-                            field_slot += 1;
-                            self.field_scopes
-                                .insert(std::ptr::from_ref(field) as usize, scope.clone());
-                            self.fields.insert(
-                                std::ptr::from_ref(field) as usize,
-                                field_source_metadata(
-                                    &source_without_text_properties(
-                                        &field_result_source_paragraph(&source, &scope)?,
-                                        &Vec::new(),
-                                    )?,
-                                    field.is_complex(),
+                    if fields.is_empty()
+                        && let Some(source) = captured[index].take()
+                    {
+                        self.runs.insert(r as *const CT_R as usize, source?);
+                    }
+                    for field in fields {
+                        let scope = actual_root_bindings(
+                            &source,
+                            &actual_root_bindings(&payload, &Vec::new())?,
+                        )?;
+                        self.capture_field_occurrence(
+                            std::ptr::from_ref(control) as usize,
+                            field,
+                            field_slot,
+                            raw_payload,
+                            span.start
+                                .checked_sub(closure_growth)
+                                .zip(span.end.checked_sub(closure_growth))
+                                .map(|(start, end)| start..end)
+                                .ok_or_else(|| {
+                                    Error::Other(
+                                        "control field source precedes its actual content owner"
+                                            .into(),
+                                    )
+                                })?,
+                            scope.clone(),
+                        )?;
+                        field_slot += 1;
+                        self.field_scopes
+                            .insert(std::ptr::from_ref(field) as usize, scope.clone());
+                        self.fields.insert(
+                            std::ptr::from_ref(field) as usize,
+                            field_source_metadata(
+                                &source_without_text_properties(
+                                    &field_result_source_paragraph(&source, &scope)?,
+                                    &Vec::new(),
                                 )?,
-                            );
-                        }
+                                field.is_complex(),
+                            )?,
+                        );
                     }
                 }
                 SdtContent::RawXml(_) => {}
@@ -12615,7 +13212,6 @@ fn source_text_fragment(
         ));
     };
     let mut reader = Reader::from_str(xml);
-    let mut texts = 0;
     let mut depth = 0;
     loop {
         match reader
@@ -12632,9 +13228,9 @@ fn source_text_fragment(
             Event::End(_) => {
                 depth -= 1;
             }
-            Event::Text(_) if depth == 1 && texts == 0 => {
-                texts += 1;
-            }
+            // The reader splits text around each character or entity
+            // reference, such as `&amp;`. The value comes from the model.
+            Event::Text(_) | Event::GeneralRef(_) if depth == 1 => {}
             Event::Eof => break,
             _ => return Err(Error::Other("split text has opaque mixed events".into())),
         }
@@ -13963,11 +14559,21 @@ fn compare_granular_paragraph(
         .map(str::to_owned)
         .map_or_else(|| paragraph_xml(original), Ok)?;
     let actual_spans = modeled_paragraph_run_spans(original, &actual_source)?;
+    // One read of the paragraph answers the scope of every run, on first use.
+    // Reading it again for each written piece is quadratic in its runs.
+    let run_parents = ParentScopes::new(
+        &actual_source,
+        actual_spans
+            .iter()
+            .map(|span| span.start)
+            .chain(element_opening(&actual_source).ok().map(|(end, ..)| end))
+            .collect(),
+    );
     let parent_for = |owner: usize| {
         let at = actual_spans
             .get(owner)
             .map_or(element_opening(&actual_source)?.0, |span| span.start);
-        publication_parent_at(&actual_source, at)
+        run_parents.at(at)
     };
     let boundary_error = || {
         Error::Other(format!(
@@ -14373,12 +14979,14 @@ fn compare_granular_paragraph(
         let mut right_raw = Vec::new();
         let mut right_typed = Vec::new();
         let left = merge_unit_runs(
+            &original.runs,
             &original_units,
             &left_indices,
             &mut left_raw,
             &mut left_typed,
         )?;
         let right = merge_unit_runs(
+            &edited.runs,
             &edited_units,
             &right_indices,
             &mut right_raw,
@@ -15554,6 +16162,13 @@ fn retain_projection_separators(
     Ok(())
 }
 
+/// The aligned pairs grouped into the pieces the redline writes as one run.
+///
+/// The granularity sets what the diff compares, never how many runs carry the
+/// result. A change takes every consecutive pair of its kind that the same
+/// physical runs own. Unchanged text takes every consecutive pair that
+/// continues the same original and edited text element, so it stays one run
+/// between two revisions whether the units are words or characters.
 fn coalesced_granular_alignment(
     aligned: &[(Option<usize>, Option<usize>)],
     original_units: &[AttributedRunUnit],
@@ -15561,6 +16176,23 @@ fn coalesced_granular_alignment(
     original_signatures: &[String],
     edited_signatures: &[String],
 ) -> Vec<(GranularAction, Range<usize>)> {
+    let owners = |at: usize| {
+        (
+            aligned[at].0.map(|index| original_units[index].owner),
+            aligned[at].1.map(|index| edited_units[index].owner),
+        )
+    };
+    // The text element each side of an unchanged pair is a fragment of.
+    let elements = |at: usize| {
+        aligned[at]
+            .0
+            .and_then(|index| unit_text_element(&original_units[index]))
+            .zip(
+                aligned[at]
+                    .1
+                    .and_then(|index| unit_text_element(&edited_units[index])),
+            )
+    };
     let mut groups = Vec::new();
     let mut start = 0usize;
     while start < aligned.len() {
@@ -15571,35 +16203,38 @@ fn coalesced_granular_alignment(
             original_signatures,
             edited_signatures,
         );
-        let owners = (
-            aligned[start].0.map(|index| original_units[index].owner),
-            aligned[start].1.map(|index| edited_units[index].owner),
-        );
+        let continues = |at: usize| match action {
+            GranularAction::Replace | GranularAction::Delete | GranularAction::Insert => true,
+            GranularAction::Equal => elements(start).is_some() && elements(at) == elements(start),
+            GranularAction::Preserve | GranularAction::Drop => false,
+        };
         let mut end = start + 1;
-        if matches!(
-            action,
-            GranularAction::Replace | GranularAction::Delete | GranularAction::Insert
-        ) {
-            while end < aligned.len()
-                && granular_action(
-                    aligned[end],
-                    original_units,
-                    edited_units,
-                    original_signatures,
-                    edited_signatures,
-                ) == action
-                && (
-                    aligned[end].0.map(|index| original_units[index].owner),
-                    aligned[end].1.map(|index| edited_units[index].owner),
-                ) == owners
-            {
-                end += 1;
-            }
+        while end < aligned.len()
+            && continues(end)
+            && granular_action(
+                aligned[end],
+                original_units,
+                edited_units,
+                original_signatures,
+                edited_signatures,
+            ) == action
+            && owners(end) == owners(start)
+        {
+            end += 1;
         }
         groups.push((action, start..end));
         start = end;
     }
     groups
+}
+
+/// The content ordinal of the text element a plain unit is a fragment of.
+fn unit_text_element(unit: &AttributedRunUnit) -> Option<usize> {
+    unit_plain_text(unit)?;
+    match unit.typed_sources.as_slice() {
+        [Some(selected)] => Some(selected.ordinal),
+        _ => None,
+    }
 }
 
 /// The text of a unit that holds nothing but text, which grouping may move
@@ -15814,7 +16449,13 @@ fn grouped_text_alignment(
     (grouped, grouped_segments)
 }
 
+/// The units at `indices`, all fragments of one run of `runs`, as one run.
+///
+/// Consecutive fragments of one text element are written back as one text
+/// with one source selection, so a merged run holds one `w:t` or `w:delText`
+/// per stretch of its source text, never one per compared unit.
 fn merge_unit_runs(
+    runs: &[CT_R],
     units: &[AttributedRunUnit],
     indices: &[usize],
     raw_sources: &mut Vec<(usize, usize, usize)>,
@@ -15827,6 +16468,7 @@ fn merge_unit_runs(
     raw_sources.extend_from_slice(&first.raw_sources);
     typed_sources.extend_from_slice(&first.typed_sources);
     let property_boundary = usize::from(merged.properties.is_some());
+    let mut joined = false;
     for &index in &indices[1..] {
         let unit = &units[index];
         if unit.owner != first.owner {
@@ -15835,9 +16477,14 @@ fn merge_unit_runs(
             ));
         }
         let next = &unit.run;
-        let content_offset = merged.content.len();
-        merged.content.extend(next.content.iter().cloned());
-        typed_sources.extend_from_slice(&unit.typed_sources);
+        let continued = join_text_fragment(&mut merged, typed_sources, unit, property_boundary);
+        joined |= continued;
+        // The raw children of a joined fragment follow the text it extends.
+        let content_offset = merged.content.len() - usize::from(continued);
+        if !continued {
+            merged.content.extend(next.content.iter().cloned());
+            typed_sources.extend_from_slice(&unit.typed_sources);
+        }
         merged
             .alt_drawings
             .extend(next.alt_drawings.iter().cloned());
@@ -15870,7 +16517,96 @@ fn merge_unit_runs(
             "fragment raw source order or multiplicity is invalid".into(),
         ));
     }
+    if joined {
+        // A joined text reads its space flag as a unit of its own would, and
+        // one that is its whole source element again selects it whole.
+        let source = runs
+            .get(first.owner)
+            .ok_or_else(|| Error::Other("merged run owner is absent".into()))?;
+        for (content, selected) in merged.content.iter_mut().zip(typed_sources.iter_mut()) {
+            let (
+                RunContent::Text(text) | RunContent::DeletedText(text),
+                Some(TypedSourceSelection {
+                    ordinal,
+                    scalars: scalars @ Some(_),
+                }),
+            ) = (content, selected)
+            else {
+                continue;
+            };
+            let Some(RunContent::Text(actual) | RunContent::DeletedText(actual)) =
+                source.content.get(*ordinal)
+            else {
+                return Err(Error::Other(
+                    "joined text has no actual source element".into(),
+                ));
+            };
+            text.preserve_space = actual.preserve_space || has_edge_whitespace(&text.text);
+            if *scalars == Some((0, actual.text.chars().count())) {
+                *scalars = None;
+            }
+        }
+    }
     Ok(Some(merged))
+}
+
+/// Append `unit` to the text that ends `merged` when it holds the next scalars
+/// of the same source text element with no raw child between the two, and
+/// report whether it did. `typed` holds one selection per content of `merged`.
+fn join_text_fragment(
+    merged: &mut CT_R,
+    typed: &mut [Option<TypedSourceSelection>],
+    unit: &AttributedRunUnit,
+    property_boundary: usize,
+) -> bool {
+    let content_end = property_boundary + merged.content.len();
+    let raw_positions = |run: &CT_R| {
+        run.extra_xml_positions
+            .iter()
+            .filter(|encoded| !CT_R::raw_child_is_root_attributes(**encoded))
+            .map(|encoded| CT_R::raw_child_position(*encoded))
+            .collect::<Vec<_>>()
+    };
+    if !unit.run.alt_drawings.is_empty()
+        || raw_positions(merged)
+            .iter()
+            .any(|position| *position >= content_end)
+        || raw_positions(&unit.run)
+            .iter()
+            .any(|position| *position <= property_boundary)
+    {
+        return false;
+    }
+    let (
+        Some(TypedSourceSelection {
+            ordinal: previous,
+            scalars: Some((_, previous_end)),
+        }),
+        [
+            Some(TypedSourceSelection {
+                ordinal,
+                scalars: Some((start, end)),
+            }),
+        ],
+    ) = (
+        typed.last_mut().and_then(Option::as_mut),
+        unit.typed_sources.as_slice(),
+    )
+    else {
+        return false;
+    };
+    if *previous != *ordinal || *previous_end != *start {
+        return false;
+    }
+    match (merged.content.last_mut(), unit.run.content.as_slice()) {
+        (Some(RunContent::Text(text)), [RunContent::Text(fragment)])
+        | (Some(RunContent::DeletedText(text)), [RunContent::DeletedText(fragment)]) => {
+            text.text.push_str(&fragment.text);
+            *previous_end = *end;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The paragraph source with `properties` in place of its own `w:pPr`. A
@@ -16021,6 +16757,7 @@ fn compare_granular_controls(
     }
     let mut child_leaves = Vec::new();
     let mut control_replacements = Vec::with_capacity(control_spans.len());
+    let mut sources = source_children(output, &control_spans).into_iter();
     for (index, ((_, _, _, left), (_, _, _, right))) in original
         .content_controls
         .iter()
@@ -16028,13 +16765,14 @@ fn compare_granular_controls(
         .enumerate()
     {
         let child_mark = metadata.leaf_publications.len();
+        let source = sources.next().expect("one source per control span");
         control_replacements.push(compare_control_from_xml(
             left,
             right,
             &format!("{location}/content-control[{index}]"),
             metadata,
             diagnostics,
-            &source_child(output, control_spans[index].clone())?,
+            &source?,
         )?);
         child_leaves.push(metadata.leaf_publications.split_off(child_mark));
     }
@@ -16623,11 +17361,18 @@ fn compare_complex_paragraph(
             location,
         )?;
     }
+    // One read of the paragraph answers the scope at every run edge.
+    let parents = ParentScopes::new(
+        &source,
+        std::iter::once(0)
+            .chain(run_spans.iter().flat_map(|span| [span.start, span.end]))
+            .collect(),
+    );
     let mut output = String::new();
     let mut cursor = 0usize;
     for (left, right) in aligned {
         let at = left.map_or(cursor, |index| run_spans[index].start);
-        let destination_parent = publication_parent_at(&source, at)?;
+        let destination_parent = parents.at(at)?;
         let revision_parent = metadata.ids.revision_parent_scope(&destination_parent);
         if let Some(index) = left {
             let span = &run_spans[index];
@@ -16716,19 +17461,21 @@ fn compare_complex_paragraph(
         )));
     }
     let mut replacements = Vec::with_capacity(spans.len());
+    let mut sources = source_children(&output, &spans).into_iter();
     for (index, ((_, _, _, left), (_, _, _, right))) in original
         .content_controls
         .iter()
         .zip(&edited.content_controls)
         .enumerate()
     {
+        let source = sources.next().expect("one source per control span");
         replacements.push(compare_control_from_xml(
             left,
             right,
             &format!("{location}/content-control[{index}]"),
             metadata,
             diagnostics,
-            &source_child(&output, spans[index].clone())?,
+            &source?,
         )?);
     }
     replace_direct_word_elements(&output, "sdt", &replacements)
@@ -17240,6 +17987,8 @@ fn paragraph_children_xml(
     }
     let mut xml = paragraph_xml(&children)?;
     let spans = modeled_paragraph_run_spans(&children, &xml)?;
+    // One read of the paragraph answers the scope of every run.
+    let parents = ParentScopes::new(&xml, spans.iter().map(|span| span.start).collect());
     let mut replacements = Vec::new();
     let mut index = 0;
     while index < children.runs.len() {
@@ -17259,9 +18008,7 @@ fn paragraph_children_xml(
                     &children.runs[index],
                     &raw,
                     &typed,
-                    &metadata
-                        .ids
-                        .revision_parent_scope(&publication_parent_at(&xml, span.start)?),
+                    &metadata.ids.revision_parent_scope(&parents.at(span.start)?),
                     &metadata.ids,
                 )
             }?));
@@ -17391,6 +18138,11 @@ fn compare_table(
             )));
         }
         let aligned = align(&original_signatures, &edited_signatures);
+        // One read of the table answers the source of every row.
+        let mut row_sources = source_children(&source, &row_spans)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         let mut output = String::new();
         let mut cursor = 0usize;
         for (alignment_index, &(left, right)) in aligned.iter().enumerate() {
@@ -17413,7 +18165,7 @@ fn compare_table(
                     output.push_str(&compare_row(
                         &original.rows[i],
                         &edited.rows[j],
-                        Some(&source_child(&source, row_spans[i].clone())?),
+                        Some(&row_sources[i].take().expect("a row is compared once")?),
                         &format!("{location}/row[{j}]"),
                         metadata,
                         diagnostics,
@@ -17439,6 +18191,7 @@ fn compare_table(
         }
         let mut child_leaves = Vec::new();
         let mut replacements = Vec::with_capacity(spans.len());
+        let mut sources = source_children(&output, &spans).into_iter();
         for (index, ((_, _, left), (_, _, right))) in original
             .content_controls
             .iter()
@@ -17446,13 +18199,14 @@ fn compare_table(
             .enumerate()
         {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per control span");
             replacements.push(compare_control_from_xml(
                 left,
                 right,
                 &format!("{location}/content-control[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -17665,9 +18419,10 @@ fn marked_row_xml(row: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<
             xml = insert_first_child(&xml, &properties)?;
         }
     }
-    let cells = direct_word_element_spans(&xml, "tc")?
+    let cell_spans = direct_word_element_spans(&xml, "tc")?;
+    let cells = source_children(&xml, &cell_spans)
         .into_iter()
-        .map(|span| marked_cell_xml(&source_child(&xml, span)?, kind, metadata))
+        .map(|source| marked_cell_xml(&source?, kind, metadata))
         .collect::<Result<Vec<_>>>()?;
     metadata
         .ids
@@ -17678,19 +18433,23 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
     #[cfg(test)]
     let _destination_diagnostic_scope =
         PolicyDiagnosticScope::enter("destination:marked_cell_xml", cell);
-    let paragraphs = direct_word_element_spans(cell, "p")?
+    let paragraph_spans = direct_word_element_spans(cell, "p")?;
+    let paragraphs = source_children(cell, &paragraph_spans)
         .into_iter()
-        .map(|span| {
+        .map(|source| {
             let marker = metadata
                 .ids
                 .marker(kind, metadata.author, metadata.timestamp)?;
-            let source = source_child(cell, span)?;
+            let source = source?;
             let paragraph = marked_paragraph_xml(&source, &marker, &metadata.ids)?;
             let paragraph = marked_direct_runs_xml(&paragraph, kind, metadata)?;
-            let hyperlinks = direct_word_element_spans(&paragraph, "hyperlink")?
-                .into_iter()
-                .map(|span| {
-                    let scoped = source_child(&paragraph, span.clone())?;
+            let hyperlink_spans = direct_word_element_spans(&paragraph, "hyperlink")?;
+            let hyperlinks = hyperlink_spans
+                .iter()
+                .cloned()
+                .zip(source_children(&paragraph, &hyperlink_spans))
+                .map(|(span, scoped)| {
+                    let scoped = scoped?;
                     let marked = marked_direct_runs_xml(&scoped, kind, metadata)?;
                     let destination = root_namespace_bindings(&paragraph, "p", &[])?;
                     retain_source_root_namespaces(&marked, &paragraph[span], &destination)
@@ -17700,14 +18459,16 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
         })
         .collect::<Result<Vec<_>>>()?;
     let cell = replace_direct_word_elements(cell, "p", &paragraphs)?;
-    let tables = direct_word_element_spans(&cell, "tbl")?
+    let table_spans = direct_word_element_spans(&cell, "tbl")?;
+    let tables = source_children(&cell, &table_spans)
         .into_iter()
-        .map(|span| {
-            let scoped_table = source_child(&cell, span)?;
+        .map(|scoped_table| {
+            let scoped_table = scoped_table?;
             let table = scoped_table.as_str();
-            let rows = direct_word_element_spans(table, "tr")?
+            let row_spans = direct_word_element_spans(table, "tr")?;
+            let rows = source_children(table, &row_spans)
                 .into_iter()
-                .map(|span| marked_row_xml(&source_child(table, span)?, kind, metadata))
+                .map(|source| marked_row_xml(&source?, kind, metadata))
                 .collect::<Result<Vec<_>>>()?;
             replace_direct_word_elements(table, "tr", &rows)
         })
@@ -17723,10 +18484,14 @@ fn marked_direct_runs_xml(owner: &str, kind: &str, metadata: &mut Metadata<'_>) 
     #[cfg(test)]
     let _destination_diagnostic_scope =
         PolicyDiagnosticScope::enter("destination:marked_direct_runs_xml", owner);
-    let runs = direct_word_element_spans(owner, "r")?
+    let spans = direct_word_element_spans(owner, "r")?
         .into_iter()
-        .map(|span| {
-            let source = RunSource::capture(None, owner, span)?;
+        .map(|span| (None, span))
+        .collect::<Vec<_>>();
+    let runs = RunSource::capture_all(&spans, owner)
+        .into_iter()
+        .map(|source| {
+            let source = source?;
             let mut run = source.scoped.clone();
             if kind == "del" {
                 for (local, deleted_local) in [("t", "delText"), ("instrText", "delInstrText")] {
@@ -17796,15 +18561,17 @@ fn compare_row(
         }
         let mut child_leaves = Vec::new();
         let mut cell_replacements = Vec::with_capacity(cell_spans.len());
+        let mut sources = source_children(&output, &cell_spans).into_iter();
         for (index, (left, right)) in original.cells.iter().zip(&edited.cells).enumerate() {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per cell span");
             cell_replacements.push(compare_cell_from_xml(
                 left,
                 right,
                 &format!("{location}/cell[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, cell_spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -17825,6 +18592,7 @@ fn compare_row(
         }
         let mut child_leaves = Vec::new();
         let mut control_replacements = Vec::with_capacity(control_spans.len());
+        let mut sources = source_children(&output, &control_spans).into_iter();
         for (index, ((_, _, left), (_, _, right))) in original
             .content_controls
             .iter()
@@ -17832,13 +18600,14 @@ fn compare_row(
             .enumerate()
         {
             let child_mark = metadata.leaf_publications.len();
+            let source = sources.next().expect("one source per control span");
             control_replacements.push(compare_control_from_xml(
                 left,
                 right,
                 &format!("{location}/content-control[{index}]"),
                 metadata,
                 diagnostics,
-                &source_child(&output, control_spans[index].clone())?,
+                &source?,
             )?);
             child_leaves.push(metadata.leaf_publications.split_off(child_mark));
         }
@@ -17898,7 +18667,12 @@ fn compare_cell_from_xml(
         let children = cell_child_spans(original, original_xml, location)?;
         let mut child_leaves = Vec::new();
         let mut replacements = Vec::with_capacity(children.len());
-        for (index, ((left, right), (_, span))) in original
+        let child_spans = children
+            .iter()
+            .map(|(_, span)| span.clone())
+            .collect::<Vec<_>>();
+        let mut sources = source_children(original_xml, &child_spans).into_iter();
+        for (index, ((left, right), _)) in original
             .content
             .iter()
             .zip(&edited.content)
@@ -17906,7 +18680,7 @@ fn compare_cell_from_xml(
             .enumerate()
         {
             let child_location = format!("{location}/content[{index}]");
-            let source = source_child(original_xml, span.clone())?;
+            let source = sources.next().expect("one source per cell child span")?;
             let source = source.as_str();
             let child_mark = metadata.leaf_publications.len();
             replacements.push(match (left, right) {
@@ -18008,6 +18782,40 @@ fn compare_control_from_xml(
         control_metadata_diagnostics(original, edited, location, diagnostics)?;
         let original_content = modeled_control_content(original);
         let edited_content = modeled_control_content(edited);
+        // Runs that only split the same text differently read as equal, as
+        // they do in a paragraph, and keep the original source. Equal runs
+        // keep the path below.
+        let only_runs = |content: &[&SdtContent]| {
+            !content.is_empty()
+                && content
+                    .iter()
+                    .all(|child| matches!(child, SdtContent::Run(_)))
+        };
+        if !metadata.leaf_capture
+            && only_runs(&original_content)
+            && only_runs(&edited_content)
+            && original_content != edited_content
+        {
+            let runs_of = |content: &[&SdtContent]| {
+                let mut paragraph = CT_P::new();
+                paragraph.runs = content
+                    .iter()
+                    .filter_map(|child| match child {
+                        SdtContent::Run(run) => Some(run.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                paragraph
+            };
+            if coalesced_paragraphs_equal(
+                &runs_of(&original_content),
+                &runs_of(&edited_content),
+                metadata.options,
+                metadata,
+            ) {
+                return Ok(original_xml.to_owned());
+            }
+        }
         let direct_run_or_raw =
             |content: &&SdtContent| matches!(content, SdtContent::Run(_) | SdtContent::RawXml(_));
         if uses_attributed_run_path(metadata.options)
@@ -18720,12 +19528,14 @@ fn compare_control_runs_with_options(
         let mut right_raw = Vec::new();
         let mut right_typed = Vec::new();
         let left = merge_unit_runs(
+            original,
             &original_units,
             &left_indices,
             &mut left_raw,
             &mut left_typed,
         )?;
         let right = merge_unit_runs(
+            edited,
             &edited_units,
             &right_indices,
             &mut right_raw,
@@ -21585,6 +22395,10 @@ fn paragraph_signature_with_options(paragraph: &CT_P, options: &ComparisonOption
 enum ParagraphToken {
     /// A compared unit, or a whole run on the whole-run path.
     Unit(String),
+    /// Consecutive plain characters at character granularity. One token
+    /// holds the whole stretch, so the signature costs one token per stretch
+    /// of text and still reads the same however the runs split it.
+    Scalars(String),
     /// A unit the options ignore, such as whitespace, a field or a comment
     /// reference.
     Ignored(String),
@@ -21602,12 +22416,6 @@ enum ParagraphToken {
 /// marker on either side of ignored content still differs.
 fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String> {
     let attributed = uses_attributed_run_path(options);
-    let units = if attributed {
-        attributed_run_units(&paragraph.runs, options)
-    } else {
-        Vec::new()
-    };
-    let mut next_unit = 0;
     let mut tokens = Vec::new();
     let mut open_hyperlink = None;
     for boundary in 0..=paragraph.runs.len() {
@@ -21645,13 +22453,20 @@ fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String
             }
             continue;
         }
-        while let Some(unit) = units.get(next_unit).filter(|unit| unit.owner == boundary) {
-            next_unit += 1;
-            if unit_is_empty(unit) {
+        for unit in signature_run_units(run, options) {
+            if unit_is_empty(&unit) {
                 continue;
             }
-            let signature = attributed_unit_signature(unit);
-            tokens.push(if unit_is_ignorable(unit) {
+            if let Some(text) = signature_scalars(&unit, options) {
+                if let Some(ParagraphToken::Scalars(stretch)) = tokens.last_mut() {
+                    stretch.push_str(text);
+                } else {
+                    tokens.push(ParagraphToken::Scalars(text.to_owned()));
+                }
+                continue;
+            }
+            let signature = attributed_unit_signature(&unit);
+            tokens.push(if unit_is_ignorable(&unit) {
                 ParagraphToken::Ignored(signature)
             } else {
                 ParagraphToken::Unit(signature)
@@ -21676,15 +22491,63 @@ fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String
         keep[start..end].fill(touches_boundary);
         start = end;
     }
-    tokens
-        .into_iter()
-        .zip(keep)
-        .filter(|(_, keep)| *keep)
-        .map(|(token, _)| match token {
+    let mut kept = Vec::<ParagraphToken>::new();
+    for (token, _) in tokens.into_iter().zip(keep).filter(|(_, keep)| *keep) {
+        // A stretch continues over ignored units that left no token.
+        if let (ParagraphToken::Scalars(text), Some(ParagraphToken::Scalars(stretch))) =
+            (&token, kept.last_mut())
+        {
+            stretch.push_str(text);
+        } else {
+            kept.push(token);
+        }
+    }
+    kept.into_iter()
+        .map(|token| match token {
             ParagraphToken::Unit(signature) => format!("unit:{signature}"),
+            ParagraphToken::Scalars(text) => format!("scalars:{text:?}"),
             ParagraphToken::Ignored(signature) | ParagraphToken::Boundary(signature) => signature,
         })
         .collect()
+}
+
+/// The units a signature reads `run` as.
+///
+/// At character granularity a run of plain content is read one stretch at a
+/// time, which gives the tokens its characters would give once
+/// [`signature_scalars`] joins them. A raw child and deleted text belong to
+/// single characters, so a run that holds one is read character by character.
+fn signature_run_units(run: &CT_R, options: &ComparisonOptions) -> Vec<AttributedRunUnit> {
+    let stretches = options.granularity == ComparisonGranularity::Character
+        && run.extra_xml.is_empty()
+        && run.alt_drawings.is_empty()
+        && !run
+            .content
+            .iter()
+            .any(|content| matches!(content, RunContent::DeletedText(_)));
+    if stretches {
+        attributed_run_units(
+            std::slice::from_ref(run),
+            &ComparisonOptions {
+                granularity: ComparisonGranularity::Run,
+                ..options.clone()
+            },
+        )
+    } else {
+        attributed_run_units(std::slice::from_ref(run), options)
+    }
+}
+
+/// The plain characters of a unit, which a character-granularity signature
+/// holds with those before and after them as one token.
+fn signature_scalars<'a>(
+    unit: &'a AttributedRunUnit,
+    options: &ComparisonOptions,
+) -> Option<&'a str> {
+    (options.granularity == ComparisonGranularity::Character)
+        .then(|| unit_plain_text(unit))
+        .flatten()
+        .filter(|text| !text.is_empty())
 }
 
 /// Push the raw children, comment markers and inline controls at one run
@@ -21853,20 +22716,36 @@ fn cell_signature_with_options(cell: &CT_Tc, options: &ComparisonOptions) -> Str
 
 fn control_signature_with_options(control: &CT_Sdt, options: &ComparisonOptions) -> String {
     let mut content = Vec::new();
+    // The plain characters since the last token, written as one token.
+    let mut scalars = String::new();
+    let close = |scalars: &mut String, content: &mut Vec<String>| {
+        if !scalars.is_empty() {
+            content.push(format!("u:scalars:{:?}", std::mem::take(scalars)));
+        }
+    };
     for child in &control.content {
         match child {
             SdtContent::RawXml(raw) if raw.iter().all(u8::is_ascii_whitespace) => {}
             SdtContent::Run(run) if uses_attributed_run_path(options) => {
-                content.extend(
-                    attributed_run_units(std::slice::from_ref(run), options)
-                        .into_iter()
-                        .filter(|unit| !unit_is_ignorable(unit) && !unit_is_empty(unit))
-                        .map(|unit| format!("u:{}", attributed_unit_signature(&unit))),
-                );
+                for unit in signature_run_units(run, options)
+                    .into_iter()
+                    .filter(|unit| !unit_is_ignorable(unit) && !unit_is_empty(unit))
+                {
+                    if let Some(text) = signature_scalars(&unit, options) {
+                        scalars.push_str(text);
+                    } else {
+                        close(&mut scalars, &mut content);
+                        content.push(format!("u:{}", attributed_unit_signature(&unit)));
+                    }
+                }
             }
-            child => content.push(control_content_signature_with_options(child, options)),
+            child => {
+                close(&mut scalars, &mut content);
+                content.push(control_content_signature_with_options(child, options));
+            }
         }
     }
+    close(&mut scalars, &mut content);
     format!("{:?}:{:?}", control_property_signature(control), content)
 }
 
@@ -23689,6 +24568,542 @@ mod tests {
         }
     }
 
+    /// One side of a written piece: its merged run and source selections.
+    type WrittenSide = Option<(CT_R, Vec<Option<super::TypedSourceSelection>>)>;
+
+    /// The alignment of two single-run paragraphs grouped into the pieces
+    /// the redline writes, each as its original and edited merged run.
+    fn written_pieces(texts: [&str; 2], options: &ComparisonOptions) -> Vec<[WrittenSide; 2]> {
+        let runs = texts.map(|text| [CT_R::new(text)]);
+        let units = [
+            attributed_run_units(&runs[0], options),
+            attributed_run_units(&runs[1], options),
+        ];
+        let signatures = [0, 1].map(|side| {
+            units[side]
+                .iter()
+                .map(attributed_unit_signature)
+                .collect::<Vec<_>>()
+        });
+        let aligned = align(&signatures[0], &signatures[1]);
+        let (aligned, _) = grouped_text_alignment(
+            &aligned,
+            &vec![0; aligned.len()],
+            &units[0],
+            &units[1],
+            &signatures[0],
+            &signatures[1],
+            options,
+        );
+        super::coalesced_granular_alignment(
+            &aligned,
+            &units[0],
+            &units[1],
+            &signatures[0],
+            &signatures[1],
+        )
+        .into_iter()
+        .map(|(_, members)| {
+            [0, 1].map(|side| {
+                let indices = members
+                    .clone()
+                    .filter_map(|at| [aligned[at].0, aligned[at].1][side])
+                    .collect::<Vec<_>>();
+                let (mut raw, mut typed) = (Vec::new(), Vec::new());
+                super::merge_unit_runs(&runs[side], &units[side], &indices, &mut raw, &mut typed)
+                    .unwrap()
+                    .map(|run| (run, typed))
+            })
+        })
+        .collect()
+    }
+
+    #[test]
+    fn granular_pieces_follow_the_changes_not_the_compared_units() {
+        for granularity in [
+            ComparisonGranularity::Word,
+            ComparisonGranularity::Character,
+        ] {
+            let options = ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            let pieces = [2, 200].map(|words| {
+                let kept = "kept ".repeat(words);
+                written_pieces(
+                    [&format!("{kept}thirty days"), &format!("{kept}sixty days")],
+                    &options,
+                )
+            });
+            // The unchanged text before the edit is one piece however many
+            // units it holds, so both lengths give the same pieces.
+            assert_eq!(pieces[0].len(), pieces[1].len(), "{granularity:?}");
+            if granularity == ComparisonGranularity::Word {
+                // The text before, the replaced word and the text after.
+                assert_eq!(pieces[0].len(), 3);
+            }
+            for (run, typed) in pieces.iter().flatten().flatten().flatten() {
+                // One piece is one text with one source selection.
+                assert_eq!(run.content.len(), 1, "{granularity:?}: {run:?}");
+                assert_eq!(typed.len(), 1, "{granularity:?}: {typed:?}");
+            }
+            let kept = "kept ".repeat(200);
+            assert!(matches!(
+                &pieces[1][0],
+                [Some((left, _)), Some((right, _))]
+                    if matches!(left.content.as_slice(), [RunContent::Text(text)] if text.text == kept)
+                        && left.content == right.content
+            ));
+        }
+    }
+
+    #[test]
+    fn merged_units_rejoin_the_fragments_of_one_text_element() {
+        let options = ComparisonOptions {
+            granularity: ComparisonGranularity::Word,
+            ..Default::default()
+        };
+        let mut run = CT_R::new("alpha beta");
+        run.content.push(RunContent::Tab);
+        run.content.push(RunContent::Text(CT_Text {
+            text: "gamma".to_owned(),
+            preserve_space: false,
+        }));
+        let runs = [run];
+        // alpha, space, beta, the tab, gamma.
+        let units = attributed_run_units(&runs, &options);
+        assert_eq!(units.len(), 5);
+        let merge = |indices: &[usize]| {
+            let (mut raw, mut typed) = (Vec::new(), Vec::new());
+            let run = super::merge_unit_runs(&runs, &units, indices, &mut raw, &mut typed)
+                .unwrap()
+                .unwrap();
+            let texts = run
+                .content
+                .iter()
+                .map(|content| match content {
+                    RunContent::Text(text) => Some((text.text.clone(), text.preserve_space)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let scalars = typed
+                .iter()
+                .map(|selected| selected.unwrap().scalars)
+                .collect::<Vec<_>>();
+            (texts, scalars)
+        };
+        // Every fragment of an element is that element again, selected whole.
+        let whole = runs[0].content[0].clone();
+        let RunContent::Text(whole) = whole else {
+            unreachable!()
+        };
+        assert_eq!(
+            merge(&[0, 1, 2]),
+            (
+                vec![Some(("alpha beta".to_owned(), whole.preserve_space))],
+                vec![None]
+            )
+        );
+        // Some of its fragments are one text over their scalars, which keeps
+        // the space a new edge exposes.
+        assert_eq!(
+            merge(&[0, 1]),
+            (vec![Some(("alpha ".to_owned(), true))], vec![Some((0, 6))])
+        );
+        assert_eq!(
+            merge(&[1, 2]),
+            (vec![Some((" beta".to_owned(), true))], vec![Some((5, 10))])
+        );
+        // Fragments that do not follow each other stay apart, and so does
+        // text on either side of other content.
+        assert_eq!(merge(&[0, 2]).0.len(), 2);
+        assert_eq!(
+            merge(&[0, 1, 2, 3, 4]),
+            (
+                vec![
+                    Some(("alpha beta".to_owned(), whole.preserve_space)),
+                    None,
+                    Some(("gamma".to_owned(), false))
+                ],
+                vec![None, None, None]
+            )
+        );
+    }
+
+    #[test]
+    fn character_signatures_hold_one_token_per_text_stretch() {
+        let scalar = ComparisonOptions {
+            granularity: ComparisonGranularity::Character,
+            ..Default::default()
+        };
+        let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+        let tokens = |runs: &str, options: &ComparisonOptions| {
+            let model = story_document(&format!("<w:p>{runs}</w:p>"), &bindings).unwrap();
+            let BodyContent::Paragraph(paragraph) = &model.body.content[0] else {
+                unreachable!()
+            };
+            super::paragraph_tokens(paragraph, options)
+        };
+        let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+        // The cost of a signature follows its stretches, not its characters.
+        assert_eq!(tokens(&run("word"), &scalar).len(), 1);
+        assert_eq!(tokens(&run(&"word ".repeat(2000)), &scalar).len(), 1);
+        // The reading is the same however runs split the text.
+        let whole = tokens(&run("invoice thirty days"), &scalar);
+        assert_eq!(
+            whole,
+            tokens(
+                &[run("invoi"), run("ce thi"), run("rty days")].concat(),
+                &scalar
+            )
+        );
+        assert_ne!(whole, tokens(&run("invoice sixty days"), &scalar));
+        // A run read one character at a time, because it holds a raw child,
+        // continues the stretch of a run read whole.
+        let raw = r#"<x:kept xmlns:x="urn:producer"/>"#;
+        let with_raw = |text: &str| format!(r#"<w:r><w:t>{text}</w:t>{raw}</w:r>"#);
+        assert_eq!(
+            tokens(&[run("ab"), with_raw("cd")].concat(), &scalar),
+            tokens(&[run("abc"), with_raw("d")].concat(), &scalar)
+        );
+        assert_ne!(
+            tokens(&[run("ab"), with_raw("cd")].concat(), &scalar),
+            tokens(&[run("abcd"), with_raw("")].concat(), &scalar)
+        );
+        // Deleted text reads one character at a time, whatever holds it.
+        let deleted = |texts: &[&str]| {
+            texts
+                .iter()
+                .map(|text| format!("<w:r><w:delText>{text}</w:delText></w:r>"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            tokens(&deleted(&["abc"]), &scalar),
+            tokens(&deleted(&["a", "bc"]), &scalar)
+        );
+        assert_ne!(
+            tokens(&deleted(&["abc"]), &scalar),
+            tokens(&run("abc"), &scalar)
+        );
+        // Other content and empty text still stand between two stretches.
+        assert_eq!(
+            tokens("<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r>", &scalar).len(),
+            3
+        );
+        assert_ne!(
+            tokens(&run("ab"), &scalar),
+            tokens("<w:r><w:t>a</w:t><w:t/><w:t>b</w:t></w:r>", &scalar)
+        );
+        // The direct runs of an inline control follow the same rule.
+        let control = |runs: &str| {
+            let model = story_document(
+                &format!("<w:p><w:sdt><w:sdtPr/><w:sdtContent>{runs}</w:sdtContent></w:sdt></w:p>"),
+                &bindings,
+            )
+            .unwrap();
+            let BodyContent::Paragraph(paragraph) = &model.body.content[0] else {
+                unreachable!()
+            };
+            super::control_signature_with_options(&paragraph.content_controls[0].3, &scalar)
+        };
+        assert_eq!(
+            control(&run("invoice thirty days")),
+            control(&[run("invoi"), run("ce thi"), run("rty days")].concat())
+        );
+        assert_ne!(
+            control(&run("invoice thirty days")),
+            control(&run("invoice sixty days"))
+        );
+        assert_eq!(
+            control(&[run("ab"), with_raw("cd")].concat()),
+            control(&[run("abc"), with_raw("d")].concat())
+        );
+        // Ignored whitespace leaves no token and does not end a stretch.
+        let ignoring = ComparisonOptions {
+            ignore_whitespace: true,
+            ..scalar.clone()
+        };
+        assert_eq!(tokens(&run("a b  c"), &ignoring).len(), 1);
+        assert_eq!(
+            tokens(&run("a b  c"), &ignoring),
+            tokens(&[run("ab "), run(" c")].concat(), &ignoring)
+        );
+        assert_ne!(
+            tokens(&run("a b  c"), &scalar),
+            tokens(&[run("ab "), run(" c")].concat(), &scalar)
+        );
+    }
+
+    #[test]
+    fn run_sources_of_one_parent_are_captured_in_one_pass() {
+        let xml = format!(
+            r#"<w:p xmlns:w="{W_NS}"><w:r><w:t>a</w:t></w:r><w:hyperlink xmlns:x="urn:link" w:anchor="spot"><w:r x:kept="1"><w:t>b</w:t></w:r><w:r><w:t>c</w:t></w:r></w:hyperlink><w:r xmlns:y="urn:run"><w:t>d</w:t><y:kept/></w:r><w:r><w:t>e</w:t></w:r></w:p>"#
+        );
+        let paragraph = rdocx_oxml::text::CT_P::from_xml_fragment(xml.as_bytes()).unwrap();
+        let spans = super::modeled_paragraph_run_spans(&paragraph, &xml).unwrap();
+        assert_eq!(spans.len(), 5);
+        let runs = paragraph
+            .runs
+            .iter()
+            .map(Some)
+            .zip(spans)
+            .collect::<Vec<_>>();
+        // A span inside a run opens no element. It is answered among the
+        // others as it is alone, and leaves the other answers as they are.
+        let mut asked = runs.clone();
+        asked.insert(2, (None, runs[1].1.start + 3..runs[1].1.end));
+        super::SOURCE_READ_BYTES.set(0);
+        let together = super::RunSource::capture_all(&asked, &xml);
+        assert_eq!(super::SOURCE_READ_BYTES.get(), xml.len());
+        let facts = |source: &super::Result<super::RunSource>| {
+            source.as_ref().map_err(ToString::to_string).map(|source| {
+                (
+                    source.owner,
+                    source.scoped.clone(),
+                    source.raw.clone(),
+                    source.parent.clone(),
+                    source.raw_slots.clone(),
+                    source.typed_slots.clone(),
+                )
+            })
+        };
+        for (run, source) in asked.iter().zip(&together) {
+            let alone = super::RunSource::capture_all(std::slice::from_ref(run), &xml);
+            assert_eq!(facts(source), facts(&alone[0]));
+        }
+        assert_eq!(
+            facts(&together[2]),
+            Err("run source has no actual opening".to_owned())
+        );
+        let together = together
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(together.len(), 5);
+        // The scope of each run is the one its own ancestors declare.
+        let link = ("xmlns:x".to_owned(), "urn:link".to_owned());
+        assert_eq!(
+            together
+                .iter()
+                .map(|source| source.parent.contains(&link))
+                .collect::<Vec<_>>(),
+            [false, true, true, false, false]
+        );
+        assert!(
+            together
+                .iter()
+                .all(|source| !source.parent.iter().any(|(_, uri)| uri == "urn:run"))
+        );
+    }
+
+    #[test]
+    fn parent_scopes_of_many_children_are_read_in_one_pass() {
+        let xml = format!(
+            r#"<w:tbl xmlns:w="{W_NS}"><w:tblPr/><w:tr xmlns:x="urn:row"><w:tc><w:p/></w:tc></w:tr><w:sdt><w:sdtContent><w:tr><w:tc><w:p/></w:tc></w:tr></w:sdtContent></w:sdt><w:tr><w:tc x:ns="unbound"/></w:tr></w:tbl>"#
+        );
+        let rows = super::direct_word_element_spans(&xml, "tr").unwrap();
+        let control = super::direct_word_element_spans(&xml, "sdt").unwrap()[0].clone();
+        // Rows, a control between them, a span inside a tag, the end of the
+        // table and a span past it.
+        let mut spans = rows.clone();
+        spans.insert(1, control.clone());
+        spans.push(control.start + 2..control.end);
+        spans.push(xml.len() - "</w:tbl>".len()..xml.len());
+        spans.push(xml.len() + 5..xml.len() + 9);
+        let starts = spans.iter().map(|span| span.start).collect::<Vec<_>>();
+        fn text<T: Clone>(result: &super::Result<T>) -> Result<T, String> {
+            result.as_ref().map_err(ToString::to_string).cloned()
+        }
+        super::SOURCE_READ_BYTES.set(0);
+        let parents = super::publication_parents_at(&xml, &starts);
+        let children = super::source_children(&xml, &spans);
+        assert_eq!(super::SOURCE_READ_BYTES.get(), 2 * xml.len());
+        // Each answer, an error included, is the one a read for that
+        // position alone gives.
+        for ((start, span), (parent, child)) in
+            starts.iter().zip(&spans).zip(parents.iter().zip(&children))
+        {
+            assert_eq!(
+                text(parent),
+                text(&super::publication_parents_at(&xml, &[*start])[0])
+            );
+            assert_eq!(
+                text(child),
+                text(&super::source_children(&xml, std::slice::from_ref(span))[0])
+            );
+        }
+        // The rows and the control open elements, and the end of the table
+        // is the start of an event, so all have a scope. The others are
+        // refused.
+        let absent = Err("publication boundary is absent from its actual shell".to_owned());
+        assert!(parents[..3].iter().all(Result::is_ok) && parents[4].is_ok());
+        assert_eq!(
+            [text(&parents[3]), text(&parents[5])],
+            [absent.clone(), absent]
+        );
+        assert!(children[..3].iter().all(Result::is_ok));
+        assert!(children[3..].iter().all(|child| {
+            text(child) == Err("source child has no opening at its span".to_owned())
+        }));
+        // A row declares its own namespace for its source, not its scope.
+        assert!(
+            children[0]
+                .as_ref()
+                .unwrap()
+                .contains(r#"xmlns:x="urn:row""#)
+                && !parents[0]
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, uri)| uri == "urn:row")
+        );
+        // The same request in another order gets the same answers.
+        let reversed = starts.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(
+            super::publication_parents_at(&xml, &reversed)
+                .iter()
+                .rev()
+                .map(text)
+                .collect::<Vec<_>>(),
+            parents.iter().map(text).collect::<Vec<_>>()
+        );
+    }
+
+    /// The source bytes one comparison of the documents `body` makes for the
+    /// original and the edited text reads.
+    fn comparison_reads(body: &dyn Fn(&str) -> String, options: &ComparisonOptions) -> usize {
+        let document = |text: &str| {
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}"><w:body>{}</w:body></w:document>"#,
+                body(text)
+            );
+            let mut document = Document::new();
+            document
+                .package
+                .set_part(&document.doc_part_name, xml.into_bytes());
+            Document::from_package(document.package).unwrap()
+        };
+        let mut original = document("thirty days");
+        let edited = document("sixty days");
+        super::SOURCE_READ_BYTES.set(0);
+        original
+            .compare_with_options(&edited, "Ada", "2026-11-15T09:00:00Z", options)
+            .unwrap();
+        assert!(!original.story_revisions().unwrap().is_empty());
+        super::SOURCE_READ_BYTES.get()
+    }
+
+    #[test]
+    fn comparison_reads_a_parent_once_per_snapshot_whatever_its_children() {
+        // Reading a paragraph or a table again for each run, row or cell made
+        // the cost quadratic in its children. The count of reads is the same
+        // for few and for many children.
+        let runs = |count: usize| {
+            (0..count)
+                .map(|index| {
+                    format!(
+                        r#"<w:r>{}<w:t xml:space="preserve">word{index} </w:t></w:r>"#,
+                        if index % 2 == 0 {
+                            "<w:rPr><w:b/></w:rPr>"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<String>()
+        };
+        let paragraph = |count: usize| {
+            move |text: &str| format!("<w:p>{}<w:r><w:t>{text}</w:t></w:r></w:p>", runs(count))
+        };
+        let linked = |count: usize| {
+            move |text: &str| {
+                format!(
+                    r#"<w:p><w:hyperlink w:anchor="spot">{}</w:hyperlink><w:r><w:t>{text}</w:t></w:r></w:p>"#,
+                    runs(count)
+                )
+            }
+        };
+        let added = |count: usize| {
+            move |text: &str| {
+                let extra = if text.starts_with("sixty") {
+                    format!("<w:p>{}</w:p>", runs(count))
+                } else {
+                    String::new()
+                };
+                format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>{extra}")
+            }
+        };
+        let table = |count: usize| {
+            move |text: &str| {
+                let rows = (0..count)
+                    .map(|index| {
+                        format!(
+                            r#"<w:tr><w:tc><w:p><w:r><w:t>row {index}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:tc></w:tr>"#,
+                            if index == count / 2 { text } else { "kept" }
+                        )
+                    })
+                    .collect::<String>();
+                format!(
+                    r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl><w:p/>"#
+                )
+            }
+        };
+        let added_table = |count: usize| {
+            move |text: &str| {
+                let paragraph = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+                if text.starts_with("sixty") {
+                    format!("{paragraph}{}", table(count)("kept"))
+                } else {
+                    paragraph
+                }
+            }
+        };
+        for granularity in [
+            ComparisonGranularity::Run,
+            ComparisonGranularity::Word,
+            ComparisonGranularity::Character,
+        ] {
+            let options = ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            // 16 times the children read at most 32 times the bytes, where a
+            // read of the parent for each child reads about 256 times more.
+            for (name, few, many) in [
+                (
+                    "paragraph",
+                    comparison_reads(&paragraph(3), &options),
+                    comparison_reads(&paragraph(48), &options),
+                ),
+                (
+                    "hyperlink",
+                    comparison_reads(&linked(3), &options),
+                    comparison_reads(&linked(48), &options),
+                ),
+                (
+                    "added paragraph",
+                    comparison_reads(&added(3), &options),
+                    comparison_reads(&added(48), &options),
+                ),
+                (
+                    "table",
+                    comparison_reads(&table(3), &options),
+                    comparison_reads(&table(48), &options),
+                ),
+                (
+                    "added table",
+                    comparison_reads(&added_table(3), &options),
+                    comparison_reads(&added_table(48), &options),
+                ),
+            ] {
+                assert!(
+                    many <= 32 * few,
+                    "{name} {granularity:?}: {few} then {many} bytes"
+                );
+            }
+        }
+    }
+
     #[test]
     fn mixed_owner_gap_pairing_is_deterministic_and_preserves_every_owner() {
         let original = (0..48)
@@ -24107,7 +25522,7 @@ mod tests {
         let units =
             super::validate_footnote_custody(&right, &crate::revision::RevisionScope::All).unwrap();
         assert_eq!(units.len(), 1);
-        assert_ne!(units[0].token, 7);
+        assert_ne!(units[0].token, Some(7));
         assert_eq!(units[0].owner, Some(6));
         assert_eq!(right.footnotes(), before_notes);
         assert_eq!(
@@ -24257,7 +25672,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(units.len(), 1);
-                assert!(note_ids.iter().all(|id| *id != units[0].token));
+                assert!(note_ids.iter().all(|id| Some(*id) != units[0].token));
                 let inventory = original.story_revisions().unwrap();
                 assert!(
                     inventory
@@ -25206,7 +26621,9 @@ mod tests {
                 let spans = story_content_spans(body, &bindings).unwrap();
                 let xml = &body[spans[0].clone()];
                 let spans = modeled_paragraph_run_spans(p, xml).unwrap();
-                RunSource::capture(Some(&p.runs[0]), xml, spans[0].clone()).unwrap()
+                RunSource::capture_all(&[(Some(&p.runs[0]), spans[0].clone())], xml)
+                    .remove(0)
+                    .unwrap()
             };
             let left_source = source(original_body, &left);
             let right_source = source(edited_body, &right);
@@ -26120,7 +27537,8 @@ mod tests {
                             let pspan = story_content_spans(body, bindings)?[0].clone();
                             let closed = source_fragment(&body[pspan], bindings)?;
                             let spans = modeled_paragraph_run_spans(p, &closed)?;
-                            RunSource::capture(Some(&p.runs[0]), &closed, spans[0].clone())
+                            RunSource::capture_all(&[(Some(&p.runs[0]), spans[0].clone())], &closed)
+                                .remove(0)
                         };
                     let left_source = capture(left_body, left, &bindings_left)?;
                     let right_source = capture(right_body, right, &bindings_right)?;

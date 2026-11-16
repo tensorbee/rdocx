@@ -293,6 +293,9 @@ struct RenderState<'a> {
     leaf_ranges: Vec<Option<Range<usize>>>,
     leaf_updates: Vec<usize>,
     retiring_simple_fields: HashSet<usize>,
+    /// Source spans of custody pairs that sit inside a revision wrapper. A
+    /// wrapper whose content the resolution removes keeps them in its place.
+    custody_pairs: Vec<Range<usize>>,
 }
 
 impl RenderState<'_> {
@@ -526,12 +529,26 @@ impl Document {
             leaf_ranges: Vec::new(),
             leaf_updates: Vec::new(),
             retiring_simple_fields: HashSet::new(),
+            custody_pairs: footnote_custody
+                .iter()
+                .filter_map(|unit| unit.wrapped_body.clone())
+                .collect(),
         };
         state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
         let mut output = Vec::with_capacity(source.len());
         output.extend_from_slice(&source[..tree.elements[tree.root].start]);
         output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
         output.extend_from_slice(&source[tree.elements[tree.root].end..]);
+        // Resolving a note reference settles the note side of a custody unit as
+        // much as resolving the note itself, so it counts for settlement. Read
+        // from this render, only when the document holds custody pairs.
+        let reference_resolved = !footnote_custody.is_empty()
+            && tree.elements.iter().enumerate().any(|(index, node)| {
+                node.word
+                    && node.local == "footnoteReference"
+                    && std::iter::successors(Some(index), |&at| tree.elements[at].parent)
+                        .any(|at| state.resolved.contains(&at))
+            });
 
         let mut resolved = state.resolved.len();
         if resolved > 0 {
@@ -550,8 +567,9 @@ impl Document {
         resolved = resolved
             .checked_add(removed_note_revisions)
             .ok_or_else(|| Error::Other("resolved revision count overflowed".into()))?;
+        let mut note_part_resolved = removed_note_revisions > 0 || reference_resolved;
         let story_parts = crate::comparison::revision_story_parts(&candidate)?;
-        for (_, part_name) in story_parts {
+        for (kind, part_name) in story_parts {
             let part = candidate
                 .package
                 .get_part(&part_name)
@@ -597,6 +615,7 @@ impl Document {
                 resolve_story_xml(&part, resolution, scope.clone())?
             };
             if count > 0 {
+                note_part_resolved |= matches!(kind, crate::StoryKind::Footnote);
                 candidate.package.set_part(&part_name, updated);
                 resolved = resolved
                     .checked_add(count)
@@ -658,6 +677,7 @@ impl Document {
             &mut candidate,
             &footnote_custody,
             matches!(resolution, Resolution::Accept),
+            note_part_resolved,
             publication.as_deref_mut(),
         )?;
         candidate.reconcile_comment_removal(self)?;
@@ -993,6 +1013,7 @@ fn render_with_source_ranges(
         leaf_elements: selected,
         leaf_updates: Vec::new(),
         retiring_simple_fields: HashSet::new(),
+        custody_pairs: Vec::new(),
     };
     state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
     let mut output = Vec::with_capacity(tree.source.len());
@@ -2567,7 +2588,18 @@ impl<'a> XmlTree<'a> {
             )
         } else {
             self.validate_selected_descendants(index, state)?;
-            Ok(Vec::new())
+            let mut kept = Vec::new();
+            for &child in &self.elements[index].children {
+                let node = &self.elements[child];
+                if state
+                    .custody_pairs
+                    .iter()
+                    .any(|pair| pair.start <= node.start && node.end <= pair.end)
+                {
+                    kept.extend(self.render_with_namespaces(child, state, false, destination)?);
+                }
+            }
+            Ok(kept)
         }
     }
 
