@@ -1605,8 +1605,11 @@ uses each attribute's effective Word namespace, including local prefix shadows.
 Added and removed definitions use paired hidden standard bookmarks in the body
 and first note paragraph. Names carry a persistent token and the emitting
 transaction's original and edited part-presence bits. The body pair precedes the
-first actual reference outside its revision wrapper. An added note's pair is
-inside its content insertion. A deleted note's pair stays outside the deletion.
+first actual reference outside its revision wrapper. The note pair follows the
+note's reference-mark run inside its content insertion or deletion, because
+Word 16.115 drops a pair that precedes the reference mark of a note that is not
+the first of its part. A note without a reference-mark run keeps the pair at the
+start of its insertion, or outside its deletion.
 Tokens and bookmark ids are reserved before allocating new comparison ids.
 A token is identity, independent of every current revision id and token order.
 Listing and id, author and date scopes still operate on revision elements.

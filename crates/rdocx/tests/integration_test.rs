@@ -39287,6 +39287,211 @@ fn issue430_custody_note_rejection_preserves_opaque_deleted_text_literals() {
     }
 }
 
+// F-X287 Word-save fixtures. Each one is the body content and the footnote
+// owners of a package that rdocx compared and Microsoft Word for Mac 16.115
+// (26110837) then opened and saved with "save as" (AppleScript `save as`,
+// `format document`). Only rsid and w14 paragraph identity attributes are
+// removed, everything else is the bytes Word wrote, including its note and
+// bookmark renumbering, its localized reference style and its merged wrappers.
+fn issue430_markers(document: &mut Document) -> Vec<String> {
+    let package = issue430_package(document);
+    let mut names = Vec::new();
+    for xml in package.parts.values() {
+        let text = String::from_utf8_lossy(xml);
+        let mut rest = text.as_ref();
+        while let Some(at) = rest.find("_rdocxCmpNoteF") {
+            let tail = &rest[at..];
+            let end = tail.find('"').unwrap_or(tail.len());
+            names.push(tail[..end].to_owned());
+            rest = &tail[end..];
+        }
+    }
+    names.sort();
+    names
+}
+fn issue430_texts(document: &Document) -> Vec<String> {
+    document.paragraphs().iter().map(|p| p.text()).collect()
+}
+fn issue430_word_separators() -> &'static str {
+    r#"<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"#
+}
+fn issue430_word_delivery_note() -> &'static str {
+    r#"<w:footnote w:id="1"><w:p><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Delivery note, p.1.</w:t></w:r></w:p></w:footnote>"#
+}
+/// A one-author Word-saved result reaches its input destination through every
+/// whole-document and author choice, with a reopen after each, and leaves no
+/// revision and no custody marker behind.
+fn issue430_word_save_destinations(
+    body: &str,
+    notes: &str,
+    accepted: (&[i32], &[&str]),
+    rejected: (&[i32], &[&str]),
+) {
+    let mut source = issue430_fixture(body, Some(notes));
+    for (accept, all) in [(true, true), (true, false), (false, true), (false, false)] {
+        let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+        let count = match (accept, all) {
+            (true, true) => document.accept_all(),
+            (true, false) => document.accept_revisions_by_author("A"),
+            (false, true) => document.reject_all(),
+            (false, false) => document.reject_revisions_by_author("A"),
+        }
+        .unwrap();
+        assert!(count > 0);
+        let mut document = issue430_roundtrip(&mut document);
+        let (ids, texts) = if accept { accepted } else { rejected };
+        assert_eq!(
+            issue430_texts(&document),
+            texts,
+            "accept {accept} all {all}"
+        );
+        issue430_assert_settled(&mut document, ids, true);
+    }
+}
+/// An unrelated paragraph edit compares over the Word-saved pending result
+/// without touching its custody, and both destinations then follow.
+fn issue430_word_save_unrelated_comparison(
+    body: &str,
+    notes: &str,
+    edit: (&str, &str),
+    accepted: &[i32],
+    rejected: &[i32],
+) {
+    let mut document = issue430_fixture(body, Some(notes));
+    let package = issue430_package(&mut document);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(xml.matches(edit.0).count(), 1);
+    let edited = issue430_replace_parts(&mut document, Some(xml.replace(edit.0, edit.1)), None);
+    let markers = issue430_markers(&mut document);
+    let notes_before = issue430_note_xml(&mut document);
+    document.compare(&edited, "C", ISSUE430_DATE).unwrap();
+    assert_eq!(issue430_markers(&mut document), markers);
+    assert_eq!(issue430_note_xml(&mut document), notes_before);
+    let mut document = issue430_roundtrip(&mut document);
+    let mut unrelated = issue430_roundtrip(&mut document);
+    unrelated.reject_revisions_by_author("C").unwrap();
+    assert!(!issue430_texts(&unrelated).concat().contains(edit.1));
+    let mut accept = issue430_roundtrip(&mut document);
+    accept.accept_all().unwrap();
+    assert!(issue430_texts(&accept).concat().contains(edit.1));
+    issue430_assert_settled(&mut accept, accepted, true);
+    let mut reject = issue430_roundtrip(&mut document);
+    reject.reject_all().unwrap();
+    assert!(issue430_texts(&reject).concat().contains(edit.0));
+    issue430_assert_settled(&mut reject, rejected, true);
+}
+
+#[test]
+fn issue430_custody_note_pair_follows_the_note_reference_mark() {
+    // Word 16.115 drops a note pair placed before the reference mark of a note
+    // that is not the first of its part, and keeps one placed after it. The
+    // pair goes after the reference-mark run of the content wrapper, in both
+    // directions. A note without a reference mark keeps the earlier position.
+    let marked = |id: i32, text: &str| {
+        format!(
+            r#"<w:footnote w:id="{id}"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> {text}</w:t></w:r></w:p></w:footnote>"#
+        )
+    };
+    let unmarked = |id: i32, text: &str| {
+        format!(r#"<w:footnote w:id="{id}"><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:footnote>"#)
+    };
+    for with_mark in [true, false] {
+        for addition in [true, false] {
+            let owner = if with_mark { marked } else { unmarked };
+            let existing = marked(1, "existing");
+            let short = format!(
+                "{}{}",
+                issue430_p("seller", Some(1)),
+                issue430_p("payment", None)
+            );
+            let long = format!(
+                "{}{}",
+                issue430_p("seller", Some(1)),
+                issue430_p("payment", Some(2))
+            );
+            let short_notes = existing.clone();
+            let long_notes = format!("{existing}{}", owner(2, "added"));
+            let (mut original, edited) = if addition {
+                (
+                    issue430_fixture(&short, Some(&short_notes)),
+                    issue430_fixture(&long, Some(&long_notes)),
+                )
+            } else {
+                (
+                    issue430_fixture(&long, Some(&long_notes)),
+                    issue430_fixture(&short, Some(&short_notes)),
+                )
+            };
+            original.compare(&edited, "A", ISSUE430_DATE).unwrap();
+            let notes = issue430_note_xml(&mut original).unwrap();
+            let owner_at = notes.find(r#"<w:footnote w:id="2""#).unwrap();
+            let owner_xml = &notes[owner_at..];
+            let owner_xml = &owner_xml[..owner_xml.find("</w:footnote>").unwrap()];
+            let pair = owner_xml.find("<w:bookmarkStart").unwrap();
+            let wrapper = if addition { "w:ins" } else { "w:del" };
+            if with_mark {
+                assert!(
+                    owner_xml[..pair].ends_with("<w:footnoteRef/></w:r>"),
+                    "{owner_xml}"
+                );
+                let open = owner_xml[..pair].rfind(&format!("<{wrapper} ")).unwrap();
+                assert!(!owner_xml[open..pair].contains(&format!("</{wrapper}>")));
+            } else if addition {
+                let open = owner_xml[..pair].rfind("<w:ins ").unwrap();
+                let tag = &owner_xml[open..pair];
+                assert!(
+                    !tag[1..].contains('<') && !tag.ends_with("/>"),
+                    "{owner_xml}"
+                );
+            } else {
+                assert!(owner_xml[..pair].ends_with("</w:pPr>"), "{owner_xml}");
+            }
+            let mut saved = issue430_roundtrip(&mut original);
+            for accept in [true, false] {
+                let mut resolved = Document::from_bytes(&saved.to_bytes().unwrap()).unwrap();
+                if accept {
+                    resolved.accept_all().unwrap();
+                } else {
+                    resolved.reject_all().unwrap();
+                }
+                let retained = if accept == addition {
+                    vec![1, 2]
+                } else {
+                    vec![1]
+                };
+                issue430_assert_settled(&mut resolved, &retained, true);
+            }
+        }
+    }
+}
+
+#[test]
+fn issue430_word_saved_note_pair_after_the_reference_mark_resolves_and_compares() {
+    // rdocx compared a three-paragraph original with an edit that adds a
+    // second footnote to its second paragraph, the note pair placed after the
+    // reference mark, and Word saved it. Word kept both pairs.
+    let body = r#"<w:p><w:r><w:t>The buyer took delivery on 12 June.</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Payment was due in thirty days.</w:t></w:r><w:bookmarkStart w:id="0" w:name="_rdocxCmpNoteF4P11B"/><w:bookmarkEnd w:id="0"/><w:ins w:id="1" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:ins></w:p><w:p><w:r><w:t>The parties met in September.</w:t></w:r></w:p>"#;
+    let added = r#"<w:footnote w:id="2"><w:p><w:pPr><w:rPr><w:ins w:id="2" w:author="A" w:date="2026-10-30T12:00:00Z"/></w:rPr></w:pPr><w:ins w:id="3" w:author="A" w:date="2026-10-30T12:00:00Z"><w:r><w:rPr><w:rStyle w:val="Appelnotedebasdep"/></w:rPr><w:footnoteRef/></w:r><w:bookmarkStart w:id="4" w:name="_rdocxCmpNoteF4P11N"/><w:bookmarkEnd w:id="4"/><w:r><w:t xml:space="preserve"> Contract, clause 7.</w:t></w:r></w:ins></w:p></w:footnote>"#;
+    let notes = format!(
+        "{}{}{added}",
+        issue430_word_separators(),
+        issue430_word_delivery_note()
+    );
+    let texts = [
+        "The buyer took delivery on 12 June.",
+        "Payment was due in thirty days.",
+        "The parties met in September.",
+    ];
+    issue430_word_save_destinations(body, &notes, (&[1, 2], &texts), (&[1], &texts));
+    issue430_word_save_unrelated_comparison(
+        body,
+        &notes,
+        ("met in September", "met in October"),
+        &[1, 2],
+        &[1],
+    );
+}
+
 #[test]
 fn issue432_note_mark_order_separators_and_space() {
     let mut doc = Document::new();

@@ -5975,9 +5975,26 @@ fn insert_note_marker(
             at = node.end;
             continue;
         }
-        if addition && node.word && node.local == "ins" {
-            at = node.open_end;
-            insertion = true;
+        let wrapper = if addition { "ins" } else { "del" };
+        if node.word && node.local == wrapper {
+            // Word 16.115 drops a zero-width pair that precedes the note's
+            // reference mark, and keeps one that follows it. Place the pair
+            // after the first reference-mark run of the content wrapper.
+            let mark = node.children.iter().copied().find(|&run| {
+                let run_node = &tree.elements[run];
+                run_node.word
+                    && run_node.local == "r"
+                    && run_node.children.iter().any(|&leaf| {
+                        tree.elements[leaf].word && tree.elements[leaf].local == "footnoteRef"
+                    })
+            });
+            if let Some(run) = mark {
+                at = tree.elements[run].end;
+                insertion = addition;
+            } else if addition {
+                at = node.open_end;
+                insertion = true;
+            }
         }
         break;
     }
