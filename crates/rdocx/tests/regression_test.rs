@@ -41448,14 +41448,15 @@ mod compare_producer_noise {
             }
         }
 
-        // A space split out of a text keeps reading as a space in the redline.
-        for granularity in [
-            ComparisonGranularity::Word,
-            ComparisonGranularity::Character,
+        // A space that a split leaves at the edge of a text keeps reading as
+        // a space in the redline.
+        for (granularity, edited) in [
+            (ComparisonGranularity::Word, "two wordy"),
+            (ComparisonGranularity::Character, "two xords"),
         ] {
             let (kinds, tracked) = compared_kinds_with(
                 &paragraph("<w:t>two words</w:t>"),
-                &paragraph("<w:t>two wordy</w:t>"),
+                &paragraph(&format!("<w:t>{edited}</w:t>")),
                 &ComparisonOptions {
                     granularity,
                     ..Default::default()
@@ -41463,9 +41464,9 @@ mod compare_producer_noise {
             );
             let tracked = comparison_structure_xml(&tracked);
             assert_eq!(kinds, changed, "{granularity:?}");
-            assert!(!tracked.contains("<w:t> </w:t>"), "{tracked}");
+            assert!(!tracked.contains("<w:t>two </w:t>"), "{tracked}");
             assert!(
-                tracked.contains(r#"<w:t xml:space="preserve"> </w:t>"#),
+                tracked.contains(r#"<w:t xml:space="preserve">two </w:t>"#),
                 "{tracked}"
             );
         }
@@ -412772,6 +412773,344 @@ fn issue434_compare_one_word_beside_split_invoice() {
             revisions.iter().map(|r| r.text()).collect::<Vec<_>>(),
             ["thirty", "sixty"]
         );
+    }
+}
+
+/// One `w:r` of a story part: the element that holds it, the text of each of
+/// its text elements, and whether it directly follows a sibling run that has
+/// the same `w:rPr`.
+struct Issue446Run {
+    parent: String,
+    texts: Vec<String>,
+    repeats_sibling: bool,
+}
+
+fn issue446_runs(xml: &str) -> Vec<Issue446Run> {
+    #[derive(Default)]
+    struct Open {
+        name: String,
+        start: usize,
+        // The `w:rPr` of the run that is the last child read so far.
+        last_run: Option<String>,
+        // For a run, the `w:rPr` of the run it directly follows, then its own.
+        follows: Option<String>,
+        properties: String,
+        texts: Vec<String>,
+    }
+    let mut reader = XmlReader::from_str(xml);
+    let mut open = vec![Open::default()];
+    let mut runs = Vec::new();
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader.read_event().unwrap();
+        let end = reader.buffer_position() as usize;
+        if let XmlEvent::Start(element) | XmlEvent::Empty(element) = &event {
+            let name = String::from_utf8(element.name().as_ref().to_vec()).unwrap();
+            let parent = open.last_mut().unwrap();
+            let follows = parent.last_run.take().filter(|_| name == "w:r");
+            if parent.name == "w:r" && matches!(name.as_str(), "w:t" | "w:delText") {
+                parent.texts.push(String::new());
+            }
+            open.push(Open {
+                name,
+                start,
+                follows,
+                ..Default::default()
+            });
+        }
+        match event {
+            XmlEvent::Text(text) => {
+                if let [.., run, leaf] = open.as_mut_slice()
+                    && run.name == "w:r"
+                    && matches!(leaf.name.as_str(), "w:t" | "w:delText")
+                {
+                    run.texts
+                        .last_mut()
+                        .unwrap()
+                        .push_str(&text.decode().unwrap());
+                }
+            }
+            XmlEvent::End(_) | XmlEvent::Empty(_) => {
+                let closed = open.pop().unwrap();
+                let parent = open.last_mut().unwrap();
+                if closed.name == "w:rPr" && parent.name == "w:r" {
+                    parent.properties = xml[closed.start..end].to_owned();
+                }
+                if closed.name == "w:r" {
+                    runs.push(Issue446Run {
+                        parent: parent.name.clone(),
+                        repeats_sibling: closed.follows.as_ref() == Some(&closed.properties),
+                        texts: closed.texts,
+                    });
+                    parent.last_run = Some(closed.properties);
+                }
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// A story a comparison revises: its name, its part and the document that
+/// holds a text in it as one run.
+type Issue446Story = (&'static str, &'static str, fn(&str) -> Document);
+
+fn issue446_stories() -> Vec<Issue446Story> {
+    fn body(content: &str) -> Document {
+        document_with_content_controls(&wrap_word_body(content))
+    }
+    fn run(text: &str) -> String {
+        format!("<w:r><w:rPr><w:b/></w:rPr><w:t>{text}</w:t></w:r>")
+    }
+    vec![
+        ("body", "/word/document.xml", |text| {
+            body(&format!("<w:p>{}</w:p>", run(text)))
+        }),
+        ("table cell", "/word/document.xml", |text| {
+            body(&format!(
+                r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid><w:tr><w:tc><w:p>{}</w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+                run(text)
+            ))
+        }),
+        ("inline control", "/word/document.xml", |text| {
+            body(&format!(
+                "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:p>",
+                run(text)
+            ))
+        }),
+        ("hyperlink", "/word/document.xml", |text| {
+            body(&format!(
+                r#"<w:p><w:hyperlink w:anchor="spot">{}</w:hyperlink></w:p>"#,
+                run(text)
+            ))
+        }),
+        ("header", "/word/header1.xml", |text| {
+            document_with_comparison_header(&format!("<w:p>{}</w:p>", run(text)))
+        }),
+        ("footnote", "/word/footnotes.xml", |text| {
+            let mut document = Document::new();
+            document.add_paragraph("The survey is on file.");
+            let location = document.paragraph_story_location(0).unwrap().unwrap();
+            document.create_footnote(&location, text).unwrap();
+            Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+        }),
+    ]
+}
+
+#[test]
+fn issue446_comparison_writes_one_run_per_stretch_in_every_story() {
+    // The granularity sets what is compared, not how the result is cut: the
+    // text between two revisions stays one run with one text element, and a
+    // revision holds its text in one `w:delText` or `w:t`.
+    let original_text = "The bearing at pier 4 moved about twelve millimetres since the survey.";
+    let edited_text = "The bearing at pier 4 moved about fifteen millimetres since the survey.";
+    for (story, part, document) in issue446_stories() {
+        for granularity in [
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            let context = format!("{story} {granularity:?}");
+            let options = rdocx::ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            let mut tracked = document(original_text);
+            let before = issue446_runs(&comparison_part_xml(&mut tracked, part));
+            tracked
+                .compare_with_options(
+                    &document(edited_text),
+                    "Ada",
+                    "2026-11-15T09:00:00Z",
+                    &options,
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let revisions = tracked.story_revisions().unwrap();
+            if granularity == rdocx::ComparisonGranularity::Word {
+                assert_eq!(
+                    revisions
+                        .iter()
+                        .map(|revision| revision.text().to_owned())
+                        .collect::<Vec<_>>(),
+                    ["twelve", "fifteen"],
+                    "{context}"
+                );
+            }
+            let xml = comparison_part_xml(&mut tracked, part);
+            let runs = issue446_runs(&xml);
+            for run in &runs {
+                assert!(run.texts.len() <= 1, "{context}: {:?} in {xml}", run.texts);
+            }
+            // The redline adds no run that repeats the properties of the
+            // sibling run it follows.
+            let repeats =
+                |runs: &[Issue446Run]| runs.iter().filter(|run| run.repeats_sibling).count();
+            assert_eq!(repeats(&runs), repeats(&before), "{context}: {xml}");
+            // One run a revision, and one for the text before, between and
+            // after them.
+            assert!(
+                runs.len() <= before.len() + 2 * revisions.len(),
+                "{context}: {} runs for {} revisions in {xml}",
+                runs.len(),
+                revisions.len()
+            );
+            let pieces = |parent: &str| {
+                runs.iter()
+                    .filter(|run| run.parent == parent)
+                    .flat_map(|run| run.texts.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+            };
+            for (parent, kind) in [
+                ("w:del", RevisionKind::Deletion),
+                ("w:ins", RevisionKind::Insertion),
+            ] {
+                // Each revision is one run holding its whole text.
+                assert_eq!(
+                    pieces(parent),
+                    revisions
+                        .iter()
+                        .filter(|revision| revision.kind() == kind)
+                        .map(|revision| revision.text())
+                        .collect::<Vec<_>>(),
+                    "{context}: {xml}"
+                );
+            }
+            if granularity == rdocx::ComparisonGranularity::Word {
+                assert_eq!(pieces("w:del"), ["twelve"], "{context}");
+                assert_eq!(pieces("w:ins"), ["fifteen"], "{context}");
+                assert!(
+                    runs.iter()
+                        .any(|run| run.texts == ["The bearing at pier 4 moved about "])
+                        && runs
+                            .iter()
+                            .any(|run| run.texts == [" millimetres since the survey."]),
+                    "{context}: {xml}"
+                );
+            }
+            let story_text = |document: &mut Document| {
+                issue446_runs(&comparison_part_xml(document, part))
+                    .into_iter()
+                    .flat_map(|run| run.texts)
+                    .collect::<String>()
+            };
+            let bytes = tracked.to_bytes().unwrap();
+            for (resolve, wanted) in [
+                (Document::accept_all as fn(&mut Document) -> _, edited_text),
+                (Document::reject_all, original_text),
+            ] {
+                let mut resolved = Document::from_bytes(&bytes).unwrap();
+                resolve(&mut resolved).unwrap();
+                assert_eq!(
+                    story_text(&mut resolved),
+                    story_text(&mut document(wanted)),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue446_comparison_keeps_the_runs_a_change_does_not_reach() {
+    let document = |last: &str| {
+        document_with_content_controls(&wrap_word_body(&format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">Plain </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r><w:r><w:t xml:space="preserve"> and a tail of {last} days</w:t></w:r></w:p>"#
+        )))
+    };
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut tracked = document("thirty");
+        tracked
+            .compare_with_options(
+                &document("ninety"),
+                "Ada",
+                "2026-11-15T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let xml = document_xml(&mut tracked);
+        let pieces = issue446_runs(&xml)
+            .into_iter()
+            .map(|run| (run.parent, run.texts.concat()))
+            .collect::<Vec<_>>();
+        let pieces = pieces
+            .iter()
+            .map(|(parent, text)| (parent.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        // The two runs before the edited one are whole, and the edited run
+        // is cut only where a revision starts or ends.
+        assert_eq!(
+            pieces[..3],
+            [
+                ("w:p", "Plain "),
+                ("w:p", "bold"),
+                ("w:p", " and a tail of ")
+            ],
+            "{granularity:?}: {xml}"
+        );
+        assert!(
+            matches!(pieces.last(), Some(("w:p", text)) if text.ends_with(" days")),
+            "{granularity:?}: {xml}"
+        );
+        if granularity == rdocx::ComparisonGranularity::Word {
+            assert_eq!(
+                pieces[3..],
+                [("w:del", "thirty"), ("w:ins", "ninety"), ("w:p", " days")],
+                "{xml}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue446_comparison_cost_follows_the_changes_not_the_unchanged_text() {
+    // Every later stage reads the redline run by run, so its run count and
+    // its size over the original are the structural cost of a comparison.
+    // Both depend on the edit alone, whatever the length of the text around
+    // it and whatever the unit the granularity compares.
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let cost = |words: usize| {
+            let document = |last: &str| {
+                let mut document = Document::new();
+                for _ in 0..3 {
+                    document.add_paragraph(&format!("{}{last} days.", "kept ".repeat(words)));
+                }
+                Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+            };
+            let mut tracked = document("thirty");
+            let original = document_xml(&mut tracked);
+            tracked
+                .compare_with_options(
+                    &document("sixty"),
+                    "Ada",
+                    "2026-11-15T09:00:00Z",
+                    &rdocx::ComparisonOptions {
+                        granularity,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let xml = document_xml(&mut tracked);
+            (
+                issue446_runs(&xml).len(),
+                tracked.story_revisions().unwrap().len(),
+                xml.len() - original.len(),
+            )
+        };
+        assert_eq!(cost(4), cost(400), "{granularity:?}");
+        if granularity == rdocx::ComparisonGranularity::Word {
+            // Three paragraphs, each with the text before, the deletion, the
+            // insertion and the text after.
+            assert_eq!((cost(4).0, cost(4).1), (12, 6));
+        }
     }
 }
 

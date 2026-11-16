@@ -14373,12 +14373,14 @@ fn compare_granular_paragraph(
         let mut right_raw = Vec::new();
         let mut right_typed = Vec::new();
         let left = merge_unit_runs(
+            &original.runs,
             &original_units,
             &left_indices,
             &mut left_raw,
             &mut left_typed,
         )?;
         let right = merge_unit_runs(
+            &edited.runs,
             &edited_units,
             &right_indices,
             &mut right_raw,
@@ -15554,6 +15556,13 @@ fn retain_projection_separators(
     Ok(())
 }
 
+/// The aligned pairs grouped into the pieces the redline writes as one run.
+///
+/// The granularity sets what the diff compares, never how many runs carry the
+/// result. A change takes every consecutive pair of its kind that the same
+/// physical runs own. Unchanged text takes every consecutive pair that
+/// continues the same original and edited text element, so it stays one run
+/// between two revisions whether the units are words or characters.
 fn coalesced_granular_alignment(
     aligned: &[(Option<usize>, Option<usize>)],
     original_units: &[AttributedRunUnit],
@@ -15561,6 +15570,23 @@ fn coalesced_granular_alignment(
     original_signatures: &[String],
     edited_signatures: &[String],
 ) -> Vec<(GranularAction, Range<usize>)> {
+    let owners = |at: usize| {
+        (
+            aligned[at].0.map(|index| original_units[index].owner),
+            aligned[at].1.map(|index| edited_units[index].owner),
+        )
+    };
+    // The text element each side of an unchanged pair is a fragment of.
+    let elements = |at: usize| {
+        aligned[at]
+            .0
+            .and_then(|index| unit_text_element(&original_units[index]))
+            .zip(
+                aligned[at]
+                    .1
+                    .and_then(|index| unit_text_element(&edited_units[index])),
+            )
+    };
     let mut groups = Vec::new();
     let mut start = 0usize;
     while start < aligned.len() {
@@ -15571,35 +15597,38 @@ fn coalesced_granular_alignment(
             original_signatures,
             edited_signatures,
         );
-        let owners = (
-            aligned[start].0.map(|index| original_units[index].owner),
-            aligned[start].1.map(|index| edited_units[index].owner),
-        );
+        let continues = |at: usize| match action {
+            GranularAction::Replace | GranularAction::Delete | GranularAction::Insert => true,
+            GranularAction::Equal => elements(start).is_some() && elements(at) == elements(start),
+            GranularAction::Preserve | GranularAction::Drop => false,
+        };
         let mut end = start + 1;
-        if matches!(
-            action,
-            GranularAction::Replace | GranularAction::Delete | GranularAction::Insert
-        ) {
-            while end < aligned.len()
-                && granular_action(
-                    aligned[end],
-                    original_units,
-                    edited_units,
-                    original_signatures,
-                    edited_signatures,
-                ) == action
-                && (
-                    aligned[end].0.map(|index| original_units[index].owner),
-                    aligned[end].1.map(|index| edited_units[index].owner),
-                ) == owners
-            {
-                end += 1;
-            }
+        while end < aligned.len()
+            && continues(end)
+            && granular_action(
+                aligned[end],
+                original_units,
+                edited_units,
+                original_signatures,
+                edited_signatures,
+            ) == action
+            && owners(end) == owners(start)
+        {
+            end += 1;
         }
         groups.push((action, start..end));
         start = end;
     }
     groups
+}
+
+/// The content ordinal of the text element a plain unit is a fragment of.
+fn unit_text_element(unit: &AttributedRunUnit) -> Option<usize> {
+    unit_plain_text(unit)?;
+    match unit.typed_sources.as_slice() {
+        [Some(selected)] => Some(selected.ordinal),
+        _ => None,
+    }
 }
 
 /// The text of a unit that holds nothing but text, which grouping may move
@@ -15814,7 +15843,13 @@ fn grouped_text_alignment(
     (grouped, grouped_segments)
 }
 
+/// The units at `indices`, all fragments of one run of `runs`, as one run.
+///
+/// Consecutive fragments of one text element are written back as one text
+/// with one source selection, so a merged run holds one `w:t` or `w:delText`
+/// per stretch of its source text, never one per compared unit.
 fn merge_unit_runs(
+    runs: &[CT_R],
     units: &[AttributedRunUnit],
     indices: &[usize],
     raw_sources: &mut Vec<(usize, usize, usize)>,
@@ -15827,6 +15862,7 @@ fn merge_unit_runs(
     raw_sources.extend_from_slice(&first.raw_sources);
     typed_sources.extend_from_slice(&first.typed_sources);
     let property_boundary = usize::from(merged.properties.is_some());
+    let mut joined = false;
     for &index in &indices[1..] {
         let unit = &units[index];
         if unit.owner != first.owner {
@@ -15835,9 +15871,14 @@ fn merge_unit_runs(
             ));
         }
         let next = &unit.run;
-        let content_offset = merged.content.len();
-        merged.content.extend(next.content.iter().cloned());
-        typed_sources.extend_from_slice(&unit.typed_sources);
+        let continued = join_text_fragment(&mut merged, typed_sources, unit, property_boundary);
+        joined |= continued;
+        // The raw children of a joined fragment follow the text it extends.
+        let content_offset = merged.content.len() - usize::from(continued);
+        if !continued {
+            merged.content.extend(next.content.iter().cloned());
+            typed_sources.extend_from_slice(&unit.typed_sources);
+        }
         merged
             .alt_drawings
             .extend(next.alt_drawings.iter().cloned());
@@ -15870,7 +15911,96 @@ fn merge_unit_runs(
             "fragment raw source order or multiplicity is invalid".into(),
         ));
     }
+    if joined {
+        // A joined text reads its space flag as a unit of its own would, and
+        // one that is its whole source element again selects it whole.
+        let source = runs
+            .get(first.owner)
+            .ok_or_else(|| Error::Other("merged run owner is absent".into()))?;
+        for (content, selected) in merged.content.iter_mut().zip(typed_sources.iter_mut()) {
+            let (
+                RunContent::Text(text) | RunContent::DeletedText(text),
+                Some(TypedSourceSelection {
+                    ordinal,
+                    scalars: scalars @ Some(_),
+                }),
+            ) = (content, selected)
+            else {
+                continue;
+            };
+            let Some(RunContent::Text(actual) | RunContent::DeletedText(actual)) =
+                source.content.get(*ordinal)
+            else {
+                return Err(Error::Other(
+                    "joined text has no actual source element".into(),
+                ));
+            };
+            text.preserve_space = actual.preserve_space || has_edge_whitespace(&text.text);
+            if *scalars == Some((0, actual.text.chars().count())) {
+                *scalars = None;
+            }
+        }
+    }
     Ok(Some(merged))
+}
+
+/// Append `unit` to the text that ends `merged` when it holds the next scalars
+/// of the same source text element with no raw child between the two, and
+/// report whether it did. `typed` holds one selection per content of `merged`.
+fn join_text_fragment(
+    merged: &mut CT_R,
+    typed: &mut [Option<TypedSourceSelection>],
+    unit: &AttributedRunUnit,
+    property_boundary: usize,
+) -> bool {
+    let content_end = property_boundary + merged.content.len();
+    let raw_positions = |run: &CT_R| {
+        run.extra_xml_positions
+            .iter()
+            .filter(|encoded| !CT_R::raw_child_is_root_attributes(**encoded))
+            .map(|encoded| CT_R::raw_child_position(*encoded))
+            .collect::<Vec<_>>()
+    };
+    if !unit.run.alt_drawings.is_empty()
+        || raw_positions(merged)
+            .iter()
+            .any(|position| *position >= content_end)
+        || raw_positions(&unit.run)
+            .iter()
+            .any(|position| *position <= property_boundary)
+    {
+        return false;
+    }
+    let (
+        Some(TypedSourceSelection {
+            ordinal: previous,
+            scalars: Some((_, previous_end)),
+        }),
+        [
+            Some(TypedSourceSelection {
+                ordinal,
+                scalars: Some((start, end)),
+            }),
+        ],
+    ) = (
+        typed.last_mut().and_then(Option::as_mut),
+        unit.typed_sources.as_slice(),
+    )
+    else {
+        return false;
+    };
+    if *previous != *ordinal || *previous_end != *start {
+        return false;
+    }
+    match (merged.content.last_mut(), unit.run.content.as_slice()) {
+        (Some(RunContent::Text(text)), [RunContent::Text(fragment)])
+        | (Some(RunContent::DeletedText(text)), [RunContent::DeletedText(fragment)]) => {
+            text.text.push_str(&fragment.text);
+            *previous_end = *end;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The paragraph source with `properties` in place of its own `w:pPr`. A
@@ -18720,12 +18850,14 @@ fn compare_control_runs_with_options(
         let mut right_raw = Vec::new();
         let mut right_typed = Vec::new();
         let left = merge_unit_runs(
+            original,
             &original_units,
             &left_indices,
             &mut left_raw,
             &mut left_typed,
         )?;
         let right = merge_unit_runs(
+            edited,
             &edited_units,
             &right_indices,
             &mut right_raw,
@@ -23687,6 +23819,168 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One side of a written piece: its merged run and source selections.
+    type WrittenSide = Option<(CT_R, Vec<Option<super::TypedSourceSelection>>)>;
+
+    /// The alignment of two single-run paragraphs grouped into the pieces
+    /// the redline writes, each as its original and edited merged run.
+    fn written_pieces(texts: [&str; 2], options: &ComparisonOptions) -> Vec<[WrittenSide; 2]> {
+        let runs = texts.map(|text| [CT_R::new(text)]);
+        let units = [
+            attributed_run_units(&runs[0], options),
+            attributed_run_units(&runs[1], options),
+        ];
+        let signatures = [0, 1].map(|side| {
+            units[side]
+                .iter()
+                .map(attributed_unit_signature)
+                .collect::<Vec<_>>()
+        });
+        let aligned = align(&signatures[0], &signatures[1]);
+        let (aligned, _) = grouped_text_alignment(
+            &aligned,
+            &vec![0; aligned.len()],
+            &units[0],
+            &units[1],
+            &signatures[0],
+            &signatures[1],
+            options,
+        );
+        super::coalesced_granular_alignment(
+            &aligned,
+            &units[0],
+            &units[1],
+            &signatures[0],
+            &signatures[1],
+        )
+        .into_iter()
+        .map(|(_, members)| {
+            [0, 1].map(|side| {
+                let indices = members
+                    .clone()
+                    .filter_map(|at| [aligned[at].0, aligned[at].1][side])
+                    .collect::<Vec<_>>();
+                let (mut raw, mut typed) = (Vec::new(), Vec::new());
+                super::merge_unit_runs(&runs[side], &units[side], &indices, &mut raw, &mut typed)
+                    .unwrap()
+                    .map(|run| (run, typed))
+            })
+        })
+        .collect()
+    }
+
+    #[test]
+    fn granular_pieces_follow_the_changes_not_the_compared_units() {
+        for granularity in [
+            ComparisonGranularity::Word,
+            ComparisonGranularity::Character,
+        ] {
+            let options = ComparisonOptions {
+                granularity,
+                ..Default::default()
+            };
+            let pieces = [2, 200].map(|words| {
+                let kept = "kept ".repeat(words);
+                written_pieces(
+                    [&format!("{kept}thirty days"), &format!("{kept}sixty days")],
+                    &options,
+                )
+            });
+            // The unchanged text before the edit is one piece however many
+            // units it holds, so both lengths give the same pieces.
+            assert_eq!(pieces[0].len(), pieces[1].len(), "{granularity:?}");
+            if granularity == ComparisonGranularity::Word {
+                // The text before, the replaced word and the text after.
+                assert_eq!(pieces[0].len(), 3);
+            }
+            for (run, typed) in pieces.iter().flatten().flatten().flatten() {
+                // One piece is one text with one source selection.
+                assert_eq!(run.content.len(), 1, "{granularity:?}: {run:?}");
+                assert_eq!(typed.len(), 1, "{granularity:?}: {typed:?}");
+            }
+            let kept = "kept ".repeat(200);
+            assert!(matches!(
+                &pieces[1][0],
+                [Some((left, _)), Some((right, _))]
+                    if matches!(left.content.as_slice(), [RunContent::Text(text)] if text.text == kept)
+                        && left.content == right.content
+            ));
+        }
+    }
+
+    #[test]
+    fn merged_units_rejoin_the_fragments_of_one_text_element() {
+        let options = ComparisonOptions {
+            granularity: ComparisonGranularity::Word,
+            ..Default::default()
+        };
+        let mut run = CT_R::new("alpha beta");
+        run.content.push(RunContent::Tab);
+        run.content.push(RunContent::Text(CT_Text {
+            text: "gamma".to_owned(),
+            preserve_space: false,
+        }));
+        let runs = [run];
+        // alpha, space, beta, the tab, gamma.
+        let units = attributed_run_units(&runs, &options);
+        assert_eq!(units.len(), 5);
+        let merge = |indices: &[usize]| {
+            let (mut raw, mut typed) = (Vec::new(), Vec::new());
+            let run = super::merge_unit_runs(&runs, &units, indices, &mut raw, &mut typed)
+                .unwrap()
+                .unwrap();
+            let texts = run
+                .content
+                .iter()
+                .map(|content| match content {
+                    RunContent::Text(text) => Some((text.text.clone(), text.preserve_space)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let scalars = typed
+                .iter()
+                .map(|selected| selected.unwrap().scalars)
+                .collect::<Vec<_>>();
+            (texts, scalars)
+        };
+        // Every fragment of an element is that element again, selected whole.
+        let whole = runs[0].content[0].clone();
+        let RunContent::Text(whole) = whole else {
+            unreachable!()
+        };
+        assert_eq!(
+            merge(&[0, 1, 2]),
+            (
+                vec![Some(("alpha beta".to_owned(), whole.preserve_space))],
+                vec![None]
+            )
+        );
+        // Some of its fragments are one text over their scalars, which keeps
+        // the space a new edge exposes.
+        assert_eq!(
+            merge(&[0, 1]),
+            (vec![Some(("alpha ".to_owned(), true))], vec![Some((0, 6))])
+        );
+        assert_eq!(
+            merge(&[1, 2]),
+            (vec![Some((" beta".to_owned(), true))], vec![Some((5, 10))])
+        );
+        // Fragments that do not follow each other stay apart, and so does
+        // text on either side of other content.
+        assert_eq!(merge(&[0, 2]).0.len(), 2);
+        assert_eq!(
+            merge(&[0, 1, 2, 3, 4]),
+            (
+                vec![
+                    Some(("alpha beta".to_owned(), whole.preserve_space)),
+                    None,
+                    Some(("gamma".to_owned(), false))
+                ],
+                vec![None, None, None]
+            )
+        );
     }
 
     #[test]
