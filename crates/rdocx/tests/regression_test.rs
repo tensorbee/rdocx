@@ -413185,6 +413185,76 @@ fn issue446_comparison_keeps_refusing_a_drawing_in_a_field_begin_run() {
 }
 
 #[test]
+fn issue446_comparison_splits_text_that_holds_references() {
+    // The reader reports `&amp;`, `&quot;` and numeric references as events
+    // of their own between pieces of text. A word or character comparison
+    // that splits such a text refused it ("split text has opaque mixed
+    // events"), including text rdocx writes itself.
+    let original = r#"<w:p><w:r><w:t xml:space="preserve">Smith&amp;Sons pay &quot;now&quot;, caf&#233; &#x1F600;.</w:t></w:r></w:p>"#;
+    let edited = r#"<w:p><w:r><w:t xml:space="preserve">Smith+Sons pay &quot;later&quot;, caf&#233; &#x1F600;.</w:t></w:r></w:p>"#;
+    let body: fn(&str) -> Document =
+        |paragraph| document_with_content_controls(&wrap_word_body(paragraph));
+    let header: fn(&str) -> Document = document_with_comparison_header;
+    for (story, document) in [("body", body), ("header", header)] {
+        for granularity in [
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            let context = format!("{story} {granularity:?}");
+            let mut tracked = document(original);
+            tracked
+                .compare_with_options(
+                    &document(edited),
+                    "Ada",
+                    "2026-11-16T09:00:00Z",
+                    &rdocx::ComparisonOptions {
+                        granularity,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let revisions = tracked
+                .story_revisions()
+                .unwrap()
+                .iter()
+                .map(|revision| (revision.kind(), revision.text().to_owned()))
+                .collect::<Vec<_>>();
+            assert!(
+                revisions.contains(&(RevisionKind::Deletion, "&".to_owned())),
+                "{context}: {revisions:?}"
+            );
+            if granularity == rdocx::ComparisonGranularity::Word {
+                assert_eq!(
+                    revisions,
+                    [
+                        (RevisionKind::Deletion, "&".to_owned()),
+                        (RevisionKind::Insertion, "+".to_owned()),
+                        (RevisionKind::Deletion, "now".to_owned()),
+                        (RevisionKind::Insertion, "later".to_owned()),
+                    ],
+                    "{context}"
+                );
+            }
+            let bytes = tracked.to_bytes().unwrap();
+            for (resolve, wanted) in [
+                (Document::accept_all as fn(&mut Document) -> _, edited),
+                (Document::reject_all, original),
+            ] {
+                let mut resolved = Document::from_bytes(&bytes).unwrap();
+                resolve(&mut resolved).unwrap();
+                resolved
+                    .compare(&document(wanted), "Ada", "2026-11-16T09:01:00Z")
+                    .unwrap();
+                assert!(
+                    resolved.story_revisions().unwrap().is_empty(),
+                    "{context}: {wanted}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn issue434_comparison_crossing_reply_composition() {
     let mut original = Document::new();
     original.add_paragraph("thirty days");

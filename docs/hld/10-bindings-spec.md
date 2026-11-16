@@ -3079,7 +3079,9 @@ existing output. Word and character redlines keep the text between two revisions
 as one run with one text element, and each revision holds its text in one text
 element, so the run count follows the revisions and not the compared units. Two
 exceptions remain. With `ignore_whitespace` unchanged text is written one run
-per word and per space, and a tab or a break between two texts ends a run. Inside supported inline controls, retained raw children keep
+per word and per space, and a tab or a break between two texts ends a run. Word
+and character comparisons split text that holds a character or entity
+reference, such as `&amp;`. Inside supported inline controls, retained raw children keep
 their physical text ownership on both sides through accept, reject and reopen.
 No comparison option or existing public signature changes. The additive doc-hidden
 lower native `properties::protected_source_residual(xml, inherited_bindings)`

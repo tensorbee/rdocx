@@ -1308,9 +1308,11 @@ one token per stretch and reads the same for every run split, and that run
 sources and parent scopes read together equal those read alone, errors
 included. A count of the source bytes a comparison reads shows that it reads a
 paragraph, a hyperlink, a table and an inserted paragraph or table a fixed
-number of times whatever their children, at every granularity. A further
-regression pins the v0.17.0 refusal of a drawing that shares its run with a
-field begin mark. None of these uses a timing threshold.
+number of times whatever their children, at every granularity. Further
+regressions pin the v0.17.0 refusal of a drawing that shares its run with a
+field begin mark
+and compare text holding references in the body and a header. None of these
+uses a timing threshold.
 
 Chart comparison regressions cover chart-only Word and Run granularity, adjacent
 text edits and an unchanged-chart control. Saved and reopened resolutions follow

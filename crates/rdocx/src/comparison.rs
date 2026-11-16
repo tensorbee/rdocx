@@ -12848,7 +12848,6 @@ fn source_text_fragment(
         ));
     };
     let mut reader = Reader::from_str(xml);
-    let mut texts = 0;
     let mut depth = 0;
     loop {
         match reader
@@ -12865,9 +12864,9 @@ fn source_text_fragment(
             Event::End(_) => {
                 depth -= 1;
             }
-            Event::Text(_) if depth == 1 && texts == 0 => {
-                texts += 1;
-            }
+            // The reader splits text around each character or entity
+            // reference, such as `&amp;`. The value comes from the model.
+            Event::Text(_) | Event::GeneralRef(_) if depth == 1 => {}
             Event::Eof => break,
             _ => return Err(Error::Other("split text has opaque mixed events".into())),
         }
